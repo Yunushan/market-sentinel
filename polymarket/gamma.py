@@ -95,6 +95,65 @@ def get_market_by_slug(slug: str, timeout: float = 15.0) -> Optional[Dict[str, A
     return None
 
 
+def get_market_by_id(market_id: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
+    """Fetch a single market by numeric id."""
+    market_id = str(market_id or "").strip()
+    if not market_id:
+        return None
+    try:
+        r = requests.get(f"{GAMMA_API}/markets/{market_id}", timeout=timeout)
+        if r.status_code == 200:
+            return r.json()
+    except requests.RequestException:
+        pass
+    return None
+
+
+def get_event_by_slug(slug: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
+    """Fetch a single event by slug."""
+    slug = slug.strip().strip("/")
+    if not slug:
+        return None
+
+    # Strategy 1: /events/slug/{slug}
+    try:
+        r = requests.get(f"{GAMMA_API}/events/slug/{slug}", timeout=timeout)
+        if r.status_code == 200:
+            return r.json()
+    except requests.RequestException:
+        pass
+
+    # Strategy 2: /events?slug={slug}
+    try:
+        r = requests.get(f"{GAMMA_API}/events", params={"slug": slug}, timeout=timeout)
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, list):
+                return data[0] if data else None
+            if isinstance(data, dict) and "data" in data:
+                arr = data.get("data") or []
+                return arr[0] if arr else None
+            return data
+    except requests.RequestException:
+        pass
+
+    return None
+
+
+def get_event_by_id(event_id: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
+    """Fetch a single event by numeric id."""
+    event_id = str(event_id or "").strip()
+    if not event_id:
+        return None
+    try:
+        r = requests.get(f"{GAMMA_API}/events/{event_id}", timeout=timeout)
+        if r.status_code == 200:
+            return r.json()
+    except requests.RequestException:
+        pass
+    return None
+
+
 def parse_market_outcomes(market: Dict[str, Any]) -> List[MarketOutcome]:
     """Extract outcomes + token ids (+ optional current prices) from a Gamma market object."""
     token_ids = market.get("clobTokenIds") or []

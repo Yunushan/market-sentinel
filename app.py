@@ -4,6 +4,7 @@ import json
 import os
 import queue
 import re
+import sys
 import threading
 import time
 from importlib import metadata as importlib_metadata
@@ -42,9 +43,9 @@ def extract_slug(s: str) -> str:
     s = (s or "").strip()
     if not s:
         return ""
+    s = re.sub(r"[?#].*$", "", s)  # drop query/fragment
     # If it's a URL, take last non-empty path segment
     if "://" in s:
-        s = re.sub(r"[?#].*$", "", s)  # drop query/fragment
         parts = [p for p in s.split("/") if p]
         return parts[-1] if parts else ""
     return s.strip("/")
@@ -55,6 +56,17 @@ def safe_float(s: Any, default: Optional[float] = None) -> Optional[float]:
         return float(s)
     except Exception:
         return default
+
+
+def set_windows_app_id(app_id: str) -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+    except Exception:
+        pass
 
 
 # ---------------------------
@@ -135,6 +147,8 @@ class App(tk.Tk):
         super().__init__()
         self.title("Polymarket Sentinel GUI (MVP)")
         self.geometry("1050x700")
+        self._load_icon_image()
+        self._apply_window_icon(self)
 
         load_dotenv()
 
@@ -146,6 +160,7 @@ class App(tk.Tk):
         self._palette = self._themes[self.cfg.theme]
         self._requirements = self._load_requirements()
         self._dep_check_running = False
+        self._icon_images: List[tk.PhotoImage] = []
 
         # price state by token_id
         self.price_state: Dict[str, Dict[str, Optional[float]]] = {}
@@ -169,6 +184,7 @@ class App(tk.Tk):
         # UI
         self._build_ui()
         self._apply_theme(self.cfg.theme)
+        self._apply_window_icon(self)
 
         # Kick off queue processing
         self.after(100, self._process_queue)
@@ -377,6 +393,54 @@ class App(tk.Tk):
                     highlightbackground=border,
                     highlightcolor=border,
                 )
+
+    def _icon_path(self) -> Optional[Path]:
+        path = Path(__file__).resolve().parent / "assets" / "polymarket.ico"
+        return path if path.exists() else None
+
+    def _icon_png_path(self) -> Optional[Path]:
+        root = Path(__file__).resolve().parent
+        candidates = [
+            root / "assets" / "polymarket.png",
+            root / "polymarket.png",
+        ]
+        for path in candidates:
+            if path.exists():
+                return path
+        return None
+
+    def _load_icon_image(self):
+        self._icon_images = []
+        icon_path = self._icon_png_path()
+        if not icon_path:
+            return
+        try:
+            base = tk.PhotoImage(file=str(icon_path))
+            self._icon_images.append(base)
+            base_w = base.width()
+            for size in (256, 128, 64, 32, 16):
+                if base_w == size:
+                    continue
+                if base_w > size and base_w % size == 0:
+                    factor = base_w // size
+                    self._icon_images.append(base.subsample(factor, factor))
+        except Exception:
+            self._icon_images = []
+
+    def _apply_window_icon(self, window: tk.Misc):
+        icon_path = self._icon_path()
+        if not icon_path:
+            icon_path = None
+        if icon_path:
+            try:
+                window.iconbitmap(str(icon_path))
+            except Exception:
+                pass
+        if self._icon_images:
+            try:
+                window.iconphoto(True, *self._icon_images)
+            except Exception:
+                pass
 
     # ------------------ Dependency versions ------------------
 
@@ -746,6 +810,75 @@ class App(tk.Tk):
 
     # ------------------ Market fetch / alerts ------------------
 
+    def _set_market_loaded(self, market: Dict[str, Any], fallback_slug: str = ""):
+        self._market_loaded = market
+        title = market.get("question") or market.get("title") or fallback_slug or "Unknown market"
+        slug = market.get("slug") or fallback_slug
+        if slug:
+            self.market_info_var.set(f"Loaded: {title} (slug: {slug})")
+        else:
+            self.market_info_var.set(f"Loaded: {title}")
+        self._market_outcomes = gamma.parse_market_outcomes(market)
+
+        self.outcome_list.delete(0, "end")
+        for o in self._market_outcomes:
+            price_str = f"{o.price:.3f}" if isinstance(o.price, float) else "?"
+            self.outcome_list.insert("end", f"{o.outcome}  |  token {o.token_id[:10]}...  |  gamma price {price_str}")
+
+        self.status_var.set("Market loaded. Select an outcome to create an alert.")
+        self._selected_token_id = None
+
+    def _select_market_from_event(self, event: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], bool]:
+        markets = list(event.get("markets") or [])
+        if not markets:
+            return None, False
+
+        active = [m for m in markets if m.get("active") or not m.get("closed")]
+        if len(active) == 1:
+            return active[0], True
+        if len(markets) == 1:
+            return markets[0], True
+
+        ordered = active + [m for m in markets if m not in active]
+
+        win = tk.Toplevel(self)
+        win.title("Select market")
+        win.geometry("820x360")
+        self._apply_window_icon(win)
+        palette = self._palette
+        win.configure(background=palette["bg"])
+
+        lb = tk.Listbox(win)
+        lb.configure(
+            bg=palette["field_bg"],
+            fg=palette["field_fg"],
+            selectbackground=palette["select_bg"],
+            selectforeground=palette["select_fg"],
+            highlightbackground=palette["border"],
+            highlightcolor=palette["border"],
+        )
+        lb.pack(fill="both", expand=True, padx=10, pady=10)
+
+        for m in ordered:
+            question = m.get("question") or m.get("title") or m.get("slug") or m.get("id") or "Unknown"
+            status = "closed" if m.get("closed") else "active" if m.get("active") else "inactive"
+            lb.insert("end", f"{question} [{status}]")
+
+        result: Dict[str, Any] = {}
+
+        def load_selected():
+            sel = lb.curselection()
+            if not sel:
+                return
+            result["market"] = ordered[sel[0]]
+            win.destroy()
+
+        ttk.Button(win, text="Load market", command=load_selected).pack(pady=(0, 10))
+        self.status_var.set("Select a market from the event.")
+        win.grab_set()
+        self.wait_window(win)
+        return result.get("market") if result else None, True
+
     def fetch_market(self):
         raw = self.market_entry.get()
         slug = extract_slug(raw)
@@ -757,22 +890,51 @@ class App(tk.Tk):
         self.update_idletasks()
 
         try:
-            m = gamma.get_market_by_slug(slug)
-            if not m:
-                messagebox.showerror("Not found", f"Could not fetch market for slug: {slug}")
+            if slug.isdigit():
+                m = gamma.get_market_by_id(slug)
+                if m:
+                    self._set_market_loaded(m)
+                    return
+                ev = gamma.get_event_by_id(slug)
+                if ev:
+                    m, has_markets = self._select_market_from_event(ev)
+                    if not has_markets:
+                        messagebox.showerror("Not found", "Event has no markets.")
+                        self.status_var.set("No markets found for event.")
+                        return
+                    if not m:
+                        self.status_var.set("Market selection canceled.")
+                        return
+                    self._set_market_loaded(m, fallback_slug=str(ev.get("slug") or ""))
+                    return
+                messagebox.showerror(
+                    "Not found",
+                    "No market/event found for that numeric id. "
+                    "If this is a Polymarket ?tid value, paste the full URL or slug instead.",
+                )
+                self.status_var.set("Market not found.")
                 return
-            self._market_loaded = m
-            title = m.get("question") or m.get("title") or slug
-            self.market_info_var.set(f"Loaded: {title} (slug: {slug})")
-            self._market_outcomes = gamma.parse_market_outcomes(m)
 
-            self.outcome_list.delete(0, "end")
-            for o in self._market_outcomes:
-                price_str = f"{o.price:.3f}" if isinstance(o.price, float) else "?"
-                self.outcome_list.insert("end", f"{o.outcome}  |  token {o.token_id[:10]}...  |  gamma price {price_str}")
+            m = gamma.get_market_by_slug(slug)
+            if m:
+                self._set_market_loaded(m, fallback_slug=slug)
+                return
 
-            self.status_var.set("Market loaded. Select an outcome to create an alert.")
-            self._selected_token_id = None
+            ev = gamma.get_event_by_slug(slug)
+            if ev:
+                m, has_markets = self._select_market_from_event(ev)
+                if not has_markets:
+                    messagebox.showerror("Not found", "Event has no markets.")
+                    self.status_var.set("No markets found for event.")
+                    return
+                if not m:
+                    self.status_var.set("Market selection canceled.")
+                    return
+                self._set_market_loaded(m, fallback_slug=str(ev.get("slug") or slug))
+                return
+
+            messagebox.showerror("Not found", f"Could not fetch market or event for: {slug}")
+            self.status_var.set("Market not found.")
 
         except Exception as e:
             messagebox.showerror("Error", str(e))
@@ -966,6 +1128,7 @@ class App(tk.Tk):
             win = tk.Toplevel(self)
             win.title("Select profile")
             win.geometry("700x300")
+            self._apply_window_icon(win)
             lb = tk.Listbox(win)
             palette = self._palette
             win.configure(background=palette["bg"])
@@ -1294,7 +1457,14 @@ class App(tk.Tk):
     def _process_queue(self):
         try:
             while True:
-                kind, a, b = self.ui_queue.get_nowait()
+                item = self.ui_queue.get_nowait()
+                if isinstance(item, tuple) and len(item) == 2:
+                    kind, a = item
+                    b = None
+                elif isinstance(item, tuple) and len(item) == 3:
+                    kind, a, b = item
+                else:
+                    kind, a, b = "log", f"[debug] unknown queue item: {item}", None
                 if kind == "log":
                     self.log(str(a))
                 elif kind == "market_event":
@@ -1351,5 +1521,6 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
+    set_windows_app_id("polymarket.sentinel.gui")
     app = App()
     app.mainloop()
