@@ -1,5 +1,14 @@
 {
   "alerts": [],
-  "wallets": [],
-  "copytrading": {}
+  "copytrading": {
+    "allow_sells": false,
+    "enabled": false,
+    "follow_wallet": "",
+    "live": false,
+    "max_usdc_per_trade": 25.0,
+    "scale": 1.0,
+    "slippage": 0.02
+  },
+  "theme": "dark",
+  "wallets": []
 }

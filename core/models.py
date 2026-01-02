@@ -8,6 +8,7 @@ import time
 
 PriceSource = Literal["last_trade", "midpoint", "best_bid", "best_ask"]
 Direction = Literal["above", "below"]
+Theme = Literal["light", "dark"]
 
 
 def _uuid() -> str:
@@ -84,12 +85,14 @@ class AppConfig:
     alerts: List[PriceAlert] = field(default_factory=list)
     wallets: List[WalletWatch] = field(default_factory=list)
     copytrading: CopyTradeSettings = field(default_factory=CopyTradeSettings)
+    theme: Theme = "light"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "alerts": [a.to_dict() for a in self.alerts],
             "wallets": [w.to_dict() for w in self.wallets],
             "copytrading": self.copytrading.to_dict(),
+            "theme": self.theme,
         }
 
     @staticmethod
@@ -97,4 +100,6 @@ class AppConfig:
         alerts = [PriceAlert.from_dict(x) for x in d.get("alerts", [])]
         wallets = [WalletWatch.from_dict(x) for x in d.get("wallets", [])]
         copytrading = CopyTradeSettings.from_dict(d.get("copytrading", {}))
-        return AppConfig(alerts=alerts, wallets=wallets, copytrading=copytrading)
+        raw_theme = str(d.get("theme") or "").lower()
+        theme: Theme = "dark" if raw_theme == "dark" else "light"
+        return AppConfig(alerts=alerts, wallets=wallets, copytrading=copytrading, theme=theme)

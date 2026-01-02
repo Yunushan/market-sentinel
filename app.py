@@ -6,6 +6,10 @@ import queue
 import re
 import threading
 import time
+from importlib import metadata as importlib_metadata
+from pathlib import Path
+from urllib import request as urllib_request
+from urllib import error as urllib_error
 from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -135,7 +139,13 @@ class App(tk.Tk):
         load_dotenv()
 
         self.cfg: AppConfig = load_config()
+        self.cfg.theme = self._normalize_theme(self.cfg.theme)
         self.ui_queue: "queue.Queue[tuple]" = queue.Queue()
+        self.style = ttk.Style(self)
+        self._themes = self._build_theme_palettes()
+        self._palette = self._themes[self.cfg.theme]
+        self._requirements = self._load_requirements()
+        self._dep_check_running = False
 
         # price state by token_id
         self.price_state: Dict[str, Dict[str, Optional[float]]] = {}
@@ -158,6 +168,7 @@ class App(tk.Tk):
 
         # UI
         self._build_ui()
+        self._apply_theme(self.cfg.theme)
 
         # Kick off queue processing
         self.after(100, self._process_queue)
@@ -165,6 +176,21 @@ class App(tk.Tk):
     # ------------------ UI build ------------------
 
     def _build_ui(self):
+        topbar = ttk.Frame(self)
+        topbar.pack(fill="x", padx=10, pady=(10, 0))
+
+        ttk.Label(topbar, text="Theme:").pack(side="left")
+        self.theme_var = tk.StringVar(value=self._theme_label(self.cfg.theme))
+        self.theme_combo = ttk.Combobox(
+            topbar,
+            textvariable=self.theme_var,
+            values=["Light", "Dark"],
+            state="readonly",
+            width=8,
+        )
+        self.theme_combo.pack(side="left", padx=(6, 0))
+        self.theme_combo.bind("<<ComboboxSelected>>", lambda e: self._on_theme_change())
+
         nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True)
 
@@ -172,27 +198,365 @@ class App(tk.Tk):
         self.tab_wallets = ttk.Frame(nb)
         self.tab_copy = ttk.Frame(nb)
         self.tab_logs = ttk.Frame(nb)
+        self.tab_about = ttk.Frame(nb)
 
         nb.add(self.tab_alerts, text="Markets & Alerts")
         nb.add(self.tab_wallets, text="Wallet Tracker")
         nb.add(self.tab_copy, text="Copy Trading")
         nb.add(self.tab_logs, text="Logs")
+        nb.add(self.tab_about, text="About")
 
         self._build_alerts_tab()
         self._build_wallets_tab()
         self._build_copy_tab()
         self._build_logs_tab()
+        self._build_about_tab()
 
         # status bar
         self.status_var = tk.StringVar(value="Ready.")
-        status = ttk.Label(self, textvariable=self.status_var, anchor="w")
+        status = ttk.Label(self, textvariable=self.status_var, anchor="w", style="Status.TLabel")
         status.pack(fill="x", side="bottom")
+
+    # ------------------ Theme ------------------
+
+    def _build_theme_palettes(self) -> Dict[str, Dict[str, str]]:
+        return {
+            "light": {
+                "bg": "#f6f4ef",
+                "fg": "#1f1f1f",
+                "muted": "#6b6b6b",
+                "accent": "#2b6e6d",
+                "accent_hover": "#245a59",
+                "field_bg": "#ffffff",
+                "field_fg": "#1f1f1f",
+                "border": "#c9c3b8",
+                "tab_bg": "#e9e5dd",
+                "tab_active_bg": "#f6f4ef",
+                "select_bg": "#dfe8e6",
+                "select_fg": "#1f1f1f",
+                "log_bg": "#fbfaf7",
+                "button_bg": "#e6e1d8",
+                "button_fg": "#1f1f1f",
+            },
+            "dark": {
+                "bg": "#1e1f24",
+                "fg": "#e9e6df",
+                "muted": "#a6a9b3",
+                "accent": "#63b7af",
+                "accent_hover": "#4fa79d",
+                "field_bg": "#2a2c33",
+                "field_fg": "#e9e6df",
+                "border": "#3b3f48",
+                "tab_bg": "#2a2c33",
+                "tab_active_bg": "#1e1f24",
+                "select_bg": "#394048",
+                "select_fg": "#e9e6df",
+                "log_bg": "#15171b",
+                "button_bg": "#2f323a",
+                "button_fg": "#e9e6df",
+            },
+        }
+
+    def _normalize_theme(self, theme: str) -> str:
+        return "dark" if str(theme).strip().lower() == "dark" else "light"
+
+    def _theme_label(self, theme: str) -> str:
+        return "Dark" if self._normalize_theme(theme) == "dark" else "Light"
+
+    def _theme_from_label(self, label: str) -> str:
+        return "dark" if str(label).strip().lower() == "dark" else "light"
+
+    def _on_theme_change(self):
+        theme = self._theme_from_label(self.theme_var.get())
+        if theme == self.cfg.theme:
+            return
+        self.cfg.theme = theme
+        save_config(self.cfg)
+        self._apply_theme(theme)
+
+    def _apply_theme(self, theme: str):
+        theme = self._normalize_theme(theme)
+        palette = self._themes.get(theme, self._themes["light"])
+        self._palette = palette
+
+        try:
+            self.style.theme_use("clam")
+        except Exception:
+            pass
+
+        bg = palette["bg"]
+        fg = palette["fg"]
+        muted = palette["muted"]
+        field_bg = palette["field_bg"]
+        field_fg = palette["field_fg"]
+        border = palette["border"]
+        tab_bg = palette["tab_bg"]
+        tab_active_bg = palette["tab_active_bg"]
+        select_bg = palette["select_bg"]
+        select_fg = palette["select_fg"]
+        button_bg = palette["button_bg"]
+        button_fg = palette["button_fg"]
+        accent = palette["accent"]
+        accent_hover = palette["accent_hover"]
+        log_bg = palette["log_bg"]
+
+        self.configure(background=bg)
+
+        self.style.configure(".", background=bg, foreground=fg)
+        self.style.configure("TFrame", background=bg)
+        self.style.configure("TLabel", background=bg, foreground=fg)
+        self.style.configure("Status.TLabel", background=bg, foreground=muted)
+        self.style.configure("TLabelframe", background=bg, foreground=fg)
+        self.style.configure("TLabelframe.Label", background=bg, foreground=fg)
+
+        self.style.configure("TButton", background=button_bg, foreground=button_fg, bordercolor=border)
+        self.style.map(
+            "TButton",
+            background=[("active", accent_hover), ("pressed", accent)],
+            foreground=[("active", button_fg), ("pressed", button_fg)],
+        )
+
+        self.style.configure("TEntry", fieldbackground=field_bg, foreground=field_fg, background=bg, bordercolor=border)
+        self.style.map("TEntry", fieldbackground=[("disabled", tab_bg)], foreground=[("disabled", muted)])
+
+        self.style.configure("TCombobox", fieldbackground=field_bg, background=bg, foreground=field_fg, bordercolor=border)
+        self.style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", field_bg)],
+            foreground=[("readonly", field_fg)],
+            selectbackground=[("readonly", select_bg)],
+            selectforeground=[("readonly", select_fg)],
+        )
+
+        self.style.configure("TCheckbutton", background=bg, foreground=fg)
+        self.style.map("TCheckbutton", background=[("active", bg)], foreground=[("disabled", muted)])
+
+        self.style.configure("TNotebook", background=bg, bordercolor=border)
+        self.style.configure("TNotebook.Tab", background=tab_bg, foreground=fg, padding=(10, 6))
+        self.style.map("TNotebook.Tab", background=[("selected", tab_active_bg), ("active", tab_active_bg)])
+
+        self.style.configure(
+            "Treeview",
+            background=field_bg,
+            fieldbackground=field_bg,
+            foreground=field_fg,
+            bordercolor=border,
+        )
+        self.style.map("Treeview", background=[("selected", select_bg)], foreground=[("selected", select_fg)])
+        self.style.configure("Treeview.Heading", background=tab_bg, foreground=fg)
+        self.style.map("Treeview.Heading", background=[("active", tab_active_bg)])
+
+        self.option_add("*TCombobox*Listbox.background", field_bg)
+        self.option_add("*TCombobox*Listbox.foreground", field_fg)
+        self.option_add("*TCombobox*Listbox.selectBackground", select_bg)
+        self.option_add("*TCombobox*Listbox.selectForeground", select_fg)
+        self.option_add("*Listbox.background", field_bg)
+        self.option_add("*Listbox.foreground", field_fg)
+        self.option_add("*Listbox.selectBackground", select_bg)
+        self.option_add("*Listbox.selectForeground", select_fg)
+
+        if hasattr(self, "log_text"):
+            self.log_text.configure(
+                bg=log_bg,
+                fg=field_fg,
+                insertbackground=field_fg,
+                selectbackground=select_bg,
+                selectforeground=select_fg,
+                highlightbackground=border,
+                highlightcolor=border,
+            )
+
+        for lb_name in ("outcome_list", "activity_list"):
+            lb = getattr(self, lb_name, None)
+            if lb is not None:
+                lb.configure(
+                    bg=field_bg,
+                    fg=field_fg,
+                    selectbackground=select_bg,
+                    selectforeground=select_fg,
+                    highlightbackground=border,
+                    highlightcolor=border,
+                )
+
+    # ------------------ Dependency versions ------------------
+
+    def _requirements_path(self) -> Path:
+        return Path(__file__).resolve().parent / "requirements.txt"
+
+    def _load_requirements(self) -> List[Dict[str, str]]:
+        path = self._requirements_path()
+        if not path.exists():
+            return []
+        reqs: List[Dict[str, str]] = []
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "#" in line:
+                line = line.split("#", 1)[0].strip()
+            if ";" in line:
+                line = line.split(";", 1)[0].strip()
+            if not line:
+                continue
+            match = re.match(r"([A-Za-z0-9_.-]+)(\[[^\]]+\])?(.*)$", line)
+            if not match:
+                continue
+            name = match.group(1)
+            extras = match.group(2) or ""
+            spec = (match.group(3) or "").strip()
+            reqs.append({"name": name, "display": f"{name}{extras}", "spec": spec})
+        return reqs
+
+    def _get_installed_version(self, package: str) -> str:
+        try:
+            return importlib_metadata.version(package)
+        except importlib_metadata.PackageNotFoundError:
+            return ""
+
+    def _fetch_latest_version(self, package: str) -> str:
+        url = f"https://pypi.org/pypi/{package}/json"
+        req = urllib_request.Request(
+            url,
+            headers={"User-Agent": "PolymarketSentinelGUI/1.0"},
+        )
+        try:
+            with urllib_request.urlopen(req, timeout=10) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"HTTP {resp.status}")
+                data = json.loads(resp.read().decode("utf-8"))
+        except (urllib_error.URLError, urllib_error.HTTPError) as exc:
+            raise RuntimeError(str(exc)) from exc
+        version = str(data.get("info", {}).get("version", "")).strip()
+        return version
+
+    def _is_up_to_date(self, installed: str, latest: str) -> bool:
+        try:
+            from packaging.version import Version
+        except Exception:
+            return installed == latest
+        try:
+            return Version(installed) >= Version(latest)
+        except Exception:
+            return installed == latest
+
+    def _refresh_dependency_table(self, rows: Optional[List[Dict[str, str]]] = None):
+        for iid in self.deps_tree.get_children():
+            self.deps_tree.delete(iid)
+
+        if rows is None:
+            rows = []
+            for req in self._requirements:
+                installed = self._get_installed_version(req["name"])
+                rows.append(
+                    {
+                        "display": req["display"],
+                        "spec": req["spec"],
+                        "installed": installed or "not installed",
+                        "latest": "",
+                        "status": "",
+                    }
+                )
+
+        if not rows:
+            self.deps_tree.insert("", "end", values=("No requirements.txt", "", "", "", ""))
+            if hasattr(self, "check_versions_btn"):
+                self.check_versions_btn.configure(state="disabled")
+            self.dep_status_var.set("No requirements found.")
+            return
+
+        for row in rows:
+            spec = row.get("spec") or "-"
+            self.deps_tree.insert(
+                "",
+                "end",
+                values=(
+                    row.get("display", ""),
+                    spec,
+                    row.get("installed", ""),
+                    row.get("latest", ""),
+                    row.get("status", ""),
+                ),
+            )
+
+    def check_dependency_versions(self):
+        if self._dep_check_running:
+            return
+        if not self._requirements:
+            self.dep_status_var.set("No requirements found.")
+            return
+        self._dep_check_running = True
+        self.dep_status_var.set("Checking versions...")
+        self.check_versions_btn.configure(state="disabled")
+        threading.Thread(target=self._check_dependency_versions_bg, daemon=True).start()
+
+    def _check_dependency_versions_bg(self):
+        rows: List[Dict[str, str]] = []
+        errors: List[str] = []
+        for req in self._requirements:
+            name = req["name"]
+            installed = self._get_installed_version(name) or "not installed"
+            latest = ""
+            try:
+                latest = self._fetch_latest_version(name)
+            except Exception as exc:
+                errors.append(f"{req['display']}: {exc}")
+            if installed == "not installed":
+                status = "missing"
+            elif latest:
+                status = "ok" if self._is_up_to_date(installed, latest) else "outdated"
+            else:
+                status = "unknown"
+            rows.append(
+                {
+                    "display": req["display"],
+                    "spec": req["spec"],
+                    "installed": installed,
+                    "latest": latest or "-",
+                    "status": status,
+                }
+            )
+        self.ui_queue.put(("dep_versions", rows, errors))
 
     def _build_logs_tab(self):
         frm = self.tab_logs
         self.log_text = tk.Text(frm, height=20, wrap="word")
         self.log_text.pack(fill="both", expand=True, padx=10, pady=10)
         self.log("App started. Price WS connected in background.")
+
+    def _build_about_tab(self):
+        frm = self.tab_about
+        content = ttk.Frame(frm)
+        content.pack(fill="both", expand=True, padx=10, pady=10)
+
+        header = ttk.Label(content, text="Dependency versions")
+        header.pack(anchor="w")
+
+        info = ttk.Label(
+            content,
+            text="Check installed dependencies against the latest versions on PyPI.",
+            wraplength=700,
+            justify="left",
+        )
+        info.pack(anchor="w", pady=(4, 10))
+
+        self.dep_status_var = tk.StringVar(value="Versions not checked.")
+        ttk.Label(content, textvariable=self.dep_status_var).pack(anchor="w", pady=(0, 8))
+
+        cols = ("package", "required", "installed", "latest", "status")
+        self.deps_tree = ttk.Treeview(content, columns=cols, show="headings", height=10)
+        for c in cols:
+            self.deps_tree.heading(c, text=c)
+        self.deps_tree.column("package", width=180, stretch=True)
+        self.deps_tree.column("required", width=120, stretch=False, anchor="center")
+        self.deps_tree.column("installed", width=120, stretch=False, anchor="center")
+        self.deps_tree.column("latest", width=100, stretch=False, anchor="center")
+        self.deps_tree.column("status", width=90, stretch=False, anchor="center")
+        self.deps_tree.pack(fill="x", pady=(0, 8))
+
+        self.check_versions_btn = ttk.Button(content, text="Check versions", command=self.check_dependency_versions)
+        self.check_versions_btn.pack(anchor="w")
+
+        self._refresh_dependency_table()
 
     def _build_alerts_tab(self):
         frm = self.tab_alerts
@@ -603,6 +967,16 @@ class App(tk.Tk):
             win.title("Select profile")
             win.geometry("700x300")
             lb = tk.Listbox(win)
+            palette = self._palette
+            win.configure(background=palette["bg"])
+            lb.configure(
+                bg=palette["field_bg"],
+                fg=palette["field_fg"],
+                selectbackground=palette["select_bg"],
+                selectforeground=palette["select_fg"],
+                highlightbackground=palette["border"],
+                highlightcolor=palette["border"],
+            )
             lb.pack(fill="both", expand=True, padx=10, pady=10)
 
             for p in profiles:
@@ -933,6 +1307,19 @@ class App(tk.Tk):
                     # Persist config (for last_seen state)
                     save_config(self.cfg)
                     self._refresh_wallet_table()
+                elif kind == "dep_versions":
+                    rows = a or []
+                    errors = b or []
+                    self._refresh_dependency_table(rows)
+                    ts = time.strftime("%H:%M:%S")
+                    if errors:
+                        self.dep_status_var.set(f"Checked at {ts} with errors.")
+                        for err in errors:
+                            self.log(f"[deps] {err}")
+                    else:
+                        self.dep_status_var.set(f"Checked at {ts}.")
+                    self.check_versions_btn.configure(state="normal")
+                    self._dep_check_running = False
                 else:
                     self.log(f"[debug] unknown queue item: {kind}")
         except queue.Empty:
