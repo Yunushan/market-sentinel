@@ -51,7 +51,7 @@ python app.py
 ```
 
 ## Notes
-- The app stores local settings in `data/config.json`.
+- The app stores local settings in `data/config.json` (gitignored user-specific state).
 - If you enable LIVE trading, do **not** store keys in plaintext beyond what you accept as your risk.
   Prefer env vars, a password manager, or OS keychain tooling.
 

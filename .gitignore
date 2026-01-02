@@ -19,6 +19,8 @@ dist/
 htmlcov/
 
 .env
+
+# Local config/state
 data/config.json
 
 .DS_Store
