@@ -19,7 +19,6 @@ dist/
 htmlcov/
 
 .env
-.env.*
 data/config.json
 
 .DS_Store
