@@ -1,0 +1,11 @@
+{
+  "proxyWallet": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "side": "BUY",
+  "asset": "token-1234567890",
+  "size": "100",
+  "price": "0.45",
+  "timestamp": 100,
+  "transactionHash": "0xfixturebuy",
+  "slug": "fixture-market",
+  "outcome": "Yes"
+}

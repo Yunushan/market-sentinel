@@ -21,13 +21,15 @@ from dotenv import load_dotenv
 
 from core.models import AppConfig, PriceAlert, WalletWatch, CopyTradeSettings
 from core.storage import load_config, save_config
+from market_adapters import build_default_registry
+from market_adapters.base import MarketAdapter
+from market_adapters.errors import UnsupportedFeatureError
+from market_adapters.polymarket import PolymarketAdapter
+from market_adapters.types import MarketMetadata
 
 from polymarket.util import is_wallet_address, normalize_wallet
-from polymarket import gamma
 from polymarket import data_api
 from polymarket.ws_market import MarketWSClient
-from polymarket import clob_rest
-from polymarket.geoblock import check_geoblock
 from polymarket.trader import PolymarketTrader, TraderConfig
 
 
@@ -56,6 +58,26 @@ def safe_float(s: Any, default: Optional[float] = None) -> Optional[float]:
         return float(s)
     except Exception:
         return default
+
+
+def activity_key(item: Dict[str, Any]) -> str:
+    """Stable local identity for a Data API activity item."""
+    tx = str(item.get("transactionHash") or "").strip().lower()
+    if tx:
+        return f"tx:{tx}"
+    fields = ("timestamp", "proxyWallet", "asset", "side", "price", "size", "slug", "outcome")
+    return "activity:" + "|".join(str(item.get(k) or "").strip().lower() for k in fields)
+
+
+def market_choice_label(metadata: MarketMetadata) -> str:
+    return f"{metadata.display_name} ({metadata.market_id})"
+
+
+def market_id_from_choice(choice: str) -> str:
+    match = re.search(r"\(([^()]+)\)\s*$", str(choice or ""))
+    if match:
+        return match.group(1).strip().lower()
+    return str(choice or "").strip().lower()
 
 
 def set_windows_app_id(app_id: str) -> None:
@@ -105,16 +127,22 @@ class WalletPoller:
                     )
                     # Items are sorted DESC per API; process oldest->newest
                     new_items = []
+                    seen_keys = set(w.seen_activity_keys or [])
                     for it in reversed(items):
                         ts = int(it.get("timestamp") or 0)
                         tx = str(it.get("transactionHash") or "")
+                        key = activity_key(it)
+                        if key in seen_keys:
+                            continue
                         if ts > (w.last_seen_ts or 0):
-                            new_items.append(it)
-                        elif ts == (w.last_seen_ts or 0) and tx and tx != (w.last_seen_tx or ""):
-                            # Same timestamp but different tx; still emit
-                            new_items.append(it)
+                            new_items.append((key, it))
+                            seen_keys.add(key)
+                        elif ts == (w.last_seen_ts or 0) and (not tx or tx != (w.last_seen_tx or "")):
+                            # Same timestamp but different activity; still emit once.
+                            new_items.append((key, it))
+                            seen_keys.add(key)
 
-                    for it in new_items:
+                    for key, it in new_items:
                         # market slug filter (optional)
                         if w.only_market_slug:
                             if str(it.get("slug") or "") != w.only_market_slug:
@@ -124,6 +152,11 @@ class WalletPoller:
                         # update last seen to this item
                         w.last_seen_ts = max(w.last_seen_ts or 0, int(it.get("timestamp") or 0))
                         w.last_seen_tx = str(it.get("transactionHash") or w.last_seen_tx or "")
+                        seen_keys.add(key)
+                        w.seen_activity_keys.append(key)
+                        if len(w.seen_activity_keys) > 200:
+                            w.seen_activity_keys = w.seen_activity_keys[-200:]
+                            seen_keys = set(w.seen_activity_keys)
 
                 except Exception as e:
                     self.ui_queue.put(("log", f"[wallet poll] {w.wallet}: {e}"))
@@ -145,7 +178,7 @@ class WalletPoller:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Polymarket Sentinel GUI (MVP)")
+        self.title("prediction-market-alert-and-copy-trade-gui")
         self.geometry("1050x700")
         self._load_icon_image()
         self._apply_window_icon(self)
@@ -154,6 +187,8 @@ class App(tk.Tk):
 
         self.cfg: AppConfig = load_config()
         self.cfg.theme = self._normalize_theme(self.cfg.theme)
+        self.adapter_registry = build_default_registry()
+        self.polymarket_adapter = self._create_polymarket_adapter()
         self.ui_queue: "queue.Queue[tuple]" = queue.Queue()
         self.style = ttk.Style(self)
         self._themes = self._build_theme_palettes()
@@ -191,9 +226,81 @@ class App(tk.Tk):
 
     # ------------------ UI build ------------------
 
+    def _create_polymarket_adapter(self) -> PolymarketAdapter:
+        market_cfg = self.cfg.markets.get("polymarket")
+        return PolymarketAdapter(market_cfg.settings if market_cfg else {})
+
+    def _get_polymarket_adapter(self) -> PolymarketAdapter:
+        adapter = getattr(self, "polymarket_adapter", None)
+        if adapter is None:
+            adapter = self._create_polymarket_adapter()
+            self.polymarket_adapter = adapter
+        return adapter
+
+    def _market_choices(self) -> List[str]:
+        return [market_choice_label(meta) for meta in self.adapter_registry.list_metadata()]
+
+    def _market_label_for_id(self, market_id: str) -> str:
+        try:
+            return market_choice_label(self.adapter_registry.get_metadata(market_id))
+        except Exception:
+            return market_choice_label(self.adapter_registry.get_metadata("polymarket"))
+
+    def _get_selected_market_adapter(self) -> MarketAdapter:
+        market_id = self.cfg.selected_market_id
+        market_cfg = self.cfg.markets.get(market_id)
+        settings = market_cfg.settings if market_cfg else {}
+        return self.adapter_registry.create(market_id, settings)
+
+    def _selected_market_display_name(self) -> str:
+        return self.adapter_registry.get_metadata(self.cfg.selected_market_id).display_name
+
+    def _require_polymarket_selected(self, feature: str) -> bool:
+        if self.cfg.selected_market_id == "polymarket":
+            return True
+        message = (
+            f"{feature} is currently implemented only for Polymarket. "
+            f"{self._selected_market_display_name()} is visible as a market adapter entry, "
+            "but its adapter is still a stub."
+        )
+        self.status_var.set(message)
+        self.ui_queue.put(("log", f"[market] {message}"))
+        messagebox.showinfo("Unsupported market", message)
+        return False
+
+    def _on_market_change(self):
+        market_id = market_id_from_choice(self.market_var.get())
+        if market_id not in self.adapter_registry.list_market_ids():
+            market_id = "polymarket"
+        if market_id == self.cfg.selected_market_id:
+            return
+        self.cfg.selected_market_id = market_id
+        save_config(self.cfg)
+        self.market_var.set(self._market_label_for_id(market_id))
+        adapter = self._get_selected_market_adapter()
+        health = adapter.health_check()
+        if health.get("ok"):
+            msg = f"Selected market: {adapter.display_name}."
+        else:
+            msg = f"Selected market: {adapter.display_name}. {health.get('message')}"
+        self.status_var.set(msg)
+        self.ui_queue.put(("log", f"[market] {msg}"))
+
     def _build_ui(self):
         topbar = ttk.Frame(self)
         topbar.pack(fill="x", padx=10, pady=(10, 0))
+
+        ttk.Label(topbar, text="Market:").pack(side="left")
+        self.market_var = tk.StringVar(value=self._market_label_for_id(self.cfg.selected_market_id))
+        self.market_combo = ttk.Combobox(
+            topbar,
+            textvariable=self.market_var,
+            values=self._market_choices(),
+            state="readonly",
+            width=58,
+        )
+        self.market_combo.pack(side="left", padx=(6, 18))
+        self.market_combo.bind("<<ComboboxSelected>>", lambda e: self._on_market_change())
 
         ttk.Label(topbar, text="Theme:").pack(side="left")
         self.theme_var = tk.StringVar(value=self._theme_label(self.cfg.theme))
@@ -481,7 +588,7 @@ class App(tk.Tk):
         url = f"https://pypi.org/pypi/{package}/json"
         req = urllib_request.Request(
             url,
-            headers={"User-Agent": "PolymarketSentinelGUI/1.0"},
+            headers={"User-Agent": "prediction-market-alert-and-copy-trade-gui/1.0"},
         )
         try:
             with urllib_request.urlopen(req, timeout=10) as resp:
@@ -704,7 +811,7 @@ class App(tk.Tk):
         self._refresh_alert_table()
 
         self._market_loaded: Optional[Dict[str, Any]] = None
-        self._market_outcomes: List[gamma.MarketOutcome] = []
+        self._market_outcomes: List[Any] = []
         self._selected_token_id: Optional[str] = None
 
     def _build_wallets_tab(self):
@@ -818,12 +925,12 @@ class App(tk.Tk):
             self.market_info_var.set(f"Loaded: {title} (slug: {slug})")
         else:
             self.market_info_var.set(f"Loaded: {title}")
-        self._market_outcomes = gamma.parse_market_outcomes(market)
+        self._market_outcomes = self._get_polymarket_adapter().parse_market_outcomes(market)
 
         self.outcome_list.delete(0, "end")
         for o in self._market_outcomes:
             price_str = f"{o.price:.3f}" if isinstance(o.price, float) else "?"
-            self.outcome_list.insert("end", f"{o.outcome}  |  token {o.token_id[:10]}...  |  gamma price {price_str}")
+            self.outcome_list.insert("end", f"{o.outcome}  |  token {o.token_id[:10]}...  |  market price {price_str}")
 
         self.status_var.set("Market loaded. Select an outcome to create an alert.")
         self._selected_token_id = None
@@ -880,22 +987,25 @@ class App(tk.Tk):
         return result.get("market") if result else None, True
 
     def fetch_market(self):
+        if not self._require_polymarket_selected("Market fetch"):
+            return
         raw = self.market_entry.get()
         slug = extract_slug(raw)
         if not slug:
             messagebox.showerror("Error", "Enter a market slug or a Polymarket URL.")
             return
 
-        self.status_var.set("Fetching market from Gamma API...")
+        self.status_var.set("Fetching market from Polymarket adapter...")
         self.update_idletasks()
+        adapter = self._get_polymarket_adapter()
 
         try:
             if slug.isdigit():
-                m = gamma.get_market_by_id(slug)
+                m = adapter.get_market_by_id(slug)
                 if m:
                     self._set_market_loaded(m)
                     return
-                ev = gamma.get_event_by_id(slug)
+                ev = adapter.get_event_by_id(slug)
                 if ev:
                     m, has_markets = self._select_market_from_event(ev)
                     if not has_markets:
@@ -915,12 +1025,12 @@ class App(tk.Tk):
                 self.status_var.set("Market not found.")
                 return
 
-            m = gamma.get_market_by_slug(slug)
+            m = adapter.get_market_by_slug(slug)
             if m:
                 self._set_market_loaded(m, fallback_slug=slug)
                 return
 
-            ev = gamma.get_event_by_slug(slug)
+            ev = adapter.get_event_by_slug(slug)
             if ev:
                 m, has_markets = self._select_market_from_event(ev)
                 if not has_markets:
@@ -1106,6 +1216,8 @@ class App(tk.Tk):
         self.ui_queue.put(("log", f"Deleted wallet watch {wid}"))
 
     def search_or_add_wallet(self):
+        if not self._require_polymarket_selected("Wallet tracking"):
+            return
         q = (self.wallet_search_entry.get() or "").strip()
         if not q:
             return
@@ -1118,7 +1230,7 @@ class App(tk.Tk):
         self.status_var.set("Searching profiles...")
         self.update_idletasks()
         try:
-            profiles = gamma.search_profiles(q, limit=10)
+            profiles = self._get_polymarket_adapter().search_profiles(q, limit=10)
             if not profiles:
                 messagebox.showinfo("No results", "No profiles found. Try pasting the 0x wallet address instead.")
                 self.status_var.set("No profiles found.")
@@ -1180,6 +1292,8 @@ class App(tk.Tk):
             self.status_var.set("Wallet polling stopped.")
             self.ui_queue.put(("log", "Wallet polling stopped."))
             return
+        if not self._require_polymarket_selected("Wallet polling"):
+            return
 
         iv = safe_float(self.poll_interval_var.get(), default=10.0)
         if iv is None or iv < 2:
@@ -1192,10 +1306,12 @@ class App(tk.Tk):
     # ------------------ Copy trading ------------------
 
     def do_geoblock_check(self):
+        if not self._require_polymarket_selected("Geoblock checks"):
+            return
         self.status_var.set("Checking geoblock...")
         self.update_idletasks()
         try:
-            geo = check_geoblock()
+            geo = self._get_polymarket_adapter().check_geoblock()
             self._geoblock_cache = geo
             if geo.get("blocked") is True:
                 self.geo_var.set(f"BLOCKED ({geo.get('country')} {geo.get('region')})")
@@ -1209,6 +1325,8 @@ class App(tk.Tk):
             self.status_var.set("Geoblock check error.")
 
     def save_copy_settings(self):
+        if not self._require_polymarket_selected("Copy trading settings"):
+            return
         s = CopyTradeSettings(
             enabled=bool(self.ct_enabled_var.get()),
             live=bool(self.ct_live_var.get()),
@@ -1248,6 +1366,8 @@ class App(tk.Tk):
         return self._trader
 
     def _copy_trade_from_activity(self, item: Dict[str, Any]):
+        if self.cfg.selected_market_id != "polymarket":
+            return
         s = self.cfg.copytrading
         if not s.enabled:
             return
@@ -1275,8 +1395,9 @@ class App(tk.Tk):
         # Pull current best bid/ask for safer limit pricing
         best_bid = best_ask = None
         try:
-            book = clob_rest.get_book(token_id)
-            best_bid, best_ask = clob_rest.best_bid_ask_from_book(book)
+            book = self._get_polymarket_adapter().get_orderbook(token_id)
+            best_bid = book.bids[0].price if book.bids else None
+            best_ask = book.asks[0].price if book.asks else None
         except Exception:
             pass
 
@@ -1521,6 +1642,6 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
-    set_windows_app_id("polymarket.sentinel.gui")
+    set_windows_app_id("prediction-market-alert-and-copy-trade-gui")
     app = App()
     app.mainloop()

@@ -1,0 +1,397 @@
+{
+  "alerts": [],
+  "copytrading": {
+    "allow_sells": false,
+    "enabled": false,
+    "follow_wallet": "",
+    "live": false,
+    "max_usdc_per_trade": 25.0,
+    "scale": 1.0,
+    "slippage": 0.02
+  },
+  "markets": {
+    "augur": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official, reliable API access is implemented."
+      }
+    },
+    "azuro": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official, reliable API access is implemented."
+      }
+    },
+    "betfair_exchange": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official API access, account permissions, and regional requirements are handled."
+      }
+    },
+    "betmgm": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official API access, account permissions, and regional requirements are handled."
+      }
+    },
+    "cme_prediction_markets": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official, reliable API access is implemented."
+      }
+    },
+    "context_v2": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official, reliable API access is implemented."
+      }
+    },
+    "crypto_com_predict": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official, reliable API access is implemented."
+      }
+    },
+    "draftkings_predictions": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official API access, account permissions, and regional requirements are handled."
+      }
+    },
+    "drift_bet": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official protocol/API access and wallet/network handling are implemented."
+      }
+    },
+    "fact_machine": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official protocol/API access and identity/outcome rules are implemented."
+      }
+    },
+    "fanatics_markets": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official API access, account permissions, and regional requirements are handled."
+      }
+    },
+    "forecastex": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official, reliable API access is implemented."
+      }
+    },
+    "frenzy_finance": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official protocol/API access and wallet/network handling are implemented."
+      }
+    },
+    "gemini_titan": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official prediction-market API access, account permissions, and regional/KYC requirements are handled."
+      }
+    },
+    "good_judgment_open": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official, reliable API access is implemented."
+      }
+    },
+    "hedgehog_markets": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official protocol/API access and wallet/network handling are implemented."
+      }
+    },
+    "hyperliquid": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official event-contract protocol/API support is implemented."
+      }
+    },
+    "hypermind": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official, reliable API access is implemented."
+      }
+    },
+    "ibkr_forecasttrader": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [
+          "IBKR_ACCOUNT_ID"
+        ],
+        "live_trading_enabled": false,
+        "notes": "Stub until official API access, account permissions, and regional/KYC requirements are handled."
+      }
+    },
+    "infer": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official, reliable API access is implemented."
+      }
+    },
+    "iowa_electronic_markets": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official, reliable API access is implemented."
+      }
+    },
+    "myriad_markets": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official protocol/API access and wallet/network handling are implemented."
+      }
+    },
+    "kalshi": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [
+          "KALSHI_API_KEY_ID",
+          "KALSHI_PRIVATE_KEY_PATH"
+        ],
+        "live_trading_enabled": false,
+        "notes": "Stub until official API integration is implemented. Credentials must stay in environment variables or external files."
+      }
+    },
+    "limitless_exchange": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official, reliable API access is implemented."
+      }
+    },
+    "manifold": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [
+          "MANIFOLD_API_KEY"
+        ],
+        "live_trading_enabled": false,
+        "notes": "Stub until official read-only API integration is implemented."
+      }
+    },
+    "metaculus": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official read-only API integration is implemented."
+      }
+    },
+    "opinion_labs": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official, reliable API access is implemented."
+      }
+    },
+    "nadex": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official API access, account permissions, and regional/KYC requirements are handled."
+      }
+    },
+    "omen": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official, reliable API access is implemented."
+      }
+    },
+    "polymarket": {
+      "enabled": true,
+      "settings": {
+        "adapter_status": "implemented",
+        "credential_env_vars": [
+          "PRIVATE_KEY",
+          "FUNDER_ADDRESS",
+          "SIGNATURE_TYPE"
+        ],
+        "live_trading_enabled": false,
+        "notes": "Live trading is disabled by default. Keep credentials in .env or environment variables, not in config.json."
+      }
+    },
+    "predictit": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official, reliable API access is implemented."
+      }
+    },
+    "predict_fun": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official protocol/API access and wallet/network handling are implemented."
+      }
+    },
+    "prizepicks": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official API access, account permissions, and regional requirements are handled."
+      }
+    },
+    "probo": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official API access, account permissions, and regional requirements are handled."
+      }
+    },
+    "robinhood_prediction_markets": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official API access, account permissions, and regional/KYC requirements are handled."
+      }
+    },
+    "smarkets": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official API access, account permissions, and regional requirements are handled."
+      }
+    },
+    "sx_bet": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official, reliable API access is implemented."
+      }
+    },
+    "thales_market": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official protocol/API access and wallet/network handling are implemented."
+      }
+    },
+    "underdog_sports": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official API access, account permissions, and regional requirements are handled."
+      }
+    },
+    "xo_market": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official, reliable API access is implemented."
+      }
+    },
+    "zeitgeist": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "stub",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Stub until official, reliable API access is implemented."
+      }
+    }
+  },
+  "selected_market_id": "polymarket",
+  "theme": "light",
+  "wallets": []
+}

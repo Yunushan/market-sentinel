@@ -1,0 +1,10 @@
+{
+  "id": "market-1",
+  "slug": "market-slug",
+  "question": "Will it happen?",
+  "active": true,
+  "closed": false,
+  "clobTokenIds": "[\"token-yes\", \"token-no\"]",
+  "outcomes": "[\"Yes\", \"No\"]",
+  "outcomePrices": "[\"0.62\", \"0.38\"]"
+}

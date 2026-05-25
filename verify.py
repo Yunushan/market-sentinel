@@ -1,0 +1,286 @@
+from __future__ import annotations
+
+import argparse
+import compileall
+import importlib
+import importlib.metadata
+import json
+import subprocess
+import sys
+import tomllib
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent
+MIN_PYTHON = (3, 10)
+MAX_PYTHON = (3, 15)
+PROJECT_NAME = "prediction-market-alert-and-copy-trade-gui"
+
+REQUIRED_IMPORTS = {
+    "requests": "requests",
+    "websocket-client": "websocket",
+    "python-dotenv": "dotenv",
+    "py-clob-client": "py_clob_client",
+    "packaging": "packaging",
+    "pytest": "pytest",
+}
+
+
+def check_python_version() -> None:
+    current = sys.version_info[:3]
+    if current < MIN_PYTHON or current >= MAX_PYTHON:
+        raise SystemExit(
+            "Unsupported Python "
+            f"{current[0]}.{current[1]}.{current[2]}; expected >=3.10,<3.15."
+        )
+    print(f"[ok] Python {current[0]}.{current[1]}.{current[2]}")
+
+
+def check_dependency_imports() -> None:
+    failures: list[str] = []
+    for dist_name, module_name in REQUIRED_IMPORTS.items():
+        try:
+            version = importlib.metadata.version(dist_name)
+            importlib.import_module(module_name)
+        except Exception as exc:
+            failures.append(f"{dist_name}: {exc}")
+        else:
+            print(f"[ok] {dist_name} {version}")
+    if failures:
+        raise SystemExit("Dependency import check failed:\n" + "\n".join(failures))
+
+
+def run_pip_check() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "check"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        output = (result.stdout + result.stderr).strip()
+        raise SystemExit("pip check failed:\n" + output)
+    print("[ok] pip check")
+
+
+def run_compile_check() -> None:
+    checks = [
+        compileall.compile_file(str(ROOT / "app.py"), quiet=1),
+        compileall.compile_dir(str(ROOT / "core"), quiet=1),
+        compileall.compile_dir(str(ROOT / "market_adapters"), quiet=1),
+        compileall.compile_dir(str(ROOT / "polymarket"), quiet=1),
+        compileall.compile_dir(str(ROOT / "tests"), quiet=1),
+    ]
+    if not all(checks):
+        raise SystemExit("Python compile check failed.")
+    print("[ok] compileall")
+
+
+def run_adapter_catalog_check() -> None:
+    from market_adapters import MARKET_CATALOG, MARKET_IDS, build_default_registry
+
+    if len(MARKET_IDS) != len(set(MARKET_IDS)):
+        raise SystemExit("Adapter catalog contains duplicate market ids.")
+    if "polymarket" not in MARKET_IDS:
+        raise SystemExit("Adapter catalog must include polymarket.")
+    registry = build_default_registry()
+    if set(registry.list_market_ids()) != set(MARKET_IDS):
+        raise SystemExit("Default adapter registry does not match the market catalog.")
+    missing_adapters = [market_id for market_id in MARKET_IDS if not registry.has_adapter(market_id)]
+    if missing_adapters:
+        raise SystemExit("Default adapter registry is missing adapters: " + ", ".join(missing_adapters))
+    if not registry.has_adapter("polymarket"):
+        raise SystemExit("Default adapter registry must include the Polymarket adapter.")
+    print(f"[ok] adapter catalog ({len(MARKET_CATALOG)} markets)")
+
+
+def run_project_metadata_check() -> None:
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    name = data.get("project", {}).get("name")
+    if name != PROJECT_NAME:
+        raise SystemExit(f"pyproject.toml project name must be {PROJECT_NAME!r}; got {name!r}.")
+    if "_" in name:
+        raise SystemExit("pyproject.toml project name must use dashes, not underscores.")
+
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    app = (ROOT / "app.py").read_text(encoding="utf-8")
+    if f"# {PROJECT_NAME}" not in readme:
+        raise SystemExit("README.md title must use the dashed project name.")
+    if f'self.title("{PROJECT_NAME}")' not in app:
+        raise SystemExit("app.py window title must use the dashed project name.")
+    if f'User-Agent": "{PROJECT_NAME}/1.0"' not in app:
+        raise SystemExit("app.py User-Agent must use the dashed project name.")
+    forbidden = (
+        "polymarket-alert-and-copy-trade-gui",
+        "polymarket-sentinel-gui",
+        "Polymarket Sentinel GUI",
+        "PolymarketSentinelGUI",
+    )
+    checked_files = (
+        ROOT / "README.md",
+        ROOT / "app.py",
+        ROOT / "pyproject.toml",
+        ROOT / "GOAL.md",
+    )
+    for path in checked_files:
+        text = path.read_text(encoding="utf-8")
+        for value in forbidden:
+            if value in text:
+                raise SystemExit(f"Old project branding {value!r} remains in {path.relative_to(ROOT)}.")
+    print("[ok] project metadata")
+
+
+def run_config_example_check() -> None:
+    import json
+
+    from core.models import AppConfig
+    from market_adapters import MARKET_IDS
+
+    path = ROOT / "data" / "config.example.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if set(data.get("markets", {})) != set(MARKET_IDS):
+        raise SystemExit("data/config.example.json does not match the market catalog.")
+    cfg = AppConfig.from_dict(data)
+    if cfg.selected_market_id != "polymarket":
+        raise SystemExit("data/config.example.json must default to selected_market_id=polymarket.")
+    if cfg.copytrading.enabled or cfg.copytrading.live:
+        raise SystemExit("data/config.example.json must keep copy trading disabled by default.")
+    print("[ok] config example")
+
+
+def run_readme_matrix_check() -> None:
+    from market_adapters import MARKET_IDS
+
+    path = ROOT / "README.md"
+    text = path.read_text(encoding="utf-8")
+    required_headers = (
+        "Market",
+        "Adapter",
+        "Alerts",
+        "Read-only data",
+        "Paper trading",
+        "Live trading",
+        "Copy trading",
+        "API required",
+        "Credentials required",
+        "Region/KYC limitation",
+    )
+    if "## Market Capability Matrix" not in text:
+        raise SystemExit("README.md is missing the market capability matrix.")
+    missing_headers = [header for header in required_headers if header not in text]
+    if missing_headers:
+        raise SystemExit("README.md capability matrix is missing headers: " + ", ".join(missing_headers))
+    missing_markets = [market_id for market_id in MARKET_IDS if f"`{market_id}`" not in text]
+    if missing_markets:
+        raise SystemExit("README.md capability matrix is missing markets: " + ", ".join(missing_markets))
+    print("[ok] README capability matrix")
+
+
+def run_blockers_doc_check() -> None:
+    from market_adapters import MARKET_IDS
+
+    path = ROOT / "docs" / "BLOCKERS.md"
+    text = path.read_text(encoding="utf-8")
+    required_sections = (
+        "# Blockers",
+        "## Summary",
+        "## Market Blockers",
+        "## Implementation Rules For Clearing A Blocker",
+    )
+    missing_sections = [section for section in required_sections if section not in text]
+    if missing_sections:
+        raise SystemExit("docs/BLOCKERS.md is missing sections: " + ", ".join(missing_sections))
+    missing_markets = [market_id for market_id in MARKET_IDS if f"`{market_id}`" not in text]
+    if missing_markets:
+        raise SystemExit("docs/BLOCKERS.md is missing markets: " + ", ".join(missing_markets))
+    print("[ok] blockers documentation")
+
+
+def run_fixture_check() -> None:
+    fixture_root = ROOT / "tests" / "fixtures"
+    fixture_paths = sorted(fixture_root.glob("**/*.json"))
+    if not fixture_paths:
+        raise SystemExit("No offline JSON fixtures found under tests/fixtures.")
+
+    for path in fixture_paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise SystemExit(f"Invalid fixture JSON at {path.relative_to(ROOT)}: {exc}") from exc
+        if not isinstance(data, dict):
+            raise SystemExit(f"Fixture must contain a JSON object: {path.relative_to(ROOT)}")
+
+    required = {
+        fixture_root / "polymarket" / "market.json",
+        fixture_root / "polymarket" / "event.json",
+        fixture_root / "polymarket" / "orderbook.json",
+        fixture_root / "polymarket" / "activity_buy.json",
+    }
+    missing = [str(path.relative_to(ROOT)) for path in sorted(required) if not path.exists()]
+    if missing:
+        raise SystemExit("Missing required offline fixtures: " + ", ".join(missing))
+    print(f"[ok] offline fixtures ({len(fixture_paths)} files)")
+
+
+def run_gui_integration_check() -> None:
+    from app import market_choice_label, market_id_from_choice
+    from core.models import AppConfig
+    from market_adapters import MARKET_IDS, StubMarketAdapter, build_default_registry
+
+    registry = build_default_registry()
+    cfg = AppConfig()
+    choices = [market_choice_label(meta) for meta in registry.list_metadata()]
+    choice_market_ids = {market_id_from_choice(choice) for choice in choices}
+    if choice_market_ids != set(MARKET_IDS):
+        missing = sorted(set(MARKET_IDS) - choice_market_ids)
+        extra = sorted(choice_market_ids - set(MARKET_IDS))
+        raise SystemExit(f"GUI market choices do not match catalog. missing={missing} extra={extra}")
+
+    for market_id, market_cfg in cfg.markets.items():
+        adapter = registry.create(market_id, market_cfg.settings)
+        if adapter.market_id != market_id:
+            raise SystemExit(f"Adapter market id mismatch for {market_id}: {adapter.market_id}")
+        if market_id != "polymarket" and not isinstance(adapter, StubMarketAdapter):
+            raise SystemExit(f"Non-Polymarket market must remain a documented stub until implemented: {market_id}")
+
+    print("[ok] GUI market integration")
+
+
+def run_unit_tests() -> None:
+    suite = unittest.defaultTestLoader.discover(str(ROOT / "tests"))
+    test_count = suite.countTestCases()
+    if test_count == 0:
+        raise SystemExit("No unit tests discovered under tests/.")
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    if not result.wasSuccessful():
+        raise SystemExit(1)
+    print(f"[ok] unit tests ({test_count} tests)")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run local verification checks.")
+    parser.add_argument(
+        "--skip-pip-check",
+        action="store_true",
+        help="Skip `python -m pip check` for constrained environments.",
+    )
+    args = parser.parse_args()
+
+    check_python_version()
+    check_dependency_imports()
+    if not args.skip_pip_check:
+        run_pip_check()
+    run_compile_check()
+    run_adapter_catalog_check()
+    run_project_metadata_check()
+    run_config_example_check()
+    run_readme_matrix_check()
+    run_blockers_doc_check()
+    run_fixture_check()
+    run_gui_integration_check()
+    run_unit_tests()
+
+
+if __name__ == "__main__":
+    main()
