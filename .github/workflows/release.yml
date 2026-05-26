@@ -30,6 +30,7 @@ concurrency:
 
 env:
   APP_NAME: prediction-market-alert-and-copy-trade-gui
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PYTHONUNBUFFERED: "1"
 
@@ -79,10 +80,10 @@ jobs:
     needs: metadata
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.14"
           cache: pip
@@ -106,7 +107,7 @@ jobs:
         run: python -m build
 
       - name: Upload Python distributions
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: python-dist
           path: dist/*
@@ -123,12 +124,12 @@ jobs:
         working-directory: frontend
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: "24"
 
       - name: Install frontend dependencies
         shell: bash
@@ -158,7 +159,7 @@ jobs:
           PY
 
       - name: Upload frontend distribution
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: frontend-dist-zip
           path: release-frontend-dist.zip
@@ -178,16 +179,16 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download Python distributions
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: python-dist
           path: release-assets
 
       - name: Download frontend bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: frontend-dist-zip
           path: release-assets

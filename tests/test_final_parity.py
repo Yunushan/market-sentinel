@@ -53,6 +53,12 @@ class FinalParityTests(unittest.TestCase):
         self.assertIn("typescript", package["devDependencies"])
         self.assertIn("vite", package["devDependencies"])
 
+    def test_status_pill_accepts_formatted_jsx_children(self) -> None:
+        source = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+
+        self.assertIn("import type { FormEvent, ReactNode } from \"react\";", source)
+        self.assertIn("{ children: ReactNode; tone?: \"good\" | \"warn\" | \"neutral\" }", source)
+
     def test_readme_documents_final_parity_commands(self) -> None:
         text = (ROOT / "README.md").read_text(encoding="utf-8")
 

@@ -23,9 +23,11 @@ class CiCdWorkflowTests(unittest.TestCase):
             '"3.12"',
             '"3.13"',
             '"3.14"',
-            "actions/setup-python@v5",
-            "actions/setup-node@v4",
-            "actions/upload-artifact@v4",
+            "actions/checkout@v6",
+            "actions/setup-python@v6",
+            "actions/setup-node@v6",
+            'node-version: "24"',
+            "actions/upload-artifact@v7",
             "python app.py --smoke-test",
             "python verify.py",
             "npm run build",
@@ -47,7 +49,10 @@ class CiCdWorkflowTests(unittest.TestCase):
             "python verify.py",
             "python -m build",
             "npm run build",
-            "actions/download-artifact@v4",
+            "actions/setup-node@v6",
+            'node-version: "24"',
+            "actions/upload-artifact@v7",
+            "actions/download-artifact@v8",
             "sha256sum * > SHA256SUMS.txt",
             "gh release create",
             "gh release upload",
@@ -61,9 +66,10 @@ class CiCdWorkflowTests(unittest.TestCase):
         dependabot = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
 
         for fragment in (
-            "actions/dependency-review-action@v4",
-            "github/codeql-action/init@v3",
-            "github/codeql-action/analyze@v3",
+            "actions/dependency-review-action@v5",
+            "continue-on-error: true",
+            "github/codeql-action/init@v4",
+            "github/codeql-action/analyze@v4",
             "security-events: write",
             "fail-on-severity: high",
         ):
@@ -79,6 +85,7 @@ class CiCdWorkflowTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, dependabot)
+        self.assertNotIn("labels:", dependabot)
 
     def test_ci_cd_docs_describe_release_operations(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -97,6 +104,8 @@ class CiCdWorkflowTests(unittest.TestCase):
         for fragment in (
             "Release Process",
             "python verify.py --frontend-build",
+            "Node.js `24`",
+            "dependency graph",
             "git tag v0.1.0",
             "SHA256SUMS.txt",
             "release environment",

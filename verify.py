@@ -7,9 +7,13 @@ import importlib.metadata
 import json
 import subprocess
 import sys
-import tomllib
 import unittest
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 compatibility.
+    import tomli as tomllib
 
 
 ROOT = Path(__file__).resolve().parent
@@ -375,8 +379,9 @@ def run_launch_ux_check() -> None:
 def run_ci_cd_workflow_check() -> None:
     required_files = {
         ROOT / ".github" / "workflows" / "ci.yml": (
-            "actions/setup-python@v5",
-            "actions/setup-node@v4",
+            "actions/setup-python@v6",
+            "actions/setup-node@v6",
+            'node-version: "24"',
             "python verify.py",
             "npm run build",
         ),
@@ -388,8 +393,9 @@ def run_ci_cd_workflow_check() -> None:
             "gh release create",
         ),
         ROOT / ".github" / "workflows" / "security.yml": (
-            "actions/dependency-review-action@v4",
-            "github/codeql-action/init@v3",
+            "actions/dependency-review-action@v5",
+            "continue-on-error: true",
+            "github/codeql-action/init@v4",
             "security-events: write",
         ),
         ROOT / ".github" / "dependabot.yml": (

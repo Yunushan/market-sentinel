@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { FormEvent } from "react";
+import type { FormEvent, ReactNode } from "react";
 import {
   Activity,
   BarChart3,
@@ -113,7 +113,7 @@ function enabledCapabilities(market: Market): string[] {
     .map(([name]) => name);
 }
 
-function StatusPill({ children, tone = "neutral" }: { children: string; tone?: "good" | "warn" | "neutral" }) {
+function StatusPill({ children, tone = "neutral" }: { children: ReactNode; tone?: "good" | "warn" | "neutral" }) {
   return <span className={`status-pill ${tone}`}>{children}</span>;
 }
 

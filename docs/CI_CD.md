@@ -15,7 +15,7 @@ Jobs:
 - Python verification on Ubuntu and Windows across Python `3.10`, `3.11`, `3.12`, `3.13`, and `3.14`.
 - Tkinter fallback smoke test with `python app.py --smoke-test`.
 - Full project verification with `python verify.py`.
-- React production build with Node.js `22`.
+- React production build with Node.js `24`.
 - Python wheel and source distribution build.
 - Short-retention artifacts for the frontend bundle and Python distributions.
 
@@ -29,10 +29,10 @@ Runs on pushes, pull requests, weekly schedule, and manual dispatch.
 
 Jobs:
 
-- Dependency review on pull requests, failing on high-severity dependency changes.
+- Dependency review on pull requests, configured as advisory until GitHub dependency graph is enabled for the repository.
 - CodeQL analysis for Python and JavaScript/TypeScript.
 
-The CodeQL job is the only job with `security-events: write`; all other jobs use least-privilege read permissions unless they need more.
+The CodeQL job is the only job with `security-events: write`; all other jobs use least-privilege read permissions unless they need more. After dependency graph is enabled, remove `continue-on-error: true` from the dependency review step if high-severity dependency changes should block merges.
 
 ### Release
 
@@ -105,6 +105,7 @@ Once `frontend/package-lock.json` exists, CI automatically prefers `npm ci` for 
 Recommended GitHub settings:
 
 - Require the `CI / Python ...` matrix, `CI / React build`, and `Security / CodeQL` checks before merging.
+- Enable GitHub dependency graph before making `Security / Dependency review` a required blocking check.
 - Keep GitHub Actions workflow permissions as read-only by default.
 - Create a protected `release` environment if production releases should require approval.
 - Enable Dependabot alerts and secret scanning.

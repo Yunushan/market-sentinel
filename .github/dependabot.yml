@@ -9,9 +9,6 @@ updates:
       time: "04:00"
       timezone: Europe/Istanbul
     open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - github-actions
     groups:
       github-actions:
         patterns:
@@ -25,9 +22,6 @@ updates:
       time: "04:20"
       timezone: Europe/Istanbul
     open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - python
     groups:
       python-runtime:
         patterns:
@@ -41,9 +35,6 @@ updates:
       time: "04:40"
       timezone: Europe/Istanbul
     open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - frontend
     groups:
       frontend-runtime:
         patterns:
