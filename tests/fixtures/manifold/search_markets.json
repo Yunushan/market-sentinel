@@ -1,0 +1,34 @@
+{
+  "results": [
+    {
+      "id": "mf-binary-1",
+      "creatorUsername": "forecast",
+      "creatorName": "Forecast User",
+      "createdTime": 1760000000000,
+      "question": "Will the demo launch before July?",
+      "url": "https://manifold.markets/forecast/will-the-demo-launch-before-july",
+      "outcomeType": "BINARY",
+      "mechanism": "cpmm-1",
+      "probability": 0.62,
+      "volume": 1234,
+      "volume24Hours": 12,
+      "isResolved": false,
+      "token": "MANA"
+    },
+    {
+      "id": "mf-multi-1",
+      "creatorUsername": "forecast",
+      "creatorName": "Forecast User",
+      "createdTime": 1760000001000,
+      "question": "Which product ships first?",
+      "url": "https://manifold.markets/forecast/which-product-ships-first",
+      "outcomeType": "MULTIPLE_CHOICE",
+      "mechanism": "cpmm-multi-1",
+      "probability": 0.55,
+      "volume": 500,
+      "volume24Hours": 10,
+      "isResolved": false,
+      "token": "MANA"
+    }
+  ]
+}

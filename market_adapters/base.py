@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
-from .errors import UnsupportedFeatureError
+from .errors import MarketConfigurationError, UnsupportedFeatureError
+from .runtime import AdapterRuntime, ResolvedCredential
 from .types import (
     MarketCapabilities,
     MarketContract,
@@ -24,8 +25,14 @@ class MarketAdapter:
 
     metadata = MarketMetadata(market_id="base", display_name="Base")
 
-    def __init__(self, config: Optional[Mapping[str, Any]] = None) -> None:
+    def __init__(
+        self,
+        config: Optional[Mapping[str, Any]] = None,
+        *,
+        runtime: Optional[AdapterRuntime] = None,
+    ) -> None:
         self.config: Dict[str, Any] = dict(config or {})
+        self.runtime = runtime or self._create_runtime()
 
     @property
     def market_id(self) -> str:
@@ -39,12 +46,47 @@ class MarketAdapter:
     def capabilities(self) -> MarketCapabilities:
         return self.metadata.capabilities
 
+    def _create_runtime(self) -> AdapterRuntime:
+        return AdapterRuntime(self.market_id, self.config)
+
     def health_check(self) -> Dict[str, Any]:
-        return {"market_id": self.market_id, "ok": True, "message": "Adapter loaded."}
+        return {
+            "market_id": self.market_id,
+            "ok": True,
+            "message": "Adapter loaded.",
+            "adapter": type(self).__name__,
+            "capabilities": self.capabilities.to_dict(),
+            "runtime": self.runtime.describe(),
+        }
 
     def ensure_capability(self, capability: str) -> None:
         if not getattr(self.capabilities, capability, False):
             raise UnsupportedFeatureError(self.market_id, capability)
+
+    def config_bool(self, key: str, default: bool = False) -> bool:
+        return self.runtime.config_bool(key, default)
+
+    def resolve_credential(
+        self,
+        config_key: str,
+        env_vars: Iterable[str] = (),
+        *,
+        required: bool = False,
+        label: str = "",
+    ) -> Optional[ResolvedCredential]:
+        return self.runtime.resolve_credential(config_key, env_vars, required=required, label=label)
+
+    def ensure_order_market(self, order: PaperOrderRequest) -> None:
+        if order.market_id != self.market_id:
+            raise MarketConfigurationError(f"Order market mismatch: {order.market_id}")
+
+    def ensure_live_trading_enabled(self, feature_name: str = "live trading") -> None:
+        if not self.config_bool("live_trading_enabled", False):
+            raise MarketConfigurationError(f"{self.display_name} {feature_name} is disabled by adapter config.")
+
+    def ensure_copy_trading_enabled(self, feature_name: str = "copy trading") -> None:
+        if not self.config_bool("copy_trading_enabled", False):
+            raise MarketConfigurationError(f"{self.display_name} {feature_name} is disabled by adapter config.")
 
     def list_events(self, query: str = "", limit: int = 50) -> List[MarketEvent]:
         self.ensure_capability("event_listing")

@@ -4,3 +4,4 @@ python-dotenv>=1.0.0
 py-clob-client>=0.34.0
 packaging>=24.0
 pytest>=8.0
+cryptography>=42.0.0

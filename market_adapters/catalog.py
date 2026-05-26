@@ -19,6 +19,36 @@ POLYMARKET_CAPABILITIES = MarketCapabilities(
     region_limited=True,
 )
 
+KALSHI_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=True,
+    alerts=True,
+    paper_trading=True,
+    live_trading=True,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=True,
+    kyc_required=True,
+    region_limited=True,
+)
+
+MANIFOLD_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    alerts=True,
+    paper_trading=True,
+    live_trading=True,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=True,
+    kyc_required=False,
+    region_limited=False,
+)
+
 STUB_CAPABILITIES = MarketCapabilities()
 
 MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
@@ -30,7 +60,13 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         description="Existing Polymarket alert, wallet tracking, and guarded copy-trading support.",
         capabilities=POLYMARKET_CAPABILITIES,
     ),
-    MarketMetadata(market_id="kalshi", display_name="Kalshi", homepage_url="https://kalshi.com"),
+    MarketMetadata(
+        market_id="kalshi",
+        display_name="Kalshi",
+        homepage_url="https://kalshi.com",
+        description="Official Kalshi REST market-data adapter with dry-run orders and guarded live-order support.",
+        capabilities=KALSHI_CAPABILITIES,
+    ),
     MarketMetadata(market_id="predictit", display_name="PredictIt", homepage_url="https://www.predictit.org"),
     MarketMetadata(
         market_id="robinhood_prediction_markets",
@@ -73,6 +109,8 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="manifold",
         display_name="Manifold Markets",
         homepage_url="https://manifold.markets",
+        description="Official Manifold REST API adapter for market discovery, probabilities, dry-run orders, and guarded MANA betting.",
+        capabilities=MANIFOLD_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="metaculus",

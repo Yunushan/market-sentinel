@@ -19,18 +19,16 @@ class StubMarketAdapter(MarketAdapter):
     ) -> None:
         super().__init__(config=config)
         self.metadata = replace(metadata, capabilities=MarketCapabilities())
+        self.runtime = self._create_runtime()
         self.reason = reason or (
             f"{self.display_name} is listed in the market catalog, but an official adapter "
             "has not been implemented yet."
         )
 
     def health_check(self) -> Dict[str, Any]:
-        return {
-            "market_id": self.market_id,
-            "ok": False,
-            "message": self.reason,
-            "stub": True,
-        }
+        health = super().health_check()
+        health.update({"ok": False, "message": self.reason, "stub": True})
+        return health
 
     def ensure_capability(self, capability: str) -> None:
         raise UnsupportedFeatureError(self.market_id, capability, self.unsupported_message(capability))

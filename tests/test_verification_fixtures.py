@@ -33,6 +33,30 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertEqual(activity.get("side"), "BUY")
         self.assertIn("asset", activity)
 
+    def test_kalshi_fixtures_cover_core_payload_shapes(self) -> None:
+        markets = json.loads((FIXTURE_ROOT / "kalshi" / "markets.json").read_text(encoding="utf-8"))
+        orderbook = json.loads((FIXTURE_ROOT / "kalshi" / "orderbook.json").read_text(encoding="utf-8"))
+
+        self.assertIsInstance(markets.get("markets"), list)
+        self.assertGreaterEqual(len(markets["markets"]), 1)
+        self.assertIn("ticker", markets["markets"][0])
+        self.assertIn("event_ticker", markets["markets"][0])
+        self.assertIn("orderbook_fp", orderbook)
+        self.assertIn("yes_dollars", orderbook["orderbook_fp"])
+        self.assertIn("no_dollars", orderbook["orderbook_fp"])
+
+    def test_manifold_fixtures_cover_core_payload_shapes(self) -> None:
+        search = json.loads((FIXTURE_ROOT / "manifold" / "search_markets.json").read_text(encoding="utf-8"))
+        market = json.loads((FIXTURE_ROOT / "manifold" / "market_binary.json").read_text(encoding="utf-8"))
+        multi = json.loads((FIXTURE_ROOT / "manifold" / "market_multi.json").read_text(encoding="utf-8"))
+        prob = json.loads((FIXTURE_ROOT / "manifold" / "prob_binary.json").read_text(encoding="utf-8"))
+
+        self.assertIsInstance(search.get("results"), list)
+        self.assertIn("id", search["results"][0])
+        self.assertEqual(market.get("outcomeType"), "BINARY")
+        self.assertIsInstance(multi.get("answers"), list)
+        self.assertIn("prob", prob)
+
 
 if __name__ == "__main__":
     unittest.main()

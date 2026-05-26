@@ -261,7 +261,7 @@ class App(tk.Tk):
         message = (
             f"{feature} is currently implemented only for Polymarket. "
             f"{self._selected_market_display_name()} is visible as a market adapter entry, "
-            "but its adapter is still a stub."
+            "but this GUI workflow has not been generalized for that market yet."
         )
         self.status_var.set(message)
         self.ui_queue.put(("log", f"[market] {message}"))

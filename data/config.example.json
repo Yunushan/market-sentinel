@@ -213,13 +213,17 @@
     "kalshi": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "implemented",
+        "kalshi_api_base_url": "https://external-api.kalshi.com/trade-api/v2",
+        "kalshi_market_status": "open",
         "credential_env_vars": [
           "KALSHI_API_KEY_ID",
-          "KALSHI_PRIVATE_KEY_PATH"
+          "KALSHI_PRIVATE_KEY_PATH",
+          "KALSHI_PRIVATE_KEY_PEM",
+          "KALSHI_PRIVATE_KEY_PASSWORD"
         ],
         "live_trading_enabled": false,
-        "notes": "Stub until official API integration is implemented. Credentials must stay in environment variables or external files."
+        "notes": "Read-only market data and paper trading are implemented through official Kalshi REST endpoints. Live trading stays disabled by default and requires API key ID plus RSA private key material from environment variables or an external file."
       }
     },
     "limitless_exchange": {
@@ -234,12 +238,15 @@
     "manifold": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "implemented",
+        "manifold_api_base_url": "https://api.manifold.markets/v0",
+        "manifold_market_filter": "open",
+        "manifold_sort": "most-popular",
         "credential_env_vars": [
           "MANIFOLD_API_KEY"
         ],
         "live_trading_enabled": false,
-        "notes": "Stub until official read-only API integration is implemented."
+        "notes": "Read-only market discovery, probabilities, and local paper trading are implemented through the official Manifold API. Authenticated MANA betting is guarded by live_trading_enabled and MANIFOLD_API_KEY."
       }
     },
     "metaculus": {

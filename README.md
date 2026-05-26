@@ -25,6 +25,16 @@ A local multi-market prediction-market GUI app (Tkinter) for:
 - Default mode is **SIMULATION** (logs what it *would* do)
 - Enable **LIVE** mode only if you know what you’re doing
 
+### 4) Kalshi adapter support
+- Lists Kalshi events/contracts through official REST market-data endpoints
+- Reads binary orderbooks and derives YES/NO best bid/ask prices
+- Supports dry-run/paper orders; live orders are opt-in and require signed API credentials
+
+### 5) Manifold adapter support
+- Searches and lists Manifold markets through the official API
+- Reads binary and multiple-choice probabilities for alerts
+- Supports paper orders locally and guarded MANA betting through documented API-key auth
+
 ## Install & Run
 
 Requires **Python >=3.10,<3.15**. Python **3.14** is supported and verified.
@@ -61,51 +71,51 @@ On Windows you can also double-click `run_gui.bat`. It uses `.venv` when it is h
 
 ## Market Capability Matrix
 
-This matrix describes current application adapter support. Stub markets appear in the GUI and config, but their market-specific operations intentionally return clear unsupported-feature messages until an official adapter is implemented.
+This matrix describes current application adapter support. Stub markets appear in the GUI and config, but their market-specific operations intentionally return clear unsupported-feature messages until an official adapter is implemented. For stub rows, the last three columns describe what is required before safe official support can be implemented or operated.
 
 | Market | Adapter | Alerts | Read-only data | Paper trading | Live trading | Copy trading | API required | Credentials required | Region/KYC limitation |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Polymarket (`polymarket`) | Implemented | Yes | Yes | Yes | Guarded, off by default | Yes, dry-run default | Yes | Live trading only | Trading may be region/KYC limited |
-| Kalshi (`kalshi`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| PredictIt (`predictit`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Robinhood Prediction Markets (`robinhood_prediction_markets`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Fanatics Markets (`fanatics_markets`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| DraftKings Predictions (`draftkings_predictions`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Interactive Brokers ForecastTrader / IBKR Prediction Markets (`ibkr_forecasttrader`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| ForecastEx (`forecastex`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| CME Group Prediction Markets (`cme_prediction_markets`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Nadex (`nadex`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Crypto.com Predict / CDNA (`crypto_com_predict`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Hyperliquid (`hyperliquid`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Myriad Markets (`myriad_markets`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Context V2 (`context_v2`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Frenzy Finance (`frenzy_finance`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| XO Market (`xo_market`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Manifold Markets (`manifold`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Metaculus (`metaculus`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Good Judgment Open (`good_judgment_open`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Hypermind (`hypermind`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Iowa Electronic Markets (`iowa_electronic_markets`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| INFER / INFER-pub (`infer`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Fact Machine (`fact_machine`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Opinion Labs (`opinion_labs`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Gemini Titan / Gemini Predictions (`gemini_titan`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Augur (`augur`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| BetMGM (`betmgm`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| PrizePicks (`prizepicks`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Underdog Sports (`underdog_sports`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Drift BET (`drift_bet`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Thales Market (`thales_market`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Hedgehog Markets (`hedgehog_markets`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Omen (`omen`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Zeitgeist (`zeitgeist`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Azuro (`azuro`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| SX Bet / SX Network (`sx_bet`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Limitless Exchange (`limitless_exchange`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Predict.fun (`predict_fun`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Smarkets (`smarkets`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Betfair Exchange (`betfair_exchange`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
-| Probo (`probo`) | Stub | No | No | No | No | No | TBD | TBD | TBD |
+| Kalshi (`kalshi`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
+| PredictIt (`predictit`) | Stub | No | No | No | No | No | Required | Account required for trading | Region/account limited |
+| Robinhood Prediction Markets (`robinhood_prediction_markets`) | Stub | No | No | No | No | No | Required | Brokerage account required | Region/KYC limited |
+| Fanatics Markets (`fanatics_markets`) | Stub | No | No | No | No | No | Required | Account required | Region/KYC limited |
+| DraftKings Predictions (`draftkings_predictions`) | Stub | No | No | No | No | No | Required | Account required | Region/KYC limited |
+| Interactive Brokers ForecastTrader / IBKR Prediction Markets (`ibkr_forecasttrader`) | Stub | No | No | No | No | No | Required | IBKR account required | Region/KYC limited |
+| ForecastEx (`forecastex`) | Stub | No | No | No | No | No | Required | Exchange/broker account required | Region/KYC limited |
+| CME Group Prediction Markets (`cme_prediction_markets`) | Stub | No | No | No | No | No | Required | Broker/data entitlement required | Region/KYC limited |
+| Nadex (`nadex`) | Stub | No | No | No | No | No | Required | Exchange account required | Region/KYC limited |
+| Crypto.com Predict / CDNA (`crypto_com_predict`) | Stub | No | No | No | No | No | Required | Crypto.com account required | Region/KYC limited |
+| Hyperliquid (`hyperliquid`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Myriad Markets (`myriad_markets`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Context V2 (`context_v2`) | Stub | No | No | No | No | No | Required | API credentials required | Jurisdiction varies |
+| Frenzy Finance (`frenzy_finance`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| XO Market (`xo_market`) | Stub | No | No | No | No | No | Required | Account required | Jurisdiction varies |
+| Manifold Markets (`manifold`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Live trading only | Not KYC limited |
+| Metaculus (`metaculus`) | Stub | No | No | No | No | No | Required | Account/API token required | Not trading/KYC limited |
+| Good Judgment Open (`good_judgment_open`) | Stub | No | No | No | No | No | Required | Account/export access required | Not trading/KYC limited |
+| Hypermind (`hypermind`) | Stub | No | No | No | No | No | Required | Program access required | Program access limited |
+| Iowa Electronic Markets (`iowa_electronic_markets`) | Stub | No | No | No | No | No | Required | IEM account required | Eligibility limited |
+| INFER / INFER-pub (`infer`) | Stub | No | No | No | No | No | Required | Account/export access required | Not trading/KYC limited |
+| Fact Machine (`fact_machine`) | Stub | No | No | No | No | No | Required | Wallet/personhood required | Identity/jurisdiction limited |
+| Opinion Labs (`opinion_labs`) | Stub | No | No | No | No | No | Required | Account or wallet required | Jurisdiction varies |
+| Gemini Titan / Gemini Predictions (`gemini_titan`) | Stub | No | No | No | No | No | Required | Gemini account required | Region/KYC limited |
+| Augur (`augur`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| BetMGM (`betmgm`) | Stub | No | No | No | No | No | Required | Account required | Region/KYC limited |
+| PrizePicks (`prizepicks`) | Stub | No | No | No | No | No | Required | Account required | Region/KYC limited |
+| Underdog Sports (`underdog_sports`) | Stub | No | No | No | No | No | Required | Account required | Region/KYC limited |
+| Drift BET (`drift_bet`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Thales Market (`thales_market`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Hedgehog Markets (`hedgehog_markets`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Omen (`omen`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Zeitgeist (`zeitgeist`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Azuro (`azuro`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| SX Bet / SX Network (`sx_bet`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Limitless Exchange (`limitless_exchange`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Predict.fun (`predict_fun`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Smarkets (`smarkets`) | Stub | No | No | No | No | No | Required | Exchange account required | Region/KYC limited |
+| Betfair Exchange (`betfair_exchange`) | Stub | No | No | No | No | No | Required | Exchange account required | Region/KYC limited |
+| Probo (`probo`) | Stub | No | No | No | No | No | Required | Account required | Region limited |
 
 ## Verification
 

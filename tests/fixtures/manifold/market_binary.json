@@ -1,0 +1,24 @@
+{
+  "id": "mf-binary-1",
+  "creatorUsername": "forecast",
+  "creatorName": "Forecast User",
+  "createdTime": 1760000000000,
+  "question": "Will the demo launch before July?",
+  "description": {
+    "type": "doc",
+    "content": []
+  },
+  "textDescription": "Demo launch timing market.",
+  "url": "https://manifold.markets/forecast/will-the-demo-launch-before-july",
+  "pool": {
+    "YES": 1000,
+    "NO": 800
+  },
+  "outcomeType": "BINARY",
+  "mechanism": "cpmm-1",
+  "probability": 0.62,
+  "volume": 1234,
+  "volume24Hours": 12,
+  "isResolved": false,
+  "token": "MANA"
+}

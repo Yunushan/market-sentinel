@@ -127,7 +127,7 @@ class AppLogicTests(unittest.TestCase):
         self.assertEqual(market_ids, set(MARKET_IDS))
         self.assertIn("Polymarket (polymarket)", choices)
 
-    def test_market_change_persists_stub_selection_without_gui_window(self) -> None:
+    def test_market_change_persists_kalshi_selection_without_gui_window(self) -> None:
         harness = MarketSelectionHarness()
         harness.market_var.set("Kalshi (kalshi)")
 
@@ -136,7 +136,7 @@ class AppLogicTests(unittest.TestCase):
 
         self.assertEqual(harness.cfg.selected_market_id, "kalshi")
         self.assertEqual(harness.market_var.get(), "Kalshi (kalshi)")
-        self.assertIn("official adapter has not been implemented", harness.status_var.get())
+        self.assertEqual(harness.status_var.get(), "Selected market: Kalshi.")
         self.assertEqual(harness.ui_queue.get_nowait()[0], "log")
         save_config.assert_called_once_with(harness.cfg)
 
@@ -149,6 +149,7 @@ class AppLogicTests(unittest.TestCase):
 
         self.assertFalse(result)
         self.assertIn("currently implemented only for Polymarket", harness.status_var.get())
+        self.assertIn("has not been generalized", harness.status_var.get())
         self.assertEqual(harness.ui_queue.get_nowait()[0], "log")
         showinfo.assert_called_once()
 

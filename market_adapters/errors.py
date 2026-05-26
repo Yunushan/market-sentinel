@@ -9,6 +9,10 @@ class MarketConfigurationError(MarketAdapterError):
     """Raised when an adapter is missing required local configuration."""
 
 
+class MarketHTTPError(MarketAdapterError):
+    """Raised when an adapter HTTP request fails."""
+
+
 class UnsupportedFeatureError(MarketAdapterError):
     """Raised when a market adapter does not support a requested feature."""
 

@@ -92,3 +92,62 @@ Add or update:
 - `python verify.py` passes.
 - `pytest` passes if tests exist.
 - Any remaining blocker is documented in `docs/BLOCKERS.md` with exact reason.
+
+## Full implementation policy
+
+The next implementation pass must move beyond "cataloged stub" support.
+
+- "100% implemented" means the adapter uses official APIs, SDKs, documented endpoints, or documented protocol contracts for every feature it marks supported.
+- If a market has no official/documented API, or requires unavailable KYC, account permissions, credentials, paid data entitlements, regional access, or private consumer-app endpoints, the app must not fake support. The correct implementation is a verified unsupported adapter with exact blocker documentation.
+- The README matrix must not use `TBD`. Every cell must be `Yes`, `No`, `Required`, `Not required`, `Blocked`, `N/A`, or a similarly concrete value.
+- Live trading and copy trading remain disabled by default for every market.
+- Paper/dry-run mode remains the default for every market.
+- Every adapter implementation must include offline fixture tests and `verify.py` coverage.
+
+## Full implementation articles
+
+Completed articles:
+
+- Article 1 Adapter Foundation: 100%
+- Article 2 Polymarket Adapter Migration: 100%
+- Article 3 Market Stub Adapters: 100%
+- Article 4 GUI Market Selector: 100%
+- Article 5 Config Examples: 100%
+- Article 6 README Capability Matrix: 100%
+- Article 7 Blockers Documentation: 100%
+- Article 8 Verification Expansion: 100%
+- Article 9 Final Integration Pass: 100%
+- Article 10 Capability De-TBD Pass: 100%
+- Article 11 Adapter Runtime Infrastructure: 100%
+- Article 12 Polymarket Production Hardening: 100%
+- Article 13 Kalshi Adapter: 100%
+- Article 14 Manifold Markets Adapter: 100%
+
+Next articles:
+
+- Article 15 Metaculus Adapter: 0%
+  Implement official Metaculus read-only forecasting data and alerts; no trading support unless official trading support exists.
+- Article 16 Public Forecasting Adapters: 0%
+  Implement or verify blockers for Good Judgment Open, Hypermind, Iowa Electronic Markets, and INFER / INFER-pub.
+- Article 17 PredictIt Adapter: 0%
+  Implement official/documented read-only data support first; only add trading if official automation support is documented and allowed.
+- Article 18 Limitless Exchange Adapter: 0%
+  Implement official Limitless REST/WebSocket read-only data, alerts, paper trading, and guarded wallet/live capability if officially supported.
+- Article 19 SX Bet / SX Network Adapter: 0%
+  Implement official SX read-only data, alerts, paper trading, and guarded wallet/live capability if officially supported.
+- Article 20 Azuro Adapter: 0%
+  Implement official Azuro protocol/API read-only data, alerts, paper trading model, and guarded wallet/live capability if officially supported.
+- Article 21 Legacy Web3 Protocol Adapters: 0%
+  Implement or verify blockers for Augur, Omen, and Zeitgeist using official protocol contracts, SDKs, or maintained APIs only.
+- Article 22 Web3 Sports/DeFi Protocol Adapters: 0%
+  Implement or verify blockers for Drift BET, Thales Market, Hedgehog Markets, Predict.fun, Myriad Markets, Hyperliquid, Frenzy Finance, Fact Machine, Opinion Labs, Context V2, and XO Market.
+- Article 23 Broker/Exchange Regulated Adapters: 0%
+  Implement or verify blockers for Interactive Brokers ForecastTrader, ForecastEx, CME Group Prediction Markets, Nadex, Crypto.com Predict / CDNA, and Gemini Titan.
+- Article 24 Consumer-App / Sportsbook Entrants: 0%
+  Implement or verify blockers for Robinhood Prediction Markets, Fanatics Markets, DraftKings Predictions, BetMGM, PrizePicks, and Underdog Sports. Do not automate consumer apps or private endpoints.
+- Article 25 Global Betting/Opinion Exchanges: 0%
+  Implement or verify blockers for Smarkets, Betfair Exchange, and Probo using official APIs only.
+- Article 26 GUI Full-Market Workflow: 0%
+  Add market-specific screens/status for implemented adapters, concrete unsupported messages for blocked adapters, and no misleading controls for unavailable live/copy trading.
+- Article 27 Final All-Market Verification: 0%
+  Ensure every market is either implemented with tested official support or blocked with exact reason, no `TBD` remains, `python verify.py` passes, and `pytest` passes.

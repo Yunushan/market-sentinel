@@ -6,6 +6,8 @@ from market_adapters import (
     MARKET_CATALOG,
     MARKET_IDS,
     AdapterRegistry,
+    KalshiAdapter,
+    ManifoldAdapter,
     MarketAdapter,
     MarketCapabilities,
     MarketMetadata,
@@ -32,6 +34,8 @@ CAPABILITY_KEYS = {
     "kyc_required",
     "region_limited",
 }
+
+IMPLEMENTED_MARKETS = {"polymarket", "kalshi", "manifold"}
 
 
 class DummyAdapter(MarketAdapter):
@@ -69,19 +73,23 @@ class AdapterFoundationTests(unittest.TestCase):
         self.assertIn("betfair_exchange", MARKET_IDS)
         self.assertIn("underdog_sports", MARKET_IDS)
 
-    def test_default_registry_exposes_catalog_metadata_and_polymarket_adapter(self) -> None:
+    def test_default_registry_exposes_catalog_metadata_and_implemented_adapters(self) -> None:
         registry = build_default_registry()
 
         self.assertEqual(set(registry.list_market_ids()), set(MARKET_IDS))
         self.assertTrue(all(registry.has_adapter(market_id) for market_id in MARKET_IDS))
         self.assertEqual(registry.get_metadata("polymarket").display_name, "Polymarket")
         self.assertEqual(registry.create("polymarket").market_id, "polymarket")
+        self.assertEqual(registry.get_metadata("kalshi").display_name, "Kalshi")
+        self.assertIsInstance(registry.create("kalshi"), KalshiAdapter)
+        self.assertEqual(registry.get_metadata("manifold").display_name, "Manifold Markets")
+        self.assertIsInstance(registry.create("manifold"), ManifoldAdapter)
 
-    def test_non_polymarket_catalog_entries_create_stub_adapters(self) -> None:
+    def test_non_implemented_catalog_entries_create_stub_adapters(self) -> None:
         registry = build_default_registry()
 
         for market_id in MARKET_IDS:
-            if market_id == "polymarket":
+            if market_id in IMPLEMENTED_MARKETS:
                 continue
             adapter = registry.create(market_id)
             self.assertIsInstance(adapter, StubMarketAdapter)
@@ -93,7 +101,7 @@ class AdapterFoundationTests(unittest.TestCase):
 
         for market_id in MARKET_IDS:
             metadata = registry.get_metadata(market_id)
-            if market_id == "polymarket":
+            if market_id in IMPLEMENTED_MARKETS:
                 self.assertTrue(any(metadata.capabilities.to_dict().values()))
                 continue
             self.assertEqual(metadata.capabilities.to_dict(), {key: False for key in CAPABILITY_KEYS})
@@ -124,7 +132,7 @@ class AdapterFoundationTests(unittest.TestCase):
         )
 
         for market_id in MARKET_IDS:
-            if market_id == "polymarket":
+            if market_id in IMPLEMENTED_MARKETS:
                 continue
             adapter = registry.create(market_id)
 
@@ -147,14 +155,14 @@ class AdapterFoundationTests(unittest.TestCase):
 
     def test_stub_adapter_raises_market_specific_unsupported_errors(self) -> None:
         registry = build_default_registry()
-        adapter = registry.create("kalshi")
+        adapter = registry.create("predictit")
 
         with self.assertRaises(UnsupportedFeatureError) as ctx:
             adapter.get_price("contract-1")
 
-        self.assertEqual(ctx.exception.market_id, "kalshi")
+        self.assertEqual(ctx.exception.market_id, "predictit")
         self.assertEqual(ctx.exception.feature, "price_reading")
-        self.assertIn("Kalshi", str(ctx.exception))
+        self.assertIn("PredictIt", str(ctx.exception))
         self.assertIn("official adapter", str(ctx.exception))
         self.assertIn("not been implemented", str(ctx.exception))
 

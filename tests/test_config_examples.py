@@ -48,6 +48,17 @@ class ConfigExampleTests(unittest.TestCase):
             direct_secret_keys = FORBIDDEN_DIRECT_SECRET_KEYS.intersection(settings)
             self.assertEqual(direct_secret_keys, set(), market_id)
 
+    def test_config_and_docs_do_not_use_tbd_placeholders(self) -> None:
+        paths = [
+            CONFIG_EXAMPLE,
+            ROOT / "README.md",
+            ROOT / "docs" / "BLOCKERS.md",
+        ]
+
+        for path in paths:
+            with self.subTest(path=path.name):
+                self.assertNotIn("TBD", path.read_text(encoding="utf-8"))
+
     def test_env_example_uses_empty_placeholders(self) -> None:
         lines = ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
         assignments = [line for line in lines if line and not line.startswith("#") and "=" in line]

@@ -21,6 +21,7 @@ REQUIRED_COLUMNS = (
     "Required before full support",
     "Reference",
 )
+IMPLEMENTED_MARKETS = {"polymarket", "kalshi", "manifold"}
 
 
 class BlockersDocTests(unittest.TestCase):
@@ -38,11 +39,14 @@ class BlockersDocTests(unittest.TestCase):
         for market_id in MARKET_IDS:
             self.assertIn(f"`{market_id}`", text)
 
-    def test_blockers_doc_marks_non_polymarket_markets_as_stubs(self) -> None:
+    def test_blockers_doc_marks_non_implemented_markets_as_stubs(self) -> None:
         text = BLOCKERS.read_text(encoding="utf-8")
 
         for line in text.splitlines():
-            if " `polymarket` " in line or not line.startswith("| `"):
+            if not line.startswith("| `"):
+                continue
+            if any(f"`{market_id}`" in line for market_id in IMPLEMENTED_MARKETS):
+                self.assertIn("| Implemented |", line)
                 continue
             if any(f"`{market_id}`" in line for market_id in MARKET_IDS):
                 self.assertIn("| Stub |", line)

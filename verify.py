@@ -24,6 +24,7 @@ REQUIRED_IMPORTS = {
     "py-clob-client": "py_clob_client",
     "packaging": "packaging",
     "pytest": "pytest",
+    "cryptography": "cryptography",
 }
 
 
@@ -138,7 +139,10 @@ def run_config_example_check() -> None:
     from market_adapters import MARKET_IDS
 
     path = ROOT / "data" / "config.example.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+    if "TBD" in text:
+        raise SystemExit("data/config.example.json must not contain TBD placeholders.")
+    data = json.loads(text)
     if set(data.get("markets", {})) != set(MARKET_IDS):
         raise SystemExit("data/config.example.json does not match the market catalog.")
     cfg = AppConfig.from_dict(data)
@@ -168,6 +172,8 @@ def run_readme_matrix_check() -> None:
     )
     if "## Market Capability Matrix" not in text:
         raise SystemExit("README.md is missing the market capability matrix.")
+    if "TBD" in text:
+        raise SystemExit("README.md capability matrix must not contain TBD placeholders.")
     missing_headers = [header for header in required_headers if header not in text]
     if missing_headers:
         raise SystemExit("README.md capability matrix is missing headers: " + ", ".join(missing_headers))
@@ -182,6 +188,8 @@ def run_blockers_doc_check() -> None:
 
     path = ROOT / "docs" / "BLOCKERS.md"
     text = path.read_text(encoding="utf-8")
+    if "TBD" in text:
+        raise SystemExit("docs/BLOCKERS.md must not contain TBD placeholders.")
     required_sections = (
         "# Blockers",
         "## Summary",
@@ -216,6 +224,13 @@ def run_fixture_check() -> None:
         fixture_root / "polymarket" / "event.json",
         fixture_root / "polymarket" / "orderbook.json",
         fixture_root / "polymarket" / "activity_buy.json",
+        fixture_root / "kalshi" / "markets.json",
+        fixture_root / "kalshi" / "orderbook.json",
+        fixture_root / "manifold" / "search_markets.json",
+        fixture_root / "manifold" / "market_binary.json",
+        fixture_root / "manifold" / "market_multi.json",
+        fixture_root / "manifold" / "prob_binary.json",
+        fixture_root / "manifold" / "prob_multi.json",
     }
     missing = [str(path.relative_to(ROOT)) for path in sorted(required) if not path.exists()]
     if missing:
@@ -230,6 +245,7 @@ def run_gui_integration_check() -> None:
 
     registry = build_default_registry()
     cfg = AppConfig()
+    implemented_markets = {"polymarket", "kalshi", "manifold"}
     choices = [market_choice_label(meta) for meta in registry.list_metadata()]
     choice_market_ids = {market_id_from_choice(choice) for choice in choices}
     if choice_market_ids != set(MARKET_IDS):
@@ -241,8 +257,11 @@ def run_gui_integration_check() -> None:
         adapter = registry.create(market_id, market_cfg.settings)
         if adapter.market_id != market_id:
             raise SystemExit(f"Adapter market id mismatch for {market_id}: {adapter.market_id}")
-        if market_id != "polymarket" and not isinstance(adapter, StubMarketAdapter):
-            raise SystemExit(f"Non-Polymarket market must remain a documented stub until implemented: {market_id}")
+        if market_id in implemented_markets:
+            if isinstance(adapter, StubMarketAdapter):
+                raise SystemExit(f"Implemented market must not use a stub adapter: {market_id}")
+        elif not isinstance(adapter, StubMarketAdapter):
+            raise SystemExit(f"Market must remain a documented stub until implemented: {market_id}")
 
     print("[ok] GUI market integration")
 

@@ -20,6 +20,59 @@ REQUIRED_HEADERS = (
     "Credentials required",
     "Region/KYC limitation",
 )
+CONCRETE_REQUIREMENT_VALUES = (
+    "Required",
+    "Yes",
+    "No",
+    "Live trading only",
+    "Trading may be region/KYC limited",
+    "Exchange account/API keys",
+    "Account required for trading",
+    "Region/account limited",
+    "Brokerage account required",
+    "Region/KYC limited",
+    "Account required",
+    "IBKR account required",
+    "Exchange/broker account required",
+    "Broker/data entitlement required",
+    "Exchange account required",
+    "Crypto.com account required",
+    "Wallet required for trading",
+    "Jurisdiction varies",
+    "API credentials required",
+    "Optional API key",
+    "Not KYC limited",
+    "Account/API token required",
+    "Not trading/KYC limited",
+    "Account/export access required",
+    "Program access required",
+    "Program access limited",
+    "IEM account required",
+    "Eligibility limited",
+    "Wallet/personhood required",
+    "Identity/jurisdiction limited",
+    "Account or wallet required",
+    "Gemini account required",
+    "Region limited",
+)
+IMPLEMENTED_MARKETS = {"polymarket", "kalshi", "manifold"}
+
+
+def matrix_rows(text: str) -> list[list[str]]:
+    rows: list[list[str]] = []
+    in_matrix = False
+    for line in text.splitlines():
+        if line.startswith("| Market | Adapter |"):
+            in_matrix = True
+            continue
+        if not in_matrix:
+            continue
+        if not line.startswith("| "):
+            break
+        if line.startswith("| ---"):
+            continue
+        rows.append([cell.strip() for cell in line.strip("|").split("|")])
+    return rows
 
 
 class ReadmeCapabilityMatrixTests(unittest.TestCase):
@@ -36,11 +89,26 @@ class ReadmeCapabilityMatrixTests(unittest.TestCase):
         for market_id in MARKET_IDS:
             self.assertIn(f"`{market_id}`", text)
 
-    def test_readme_marks_non_polymarket_markets_as_stubs(self) -> None:
+    def test_readme_capability_matrix_has_no_tbd_values(self) -> None:
+        text = README.read_text(encoding="utf-8")
+
+        self.assertNotIn("TBD", text)
+        rows = matrix_rows(text)
+        self.assertEqual(len(rows), len(MARKET_IDS))
+        for row in rows:
+            self.assertEqual(len(row), len(REQUIRED_HEADERS), row)
+            for value in row[-3:]:
+                self.assertNotIn("TBD", value)
+                self.assertIn(value, CONCRETE_REQUIREMENT_VALUES, row)
+
+    def test_readme_marks_non_implemented_markets_as_stubs(self) -> None:
         text = README.read_text(encoding="utf-8")
 
         for line in text.splitlines():
-            if "(`polymarket`)" in line or not line.startswith("| "):
+            if not line.startswith("| "):
+                continue
+            if any(f"`{market_id}`" in line for market_id in IMPLEMENTED_MARKETS):
+                self.assertIn("| Implemented |", line)
                 continue
             if any(f"`{market_id}`" in line for market_id in MARKET_IDS):
                 self.assertIn("| Stub |", line)

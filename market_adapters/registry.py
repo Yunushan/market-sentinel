@@ -86,12 +86,17 @@ def build_default_registry() -> AdapterRegistry:
     registry = AdapterRegistry()
     for metadata in MARKET_CATALOG:
         registry.register_metadata(metadata)
+    from .kalshi import KalshiAdapter
+    from .manifold import ManifoldAdapter
     from .polymarket import PolymarketAdapter
     from .stub import create_stub_adapter
 
+    implemented_adapters = (PolymarketAdapter, KalshiAdapter, ManifoldAdapter)
     registry.register_adapter(PolymarketAdapter, replace=True)
+    registry.register_adapter(KalshiAdapter, replace=True)
+    registry.register_adapter(ManifoldAdapter, replace=True)
     for metadata in MARKET_CATALOG:
-        if metadata.market_id == PolymarketAdapter.metadata.market_id:
+        if metadata.market_id in {adapter.metadata.market_id for adapter in implemented_adapters}:
             continue
         registry.register_factory(
             metadata,

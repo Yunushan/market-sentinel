@@ -1,0 +1,33 @@
+{
+  "id": "mf-multi-1",
+  "creatorUsername": "forecast",
+  "creatorName": "Forecast User",
+  "createdTime": 1760000001000,
+  "question": "Which product ships first?",
+  "description": {
+    "type": "doc",
+    "content": []
+  },
+  "textDescription": "Product shipping market.",
+  "url": "https://manifold.markets/forecast/which-product-ships-first",
+  "outcomeType": "MULTIPLE_CHOICE",
+  "mechanism": "cpmm-multi-1",
+  "volume": 500,
+  "volume24Hours": 10,
+  "isResolved": false,
+  "token": "MANA",
+  "answers": [
+    {
+      "id": "answer-a",
+      "number": 1,
+      "text": "Alpha",
+      "probability": 0.35
+    },
+    {
+      "id": "answer-b",
+      "number": 2,
+      "text": "Beta",
+      "probability": 0.65
+    }
+  ]
+}
