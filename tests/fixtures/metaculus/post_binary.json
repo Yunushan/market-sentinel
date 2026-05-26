@@ -1,0 +1,21 @@
+{
+  "id": 1001,
+  "title": "Will the demo launch before July?",
+  "url": "/questions/1001/will-the-demo-launch-before-july/",
+  "status": "open",
+  "question": {
+    "id": 501,
+    "title": "Will the demo launch before July?",
+    "type": "binary",
+    "status": "open",
+    "aggregations": {
+      "recency_weighted": {
+        "latest": {
+          "centers": [
+            0.64
+          ]
+        }
+      }
+    }
+  }
+}

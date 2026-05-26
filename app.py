@@ -255,15 +255,45 @@ class App(tk.Tk):
     def _selected_market_display_name(self) -> str:
         return self.adapter_registry.get_metadata(self.cfg.selected_market_id).display_name
 
+    def _selected_market_status_text(self, adapter: Optional[MarketAdapter] = None) -> str:
+        adapter = adapter or self._get_selected_market_adapter()
+        health = adapter.health_check()
+        message = str(health.get("message") or "").strip()
+        if health.get("verified_blocker"):
+            return f"{adapter.display_name}: verified blocked. {message}"
+        capabilities = adapter.capabilities
+        read_supported = (
+            capabilities.market_discovery
+            or capabilities.event_listing
+            or capabilities.price_reading
+            or capabilities.orderbook_reading
+        )
+        live_status = "no"
+        if capabilities.live_trading:
+            live_status = "yes" if adapter.config_bool("live_trading_enabled", False) else "guarded/off"
+        return (
+            f"{adapter.display_name}: adapter loaded. "
+            f"Alerts {'yes' if capabilities.alerts else 'no'}; "
+            f"read-only {'yes' if read_supported else 'no'}; "
+            f"paper {'yes' if capabilities.paper_trading else 'no'}; "
+            f"live {live_status}; "
+            f"copy {'yes' if capabilities.copy_trading else 'no'}."
+        )
+
     def _require_polymarket_selected(self, feature: str) -> bool:
         if self.cfg.selected_market_id == "polymarket":
             return True
+        adapter = self._get_selected_market_adapter()
+        adapter_status = self._selected_market_status_text(adapter)
         message = (
             f"{feature} is currently implemented only for Polymarket. "
-            f"{self._selected_market_display_name()} is visible as a market adapter entry, "
-            "but this GUI workflow has not been generalized for that market yet."
+            f"{adapter.display_name} is visible as a market adapter entry, "
+            "but this GUI workflow has not been generalized for that market yet. "
+            f"Selected adapter status: {adapter_status}"
         )
         self.status_var.set(message)
+        if hasattr(self, "market_status_var"):
+            self.market_status_var.set(adapter_status)
         self.ui_queue.put(("log", f"[market] {message}"))
         messagebox.showinfo("Unsupported market", message)
         return False
@@ -279,6 +309,9 @@ class App(tk.Tk):
         self.market_var.set(self._market_label_for_id(market_id))
         adapter = self._get_selected_market_adapter()
         health = adapter.health_check()
+        adapter_status = self._selected_market_status_text(adapter)
+        if hasattr(self, "market_status_var"):
+            self.market_status_var.set(adapter_status)
         if health.get("ok"):
             msg = f"Selected market: {adapter.display_name}."
         else:
@@ -313,6 +346,15 @@ class App(tk.Tk):
         )
         self.theme_combo.pack(side="left", padx=(6, 0))
         self.theme_combo.bind("<<ComboboxSelected>>", lambda e: self._on_theme_change())
+
+        self.market_status_var = tk.StringVar(value=self._selected_market_status_text())
+        ttk.Label(
+            self,
+            textvariable=self.market_status_var,
+            anchor="w",
+            style="Status.TLabel",
+            wraplength=1100,
+        ).pack(fill="x", padx=10, pady=(4, 6))
 
         nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True)

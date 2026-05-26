@@ -1,0 +1,27 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "status": "ACTIVE",
+      "marketHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+      "outcomeOneName": "Golden State Warriors",
+      "outcomeTwoName": "Minnesota Timberwolves",
+      "outcomeVoidName": "NO_CONTEST",
+      "teamOneName": "Golden State Warriors",
+      "teamTwoName": "Minnesota Timberwolves",
+      "type": 226,
+      "gameTime": 1773453600,
+      "sportXeventId": "L18272456",
+      "liveEnabled": true,
+      "sportLabel": "Basketball",
+      "sportId": 1,
+      "leagueId": 1,
+      "leagueLabel": "NBA",
+      "group1": "NBA",
+      "chainVersion": "SXR",
+      "participantOneId": 15002,
+      "participantTwoId": 14999,
+      "__type": "Market"
+    }
+  ]
+}

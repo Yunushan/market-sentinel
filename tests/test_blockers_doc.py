@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from market_adapters import MARKET_IDS
+from market_adapters import MARKET_IDS, VERIFIED_BLOCKERS
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -21,7 +21,26 @@ REQUIRED_COLUMNS = (
     "Required before full support",
     "Reference",
 )
-IMPLEMENTED_MARKETS = {"polymarket", "kalshi", "manifold"}
+IMPLEMENTED_MARKETS = {
+    "polymarket",
+    "kalshi",
+    "predictit",
+    "manifold",
+    "metaculus",
+    "limitless_exchange",
+    "sx_bet",
+    "azuro",
+    "augur",
+    "omen",
+    "zeitgeist",
+    "myriad_markets",
+    "xo_market",
+    "opinion_labs",
+    "gemini_titan",
+    "predict_fun",
+    "betfair_exchange",
+}
+VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)
 
 
 class BlockersDocTests(unittest.TestCase):
@@ -47,6 +66,10 @@ class BlockersDocTests(unittest.TestCase):
                 continue
             if any(f"`{market_id}`" in line for market_id in IMPLEMENTED_MARKETS):
                 self.assertIn("| Implemented |", line)
+                continue
+            if any(f"`{market_id}`" in line for market_id in VERIFIED_BLOCKED_MARKETS):
+                self.assertIn("| Verified blocked |", line)
+                self.assertIn("Verified 2026-05-26", line)
                 continue
             if any(f"`{market_id}`" in line for market_id in MARKET_IDS):
                 self.assertIn("| Stub |", line)

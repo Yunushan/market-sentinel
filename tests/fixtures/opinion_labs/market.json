@@ -1,0 +1,18 @@
+{
+  "code": 0,
+  "msg": "success",
+  "result": {
+    "data": {
+      "marketId": 77,
+      "marketTitle": "Will ETH reach $6k in 2026?",
+      "statusEnum": "Activated",
+      "yesLabel": "Yes",
+      "noLabel": "No",
+      "yesTokenId": "0xyes",
+      "noTokenId": "0xno",
+      "volume": "100000",
+      "quoteToken": "USDT",
+      "chainId": "56"
+    }
+  }
+}

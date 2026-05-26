@@ -38,6 +38,7 @@ class MarketSelectionHarness:
         self.adapter_registry = build_default_registry()
         self.market_var = FakeVar()
         self.status_var = FakeVar()
+        self.market_status_var = FakeVar()
         self.ui_queue: "queue.Queue[tuple]" = queue.Queue()
 
     def _market_label_for_id(self, market_id: str) -> str:
@@ -48,6 +49,9 @@ class MarketSelectionHarness:
 
     def _selected_market_display_name(self) -> str:
         return App._selected_market_display_name(self)
+
+    def _selected_market_status_text(self, adapter=None) -> str:
+        return App._selected_market_status_text(self, adapter)
 
 
 class AlertHarness:
@@ -137,8 +141,19 @@ class AppLogicTests(unittest.TestCase):
         self.assertEqual(harness.cfg.selected_market_id, "kalshi")
         self.assertEqual(harness.market_var.get(), "Kalshi (kalshi)")
         self.assertEqual(harness.status_var.get(), "Selected market: Kalshi.")
+        self.assertIn("Kalshi: adapter loaded.", harness.market_status_var.get())
+        self.assertIn("live guarded/off", harness.market_status_var.get())
         self.assertEqual(harness.ui_queue.get_nowait()[0], "log")
         save_config.assert_called_once_with(harness.cfg)
+
+    def test_verified_blocked_market_status_includes_blocker_reason(self) -> None:
+        harness = MarketSelectionHarness()
+        harness.cfg.selected_market_id = "robinhood_prediction_markets"
+
+        status = App._selected_market_status_text(harness)
+
+        self.assertIn("Robinhood Prediction Markets: verified blocked.", status)
+        self.assertIn("Verified 2026-05-26", status)
 
     def test_stub_market_blocks_polymarket_only_actions(self) -> None:
         harness = MarketSelectionHarness()
@@ -150,6 +165,7 @@ class AppLogicTests(unittest.TestCase):
         self.assertFalse(result)
         self.assertIn("currently implemented only for Polymarket", harness.status_var.get())
         self.assertIn("has not been generalized", harness.status_var.get())
+        self.assertIn("Selected adapter status: Kalshi: adapter loaded.", harness.status_var.get())
         self.assertEqual(harness.ui_queue.get_nowait()[0], "log")
         showinfo.assert_called_once()
 

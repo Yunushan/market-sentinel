@@ -1,0 +1,19 @@
+{
+  "id": 1003,
+  "title": "How many users will sign up?",
+  "url": "/questions/1003/how-many-users-will-sign-up/",
+  "status": "open",
+  "question": {
+    "id": 701,
+    "title": "How many users will sign up?",
+    "type": "numeric",
+    "status": "open",
+    "aggregations": {
+      "recency_weighted": {
+        "latest": {
+          "median": 1250
+        }
+      }
+    }
+  }
+}

@@ -122,32 +122,16 @@ Completed articles:
 - Article 12 Polymarket Production Hardening: 100%
 - Article 13 Kalshi Adapter: 100%
 - Article 14 Manifold Markets Adapter: 100%
-
-Next articles:
-
-- Article 15 Metaculus Adapter: 0%
-  Implement official Metaculus read-only forecasting data and alerts; no trading support unless official trading support exists.
-- Article 16 Public Forecasting Adapters: 0%
-  Implement or verify blockers for Good Judgment Open, Hypermind, Iowa Electronic Markets, and INFER / INFER-pub.
-- Article 17 PredictIt Adapter: 0%
-  Implement official/documented read-only data support first; only add trading if official automation support is documented and allowed.
-- Article 18 Limitless Exchange Adapter: 0%
-  Implement official Limitless REST/WebSocket read-only data, alerts, paper trading, and guarded wallet/live capability if officially supported.
-- Article 19 SX Bet / SX Network Adapter: 0%
-  Implement official SX read-only data, alerts, paper trading, and guarded wallet/live capability if officially supported.
-- Article 20 Azuro Adapter: 0%
-  Implement official Azuro protocol/API read-only data, alerts, paper trading model, and guarded wallet/live capability if officially supported.
-- Article 21 Legacy Web3 Protocol Adapters: 0%
-  Implement or verify blockers for Augur, Omen, and Zeitgeist using official protocol contracts, SDKs, or maintained APIs only.
-- Article 22 Web3 Sports/DeFi Protocol Adapters: 0%
-  Implement or verify blockers for Drift BET, Thales Market, Hedgehog Markets, Predict.fun, Myriad Markets, Hyperliquid, Frenzy Finance, Fact Machine, Opinion Labs, Context V2, and XO Market.
-- Article 23 Broker/Exchange Regulated Adapters: 0%
-  Implement or verify blockers for Interactive Brokers ForecastTrader, ForecastEx, CME Group Prediction Markets, Nadex, Crypto.com Predict / CDNA, and Gemini Titan.
-- Article 24 Consumer-App / Sportsbook Entrants: 0%
-  Implement or verify blockers for Robinhood Prediction Markets, Fanatics Markets, DraftKings Predictions, BetMGM, PrizePicks, and Underdog Sports. Do not automate consumer apps or private endpoints.
-- Article 25 Global Betting/Opinion Exchanges: 0%
-  Implement or verify blockers for Smarkets, Betfair Exchange, and Probo using official APIs only.
-- Article 26 GUI Full-Market Workflow: 0%
-  Add market-specific screens/status for implemented adapters, concrete unsupported messages for blocked adapters, and no misleading controls for unavailable live/copy trading.
-- Article 27 Final All-Market Verification: 0%
-  Ensure every market is either implemented with tested official support or blocked with exact reason, no `TBD` remains, `python verify.py` passes, and `pytest` passes.
+- Article 15 Metaculus Adapter: 100%
+- Article 16 Public Forecasting Adapters: 100%
+- Article 17 PredictIt Adapter: 100%
+- Article 18 Limitless Exchange Adapter: 100%
+- Article 19 SX Bet / SX Network Adapter: 100%
+- Article 20 Azuro Adapter: 100%
+- Article 21 Legacy Web3 Protocol Adapters: 100%
+- Article 22 Web3 Sports/DeFi Protocol Adapters: 100%
+- Article 23 Broker/Exchange Regulated Adapters: 100%
+- Article 24 Consumer-App / Sportsbook Entrants: 100%
+- Article 25 Global Betting/Opinion Exchanges: 100%
+- Article 26 GUI Full-Market Workflow: 100%
+- Article 27 Final All-Market Verification: 100%

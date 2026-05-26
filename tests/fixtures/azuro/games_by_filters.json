@@ -1,0 +1,84 @@
+{
+  "games": [
+    {
+      "id": "30061006000000000029214016",
+      "gameId": "30061006000000000029214016",
+      "slug": "arsenal-chelsea-2026-05-30",
+      "title": "Arsenal vs Chelsea",
+      "startsAt": "1771707600",
+      "state": "Prematch",
+      "turnover": "1000",
+      "sport": {
+        "sportId": "1",
+        "slug": "football",
+        "name": "Football",
+        "sporthub": {
+          "id": "sports",
+          "slug": "sports"
+        }
+      },
+      "league": {
+        "id": "premier-league",
+        "slug": "premier-league",
+        "name": "Premier League"
+      },
+      "country": {
+        "id": "england",
+        "slug": "england",
+        "name": "England"
+      },
+      "participants": [
+        {
+          "image": null,
+          "name": "Arsenal"
+        },
+        {
+          "image": null,
+          "name": "Chelsea"
+        }
+      ]
+    },
+    {
+      "id": "30061006000000000029214017",
+      "gameId": "30061006000000000029214017",
+      "slug": "real-madrid-barcelona-2026-05-30",
+      "title": "Real Madrid vs Barcelona",
+      "startsAt": "1771711200",
+      "state": "Prematch",
+      "turnover": "2500",
+      "sport": {
+        "sportId": "1",
+        "slug": "football",
+        "name": "Football",
+        "sporthub": {
+          "id": "sports",
+          "slug": "sports"
+        }
+      },
+      "league": {
+        "id": "laliga",
+        "slug": "laliga",
+        "name": "La Liga"
+      },
+      "country": {
+        "id": "spain",
+        "slug": "spain",
+        "name": "Spain"
+      },
+      "participants": [
+        {
+          "image": null,
+          "name": "Real Madrid"
+        },
+        {
+          "image": null,
+          "name": "Barcelona"
+        }
+      ]
+    }
+  ],
+  "page": 1,
+  "perPage": 50,
+  "total": 2,
+  "totalPages": 1
+}

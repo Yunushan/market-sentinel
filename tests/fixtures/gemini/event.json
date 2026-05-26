@@ -1,0 +1,22 @@
+{
+  "id": "evt_123",
+  "ticker": "BTC100K2026",
+  "title": "Will Bitcoin reach $100k by the end of 2026?",
+  "slug": "bitcoin-100k-2026",
+  "category": "crypto",
+  "status": "active",
+  "contracts": [
+    {
+      "id": "contract_yes",
+      "instrumentSymbol": "GEMI-BTC100K26-YES",
+      "name": "Yes",
+      "status": "active"
+    },
+    {
+      "id": "contract_no",
+      "instrumentSymbol": "GEMI-BTC100K26-NO",
+      "name": "No",
+      "status": "active"
+    }
+  ]
+}

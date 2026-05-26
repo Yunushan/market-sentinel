@@ -1,0 +1,17 @@
+{
+  "id": "order-1",
+  "environment": "PolygonUSDT",
+  "state": "Created",
+  "betType": "Ordinar",
+  "createdAt": "2026-05-26T09:00:00.000Z",
+  "updatedAt": "2026-05-26T09:00:00.000Z",
+  "core": "0xF9548Be470A4e130c90ceA8b179FCD66D2972AC7",
+  "bettor": "0x0000000000000000000000000000000000000001",
+  "affiliate": "0x0000000000000000000000000000000000000000",
+  "odds": 1.85,
+  "amount": 1000000,
+  "betId": 0,
+  "txHash": null,
+  "error": null,
+  "errorMessage": null
+}

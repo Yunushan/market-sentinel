@@ -1,0 +1,24 @@
+{
+  "result": [
+    {
+      "marketId": "1.234",
+      "status": "OPEN",
+      "runners": [
+        {
+          "selectionId": 101,
+          "status": "ACTIVE",
+          "ex": {
+            "availableToBack": [
+              {"price": 2.0, "size": 50},
+              {"price": 2.2, "size": 25}
+            ],
+            "availableToLay": [
+              {"price": 1.8, "size": 40},
+              {"price": 1.7, "size": 30}
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

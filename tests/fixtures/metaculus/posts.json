@@ -1,0 +1,65 @@
+{
+  "count": 2,
+  "next": null,
+  "previous": null,
+  "results": [
+    {
+      "id": 1001,
+      "title": "Will the demo launch before July?",
+      "url": "/questions/1001/will-the-demo-launch-before-july/",
+      "status": "open",
+      "question": {
+        "id": 501,
+        "title": "Will the demo launch before July?",
+        "type": "binary",
+        "status": "open",
+        "aggregations": {
+          "recency_weighted": {
+            "latest": {
+              "centers": [
+                0.64
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": 1002,
+      "title": "Which model ships first?",
+      "url": "/questions/1002/which-model-ships-first/",
+      "status": "open",
+      "questions": [
+        {
+          "id": 601,
+          "title": "Which model ships first?",
+          "type": "multiple_choice",
+          "status": "open",
+          "possibilities": {
+            "type": "multiple_choice",
+            "choices": [
+              {
+                "id": "alpha",
+                "label": "Alpha"
+              },
+              {
+                "id": "beta",
+                "label": "Beta"
+              }
+            ]
+          },
+          "aggregations": {
+            "recency_weighted": {
+              "latest": {
+                "forecast_values": {
+                  "alpha": 0.25,
+                  "beta": 0.75
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

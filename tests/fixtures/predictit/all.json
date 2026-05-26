@@ -1,0 +1,60 @@
+{
+  "markets": [
+    {
+      "id": 7053,
+      "name": "Who will win the 2028 Republican presidential nomination?",
+      "shortName": "2028 GOP nominee",
+      "url": "https://www.predictit.org/markets/detail/7053",
+      "status": "Open",
+      "contracts": [
+        {
+          "id": 24680,
+          "name": "Candidate A",
+          "shortName": "Candidate A",
+          "status": "Open",
+          "lastTradePrice": 0.42,
+          "bestBuyYesCost": 0.43,
+          "bestSellYesCost": 0.41,
+          "bestBuyNoCost": 0.59,
+          "bestSellNoCost": 0.57,
+          "lastClosePrice": 0.4
+        },
+        {
+          "id": 24681,
+          "name": "Candidate B",
+          "shortName": "Candidate B",
+          "status": "Open",
+          "lastTradePrice": 0.28,
+          "bestBuyYesCost": 0.29,
+          "bestSellYesCost": 0.27,
+          "bestBuyNoCost": 0.73,
+          "bestSellNoCost": 0.71,
+          "lastClosePrice": 0.3
+        }
+      ],
+      "timeStamp": "2026-05-26T09:00:00Z"
+    },
+    {
+      "id": 7054,
+      "name": "Will a bill pass Congress in 2026?",
+      "shortName": "Bill passage",
+      "url": "https://www.predictit.org/markets/detail/7054",
+      "status": "Open",
+      "contracts": [
+        {
+          "id": 24690,
+          "name": "Bill passes",
+          "shortName": "Passes",
+          "status": "Open",
+          "lastTradePrice": 0.61,
+          "bestBuyYesCost": 0.62,
+          "bestSellYesCost": 0.6,
+          "bestBuyNoCost": 0.4,
+          "bestSellNoCost": 0.38,
+          "lastClosePrice": 0.59
+        }
+      ],
+      "timeStamp": "2026-05-26T09:00:00Z"
+    }
+  ]
+}

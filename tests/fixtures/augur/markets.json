@@ -1,0 +1,39 @@
+{
+  "data": {
+    "markets": [
+      {
+        "id": "0xaugurmarket1",
+        "description": "Will ETH trade above 5000 USD before 2027?",
+        "longDescription": "Legacy Augur v2 fixture market for adapter tests.",
+        "categories": [
+          "Crypto"
+        ],
+        "status": "Trading",
+        "marketType": "YesNo",
+        "endTimestamp": "1798761600",
+        "timestamp": "1760000000",
+        "numOutcomes": 3,
+        "outcomes": [
+          {
+            "id": "0xaugurmarket1-0",
+            "value": "Invalid",
+            "payoutNumerator": null,
+            "isFinalNumerator": false
+          },
+          {
+            "id": "0xaugurmarket1-1",
+            "value": "No",
+            "payoutNumerator": null,
+            "isFinalNumerator": false
+          },
+          {
+            "id": "0xaugurmarket1-2",
+            "value": "Yes",
+            "payoutNumerator": null,
+            "isFinalNumerator": false
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "id": "us-election-2028",
+  "title": "Who will win the 2028 US Presidential Election?",
+  "category": "politics",
+  "status": "open",
+  "outcomes": [
+    {"id": "vance", "name": "JD Vance", "price": 0.35},
+    {"id": "newsom", "name": "Gavin Newsom", "price": 0.28}
+  ]
+}

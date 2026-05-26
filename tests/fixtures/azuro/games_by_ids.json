@@ -1,0 +1,33 @@
+{
+  "games": [
+    {
+      "id": "30061006000000000029214016",
+      "gameId": "30061006000000000029214016",
+      "slug": "arsenal-chelsea-2026-05-30",
+      "title": "Arsenal vs Chelsea",
+      "startsAt": "1771707600",
+      "state": "Prematch",
+      "turnover": "1000",
+      "sport": {
+        "sportId": "1",
+        "slug": "football",
+        "name": "Football"
+      },
+      "league": {
+        "id": "premier-league",
+        "slug": "premier-league",
+        "name": "Premier League"
+      },
+      "participants": [
+        {
+          "image": null,
+          "name": "Arsenal"
+        },
+        {
+          "image": null,
+          "name": "Chelsea"
+        }
+      ]
+    }
+  ]
+}

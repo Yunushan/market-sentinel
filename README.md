@@ -35,6 +35,21 @@ A local multi-market prediction-market GUI app (Tkinter) for:
 - Reads binary and multiple-choice probabilities for alerts
 - Supports paper orders locally and guarded MANA betting through documented API-key auth
 
+### 6) Metaculus adapter support
+- Lists authenticated Metaculus posts/questions through the official API
+- Reads accessible binary, multiple-choice, and numeric forecast values for alerts
+- Does not expose trading controls because Metaculus is a forecasting platform, not a cash market
+
+### 7) Legacy Web3 protocol adapter support
+- Lists Augur v2 markets/outcomes through a configured documented subgraph endpoint
+- Reads Omen AMM marginal prices and Zeitgeist indexer asset prices for alerts
+- Supports dry-run paper orders where reliable price data exists; wallet-signed live trading is not enabled
+
+### 8) Additional official adapter support
+- Reads Gemini Prediction Markets events/contracts and orderbooks through official endpoints
+- Reads Myriad, Opinion, Predict.fun, XO, and Betfair market data through their documented APIs
+- Keeps live trading off by default; XO live order posting is guarded, while the others remain read-only plus dry-run/paper mode
+
 ## Install & Run
 
 Requires **Python >=3.10,<3.15**. Python **3.14** is supported and verified.
@@ -71,51 +86,51 @@ On Windows you can also double-click `run_gui.bat`. It uses `.venv` when it is h
 
 ## Market Capability Matrix
 
-This matrix describes current application adapter support. Stub markets appear in the GUI and config, but their market-specific operations intentionally return clear unsupported-feature messages until an official adapter is implemented. For stub rows, the last three columns describe what is required before safe official support can be implemented or operated.
+This matrix describes current application adapter support. Verified-blocked markets appear in the GUI and config, but their market-specific operations intentionally return clear unsupported-feature messages until official access, entitlements, or documented automation terms make support safe to add. Verified-blocked rows were checked against currently available official docs/pages.
 
 | Market | Adapter | Alerts | Read-only data | Paper trading | Live trading | Copy trading | API required | Credentials required | Region/KYC limitation |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Polymarket (`polymarket`) | Implemented | Yes | Yes | Yes | Guarded, off by default | Yes, dry-run default | Yes | Live trading only | Trading may be region/KYC limited |
 | Kalshi (`kalshi`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
-| PredictIt (`predictit`) | Stub | No | No | No | No | No | Required | Account required for trading | Region/account limited |
-| Robinhood Prediction Markets (`robinhood_prediction_markets`) | Stub | No | No | No | No | No | Required | Brokerage account required | Region/KYC limited |
-| Fanatics Markets (`fanatics_markets`) | Stub | No | No | No | No | No | Required | Account required | Region/KYC limited |
-| DraftKings Predictions (`draftkings_predictions`) | Stub | No | No | No | No | No | Required | Account required | Region/KYC limited |
-| Interactive Brokers ForecastTrader / IBKR Prediction Markets (`ibkr_forecasttrader`) | Stub | No | No | No | No | No | Required | IBKR account required | Region/KYC limited |
-| ForecastEx (`forecastex`) | Stub | No | No | No | No | No | Required | Exchange/broker account required | Region/KYC limited |
-| CME Group Prediction Markets (`cme_prediction_markets`) | Stub | No | No | No | No | No | Required | Broker/data entitlement required | Region/KYC limited |
-| Nadex (`nadex`) | Stub | No | No | No | No | No | Required | Exchange account required | Region/KYC limited |
-| Crypto.com Predict / CDNA (`crypto_com_predict`) | Stub | No | No | No | No | No | Required | Crypto.com account required | Region/KYC limited |
-| Hyperliquid (`hyperliquid`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| Myriad Markets (`myriad_markets`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| Context V2 (`context_v2`) | Stub | No | No | No | No | No | Required | API credentials required | Jurisdiction varies |
-| Frenzy Finance (`frenzy_finance`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| XO Market (`xo_market`) | Stub | No | No | No | No | No | Required | Account required | Jurisdiction varies |
+| PredictIt (`predictit`) | Implemented | Yes | Yes | Yes | No | No | Required | No | Region/account limited |
+| Robinhood Prediction Markets (`robinhood_prediction_markets`) | Verified blocked | No | No | No | No | No | Required | Brokerage account required | Region/KYC limited |
+| Fanatics Markets (`fanatics_markets`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
+| DraftKings Predictions (`draftkings_predictions`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
+| Interactive Brokers ForecastTrader / IBKR Prediction Markets (`ibkr_forecasttrader`) | Verified blocked | No | No | No | No | No | Required | IBKR account required | Region/KYC limited |
+| ForecastEx (`forecastex`) | Verified blocked | No | No | No | No | No | Required | Exchange/broker account required | Region/KYC limited |
+| CME Group Prediction Markets (`cme_prediction_markets`) | Verified blocked | No | No | No | No | No | Required | Broker/data entitlement required | Region/KYC limited |
+| Nadex (`nadex`) | Verified blocked | No | No | No | No | No | Required | Exchange account required | Region/KYC limited |
+| Crypto.com Predict / CDNA (`crypto_com_predict`) | Verified blocked | No | No | No | No | No | Required | Crypto.com account required | Region/KYC limited |
+| Hyperliquid (`hyperliquid`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Myriad Markets (`myriad_markets`) | Implemented | Yes | Yes | Yes | No | No | Required | Optional API key | Jurisdiction varies |
+| Context V2 (`context_v2`) | Verified blocked | No | No | No | No | No | Required | API credentials required | Jurisdiction varies |
+| Frenzy Finance (`frenzy_finance`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| XO Market (`xo_market`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | API credentials required | Region/KYC limited |
 | Manifold Markets (`manifold`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Live trading only | Not KYC limited |
-| Metaculus (`metaculus`) | Stub | No | No | No | No | No | Required | Account/API token required | Not trading/KYC limited |
-| Good Judgment Open (`good_judgment_open`) | Stub | No | No | No | No | No | Required | Account/export access required | Not trading/KYC limited |
-| Hypermind (`hypermind`) | Stub | No | No | No | No | No | Required | Program access required | Program access limited |
-| Iowa Electronic Markets (`iowa_electronic_markets`) | Stub | No | No | No | No | No | Required | IEM account required | Eligibility limited |
-| INFER / INFER-pub (`infer`) | Stub | No | No | No | No | No | Required | Account/export access required | Not trading/KYC limited |
-| Fact Machine (`fact_machine`) | Stub | No | No | No | No | No | Required | Wallet/personhood required | Identity/jurisdiction limited |
-| Opinion Labs (`opinion_labs`) | Stub | No | No | No | No | No | Required | Account or wallet required | Jurisdiction varies |
-| Gemini Titan / Gemini Predictions (`gemini_titan`) | Stub | No | No | No | No | No | Required | Gemini account required | Region/KYC limited |
-| Augur (`augur`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| BetMGM (`betmgm`) | Stub | No | No | No | No | No | Required | Account required | Region/KYC limited |
-| PrizePicks (`prizepicks`) | Stub | No | No | No | No | No | Required | Account required | Region/KYC limited |
-| Underdog Sports (`underdog_sports`) | Stub | No | No | No | No | No | Required | Account required | Region/KYC limited |
-| Drift BET (`drift_bet`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| Thales Market (`thales_market`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| Hedgehog Markets (`hedgehog_markets`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| Omen (`omen`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| Zeitgeist (`zeitgeist`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| Azuro (`azuro`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| SX Bet / SX Network (`sx_bet`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| Limitless Exchange (`limitless_exchange`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| Predict.fun (`predict_fun`) | Stub | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| Smarkets (`smarkets`) | Stub | No | No | No | No | No | Required | Exchange account required | Region/KYC limited |
-| Betfair Exchange (`betfair_exchange`) | Stub | No | No | No | No | No | Required | Exchange account required | Region/KYC limited |
-| Probo (`probo`) | Stub | No | No | No | No | No | Required | Account required | Region limited |
+| Metaculus (`metaculus`) | Implemented | Yes | Yes | No | No | No | Required | Account/API token required | Not trading/KYC limited |
+| Good Judgment Open (`good_judgment_open`) | Verified blocked | No | No | No | No | No | Required | Account/export access required | Not trading/KYC limited |
+| Hypermind (`hypermind`) | Verified blocked | No | No | No | No | No | Required | Program access required | Program access limited |
+| Iowa Electronic Markets (`iowa_electronic_markets`) | Verified blocked | No | No | No | No | No | Required | IEM account required | Eligibility limited |
+| INFER / INFER-pub (`infer`) | Verified blocked | No | No | No | No | No | Required | Account/export access required | Not trading/KYC limited |
+| Fact Machine (`fact_machine`) | Verified blocked | No | No | No | No | No | Required | Wallet/personhood required | Identity/jurisdiction limited |
+| Opinion Labs (`opinion_labs`) | Implemented | Yes | Yes | Yes | No | No | Required | API credentials required | Jurisdiction varies |
+| Gemini Titan / Gemini Predictions (`gemini_titan`) | Implemented | Yes | Yes | Yes | No | No | Required | Not required | Region/KYC limited |
+| Augur (`augur`) | Implemented | No | Yes | No | No | No | Required | Subgraph endpoint required | Jurisdiction varies |
+| BetMGM (`betmgm`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
+| PrizePicks (`prizepicks`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
+| Underdog Sports (`underdog_sports`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
+| Drift BET (`drift_bet`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Thales Market (`thales_market`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Hedgehog Markets (`hedgehog_markets`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Omen (`omen`) | Implemented | Yes | Yes | Yes | No | No | Required | Subgraph endpoint required | Jurisdiction varies |
+| Zeitgeist (`zeitgeist`) | Implemented | Yes | Yes | Yes | No | No | Required | Not required | Jurisdiction varies |
+| Azuro (`azuro`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Live signed orders only | Jurisdiction varies |
+| SX Bet / SX Network (`sx_bet`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Live/WebSocket only | Jurisdiction varies |
+| Limitless Exchange (`limitless_exchange`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Live trading only | Jurisdiction varies |
+| Predict.fun (`predict_fun`) | Implemented | Yes | Yes | Yes | No | No | Required | API credentials required | Jurisdiction varies |
+| Smarkets (`smarkets`) | Verified blocked | No | No | No | No | No | Required | Exchange account required | Region/KYC limited |
+| Betfair Exchange (`betfair_exchange`) | Implemented | Yes | Yes | Yes | No | No | Required | Exchange account/API keys | Region/KYC limited |
+| Probo (`probo`) | Verified blocked | No | No | No | No | No | Required | Account required | Region limited |
 
 ## Verification
 

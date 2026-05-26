@@ -1,0 +1,21 @@
+{
+  "success": true,
+  "data": {
+    "marketId": 9001,
+    "updateTimestampMs": 1733312400000,
+    "lastOrderSettled": {
+      "id": "order-1",
+      "price": "0.58",
+      "side": "Ask",
+      "outcome": "Yes"
+    },
+    "bids": [
+      ["0.56", "100"],
+      ["0.54", "75"]
+    ],
+    "asks": [
+      ["0.58", "120"],
+      ["0.60", "80"]
+    ]
+  }
+}

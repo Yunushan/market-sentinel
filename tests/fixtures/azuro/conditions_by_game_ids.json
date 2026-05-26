@@ -1,0 +1,49 @@
+{
+  "conditions": [
+    {
+      "gameId": "30061006000000000029214016",
+      "conditionId": "300610060000000000649714110000000000000227249395",
+      "marketName": "Full Time Result",
+      "state": "Active",
+      "core": "0xF9548Be470A4e130c90ceA8b179FCD66D2972AC7",
+      "winningOutcomesCount": 1,
+      "outcomes": [
+        {
+          "outcomeId": 29,
+          "selectionName": "Arsenal",
+          "currentOdds": "1.85"
+        },
+        {
+          "outcomeId": 30,
+          "selectionName": "Draw",
+          "currentOdds": "3.40"
+        },
+        {
+          "outcomeId": 31,
+          "selectionName": "Chelsea",
+          "currentOdds": "4.20"
+        }
+      ]
+    },
+    {
+      "gameId": "30061006000000000029214016",
+      "conditionId": "300610060000000000649714110000000000000227249396",
+      "marketName": "Total Goals",
+      "state": "Active",
+      "core": "0xF9548Be470A4e130c90ceA8b179FCD66D2972AC7",
+      "winningOutcomesCount": 1,
+      "outcomes": [
+        {
+          "outcomeId": 40,
+          "selectionName": "Over 2.5",
+          "currentOdds": "1.92"
+        },
+        {
+          "outcomeId": 41,
+          "selectionName": "Under 2.5",
+          "currentOdds": "1.94"
+        }
+      ]
+    }
+  ]
+}

@@ -13,201 +13,224 @@
     "augur": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "augur_subgraph_url": "",
+        "credential_env_vars": [
+          "AUGUR_SUBGRAPH_URL"
+        ],
         "live_trading_enabled": false,
-        "notes": "Stub until official, reliable API access is implemented."
+        "min_request_interval_seconds": 0.5,
+        "notes": "Read-only market and outcome listing is implemented through the documented Augur v2 subgraph schema. Configure AUGUR_SUBGRAPH_URL or augur_subgraph_url to a maintained GraphQL endpoint. Prices, orderbooks, paper trading, live trading, and copy trading remain unsupported because no maintained official feed/order route is available."
       }
     },
     "azuro": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "azuro_api_base_url": "https://api.onchainfeed.org/api/v1/public",
+        "azuro_ws_url": "wss://streams.onchainfeed.org/v1/streams/feed",
+        "azuro_environment": "PolygonUSDT",
+        "azuro_chain_id": 137,
+        "credential_env_vars": [
+          "AZURO_BETTOR_ADDRESS",
+          "AZURO_AFFILIATE_ADDRESS"
+        ],
         "live_trading_enabled": false,
-        "notes": "Stub until official, reliable API access is implemented."
+        "min_request_interval_seconds": 0.25,
+        "notes": "Read-only games, conditions, odds, WebSocket subscriptions, and local paper bet-calculation payloads are implemented through official Azuro APIs. Live posting only accepts pre-signed wallet order payloads and stays disabled by default."
       }
     },
     "betfair_exchange": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "betfair_api_base_url": "https://api.betfair.com/exchange/betting/json-rpc/v1",
+        "credential_env_vars": [
+          "BETFAIR_APP_KEY",
+          "BETFAIR_SESSION_TOKEN"
+        ],
         "live_trading_enabled": false,
-        "notes": "Stub until official API access, account permissions, and regional requirements are handled."
+        "min_request_interval_seconds": 0.25,
+        "notes": "Authenticated read-only market discovery, runner listing, best-offer orderbooks, implied-probability prices, and local paper orders are implemented through the official Betfair Exchange API. Live betting and copy trading remain unsupported."
       }
     },
     "betmgm": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official API access, account permissions, and regional requirements are handled."
+        "notes": "Verified 2026-05-26: no public documented BetMGM prediction/event-market API, SDK, or automation permission flow is published. Consumer app automation is unsupported."
       }
     },
     "cme_prediction_markets": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official, reliable API access is implemented."
+        "notes": "Verified 2026-05-26: CME event-contract support is blocked by market-data licensing/entitlements and a missing documented broker order route for this app."
       }
     },
     "context_v2": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official, reliable API access is implemented."
+        "notes": "Verified 2026-05-26: Context V2 API use requires service credentials, market/order lifecycle validation, and account-specific automation terms that are not available in this local app."
       }
     },
     "crypto_com_predict": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official, reliable API access is implemented."
+        "notes": "Verified 2026-05-26: published Crypto.com exchange APIs do not expose prediction-market-specific discovery, contract, orderbook, or order endpoints for CDNA/Predict."
       }
     },
     "draftkings_predictions": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official API access, account permissions, and regional requirements are handled."
+        "notes": "Verified 2026-05-26: DraftKings Predictions is published as an app product, but no public documented Predictions API, SDK, or account activity/order automation route is available."
       }
     },
     "drift_bet": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official protocol/API access and wallet/network handling are implemented."
+        "notes": "Verified 2026-05-26: Drift BET support is blocked by Solana wallet, margin, settlement, and BET-specific account handling that is not implemented with fixtures and safeguards."
       }
     },
     "fact_machine": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official protocol/API access and identity/outcome rules are implemented."
+        "notes": "Verified 2026-05-26: no public documented Fact Machine API/SDK or stable protocol integration contract suitable for app discovery, pricing, or order automation is published."
       }
     },
     "fanatics_markets": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official API access, account permissions, and regional requirements are handled."
+        "notes": "Verified 2026-05-26: Fanatics Markets is a consumer product built with Crypto.com/CDNA, but no public Fanatics Markets API, SDK, or automation terms are published."
       }
     },
     "forecastex": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official, reliable API access is implemented."
+        "notes": "Verified 2026-05-26: ForecastEx contracts are broker/member mediated and no direct public self-service ForecastEx market-data plus order API is published for this app."
       }
     },
     "frenzy_finance": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official protocol/API access and wallet/network handling are implemented."
+        "notes": "Verified 2026-05-26: Frenzy Finance requires wallet/network handling, contract validation, and settlement-rule support that is not implemented in this app."
       }
     },
     "gemini_titan": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "implemented",
+        "gemini_api_base_url": "https://api.gemini.com/v1",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official prediction-market API access, account permissions, and regional/KYC requirements are handled."
+        "min_request_interval_seconds": 0.25,
+        "notes": "Public prediction-market event discovery, contract listing, orderbooks, implied prices, and local paper orders are implemented through official Gemini Prediction Markets endpoints. Live trading and copy trading remain unsupported."
       }
     },
     "good_judgment_open": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official, reliable API access is implemented."
+        "notes": "Verified 2026-05-26: public question pages exist, but no public documented API, SDK, or export endpoint is published. Do not scrape pages or automate private sessions."
       }
     },
     "hedgehog_markets": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official protocol/API access and wallet/network handling are implemented."
+        "notes": "Verified 2026-05-26: no stable public Hedgehog Markets API/SDK or documented protocol contract is published for this app's discovery, pricing, order, and settlement model."
       }
     },
     "hyperliquid": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official event-contract protocol/API support is implemented."
+        "notes": "Verified 2026-05-26: generic HyperCore/perp/spot APIs are not enough; this app lacks a verified HIP-4 prediction-market catalog/order-normalization contract with fixtures and wallet safeguards."
       }
     },
     "hypermind": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official, reliable API access is implemented."
+        "notes": "Verified 2026-05-26: API feeds are described as managed service deliverables, but no public API contract, SDK, or self-service endpoint is published."
       }
     },
     "ibkr_forecasttrader": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [
           "IBKR_ACCOUNT_ID"
         ],
         "live_trading_enabled": false,
-        "notes": "Stub until official API access, account permissions, and regional/KYC requirements are handled."
+        "notes": "Verified 2026-05-26: ForecastTrader/Forecast Contracts require eligible IBKR account permissions and authenticated Web API or TWS/API session handling that cannot be shipped without user-specific entitlements."
       }
     },
     "infer": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official, reliable API access is implemented."
+        "notes": "Verified 2026-05-26: INFER-pub redirects to RAND Forecasting Initiative public pages, but no public documented API or export contract is published."
       }
     },
     "iowa_electronic_markets": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official, reliable API access is implemented."
+        "notes": "Verified 2026-05-26: official quote/history pages exist, but no stable documented API for discovery, contract listing, live quotes, or automated trading is published."
       }
     },
     "myriad_markets": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "myriad_api_base_url": "https://api.myriad.markets",
+        "credential_env_vars": [
+          "MYRIAD_API_KEY"
+        ],
         "live_trading_enabled": false,
-        "notes": "Stub until official protocol/API access and wallet/network handling are implemented."
+        "min_request_interval_seconds": 0.25,
+        "notes": "Public question/market discovery, outcome price reads, alerts, and local paper quote payloads are implemented through the official Myriad API. Orderbook reading, live trading, and copy trading remain unsupported."
       }
     },
     "kalshi": {
@@ -229,10 +252,17 @@
     "limitless_exchange": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "limitless_api_base_url": "https://api.limitless.exchange",
+        "limitless_ws_url": "wss://ws.limitless.exchange",
+        "credential_env_vars": [
+          "LIMITLESS_TOKEN_ID",
+          "LIMITLESS_TOKEN_SECRET",
+          "LIMITLESS_ON_BEHALF_OF"
+        ],
         "live_trading_enabled": false,
-        "notes": "Stub until official, reliable API access is implemented."
+        "min_request_interval_seconds": 0.25,
+        "notes": "Read-only market data, orderbooks, and local paper trading are implemented through official Limitless APIs. Live HMAC order posting is guarded by live_trading_enabled and requires environment credentials plus an on-behalf-of profile."
       }
     },
     "manifold": {
@@ -252,37 +282,48 @@
     "metaculus": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "metaculus_api_base_url": "https://www.metaculus.com/api",
+        "credential_env_vars": [
+          "METACULUS_API_TOKEN"
+        ],
         "live_trading_enabled": false,
-        "notes": "Stub until official read-only API integration is implemented."
+        "notes": "Authenticated read-only post/question discovery and probability reads are implemented through the official Metaculus API. Community Prediction data is access-limited by Metaculus API policy. No trading support exists."
       }
     },
     "opinion_labs": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "opinion_api_base_url": "https://openapi.opinion.trade/openapi",
+        "credential_env_vars": [
+          "OPINION_API_KEY"
+        ],
         "live_trading_enabled": false,
-        "notes": "Stub until official, reliable API access is implemented."
+        "min_request_interval_seconds": 0.25,
+        "notes": "Authenticated market discovery, token listing, token prices, orderbooks, alerts, and local paper orders are implemented through the official Opinion OpenAPI. Live trading and copy trading remain unsupported."
       }
     },
     "nadex": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official API access, account permissions, and regional/KYC requirements are handled."
+        "notes": "Verified 2026-05-26: Nadex event-contract trading requires eligible exchange account access and no public documented third-party event-contract API is published for this adapter."
       }
     },
     "omen": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "omen_subgraph_url": "",
+        "credential_env_vars": [
+          "OMEN_SUBGRAPH_URL"
+        ],
         "live_trading_enabled": false,
-        "notes": "Stub until official, reliable API access is implemented."
+        "min_request_interval_seconds": 0.5,
+        "notes": "Read-only market discovery, outcome listing, AMM marginal-price alerts, and local paper orders are implemented through the documented Omen FixedProductMarketMaker subgraph schema. Configure OMEN_SUBGRAPH_URL or omen_subgraph_url to a maintained GraphQL endpoint. Live trading requires wallet-signed AMM transactions and is not implemented."
       }
     },
     "polymarket": {
@@ -301,100 +342,123 @@
     "predictit": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "implemented",
+        "predictit_api_base_url": "https://www.predictit.org/api/marketdata",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official, reliable API access is implemented."
+        "min_request_interval_seconds": 1.0,
+        "notes": "Public read-only market-data API support is implemented. Live trading/copy trading are unsupported because no official automation API is documented."
       }
     },
     "predict_fun": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "predict_fun_api_base_url": "https://api.predict.fun/v1",
+        "credential_env_vars": [
+          "PREDICT_FUN_API_KEY"
+        ],
         "live_trading_enabled": false,
-        "notes": "Stub until official protocol/API access and wallet/network handling are implemented."
+        "min_request_interval_seconds": 0.25,
+        "notes": "Market discovery, outcome listing, orderbook-derived prices, alerts, and local paper orders are implemented through the official Predict.fun REST API. Live trading and copy trading remain unsupported."
       }
     },
     "prizepicks": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official API access, account permissions, and regional requirements are handled."
+        "notes": "Verified 2026-05-26: no public official PrizePicks developer API for programmatic projections, entries, market data, or automation is published for this app."
       }
     },
     "probo": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official API access, account permissions, and regional requirements are handled."
+        "notes": "Verified 2026-05-26: Probo is a region-limited consumer opinion-market product and does not publish a public official API, SDK, or automation permission flow suitable for this app."
       }
     },
     "robinhood_prediction_markets": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official API access, account permissions, and regional/KYC requirements are handled."
+        "notes": "Verified 2026-05-26: Robinhood Prediction Markets is exposed as a consumer brokerage/app product, but no public documented prediction-market API, SDK, or automation permission flow is published."
       }
     },
     "smarkets": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official API access, account permissions, and regional requirements are handled."
+        "notes": "Verified 2026-05-26: Smarkets API/data use requires account approval and written permission for platform data use, so this app cannot ship working support without user-specific entitlements."
       }
     },
     "sx_bet": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "sx_bet_api_base_url": "https://api.sx.bet",
+        "sx_bet_ws_url": "wss://realtime.sx.bet/connection/websocket",
+        "sx_bet_base_token": "0x6629Ce1Cf35Cc1329ebB4F63202F3f197b3F050B",
+        "sx_bet_executor_address": "0x52adf738AAD93c31f798a30b2C74D658e1E9a562",
+        "credential_env_vars": [
+          "SX_BET_API_KEY",
+          "SX_BET_PRIVATE_KEY",
+          "SX_BET_MAKER_ADDRESS"
+        ],
         "live_trading_enabled": false,
-        "notes": "Stub until official, reliable API access is implemented."
+        "min_request_interval_seconds": 0.25,
+        "notes": "Read-only markets, active-order orderbooks, best odds, WebSocket channel metadata, and local paper trading are implemented through official SX Bet APIs. Live signed order posting is guarded by live_trading_enabled and requires wallet credentials plus funded SX account setup."
       }
     },
     "thales_market": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official protocol/API access and wallet/network handling are implemented."
+        "notes": "Verified 2026-05-26: Thales support requires chain-specific contract/indexer integration, AMM accounting, and explicit wallet transaction handling that this app does not implement."
       }
     },
     "underdog_sports": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official API access, account permissions, and regional requirements are handled."
+        "notes": "Verified 2026-05-26: Underdog is a consumer app with eligibility restrictions and no public official API or automation terms for third-party prediction/event-market integration."
       }
     },
     "xo_market": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "xo_api_base_url": "https://api.xotrade.co/v1",
+        "credential_env_vars": [
+          "XO_API_KEY",
+          "XO_API_SECRET"
+        ],
         "live_trading_enabled": false,
-        "notes": "Stub until official, reliable API access is implemented."
+        "min_request_interval_seconds": 0.25,
+        "notes": "Authenticated market discovery, outcome listing, orderbooks, alerts, local paper orders, and guarded signed live order posting are implemented through official XO Markets HMAC endpoints. Live trading remains disabled by default; copy trading is unsupported."
       }
     },
     "zeitgeist": {
       "enabled": false,
       "settings": {
-        "adapter_status": "stub",
+        "adapter_status": "implemented",
+        "zeitgeist_indexer_url": "https://processor.bsr.zeitgeist.pm/graphql",
+        "zeitgeist_market_status": "",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Stub until official, reliable API access is implemented."
+        "min_request_interval_seconds": 0.5,
+        "notes": "Read-only market discovery, outcome asset price alerts, and local paper orders are implemented through the official Zeitgeist Subsquid/indexer GraphQL shape. Live trading requires wallet-signed Substrate extrinsics and is not implemented."
       }
     }
   },

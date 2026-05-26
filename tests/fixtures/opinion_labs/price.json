@@ -1,0 +1,11 @@
+{
+  "code": 0,
+  "msg": "success",
+  "result": {
+    "tokenId": "0xyes",
+    "price": "0.65",
+    "side": "BUY",
+    "size": "1000",
+    "timestamp": 1733312400000
+  }
+}

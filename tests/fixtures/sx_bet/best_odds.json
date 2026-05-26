@@ -1,0 +1,19 @@
+{
+  "status": "success",
+  "data": {
+    "bestOdds": [
+      {
+        "marketHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "baseToken": "0x6629Ce1Cf35Cc1329ebB4F63202F3f197b3F050B",
+        "outcomeOne": {
+          "percentageOdds": "42500000000000000000",
+          "updatedAt": 1773008449368
+        },
+        "outcomeTwo": {
+          "percentageOdds": "57500000000000000000",
+          "updatedAt": 1773007355305
+        }
+      }
+    ]
+  }
+}

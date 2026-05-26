@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 from .base import MarketAdapter
 from .errors import UnsupportedFeatureError
@@ -61,9 +61,60 @@ class StubMarketAdapter(MarketAdapter):
         self.ensure_capability("copy_trading")
 
 
+class VerifiedBlockedAdapter(StubMarketAdapter):
+    """Stub adapter for markets whose official support was checked and blocked."""
+
+    def __init__(
+        self,
+        metadata: MarketMetadata,
+        config: Optional[Mapping[str, Any]] = None,
+        reason: str = "",
+        *,
+        references: Sequence[str] = (),
+        last_reviewed: str = "",
+    ) -> None:
+        super().__init__(metadata=metadata, config=config, reason=reason)
+        self.references = tuple(str(ref) for ref in references if str(ref).strip())
+        self.last_reviewed = str(last_reviewed or "")
+
+    def health_check(self) -> Dict[str, Any]:
+        health = super().health_check()
+        health.update(
+            {
+                "verified_blocker": True,
+                "last_reviewed": self.last_reviewed,
+                "references": list(self.references),
+            }
+        )
+        return health
+
+    def unsupported_message(self, capability: str) -> str:
+        return (
+            f"{self.display_name} adapter is verified blocked for {capability}. "
+            f"{self.reason}"
+        )
+
+
 def create_stub_adapter(
     metadata: MarketMetadata,
     config: Optional[Mapping[str, Any]] = None,
     reason: str = "",
 ) -> StubMarketAdapter:
     return StubMarketAdapter(metadata=metadata, config=config, reason=reason)
+
+
+def create_verified_blocked_adapter(
+    metadata: MarketMetadata,
+    config: Optional[Mapping[str, Any]] = None,
+    reason: str = "",
+    *,
+    references: Sequence[str] = (),
+    last_reviewed: str = "",
+) -> VerifiedBlockedAdapter:
+    return VerifiedBlockedAdapter(
+        metadata=metadata,
+        config=config,
+        reason=reason,
+        references=references,
+        last_reviewed=last_reviewed,
+    )

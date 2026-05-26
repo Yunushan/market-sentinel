@@ -1,0 +1,18 @@
+{
+  "success": true,
+  "cursor": "next",
+  "data": [
+    {
+      "id": 9001,
+      "title": "Will SOL trade above $300 this year?",
+      "question": "Will SOL trade above $300 this year?",
+      "tradingStatus": "Open",
+      "status": "Active",
+      "categorySlug": "crypto",
+      "outcomes": [
+        {"id": "YES", "name": "Yes", "price": "0.57"},
+        {"id": "NO", "name": "No", "price": "0.43"}
+      ]
+    }
+  ]
+}

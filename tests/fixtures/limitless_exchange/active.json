@@ -1,0 +1,64 @@
+{
+  "data": [
+    {
+      "id": 7495,
+      "address": "0x76d3e2098Be66Aa7E15138F467390f0Eb7349B9b",
+      "conditionId": "0x812f578437dc536def1412e4e593ef310884262c22868b30c1e58582e5f3e9bf",
+      "title": "$DOGE above $0.21652 on Sep 1, 12:00 UTC?",
+      "description": "This market will resolve to YES if the price of DOGE is above the stated level.",
+      "prices": [
+        42.8,
+        57.2
+      ],
+      "categories": [
+        "Hourly"
+      ],
+      "tags": [
+        "Lumy",
+        "Recurring",
+        "Hourly"
+      ],
+      "status": "FUNDED",
+      "expired": false,
+      "volumeFormatted": "164.109293",
+      "openInterestFormatted": "48.310707",
+      "liquidityFormatted": "50.000000",
+      "tradeType": "clob",
+      "marketType": "single",
+      "slug": "doge-above-021652-sep-1-1200-utc",
+      "positionIds": [
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222222222222222222222222222"
+      ],
+      "tokens": {
+        "yes": "1111111111111111111111111111111111111111111111111111111111111111",
+        "no": "2222222222222222222222222222222222222222222222222222222222222222"
+      }
+    },
+    {
+      "id": 7496,
+      "title": "BTC above $100,000 this week?",
+      "description": "Fixture BTC market.",
+      "prices": [
+        64,
+        36
+      ],
+      "categories": [
+        "Crypto"
+      ],
+      "tags": [
+        "BTC"
+      ],
+      "status": "FUNDED",
+      "expired": false,
+      "tradeType": "clob",
+      "marketType": "single",
+      "slug": "btc-above-100k-this-week",
+      "positionIds": [
+        "3333333333333333333333333333333333333333333333333333333333333333",
+        "4444444444444444444444444444444444444444444444444444444444444444"
+      ]
+    }
+  ],
+  "totalMarketsCount": 2
+}

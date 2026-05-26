@@ -1,0 +1,14 @@
+{
+  "code": 0,
+  "msg": "success",
+  "result": {
+    "bids": [
+      {"price": "0.64", "size": "100"},
+      {"price": "0.62", "size": "80"}
+    ],
+    "asks": [
+      {"price": "0.66", "size": "90"},
+      {"price": "0.68", "size": "50"}
+    ]
+  }
+}

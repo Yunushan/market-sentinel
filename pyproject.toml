@@ -18,6 +18,8 @@ dependencies = [
     "packaging>=24.0",
     "pytest>=8.0",
     "cryptography>=42.0.0",
+    "eth-account>=0.13.0",
+    "eth-abi>=5.0.0",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",

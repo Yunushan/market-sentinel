@@ -1,0 +1,17 @@
+{
+  "result": [
+    {
+      "marketId": "1.234",
+      "marketName": "Match Odds",
+      "marketStartTime": "2026-06-01T20:00:00.000Z",
+      "event": {
+        "id": "evt-1",
+        "name": "Team A v Team B"
+      },
+      "runners": [
+        {"selectionId": 101, "runnerName": "Team A"},
+        {"selectionId": 102, "runnerName": "Team B"}
+      ]
+    }
+  ]
+}

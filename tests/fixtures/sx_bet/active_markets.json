@@ -1,0 +1,52 @@
+{
+  "status": "success",
+  "data": {
+    "markets": [
+      {
+        "status": "ACTIVE",
+        "marketHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "outcomeOneName": "Golden State Warriors",
+        "outcomeTwoName": "Minnesota Timberwolves",
+        "outcomeVoidName": "NO_CONTEST",
+        "teamOneName": "Golden State Warriors",
+        "teamTwoName": "Minnesota Timberwolves",
+        "type": 226,
+        "gameTime": 1773453600,
+        "sportXeventId": "L18272456",
+        "liveEnabled": true,
+        "sportLabel": "Basketball",
+        "sportId": 1,
+        "leagueId": 1,
+        "leagueLabel": "NBA",
+        "group1": "NBA",
+        "chainVersion": "SXR",
+        "participantOneId": 15002,
+        "participantTwoId": 14999,
+        "__type": "Market"
+      },
+      {
+        "status": "ACTIVE",
+        "marketHash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "outcomeOneName": "Over 48.5",
+        "outcomeTwoName": "Under 48.5",
+        "outcomeVoidName": "NO_GAME_OR_EVEN",
+        "teamOneName": "Kansas City",
+        "teamTwoName": "Buffalo",
+        "type": 342,
+        "gameTime": 1773457200,
+        "line": 48.5,
+        "sportXeventId": "L18272457",
+        "liveEnabled": false,
+        "sportLabel": "Football",
+        "sportId": 2,
+        "leagueId": 2,
+        "leagueLabel": "NFL",
+        "group1": "NFL",
+        "chainVersion": "SXR",
+        "mainLine": true,
+        "__type": "Market"
+      }
+    ],
+    "nextKey": "fixture-next"
+  }
+}

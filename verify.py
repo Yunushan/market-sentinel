@@ -25,6 +25,8 @@ REQUIRED_IMPORTS = {
     "packaging": "packaging",
     "pytest": "pytest",
     "cryptography": "cryptography",
+    "eth-account": "eth_account",
+    "eth-abi": "eth_abi",
 }
 
 
@@ -231,6 +233,49 @@ def run_fixture_check() -> None:
         fixture_root / "manifold" / "market_multi.json",
         fixture_root / "manifold" / "prob_binary.json",
         fixture_root / "manifold" / "prob_multi.json",
+        fixture_root / "metaculus" / "posts.json",
+        fixture_root / "metaculus" / "post_binary.json",
+        fixture_root / "metaculus" / "post_multiple.json",
+        fixture_root / "metaculus" / "post_numeric.json",
+        fixture_root / "predictit" / "all.json",
+        fixture_root / "predictit" / "market.json",
+        fixture_root / "limitless_exchange" / "active.json",
+        fixture_root / "limitless_exchange" / "market.json",
+        fixture_root / "limitless_exchange" / "orderbook.json",
+        fixture_root / "sx_bet" / "active_markets.json",
+        fixture_root / "sx_bet" / "market_find.json",
+        fixture_root / "sx_bet" / "orders.json",
+        fixture_root / "sx_bet" / "best_odds.json",
+        fixture_root / "azuro" / "games_by_filters.json",
+        fixture_root / "azuro" / "games_by_ids.json",
+        fixture_root / "azuro" / "conditions_by_game_ids.json",
+        fixture_root / "azuro" / "order_response.json",
+        fixture_root / "augur" / "markets.json",
+        fixture_root / "augur" / "market.json",
+        fixture_root / "omen" / "fpmms.json",
+        fixture_root / "omen" / "fpmm.json",
+        fixture_root / "zeitgeist" / "markets.json",
+        fixture_root / "zeitgeist" / "market.json",
+        fixture_root / "zeitgeist" / "assets.json",
+        fixture_root / "gemini" / "events.json",
+        fixture_root / "gemini" / "event.json",
+        fixture_root / "gemini" / "orderbook.json",
+        fixture_root / "myriad_markets" / "questions.json",
+        fixture_root / "myriad_markets" / "question.json",
+        fixture_root / "myriad_markets" / "market.json",
+        fixture_root / "opinion_labs" / "markets.json",
+        fixture_root / "opinion_labs" / "market.json",
+        fixture_root / "opinion_labs" / "price.json",
+        fixture_root / "opinion_labs" / "orderbook.json",
+        fixture_root / "predict_fun" / "markets.json",
+        fixture_root / "predict_fun" / "market.json",
+        fixture_root / "predict_fun" / "orderbook.json",
+        fixture_root / "xo_market" / "markets.json",
+        fixture_root / "xo_market" / "market.json",
+        fixture_root / "xo_market" / "orderbook.json",
+        fixture_root / "xo_market" / "order_response.json",
+        fixture_root / "betfair_exchange" / "market_catalogue.json",
+        fixture_root / "betfair_exchange" / "market_book.json",
     }
     missing = [str(path.relative_to(ROOT)) for path in sorted(required) if not path.exists()]
     if missing:
@@ -245,7 +290,25 @@ def run_gui_integration_check() -> None:
 
     registry = build_default_registry()
     cfg = AppConfig()
-    implemented_markets = {"polymarket", "kalshi", "manifold"}
+    implemented_markets = {
+        "polymarket",
+        "kalshi",
+        "predictit",
+        "manifold",
+        "metaculus",
+        "limitless_exchange",
+        "sx_bet",
+        "azuro",
+        "augur",
+        "omen",
+        "zeitgeist",
+        "myriad_markets",
+        "xo_market",
+        "opinion_labs",
+        "gemini_titan",
+        "predict_fun",
+        "betfair_exchange",
+    }
     choices = [market_choice_label(meta) for meta in registry.list_metadata()]
     choice_market_ids = {market_id_from_choice(choice) for choice in choices}
     if choice_market_ids != set(MARKET_IDS):
