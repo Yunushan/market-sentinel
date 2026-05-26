@@ -372,6 +372,47 @@ def run_launch_ux_check() -> None:
     print("[ok] launch UX")
 
 
+def run_ci_cd_workflow_check() -> None:
+    required_files = {
+        ROOT / ".github" / "workflows" / "ci.yml": (
+            "actions/setup-python@v5",
+            "actions/setup-node@v4",
+            "python verify.py",
+            "npm run build",
+        ),
+        ROOT / ".github" / "workflows" / "release.yml": (
+            "workflow_dispatch:",
+            "environment: release",
+            "contents: write",
+            "sha256sum * > SHA256SUMS.txt",
+            "gh release create",
+        ),
+        ROOT / ".github" / "workflows" / "security.yml": (
+            "actions/dependency-review-action@v4",
+            "github/codeql-action/init@v3",
+            "security-events: write",
+        ),
+        ROOT / ".github" / "dependabot.yml": (
+            "package-ecosystem: github-actions",
+            "package-ecosystem: pip",
+            "package-ecosystem: npm",
+        ),
+        ROOT / "docs" / "CI_CD.md": (
+            "Release Process",
+            "python verify.py --frontend-build",
+            "No custom release secrets are required",
+        ),
+    }
+    for path, expected_fragments in required_files.items():
+        if not path.exists():
+            raise SystemExit(f"Missing CI/CD file: {path.relative_to(ROOT)}")
+        text = path.read_text(encoding="utf-8")
+        missing = [fragment for fragment in expected_fragments if fragment not in text]
+        if missing:
+            raise SystemExit(f"{path.relative_to(ROOT)} is missing CI/CD fragments: {', '.join(missing)}")
+    print("[ok] CI/CD workflows")
+
+
 def run_tkinter_smoke_check() -> None:
     from app import tkinter_smoke_payload
     from market_adapters import MARKET_IDS
@@ -457,6 +498,7 @@ def main() -> None:
     run_fixture_check()
     run_gui_integration_check()
     run_launch_ux_check()
+    run_ci_cd_workflow_check()
     run_tkinter_smoke_check()
     run_frontend_build_check(strict=args.frontend_build)
     run_unit_tests()

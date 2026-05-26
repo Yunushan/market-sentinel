@@ -286,6 +286,17 @@ python verify.py --frontend-build
 
 If `frontend/node_modules` is missing, the normal verifier records frontend build readiness and skips the build. The strict command above fails until `npm install` or `build_web_gui.bat` has completed successfully.
 
+## CI/CD and Releases
+
+GitHub Actions workflows live under `.github/workflows`:
+- `ci.yml` runs Python verification across Ubuntu/Windows and Python `3.10` through `3.14`, builds the React frontend, and builds Python distributions.
+- `security.yml` runs dependency review and CodeQL analysis.
+- `release.yml` publishes tagged releases (`v*.*.*`) with Python package artifacts, a zipped React production bundle, and SHA256 checksums.
+
+Dependabot is configured in `.github/dependabot.yml` for GitHub Actions, Python, and frontend npm dependency updates.
+
+See `docs/CI_CD.md` for the release process, recommended branch protection, release environment setup, and strict frontend build verification.
+
 In-app checks:
 - **About -> Check versions** compares installed dependency versions with PyPI.
 - **Copy Trading -> Check Geoblock** verifies whether live trading should be blocked for the current location.
