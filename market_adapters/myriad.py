@@ -5,10 +5,12 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, UnsupportedFeatureError
+from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
 from .types import (
     MarketContract,
     MarketEvent,
+    OrderBookLevel,
+    OrderBookSnapshot,
     PaperOrderRequest,
     PaperOrderResult,
     PriceSnapshot,
@@ -36,7 +38,8 @@ class MyriadAdapter(MarketAdapter):
                 "api_base_url": self.api_base_url,
                 "references": list(MYRIAD_REFERENCES),
                 "credential_sources": [{"name": api_key.name, "source": api_key.source}] if api_key else [],
-                "live_trading_supported": False,
+                "live_trading_supported": True,
+                "live_trading_enabled": self.config_bool("live_trading_enabled", False),
             }
         )
         return health
@@ -80,11 +83,22 @@ class MyriadAdapter(MarketAdapter):
             raw={"market": dict(market), "outcome": dict(outcome)},
         )
 
-    def get_orderbook(self, contract_id: str):
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "orderbook_reading",
-            "Myriad read-only adapter uses public market/outcome price endpoints; order book integration needs the separate Myriad Order Book API shape.",
+    def get_orderbook(self, contract_id: str) -> OrderBookSnapshot:
+        self.ensure_capability("orderbook_reading")
+        market_id, outcome_id = self._split_contract_id(contract_id)
+        params: Dict[str, Any] = {"outcome": self._orderbook_outcome_param(outcome_id)}
+        network_id = self.config.get("myriad_network_id")
+        if network_id not in (None, ""):
+            params["network_id"] = network_id
+        payload = self._get(f"/markets/{market_id}/orderbook", params=params)
+        data = payload.get("data") if isinstance(payload, Mapping) else payload
+        orderbook = data if isinstance(data, Mapping) else payload if isinstance(payload, Mapping) else {}
+        return OrderBookSnapshot(
+            market_id=self.market_id,
+            contract_id=self._contract_id(market_id, outcome_id),
+            bids=self._book_levels(orderbook.get("bids"), descending=True),
+            asks=self._book_levels(orderbook.get("asks")),
+            raw=orderbook,
         )
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
@@ -104,11 +118,19 @@ class MyriadAdapter(MarketAdapter):
         )
 
     def place_live_order(self, order: PaperOrderRequest) -> Dict[str, Any]:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "live_trading",
-            "Myriad live trading requires user wallet signing and transaction submission outside this adapter.",
-        )
+        self.ensure_capability("live_trading")
+        self._validate_order(order)
+        preflight = self.preflight_live_order(order)
+        payload = self._live_order_payload(order)
+        response = self._post("/orders", payload)
+        return {
+            "market_id": self.market_id,
+            "contract_id": order.contract_id,
+            "live": True,
+            "preflight": preflight,
+            "request": payload,
+            "response": response,
+        }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
         raise UnsupportedFeatureError(
@@ -144,12 +166,38 @@ class MyriadAdapter(MarketAdapter):
     def _get(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> Any:
         return self.runtime.get_json(self._url(path), params=params, headers=self._headers())
 
+    def _post(self, path: str, payload: Mapping[str, Any]) -> Any:
+        headers = {"Content-Type": "application/json", **self._headers(required=True)}
+        self.runtime.rate_limiter.wait()
+        try:
+            response = self.runtime.session.request(
+                "POST",
+                self._url(path),
+                json=dict(payload),
+                headers=headers,
+                timeout=self.runtime.timeout_seconds,
+            )
+        except Exception as exc:
+            raise MarketHTTPError(f"{self.market_id} HTTP request failed: {exc}") from exc
+        status = int(getattr(response, "status_code", 0) or 0)
+        if status >= 400:
+            raise MarketHTTPError(f"{self.market_id} HTTP {status}: {str(getattr(response, 'text', ''))[:200]}")
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
+
     def _url(self, path: str) -> str:
         clean_path = "/" + str(path or "").strip("/")
         return f"{self.api_base_url}{clean_path}"
 
-    def _headers(self) -> Dict[str, str]:
-        credential = self.resolve_credential("myriad_api_key", ("MYRIAD_API_KEY",), label="MYRIAD_API_KEY")
+    def _headers(self, *, required: bool = False) -> Dict[str, str]:
+        credential = self.resolve_credential(
+            "myriad_api_key",
+            ("MYRIAD_API_KEY",),
+            required=required,
+            label="MYRIAD_API_KEY",
+        )
         return {"x-api-key": credential.value} if credential else {}
 
     def _event_from_question(self, question: Mapping[str, Any]) -> MarketEvent:
@@ -205,6 +253,26 @@ class MyriadAdapter(MarketAdapter):
             payload["network_id"] = order.metadata["network_id"]
         return payload
 
+    def _live_order_payload(self, order: PaperOrderRequest) -> Dict[str, Any]:
+        existing = order.metadata.get("myriad_order_payload") or order.metadata.get("signed_order_payload")
+        if isinstance(existing, Mapping):
+            return dict(existing)
+        signed_order = order.metadata.get("order") or order.metadata.get("signed_order")
+        if not isinstance(signed_order, Mapping):
+            raise MarketConfigurationError("Myriad live orders require order.metadata['order'] with a signed EIP-712 order.")
+        signature = str(order.metadata.get("signature") or "").strip()
+        if not signature:
+            raise MarketConfigurationError("Myriad live orders require order.metadata['signature'].")
+        payload: Dict[str, Any] = {
+            "order": dict(signed_order),
+            "signature": signature,
+            "time_in_force": str(order.metadata.get("time_in_force") or self.config.get("myriad_time_in_force") or "GTC"),
+        }
+        network_id = order.metadata.get("network_id", self.config.get("myriad_network_id"))
+        if network_id not in (None, ""):
+            payload["network_id"] = network_id
+        return payload
+
     def _validate_order(self, order: PaperOrderRequest) -> None:
         self.ensure_order_market(order)
         self._split_contract_id(order.contract_id)
@@ -253,6 +321,42 @@ class MyriadAdapter(MarketAdapter):
             if MyriadAdapter._outcome_id(outcome) == str(outcome_id):
                 return outcome
         return None
+
+    @staticmethod
+    def _book_levels(raw: Any, *, descending: bool = False) -> List[OrderBookLevel]:
+        levels: List[OrderBookLevel] = []
+        if not isinstance(raw, list):
+            return levels
+        for item in raw:
+            price = size = None
+            if isinstance(item, Mapping):
+                price = item.get("price")
+                size = item.get("remaining_amount") or item.get("size") or item.get("amount")
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                price, size = item[0], item[1]
+            parsed_price = MyriadAdapter._scaled_decimal(price)
+            parsed_size = MyriadAdapter._scaled_decimal(size)
+            if parsed_price is not None and parsed_size is not None and MyriadAdapter._is_positive_number(parsed_size):
+                levels.append(OrderBookLevel(price=parsed_price, size=parsed_size))
+        levels.sort(key=lambda level: level.price, reverse=descending)
+        return levels
+
+    @staticmethod
+    def _scaled_decimal(value: Any) -> Optional[float]:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(number):
+            return None
+        if number > 10_000_000_000:
+            number /= 1_000_000_000_000_000_000
+        return number
+
+    @staticmethod
+    def _orderbook_outcome_param(outcome_id: str) -> Any:
+        clean = str(outcome_id or "").strip()
+        return int(clean) if clean.isdigit() else clean
 
     @staticmethod
     def _list_from_payload(payload: Any, *keys: str) -> List[Mapping[str, Any]]:

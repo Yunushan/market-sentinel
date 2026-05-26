@@ -163,7 +163,7 @@ class SxBetAdapterTests(unittest.TestCase):
         self.assertIn("disabled", str(ctx.exception))
 
     def test_live_order_posts_signed_order_when_enabled(self) -> None:
-        adapter = self.make_adapter({"live_trading_enabled": True})
+        adapter = self.make_adapter({"live_trading_enabled": True, "live_trading_confirmed": True})
         calls = []
 
         def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):

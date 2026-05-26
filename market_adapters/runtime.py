@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import time
@@ -176,6 +177,18 @@ class AdapterRuntime:
         if isinstance(value, str):
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
+
+    def config_float(self, key: str, default: Optional[float] = None) -> Optional[float]:
+        value = self.config.get(key, default)
+        if value in (None, ""):
+            return default
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"{self.market_id} config {key} must be numeric.") from exc
+        if not math.isfinite(number):
+            raise MarketConfigurationError(f"{self.market_id} config {key} must be finite.")
+        return number
 
 
 def load_json_fixture(path: Path) -> Any:

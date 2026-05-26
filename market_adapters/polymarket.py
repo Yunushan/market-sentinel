@@ -190,7 +190,7 @@ class PolymarketAdapter(MarketAdapter):
     def place_live_order(self, order: PaperOrderRequest) -> Dict[str, Any]:
         self.ensure_capability("live_trading")
         self._validate_order(order)
-        self.ensure_live_trading_enabled()
+        preflight = self.preflight_live_order(order)
         if order.limit_price is None:
             raise MarketConfigurationError("Polymarket live trading requires a limit price.")
 
@@ -218,13 +218,20 @@ class PolymarketAdapter(MarketAdapter):
                 signature_type=signature_type,
             )
         )
-        return trader.place_limit_order(
+        response = trader.place_limit_order(
             token_id=order.contract_id,
             side=order.side,
             price=order.limit_price,
             size=order.size,
             tif=str(order.metadata.get("tif") or "FOK"),
         )
+        return {
+            "market_id": self.market_id,
+            "contract_id": order.contract_id,
+            "live": True,
+            "preflight": preflight,
+            "response": response,
+        }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
         self.ensure_capability("copy_trading")

@@ -164,7 +164,7 @@ class LimitlessAdapter(MarketAdapter):
     def place_live_order(self, order: PaperOrderRequest) -> Dict[str, Any]:
         self.ensure_capability("live_trading")
         self._validate_order(order)
-        self.ensure_live_trading_enabled()
+        preflight = self.preflight_live_order(order)
         payload = self._build_delegated_order_payload(order, dry_run=False)
         body = self._canonical_json(payload)
         response = self._post_signed_json("/orders", payload, body=body)
@@ -172,6 +172,7 @@ class LimitlessAdapter(MarketAdapter):
             "market_id": self.market_id,
             "contract_id": self._contract_id(*self._split_contract_id(order.contract_id)),
             "live": True,
+            "preflight": preflight,
             "request": payload,
             "response": response,
         }

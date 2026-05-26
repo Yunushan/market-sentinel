@@ -11,6 +11,7 @@ BLOCKERS = ROOT / "docs" / "BLOCKERS.md"
 REQUIRED_HEADERS = (
     "# Blockers",
     "## Summary",
+    "## 2026-05-26 Re-Audit Notes",
     "## Market Blockers",
     "## Implementation Rules For Clearing A Blocker",
 )
@@ -80,6 +81,19 @@ class BlockersDocTests(unittest.TestCase):
         self.assertIn("Live trading remains disabled by default", text)
         self.assertIn("Keep paper/dry-run mode as default", text)
         self.assertIn("Never commit credentials", text)
+
+    def test_article35_reaudit_records_candidate_decisions(self) -> None:
+        text = BLOCKERS.read_text(encoding="utf-8")
+
+        self.assertIn("No verified-blocked market was promoted", text)
+        self.assertIn("`context_v2`", text)
+        self.assertIn("sunset", text)
+        self.assertIn("`hyperliquid`", text)
+        self.assertIn("outcomeMeta", text)
+        self.assertIn("`thales_market`", text)
+        self.assertIn("contract integration", text)
+        self.assertIn("`smarkets`", text)
+        self.assertIn("written approval", text)
 
 
 if __name__ == "__main__":

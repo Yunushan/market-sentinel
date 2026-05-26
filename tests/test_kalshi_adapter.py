@@ -162,7 +162,7 @@ class KalshiAdapterTests(unittest.TestCase):
         self.assertEqual(payload["price"], "0.6500")
 
     def test_live_trading_requires_credentials_when_enabled(self) -> None:
-        adapter = KalshiAdapter({"live_trading_enabled": True})
+        adapter = KalshiAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})
 
         with self.assertRaises(MarketConfigurationError) as ctx:
             adapter.place_live_order(
@@ -187,7 +187,7 @@ class KalshiAdapterTests(unittest.TestCase):
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption(),
         ).decode("utf-8")
-        adapter = KalshiAdapter({"live_trading_enabled": True})
+        adapter = KalshiAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})
         calls = []
 
         def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):

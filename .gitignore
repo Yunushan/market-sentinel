@@ -18,6 +18,10 @@ dist/
 .coverage
 htmlcov/
 
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
 .env
 
 # Local config/state

@@ -144,6 +144,12 @@ class VerificationFixtureTests(unittest.TestCase):
         betfair_catalogue = json.loads(
             (FIXTURE_ROOT / "betfair_exchange" / "market_catalogue.json").read_text(encoding="utf-8")
         )
+        myriad_orderbook = json.loads((FIXTURE_ROOT / "myriad_markets" / "orderbook.json").read_text(encoding="utf-8"))
+        gemini_order = json.loads((FIXTURE_ROOT / "gemini" / "order_response.json").read_text(encoding="utf-8"))
+        predict_order = json.loads((FIXTURE_ROOT / "predict_fun" / "order_response.json").read_text(encoding="utf-8"))
+        betfair_order = json.loads(
+            (FIXTURE_ROOT / "betfair_exchange" / "place_order_response.json").read_text(encoding="utf-8")
+        )
 
         self.assertIsInstance(gemini_events.get("data"), list)
         self.assertIn("contracts", gemini_events["data"][0])
@@ -157,6 +163,11 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("outcomes", xo_markets["markets"][0])
         self.assertIsInstance(betfair_catalogue.get("result"), list)
         self.assertIn("runners", betfair_catalogue["result"][0])
+        self.assertIsInstance(myriad_orderbook.get("bids"), list)
+        self.assertIsInstance(myriad_orderbook.get("asks"), list)
+        self.assertIn("order_id", gemini_order)
+        self.assertEqual(predict_order.get("success"), True)
+        self.assertEqual(betfair_order.get("status"), "SUCCESS")
 
 
 if __name__ == "__main__":

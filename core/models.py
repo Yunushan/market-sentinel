@@ -27,6 +27,7 @@ class PriceAlert:
     source: PriceSource = "last_trade"
     once: bool = True
     enabled: bool = True
+    market_id: str = DEFAULT_MARKET_ID
 
     id: str = field(default_factory=_uuid)
     created_at: int = field(default_factory=lambda: int(time.time()))
@@ -38,7 +39,47 @@ class PriceAlert:
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "PriceAlert":
-        return PriceAlert(**d)
+        data = dict(d)
+        data["market_id"] = str(data.get("market_id") or DEFAULT_MARKET_ID).strip().lower()
+        return PriceAlert(**data)
+
+
+@dataclass
+class PaperTradeRecord:
+    market_id: str
+    contract_id: str
+    side: str
+    size: float
+    limit_price: Optional[float]
+    accepted: bool
+    message: str
+    filled_size: float = 0.0
+    average_price: Optional[float] = None
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+    id: str = field(default_factory=_uuid)
+    created_at: int = field(default_factory=lambda: int(time.time()))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(d: Dict[str, Any]) -> "PaperTradeRecord":
+        data = dict(d)
+        data["market_id"] = str(data.get("market_id") or DEFAULT_MARKET_ID).strip().lower()
+        data["contract_id"] = str(data.get("contract_id") or "")
+        data["side"] = str(data.get("side") or "").upper()
+        data["size"] = float(data.get("size") or 0.0)
+        raw_limit = data.get("limit_price")
+        data["limit_price"] = None if raw_limit in (None, "") else float(raw_limit)
+        data["accepted"] = bool(data.get("accepted", False))
+        data["message"] = str(data.get("message") or "")
+        data["filled_size"] = float(data.get("filled_size") or 0.0)
+        raw_average = data.get("average_price")
+        data["average_price"] = None if raw_average in (None, "") else float(raw_average)
+        raw = data.get("raw")
+        data["raw"] = dict(raw) if isinstance(raw, dict) else {}
+        return PaperTradeRecord(**data)
 
 
 @dataclass
@@ -118,6 +159,7 @@ def default_market_configs() -> Dict[str, MarketConfig]:
 @dataclass
 class AppConfig:
     alerts: List[PriceAlert] = field(default_factory=list)
+    paper_trades: List[PaperTradeRecord] = field(default_factory=list)
     wallets: List[WalletWatch] = field(default_factory=list)
     copytrading: CopyTradeSettings = field(default_factory=CopyTradeSettings)
     markets: Dict[str, MarketConfig] = field(default_factory=default_market_configs)
@@ -127,6 +169,7 @@ class AppConfig:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "alerts": [a.to_dict() for a in self.alerts],
+            "paper_trades": [t.to_dict() for t in self.paper_trades],
             "wallets": [w.to_dict() for w in self.wallets],
             "copytrading": self.copytrading.to_dict(),
             "markets": {market_id: cfg.to_dict() for market_id, cfg in self.markets.items()},
@@ -137,6 +180,7 @@ class AppConfig:
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "AppConfig":
         alerts = [PriceAlert.from_dict(x) for x in d.get("alerts", [])]
+        paper_trades = [PaperTradeRecord.from_dict(x) for x in d.get("paper_trades", [])]
         wallets = [WalletWatch.from_dict(x) for x in d.get("wallets", [])]
         copytrading = CopyTradeSettings.from_dict(d.get("copytrading", {}))
         markets = default_market_configs()
@@ -153,6 +197,7 @@ class AppConfig:
         theme: Theme = "dark" if raw_theme == "dark" else "light"
         return AppConfig(
             alerts=alerts,
+            paper_trades=paper_trades,
             wallets=wallets,
             copytrading=copytrading,
             markets=markets,

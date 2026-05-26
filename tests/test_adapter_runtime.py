@@ -4,7 +4,15 @@ import os
 import unittest
 from unittest.mock import patch
 
-from market_adapters import AdapterRuntime, MarketAdapter, MarketHTTPError, PaperOrderRequest, RateLimiter
+from market_adapters import (
+    AdapterRuntime,
+    MarketAdapter,
+    MarketCapabilities,
+    MarketHTTPError,
+    MarketMetadata,
+    PaperOrderRequest,
+    RateLimiter,
+)
 from market_adapters.errors import MarketConfigurationError
 from market_adapters.runtime import DEFAULT_USER_AGENT, load_market_fixture
 
@@ -27,6 +35,20 @@ class FakeSession:
     def request(self, *args, **kwargs):
         self.calls.append((args, kwargs))
         return self.response
+
+
+class LiveAdapter(MarketAdapter):
+    metadata = MarketMetadata(
+        market_id="live_dummy",
+        display_name="Live Dummy",
+        capabilities=MarketCapabilities(
+            live_trading=True,
+            paper_trading=True,
+            credentials_required=True,
+            kyc_required=True,
+            region_limited=True,
+        ),
+    )
 
 
 class AdapterRuntimeTests(unittest.TestCase):
@@ -122,8 +144,62 @@ class AdapterRuntimeTests(unittest.TestCase):
         with self.assertRaises(MarketConfigurationError):
             adapter.ensure_live_trading_enabled()
 
-        enabled_adapter = MarketAdapter({"live_trading_enabled": "true"})
+        enabled_adapter = MarketAdapter({"live_trading_enabled": "true", "live_trading_confirmed": "true"})
         enabled_adapter.ensure_live_trading_enabled()
+
+    def test_live_preflight_requires_acknowledgement_and_honors_kill_switch(self) -> None:
+        order = PaperOrderRequest("live_dummy", "contract-1", "BUY", 2.0, 0.4)
+
+        with self.assertRaises(MarketConfigurationError) as ack_ctx:
+            LiveAdapter({"live_trading_enabled": True}).preflight_live_order(order)
+        self.assertIn("acknowledgement", str(ack_ctx.exception))
+
+        with self.assertRaises(MarketConfigurationError) as kill_ctx:
+            LiveAdapter(
+                {
+                    "live_trading_enabled": True,
+                    "live_trading_confirmed": True,
+                    "live_trading_kill_switch": True,
+                }
+            ).preflight_live_order(order)
+        self.assertIn("kill switch", str(kill_ctx.exception))
+
+    def test_live_preflight_applies_size_notional_caps_and_returns_redacted_audit(self) -> None:
+        adapter = LiveAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "live_trading_max_size": 10,
+                "live_trading_max_notional": 5,
+            }
+        )
+
+        preflight = adapter.preflight_live_order(
+            PaperOrderRequest(
+                "live_dummy",
+                "contract-1",
+                "BUY",
+                4.0,
+                0.5,
+                {"private_key": "secret", "client_order_id": "client-1"},
+            )
+        )
+
+        self.assertEqual(preflight["market_id"], "live_dummy")
+        self.assertEqual(preflight["approx_notional"], 2.0)
+        self.assertEqual(preflight["metadata_keys"], ["client_order_id", "private_key"])
+        self.assertIn("credentials_required", preflight["warnings"])
+        self.assertIn("kyc_required", preflight["warnings"])
+        self.assertIn("region_limited", preflight["warnings"])
+        self.assertNotIn("secret", str(preflight))
+
+        with self.assertRaises(MarketConfigurationError) as size_ctx:
+            adapter.preflight_live_order(PaperOrderRequest("live_dummy", "contract-1", "BUY", 11.0, 0.4))
+        self.assertIn("size", str(size_ctx.exception))
+
+        with self.assertRaises(MarketConfigurationError) as notional_ctx:
+            adapter.preflight_live_order(PaperOrderRequest("live_dummy", "contract-1", "BUY", 4.0, 2.0))
+        self.assertIn("notional", str(notional_ctx.exception))
 
     def test_base_adapter_order_market_gate(self) -> None:
         adapter = MarketAdapter()

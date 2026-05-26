@@ -1,0 +1,17 @@
+{
+  "order_id": "106817811",
+  "id": "106817811",
+  "symbol": "GEMI-BTC100K26-YES",
+  "exchange": "gemini",
+  "avg_execution_price": "0",
+  "side": "buy",
+  "type": "exchange limit",
+  "timestamp": "1767225600",
+  "timestampms": 1767225600000,
+  "is_live": true,
+  "is_cancelled": false,
+  "executed_amount": "0",
+  "remaining_amount": "3",
+  "price": "0.44",
+  "original_amount": "3"
+}

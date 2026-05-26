@@ -1,5 +1,6 @@
 {
   "alerts": [],
+  "paper_trades": [],
   "copytrading": {
     "allow_sells": false,
     "enabled": false,
@@ -36,6 +37,9 @@
           "AZURO_AFFILIATE_ADDRESS"
         ],
         "live_trading_enabled": false,
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.25,
         "notes": "Read-only games, conditions, odds, WebSocket subscriptions, and local paper bet-calculation payloads are implemented through official Azuro APIs. Live posting only accepts pre-signed wallet order payloads and stays disabled by default."
       }
@@ -50,8 +54,11 @@
           "BETFAIR_SESSION_TOKEN"
         ],
         "live_trading_enabled": false,
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.25,
-        "notes": "Authenticated read-only market discovery, runner listing, best-offer orderbooks, implied-probability prices, and local paper orders are implemented through the official Betfair Exchange API. Live betting and copy trading remain unsupported."
+        "notes": "Authenticated market discovery, runner listing, best-offer orderbooks, implied-probability prices, local paper orders, and guarded placeOrders support are implemented through the official Betfair Exchange API. Live betting stays disabled by default; copy trading remains unsupported."
       }
     },
     "betmgm": {
@@ -148,11 +155,17 @@
       "enabled": false,
       "settings": {
         "adapter_status": "implemented",
-        "gemini_api_base_url": "https://api.gemini.com/v1",
-        "credential_env_vars": [],
+        "gemini_api_base_url": "https://api.gemini.com",
+        "credential_env_vars": [
+          "GEMINI_API_KEY",
+          "GEMINI_API_SECRET"
+        ],
         "live_trading_enabled": false,
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.25,
-        "notes": "Public prediction-market event discovery, contract listing, orderbooks, implied prices, and local paper orders are implemented through official Gemini Prediction Markets endpoints. Live trading and copy trading remain unsupported."
+        "notes": "Public prediction-market event discovery, contract listing, orderbooks, implied prices, local paper orders, and guarded authenticated limit-order posting are implemented through official Gemini endpoints. Live trading stays disabled by default; copy trading remains unsupported."
       }
     },
     "good_judgment_open": {
@@ -229,8 +242,11 @@
           "MYRIAD_API_KEY"
         ],
         "live_trading_enabled": false,
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.25,
-        "notes": "Public question/market discovery, outcome price reads, alerts, and local paper quote payloads are implemented through the official Myriad API. Orderbook reading, live trading, and copy trading remain unsupported."
+        "notes": "Public question/market discovery, outcome price reads, orderbooks, alerts, local paper quote payloads, and guarded signed order submission are implemented through the official Myriad API. Live trading stays disabled by default; copy trading remains unsupported."
       }
     },
     "kalshi": {
@@ -246,6 +262,9 @@
           "KALSHI_PRIVATE_KEY_PASSWORD"
         ],
         "live_trading_enabled": false,
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
         "notes": "Read-only market data and paper trading are implemented through official Kalshi REST endpoints. Live trading stays disabled by default and requires API key ID plus RSA private key material from environment variables or an external file."
       }
     },
@@ -261,6 +280,9 @@
           "LIMITLESS_ON_BEHALF_OF"
         ],
         "live_trading_enabled": false,
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.25,
         "notes": "Read-only market data, orderbooks, and local paper trading are implemented through official Limitless APIs. Live HMAC order posting is guarded by live_trading_enabled and requires environment credentials plus an on-behalf-of profile."
       }
@@ -276,6 +298,9 @@
           "MANIFOLD_API_KEY"
         ],
         "live_trading_enabled": false,
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
         "notes": "Read-only market discovery, probabilities, and local paper trading are implemented through the official Manifold API. Authenticated MANA betting is guarded by live_trading_enabled and MANIFOLD_API_KEY."
       }
     },
@@ -336,6 +361,9 @@
           "SIGNATURE_TYPE"
         ],
         "live_trading_enabled": false,
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
         "notes": "Live trading is disabled by default. Keep credentials in .env or environment variables, not in config.json."
       }
     },
@@ -359,8 +387,11 @@
           "PREDICT_FUN_API_KEY"
         ],
         "live_trading_enabled": false,
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.25,
-        "notes": "Market discovery, outcome listing, orderbook-derived prices, alerts, and local paper orders are implemented through the official Predict.fun REST API. Live trading and copy trading remain unsupported."
+        "notes": "Market discovery, outcome listing, orderbook-derived prices, alerts, local paper orders, and guarded signed order submission are implemented through the official Predict.fun REST API. Live trading stays disabled by default; copy trading remains unsupported."
       }
     },
     "prizepicks": {
@@ -413,6 +444,9 @@
           "SX_BET_MAKER_ADDRESS"
         ],
         "live_trading_enabled": false,
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.25,
         "notes": "Read-only markets, active-order orderbooks, best odds, WebSocket channel metadata, and local paper trading are implemented through official SX Bet APIs. Live signed order posting is guarded by live_trading_enabled and requires wallet credentials plus funded SX account setup."
       }
@@ -445,6 +479,9 @@
           "XO_API_SECRET"
         ],
         "live_trading_enabled": false,
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.25,
         "notes": "Authenticated market discovery, outcome listing, orderbooks, alerts, local paper orders, and guarded signed live order posting are implemented through official XO Markets HMAC endpoints. Live trading remains disabled by default; copy trading is unsupported."
       }

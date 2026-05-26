@@ -260,9 +260,12 @@ def run_fixture_check() -> None:
         fixture_root / "gemini" / "events.json",
         fixture_root / "gemini" / "event.json",
         fixture_root / "gemini" / "orderbook.json",
+        fixture_root / "gemini" / "order_response.json",
         fixture_root / "myriad_markets" / "questions.json",
         fixture_root / "myriad_markets" / "question.json",
         fixture_root / "myriad_markets" / "market.json",
+        fixture_root / "myriad_markets" / "orderbook.json",
+        fixture_root / "myriad_markets" / "order_response.json",
         fixture_root / "opinion_labs" / "markets.json",
         fixture_root / "opinion_labs" / "market.json",
         fixture_root / "opinion_labs" / "price.json",
@@ -270,12 +273,14 @@ def run_fixture_check() -> None:
         fixture_root / "predict_fun" / "markets.json",
         fixture_root / "predict_fun" / "market.json",
         fixture_root / "predict_fun" / "orderbook.json",
+        fixture_root / "predict_fun" / "order_response.json",
         fixture_root / "xo_market" / "markets.json",
         fixture_root / "xo_market" / "market.json",
         fixture_root / "xo_market" / "orderbook.json",
         fixture_root / "xo_market" / "order_response.json",
         fixture_root / "betfair_exchange" / "market_catalogue.json",
         fixture_root / "betfair_exchange" / "market_book.json",
+        fixture_root / "betfair_exchange" / "place_order_response.json",
     }
     missing = [str(path.relative_to(ROOT)) for path in sorted(required) if not path.exists()]
     if missing:
@@ -329,6 +334,91 @@ def run_gui_integration_check() -> None:
     print("[ok] GUI market integration")
 
 
+def run_launch_ux_check() -> None:
+    required_scripts = {
+        "run_gui.bat": ("app.py",),
+        "run_web_gui.bat": ("run_web_gui_dev.bat", "run_web_gui_prod.bat", "run_gui.bat"),
+        "run_web_gui_dev.bat": ("web_api.py", "npm run dev", "VITE_API_BASE_URL", "run_gui.bat"),
+        "run_web_gui_prod.bat": ("web_api.py", "frontend\\dist", "run_gui.bat"),
+        "build_web_gui.bat": ("npm install", "npm run build", "run_web_gui_prod.bat"),
+    }
+    for name, expected_fragments in required_scripts.items():
+        path = ROOT / name
+        if not path.exists():
+            raise SystemExit(f"Missing launch script: {name}")
+        text = path.read_text(encoding="utf-8")
+        missing = [fragment for fragment in expected_fragments if fragment not in text]
+        if missing:
+            raise SystemExit(f"{name} is missing launch UX fragments: {', '.join(missing)}")
+
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    for fragment in ("run_web_gui_dev.bat", "run_web_gui_prod.bat", "build_web_gui.bat", "run_gui.bat"):
+        if fragment not in readme:
+            raise SystemExit(f"README.md must document {fragment}.")
+
+    from web_api import health_payload
+
+    health = health_payload(ROOT / "data" / "config.json", ROOT / "frontend" / "dist")
+    required_health_keys = (
+        "tkinter_fallback",
+        "react_dev_command",
+        "react_build_command",
+        "react_prod_command",
+        "frontend_build_available",
+    )
+    missing_keys = [key for key in required_health_keys if key not in health]
+    if missing_keys:
+        raise SystemExit("web_api health payload is missing launch metadata: " + ", ".join(missing_keys))
+    print("[ok] launch UX")
+
+
+def run_tkinter_smoke_check() -> None:
+    from app import tkinter_smoke_payload
+    from market_adapters import MARKET_IDS
+
+    payload = tkinter_smoke_payload()
+    if not payload.get("ok"):
+        raise SystemExit("Tkinter smoke payload did not report ok.")
+    if not payload.get("tkinter_base"):
+        raise SystemExit("App must remain a tkinter.Tk subclass.")
+    if payload.get("market_count") != len(MARKET_IDS):
+        raise SystemExit("Tkinter smoke payload market count does not match catalog.")
+    if not payload.get("all_markets_configured"):
+        raise SystemExit("Tkinter smoke payload reports missing market config entries.")
+    print("[ok] Tkinter smoke")
+
+
+def run_frontend_build_check(strict: bool = False) -> None:
+    frontend = ROOT / "frontend"
+    package_path = frontend / "package.json"
+    if not package_path.exists():
+        raise SystemExit("frontend/package.json is missing.")
+    package = json.loads(package_path.read_text(encoding="utf-8"))
+    scripts = package.get("scripts") or {}
+    missing_scripts = [name for name in ("dev", "build", "preview") if name not in scripts]
+    if missing_scripts:
+        raise SystemExit("frontend/package.json is missing scripts: " + ", ".join(missing_scripts))
+
+    node_modules = frontend / "node_modules"
+    if not node_modules.exists():
+        message = "frontend build skipped because frontend/node_modules is missing; run build_web_gui.bat or npm install."
+        if strict:
+            raise SystemExit(message)
+        print(f"[skip] {message}")
+        return
+
+    result = subprocess.run(
+        ["npm", "run", "build"],
+        cwd=frontend,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        output = (result.stdout + result.stderr).strip()
+        raise SystemExit("frontend build failed:\n" + output)
+    print("[ok] frontend build")
+
+
 def run_unit_tests() -> None:
     suite = unittest.defaultTestLoader.discover(str(ROOT / "tests"))
     test_count = suite.countTestCases()
@@ -347,6 +437,11 @@ def main() -> None:
         action="store_true",
         help="Skip `python -m pip check` for constrained environments.",
     )
+    parser.add_argument(
+        "--frontend-build",
+        action="store_true",
+        help="Fail unless frontend dependencies exist and `npm run build` succeeds.",
+    )
     args = parser.parse_args()
 
     check_python_version()
@@ -361,6 +456,9 @@ def main() -> None:
     run_blockers_doc_check()
     run_fixture_check()
     run_gui_integration_check()
+    run_launch_ux_check()
+    run_tkinter_smoke_check()
+    run_frontend_build_check(strict=args.frontend_build)
     run_unit_tests()
 
 

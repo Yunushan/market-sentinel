@@ -1,0 +1,21 @@
+{
+  "status": "SUCCESS",
+  "marketId": "1.234",
+  "instructionReports": [
+    {
+      "status": "SUCCESS",
+      "instruction": {
+        "selectionId": 101,
+        "side": "BACK",
+        "orderType": "LIMIT",
+        "limitOrder": {
+          "size": "10",
+          "price": "2.0",
+          "persistenceType": "LAPSE"
+        }
+      },
+      "betId": "bet_123",
+      "placedDate": "2026-06-01T20:00:00.000Z"
+    }
+  ]
+}

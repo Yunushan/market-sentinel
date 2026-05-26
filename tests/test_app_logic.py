@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import queue
+import time
 import unittest
 from unittest.mock import patch
 
 from app import (
     App,
+    AdapterPricePoller,
     WalletPoller,
     activity_key,
     extract_slug,
@@ -13,9 +15,20 @@ from app import (
     market_id_from_choice,
     safe_float,
 )
-from core.models import AppConfig, CopyTradeSettings, PriceAlert, WalletWatch
+from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, WalletWatch
 from market_adapters import MARKET_IDS, build_default_registry
-from market_adapters.types import MarketMetadata, OrderBookLevel, OrderBookSnapshot
+from market_adapters.errors import MarketConfigurationError
+from market_adapters.types import (
+    MarketCapabilities,
+    MarketContract,
+    MarketEvent,
+    MarketMetadata,
+    OrderBookLevel,
+    OrderBookSnapshot,
+    PaperOrderRequest,
+    PaperOrderResult,
+    PriceSnapshot,
+)
 
 
 WALLET = "0x" + "b" * 40
@@ -30,6 +43,59 @@ class FakeVar:
 
     def set(self, value: str) -> None:
         self.value = value
+
+
+class FakeEntry(FakeVar):
+    def insert(self, _index: int, value: str) -> None:
+        self.value = value
+
+
+class FakeListbox:
+    def __init__(self) -> None:
+        self.items = []
+        self.selection = ()
+
+    def delete(self, *_args) -> None:
+        self.items = []
+
+    def insert(self, _index, value: str) -> None:
+        self.items.append(value)
+
+    def curselection(self):
+        return self.selection
+
+
+class FakeButton:
+    def __init__(self) -> None:
+        self.state = "normal"
+
+    def configure(self, **kwargs) -> None:
+        if "state" in kwargs:
+            self.state = kwargs["state"]
+
+
+class FakeTree:
+    def __init__(self) -> None:
+        self.rows = {}
+        self.selection_ids = ()
+
+    def get_children(self):
+        return list(self.rows)
+
+    def delete(self, iid) -> None:
+        self.rows.pop(iid, None)
+
+    def insert(self, _parent, _index, iid=None, values=()) -> None:
+        self.rows[iid] = values
+
+    def selection(self):
+        return self.selection_ids
+
+    def item(self, iid, option=None):
+        values = self.rows.get(iid, ())
+        if option == "values":
+            return values
+        return {"values": values}
 
 
 class MarketSelectionHarness:
@@ -54,6 +120,21 @@ class MarketSelectionHarness:
         return App._selected_market_status_text(self, adapter)
 
 
+class SafetyHarness(MarketSelectionHarness):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cfg.selected_market_id = "kalshi"
+        self.safety_market_var = FakeVar()
+        self.safety_market_enabled_var = FakeVar(False)
+        self.safety_live_enabled_var = FakeVar(False)
+        self.safety_live_confirmed_var = FakeVar(False)
+        self.safety_kill_switch_var = FakeVar(False)
+        self.safety_max_size_var = FakeVar("")
+        self.safety_max_notional_var = FakeVar("")
+        self.safety_status_var = FakeVar()
+        self.safety_tree = FakeTree()
+
+
 class AlertHarness:
     def __init__(self, alert: PriceAlert, value: float) -> None:
         self.cfg = AppConfig(alerts=[alert])
@@ -63,6 +144,20 @@ class AlertHarness:
 
     def _fire_alert(self, alert: PriceAlert, value: float) -> None:
         self.fired.append((alert.id, value))
+
+    def _refresh_alert_table(self) -> None:
+        self.refreshed = True
+
+
+class MultiAlertHarness:
+    def __init__(self, alerts, price_state) -> None:
+        self.cfg = AppConfig(alerts=list(alerts))
+        self.price_state = price_state
+        self.fired = []
+        self.refreshed = False
+
+    def _fire_alert(self, alert: PriceAlert, value: float) -> None:
+        self.fired.append((alert.market_id, alert.token_id, value))
 
     def _refresh_alert_table(self) -> None:
         self.refreshed = True
@@ -89,6 +184,10 @@ class CopyHarness:
 
 
 class FakePolymarketAdapter:
+    def __init__(self) -> None:
+        self.preflight_calls = []
+        self.preflight_error = None
+
     def get_orderbook(self, contract_id: str) -> OrderBookSnapshot:
         return OrderBookSnapshot(
             market_id="polymarket",
@@ -96,6 +195,101 @@ class FakePolymarketAdapter:
             bids=[OrderBookLevel(price=0.48, size=10.0)],
             asks=[OrderBookLevel(price=0.50, size=10.0)],
         )
+
+    def preflight_live_order(self, order, *, feature_name: str = "live trading"):
+        self.preflight_calls.append((order, feature_name))
+        if self.preflight_error:
+            raise self.preflight_error
+        return {"approx_notional": float(order.size) * float(order.limit_price or 1.0)}
+
+
+class FakePriceAdapter:
+    market_id = "kalshi"
+    display_name = "Kalshi"
+    capabilities = MarketCapabilities(price_reading=True)
+
+    def __init__(self) -> None:
+        self.contracts = []
+
+    def get_price(self, contract_id: str) -> PriceSnapshot:
+        self.contracts.append(contract_id)
+        return PriceSnapshot(
+            market_id="kalshi",
+            contract_id=contract_id,
+            last=0.62,
+            bid=0.60,
+            ask=0.64,
+            source="unit-test",
+        )
+
+
+class FakePaperAdapter(FakePriceAdapter):
+    capabilities = MarketCapabilities(price_reading=True, paper_trading=True)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.orders = []
+
+    def place_paper_order(self, order):
+        self.orders.append(order)
+        return PaperOrderResult(
+            market_id=order.market_id,
+            contract_id=order.contract_id,
+            accepted=True,
+            message="DRY RUN accepted",
+            filled_size=order.size,
+            average_price=order.limit_price,
+            raw={"request": {"contract_id": order.contract_id}},
+        )
+
+
+class FakeQuoteAdapter(FakePaperAdapter):
+    capabilities = MarketCapabilities(price_reading=True, orderbook_reading=True, paper_trading=True)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.orderbooks = []
+
+    def get_orderbook(self, contract_id: str) -> OrderBookSnapshot:
+        self.orderbooks.append(contract_id)
+        return OrderBookSnapshot(
+            market_id="kalshi",
+            contract_id=contract_id,
+            bids=[OrderBookLevel(price=0.58, size=12.0)],
+            asks=[OrderBookLevel(price=0.66, size=15.0)],
+        )
+
+
+class FakeLiveAdapter(FakePaperAdapter):
+    market_id = "kalshi"
+    display_name = "Kalshi"
+    capabilities = MarketCapabilities(price_reading=True, paper_trading=True, live_trading=True)
+
+    def __init__(self, *, error=None) -> None:
+        super().__init__()
+        self.error = error
+        self.preflight_orders = []
+
+    def preflight_live_order(self, order, *, feature_name: str = "live trading"):
+        self.preflight_orders.append((order, feature_name))
+        if self.error:
+            raise self.error
+        return {
+            "dry_run_preview": f"Would submit live {order.side} order for {order.size:g}",
+            "approx_notional": float(order.size) * float(order.limit_price or 1.0),
+            "max_notional": 10.0,
+            "warnings": ["credentials_required"],
+        }
+
+
+class FakeRegistry:
+    def __init__(self, adapter: FakePriceAdapter) -> None:
+        self.adapter = adapter
+        self.calls = []
+
+    def create(self, market_id: str, settings=None) -> FakePriceAdapter:
+        self.calls.append((market_id, settings or {}))
+        return self.adapter
 
 
 class AppLogicTests(unittest.TestCase):
@@ -155,12 +349,72 @@ class AppLogicTests(unittest.TestCase):
         self.assertIn("Robinhood Prediction Markets: verified blocked.", status)
         self.assertIn("Verified 2026-05-26", status)
 
-    def test_stub_market_blocks_polymarket_only_actions(self) -> None:
+    def test_market_safety_refresh_populates_selected_market_settings(self) -> None:
+        harness = SafetyHarness()
+        harness.cfg.markets["kalshi"].enabled = True
+        harness.cfg.markets["kalshi"].settings.update(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": False,
+                "live_trading_kill_switch": True,
+                "live_trading_max_notional": 12.5,
+                "credential_env_vars": ["KALSHI_API_KEY_ID"],
+            }
+        )
+
+        App._refresh_market_safety_tab(harness)
+
+        self.assertEqual(harness.safety_market_var.get(), "Selected market: Kalshi (kalshi)")
+        self.assertTrue(harness.safety_market_enabled_var.get())
+        self.assertTrue(harness.safety_live_enabled_var.get())
+        self.assertFalse(harness.safety_live_confirmed_var.get())
+        self.assertTrue(harness.safety_kill_switch_var.get())
+        self.assertEqual(harness.safety_max_notional_var.get(), "12.5")
+        self.assertIn("kill-switch", harness.safety_status_var.get())
+        self.assertEqual(harness.safety_tree.rows["credential_env_vars"][1], "KALSHI_API_KEY_ID")
+        self.assertIn("event_listing", harness.safety_tree.rows["capabilities"][1])
+
+    def test_save_market_safety_settings_persists_live_gates(self) -> None:
+        harness = SafetyHarness()
+        harness.safety_market_enabled_var.set(True)
+        harness.safety_live_enabled_var.set(True)
+        harness.safety_live_confirmed_var.set(True)
+        harness.safety_kill_switch_var.set(False)
+        harness.safety_max_size_var.set("9")
+        harness.safety_max_notional_var.set("25.5")
+
+        with patch("app.save_config") as save_config:
+            App.save_market_safety_settings(harness)
+
+        settings = harness.cfg.markets["kalshi"].settings
+        self.assertTrue(harness.cfg.markets["kalshi"].enabled)
+        self.assertTrue(settings["live_trading_enabled"])
+        self.assertTrue(settings["live_trading_confirmed"])
+        self.assertFalse(settings["live_trading_kill_switch"])
+        self.assertEqual(settings["live_trading_max_size"], 9.0)
+        self.assertEqual(settings["live_trading_max_notional"], 25.5)
+        self.assertIn("live armed", harness.market_status_var.get())
+        self.assertEqual(harness.status_var.get(), "Market safety settings saved.")
+        self.assertEqual(harness.ui_queue.get_nowait()[0], "log")
+        save_config.assert_called_once_with(harness.cfg)
+
+    def test_save_market_safety_settings_rejects_invalid_caps(self) -> None:
+        harness = SafetyHarness()
+        harness.safety_max_notional_var.set("bad")
+
+        with patch("app.save_config") as save_config, patch("app.messagebox.showerror") as showerror:
+            App.save_market_safety_settings(harness)
+
+        self.assertIn("Max notional", harness.safety_status_var.get())
+        save_config.assert_not_called()
+        showerror.assert_called_once()
+
+    def test_non_polymarket_selection_blocks_wallet_only_actions(self) -> None:
         harness = MarketSelectionHarness()
         harness.cfg.selected_market_id = "kalshi"
 
         with patch("app.messagebox.showinfo") as showinfo:
-            result = App._require_polymarket_selected(harness, "Market fetch")
+            result = App._require_polymarket_selected(harness, "Wallet tracking")
 
         self.assertFalse(result)
         self.assertIn("currently implemented only for Polymarket", harness.status_var.get())
@@ -169,16 +423,42 @@ class AppLogicTests(unittest.TestCase):
         self.assertEqual(harness.ui_queue.get_nowait()[0], "log")
         showinfo.assert_called_once()
 
-    def test_polymarket_selection_allows_polymarket_only_actions(self) -> None:
+    def test_polymarket_selection_allows_wallet_only_actions(self) -> None:
         harness = MarketSelectionHarness()
         harness.cfg.selected_market_id = "polymarket"
 
         with patch("app.messagebox.showinfo") as showinfo:
-            result = App._require_polymarket_selected(harness, "Market fetch")
+            result = App._require_polymarket_selected(harness, "Wallet tracking")
 
         self.assertTrue(result)
         self.assertTrue(harness.ui_queue.empty())
         showinfo.assert_not_called()
+
+    def test_adapter_event_loaded_populates_generic_contract_selection(self) -> None:
+        harness = MarketSelectionHarness()
+        harness.market_info_var = FakeVar()
+        harness.outcome_list = FakeListbox()
+        harness.alert_label_entry = FakeEntry()
+        harness._market_outcomes = []
+        harness._selected_token_id = None
+        harness._selected_alert_market_id = "polymarket"
+        adapter = harness.adapter_registry.create("kalshi")
+        event = MarketEvent("kalshi", "EVT", "Fed decision", status="open")
+        contract = MarketContract("kalshi", "FED-YES:yes", "EVT", "Fed decision - Yes", outcome="Yes")
+
+        App._set_adapter_event_loaded(harness, adapter, event, [contract])
+
+        self.assertEqual(harness._market_outcomes, [contract])
+        self.assertEqual(harness._selected_alert_market_id, "kalshi")
+        self.assertIn("Fed decision", harness.market_info_var.get())
+        self.assertIn("contract FED-YES:yes", harness.outcome_list.items[0])
+
+        harness.outcome_list.selection = (0,)
+        App._on_outcome_selected(harness)
+
+        self.assertEqual(harness._selected_token_id, "FED-YES:yes")
+        self.assertEqual(harness._selected_alert_market_id, "kalshi")
+        self.assertEqual(harness.alert_label_entry.get(), "Yes")
 
     def test_once_alert_fires_and_disables_on_crossing(self) -> None:
         alert = PriceAlert(
@@ -199,6 +479,973 @@ class AppLogicTests(unittest.TestCase):
         self.assertFalse(alert.enabled)
         self.assertTrue(harness.refreshed)
         save_config.assert_called_once()
+
+    def test_market_scoped_alerts_do_not_collide_on_same_contract_id(self) -> None:
+        polymarket_alert = PriceAlert(
+            token_id="same-contract",
+            label="Poly",
+            direction="above",
+            threshold=0.5,
+            source="last_trade",
+            market_id="polymarket",
+        )
+        kalshi_alert = PriceAlert(
+            token_id="same-contract",
+            label="Kalshi",
+            direction="above",
+            threshold=0.5,
+            source="last_trade",
+            market_id="kalshi",
+        )
+        harness = MultiAlertHarness(
+            [polymarket_alert, kalshi_alert],
+            {
+                App._price_state_key("polymarket", "same-contract"): {"last_trade": 0.40},
+                App._price_state_key("kalshi", "same-contract"): {"last_trade": 0.70},
+            },
+        )
+
+        with patch("app.save_config") as save_config:
+            App._eval_alerts_for_contract(harness, "kalshi", "same-contract")
+
+        self.assertEqual(harness.fired, [("kalshi", "same-contract", 0.70)])
+        self.assertFalse(polymarket_alert.triggered)
+        self.assertTrue(kalshi_alert.triggered)
+        save_config.assert_called_once()
+
+    def test_adapter_price_poller_emits_non_polymarket_price_updates(self) -> None:
+        adapter = FakePriceAdapter()
+        registry = FakeRegistry(adapter)
+        ui_queue: "queue.Queue[tuple]" = queue.Queue()
+        cfg = AppConfig(
+            alerts=[
+                PriceAlert(
+                    token_id="KALSHI-CONTRACT",
+                    label="Kalshi",
+                    direction="above",
+                    threshold=0.6,
+                    market_id="kalshi",
+                ),
+                PriceAlert(
+                    token_id="POLY-TOKEN",
+                    label="Poly",
+                    direction="above",
+                    threshold=0.6,
+                    market_id="polymarket",
+                ),
+            ]
+        )
+        cfg.markets["kalshi"].enabled = True
+        poller = AdapterPricePoller(ui_queue, cfg, registry)
+
+        poller.poll_once()
+
+        kind, payload, _ = ui_queue.get_nowait()
+        self.assertEqual(kind, "adapter_price")
+        self.assertEqual(payload["market_id"], "kalshi")
+        self.assertEqual(payload["contract_id"], "KALSHI-CONTRACT")
+        self.assertEqual(payload["values"]["last_trade"], 0.62)
+        self.assertEqual(payload["values"]["midpoint"], 0.62)
+        self.assertEqual(adapter.contracts, ["KALSHI-CONTRACT"])
+        self.assertEqual(registry.calls[0][0], "kalshi")
+
+    def test_adapter_price_poller_skips_disabled_markets(self) -> None:
+        adapter = FakePriceAdapter()
+        registry = FakeRegistry(adapter)
+        ui_queue: "queue.Queue[tuple]" = queue.Queue()
+        cfg = AppConfig(
+            alerts=[
+                PriceAlert(
+                    token_id="KALSHI-CONTRACT",
+                    label="Kalshi",
+                    direction="above",
+                    threshold=0.6,
+                    market_id="kalshi",
+                )
+            ]
+        )
+        poller = AdapterPricePoller(ui_queue, cfg, registry)
+
+        poller.poll_once()
+
+        self.assertEqual(adapter.contracts, [])
+        self.assertEqual(registry.calls, [])
+        kind, message = ui_queue.get_nowait()
+        self.assertEqual(kind, "log")
+        self.assertIn("disabled in local market config", message)
+
+    def test_paper_order_form_builds_adapter_request_with_optional_limit(self) -> None:
+        harness = MarketSelectionHarness()
+        harness.paper_market_var = FakeVar("kalshi")
+        harness.paper_contract_var = FakeVar("KALSHI-CONTRACT")
+        harness.paper_side_var = FakeVar("BUY")
+        harness.paper_size_var = FakeVar("7")
+        harness.paper_limit_var = FakeVar("")
+
+        order = App._paper_order_from_form(harness)
+
+        self.assertEqual(order.market_id, "kalshi")
+        self.assertEqual(order.contract_id, "KALSHI-CONTRACT")
+        self.assertEqual(order.side, "BUY")
+        self.assertEqual(order.size, 7.0)
+        self.assertIsNone(order.limit_price)
+
+    def test_submit_paper_order_records_adapter_result_in_history(self) -> None:
+        adapter = FakePaperAdapter()
+        harness = MarketSelectionHarness()
+        harness.cfg.markets["kalshi"].enabled = True
+        harness.adapter_registry = FakeRegistry(adapter)
+        harness.paper_market_var = FakeVar("kalshi")
+        harness.paper_contract_var = FakeVar("KALSHI-CONTRACT")
+        harness.paper_side_var = FakeVar("BUY")
+        harness.paper_size_var = FakeVar("4")
+        harness.paper_limit_var = FakeVar("0.44")
+        harness.paper_status_var = FakeVar()
+        harness.status_var = FakeVar()
+        harness.paper_tree = FakeTree()
+        harness.ui_queue = queue.Queue()
+
+        with patch("app.save_config") as save_config:
+            App.submit_paper_order(harness)
+
+        self.assertEqual(len(adapter.orders), 1)
+        self.assertEqual(adapter.orders[0].limit_price, 0.44)
+        self.assertEqual(len(harness.cfg.paper_trades), 1)
+        record = harness.cfg.paper_trades[0]
+        self.assertEqual(record.market_id, "kalshi")
+        self.assertEqual(record.contract_id, "KALSHI-CONTRACT")
+        self.assertEqual(record.message, "DRY RUN accepted")
+        self.assertEqual(harness.paper_status_var.get(), "DRY RUN accepted")
+        self.assertEqual(harness.status_var.get(), "Paper order recorded.")
+        self.assertEqual(len(harness.paper_tree.rows), 1)
+        self.assertEqual(harness.ui_queue.get_nowait()[0], "log")
+        save_config.assert_called_once_with(harness.cfg)
+
+    def test_paper_position_rows_aggregate_accepted_history_by_contract(self) -> None:
+        rows = App._paper_position_rows(
+            [
+                PaperTradeRecord(
+                    market_id="kalshi",
+                    contract_id="KALSHI-CONTRACT",
+                    side="BUY",
+                    size=4,
+                    limit_price=0.40,
+                    accepted=True,
+                    message="buy",
+                    filled_size=4,
+                    average_price=0.40,
+                ),
+                PaperTradeRecord(
+                    market_id="kalshi",
+                    contract_id="KALSHI-CONTRACT",
+                    side="SELL",
+                    size=1,
+                    limit_price=0.55,
+                    accepted=True,
+                    message="sell",
+                    filled_size=1,
+                    average_price=0.55,
+                ),
+                PaperTradeRecord(
+                    market_id="kalshi",
+                    contract_id="IGNORED",
+                    side="BUY",
+                    size=8,
+                    limit_price=0.70,
+                    accepted=False,
+                    message="rejected",
+                ),
+            ]
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["market_id"], "kalshi")
+        self.assertEqual(rows[0]["contract_id"], "KALSHI-CONTRACT")
+        self.assertAlmostEqual(rows[0]["net_size"], 3.0)
+        self.assertAlmostEqual(rows[0]["notional"], 1.05)
+        self.assertAlmostEqual(rows[0]["average_price"], 0.35)
+        self.assertEqual(rows[0]["trades"], 2)
+
+    def test_paper_order_impact_projects_position_after_order(self) -> None:
+        impact = App._paper_order_impact(
+            [
+                PaperTradeRecord(
+                    market_id="kalshi",
+                    contract_id="KALSHI-CONTRACT",
+                    side="BUY",
+                    size=4,
+                    limit_price=0.40,
+                    accepted=True,
+                    message="buy",
+                )
+            ],
+            PaperOrderRequest(
+                market_id="kalshi",
+                contract_id="KALSHI-CONTRACT",
+                side="SELL",
+                size=1,
+                limit_price=0.55,
+            ),
+        )
+
+        self.assertAlmostEqual(impact["current_net"], 4.0)
+        self.assertAlmostEqual(impact["signed_size"], -1.0)
+        self.assertAlmostEqual(impact["projected_net"], 3.0)
+        self.assertEqual(impact["effect"], "reduces position")
+        self.assertAlmostEqual(impact["order_notional"], -0.55)
+        self.assertAlmostEqual(impact["projected_notional"], 1.05)
+        self.assertAlmostEqual(impact["projected_average"], 0.35)
+
+    def test_preview_paper_order_impact_reports_projection_without_ordering(self) -> None:
+        adapter = FakePaperAdapter()
+        harness = MarketSelectionHarness()
+        harness.cfg.markets["kalshi"].enabled = True
+        harness.adapter_registry = FakeRegistry(adapter)
+        harness.cfg.paper_trades = [
+            PaperTradeRecord(
+                market_id="kalshi",
+                contract_id="KALSHI-CONTRACT",
+                side="BUY",
+                size=4,
+                limit_price=0.40,
+                accepted=True,
+                message="buy",
+            )
+        ]
+        harness.paper_market_var = FakeVar("kalshi")
+        harness.paper_contract_var = FakeVar("KALSHI-CONTRACT")
+        harness.paper_side_var = FakeVar("SELL")
+        harness.paper_size_var = FakeVar("1")
+        harness.paper_limit_var = FakeVar("0.55")
+        harness.paper_status_var = FakeVar()
+        harness.status_var = FakeVar()
+        harness.ui_queue = queue.Queue()
+
+        App.preview_paper_order_impact(harness)
+
+        self.assertEqual(adapter.orders, [])
+        self.assertEqual(harness.adapter_registry.calls, [])
+        self.assertIn("projected_net=3.0000", harness.paper_status_var.get())
+        self.assertIn("effect=reduces position", harness.paper_status_var.get())
+        self.assertIn("projected_avg=0.3500", harness.paper_status_var.get())
+        self.assertEqual(harness.status_var.get(), "Paper order impact previewed.")
+        self.assertEqual(harness.ui_queue.get_nowait()[0], "log")
+
+    def test_refresh_paper_trade_table_updates_position_summary(self) -> None:
+        harness = MarketSelectionHarness()
+        harness.paper_tree = FakeTree()
+        harness.paper_position_tree = FakeTree()
+        harness.paper_position_summary_var = FakeVar()
+        harness.cfg.paper_trades = [
+            PaperTradeRecord(
+                market_id="kalshi",
+                contract_id="KALSHI-CONTRACT",
+                side="BUY",
+                size=2,
+                limit_price=0.44,
+                accepted=True,
+                message="buy",
+            )
+        ]
+
+        App._refresh_paper_trade_table(harness)
+
+        self.assertEqual(len(harness.paper_tree.rows), 1)
+        self.assertEqual(len(harness.paper_position_tree.rows), 1)
+        row = next(iter(harness.paper_position_tree.rows.values()))
+        self.assertEqual(row[0], "kalshi")
+        self.assertEqual(row[1], "KALSHI-CONTRACT")
+        self.assertEqual(row[2], "2.0000")
+        self.assertEqual(row[3], "0.4400")
+        self.assertEqual(row[4], "0.8800")
+        self.assertIn("Positions: 1", harness.paper_position_summary_var.get())
+        self.assertIn("gross_size=2.0000", harness.paper_position_summary_var.get())
+        self.assertIn("entry_notional=0.8800", harness.paper_position_summary_var.get())
+
+    def test_format_paper_position_summary_includes_marked_unrealized_total(self) -> None:
+        rows = App._paper_position_rows(
+            [
+                PaperTradeRecord(
+                    market_id="kalshi",
+                    contract_id="KALSHI-CONTRACT",
+                    side="BUY",
+                    size=2,
+                    limit_price=0.44,
+                    accepted=True,
+                    message="accepted",
+                )
+            ]
+        )
+        marked_at = 1_712_345_678
+        marks = {
+            ("kalshi", "KALSHI-CONTRACT"): {
+                "mark_price": 0.60,
+                "unrealized": 0.32,
+                "source": "bid",
+                "marked_at": marked_at,
+            }
+        }
+
+        summary = App._format_paper_position_summary(rows, marks)
+
+        self.assertIn("Positions: 1", summary)
+        self.assertIn("marked=1/1", summary)
+        self.assertIn("unrealized=0.3200", summary)
+        self.assertIn(f"last_mark={time.strftime('%H:%M:%S', time.localtime(marked_at))}", summary)
+        self.assertIn("mark_sources=bid:1", summary)
+
+    def test_refresh_paper_position_table_revalues_cached_mark_against_current_history(self) -> None:
+        harness = MarketSelectionHarness()
+        harness.paper_position_tree = FakeTree()
+        harness.paper_position_summary_var = FakeVar()
+        harness._paper_position_marks = {
+            ("kalshi", "KALSHI-CONTRACT"): {
+                "mark_price": 0.60,
+                "unrealized": 0.32,
+                "source": "bid",
+                "marked_at": 1_712_345_678,
+            },
+            ("kalshi", "CLOSED-CONTRACT"): {
+                "mark_price": 0.10,
+                "source": "last",
+                "marked_at": 1_712_345_600,
+            },
+        }
+        harness.cfg.paper_trades = [
+            PaperTradeRecord(
+                market_id="kalshi",
+                contract_id="KALSHI-CONTRACT",
+                side="BUY",
+                size=2,
+                limit_price=0.44,
+                accepted=True,
+                message="first",
+            ),
+            PaperTradeRecord(
+                market_id="kalshi",
+                contract_id="KALSHI-CONTRACT",
+                side="BUY",
+                size=1,
+                limit_price=0.50,
+                accepted=True,
+                message="second",
+            ),
+        ]
+
+        App._refresh_paper_position_table(harness)
+
+        row = next(iter(harness.paper_position_tree.rows.values()))
+        self.assertEqual(row[2], "3.0000")
+        self.assertEqual(row[8], "0.4200")
+        self.assertEqual(row[9], 2)
+        self.assertEqual(set(harness._paper_position_marks), {("kalshi", "KALSHI-CONTRACT")})
+        self.assertIn("unrealized=0.4200", harness.paper_position_summary_var.get())
+
+    def test_paper_marks_for_rows_drops_non_active_and_malformed_keys(self) -> None:
+        rows = [{"market_id": "kalshi", "contract_id": "KALSHI-CONTRACT"}]
+        marks = {
+            ("kalshi", "KALSHI-CONTRACT"): {"mark_price": 0.60},
+            ("kalshi", "CLOSED-CONTRACT"): {"mark_price": 0.10},
+            "bad-key": {"mark_price": 0.99},
+        }
+
+        pruned = App._paper_marks_for_rows(marks, rows)
+
+        self.assertEqual(pruned, {("kalshi", "KALSHI-CONTRACT"): {"mark_price": 0.60}})
+
+    def test_use_selected_paper_trade_loads_history_into_form(self) -> None:
+        adapter = FakePaperAdapter()
+        harness = MarketSelectionHarness()
+        harness.cfg.markets["kalshi"].enabled = True
+        harness.adapter_registry = FakeRegistry(adapter)
+        record = PaperTradeRecord(
+            market_id="kalshi",
+            contract_id="KALSHI-CONTRACT",
+            side="BUY",
+            size=4,
+            limit_price=0.44,
+            accepted=True,
+            message="accepted",
+        )
+        harness.cfg.paper_trades = [record]
+        harness.paper_tree = FakeTree()
+        harness.paper_position_tree = FakeTree()
+        harness.paper_market_var = FakeVar("")
+        harness.paper_contract_var = FakeVar("")
+        harness.paper_side_var = FakeVar("SELL")
+        harness.paper_size_var = FakeVar("")
+        harness.paper_limit_var = FakeVar("")
+        harness.paper_selected_var = FakeVar()
+        harness.paper_status_var = FakeVar()
+        harness.status_var = FakeVar()
+        harness.paper_submit_btn = FakeButton()
+        harness.paper_quote_btn = FakeButton()
+        harness.paper_quote_limit_btn = FakeButton()
+        harness.ui_queue = queue.Queue()
+
+        App._refresh_paper_trade_table(harness)
+        harness.paper_tree.selection_ids = (record.id,)
+        App.use_selected_paper_trade(harness)
+
+        self.assertEqual(harness.paper_market_var.get(), "kalshi")
+        self.assertEqual(harness.paper_contract_var.get(), "KALSHI-CONTRACT")
+        self.assertEqual(harness.paper_side_var.get(), "BUY")
+        self.assertEqual(harness.paper_size_var.get(), "4")
+        self.assertEqual(harness.paper_limit_var.get(), "0.44")
+        self.assertEqual(harness.paper_selected_var.get(), "Selected contract: kalshi:KALSHI-CONTRACT")
+        self.assertEqual(harness.paper_submit_btn.state, "normal")
+        self.assertEqual(harness.status_var.get(), "Paper order loaded into form.")
+        self.assertIn("Loaded paper history order", harness.paper_status_var.get())
+        self.assertEqual(harness.ui_queue.get_nowait()[0], "log")
+        self.assertEqual(adapter.orders, [])
+
+    def test_use_selected_paper_trade_requires_selection(self) -> None:
+        harness = MarketSelectionHarness()
+        harness.paper_tree = FakeTree()
+        harness.paper_status_var = FakeVar()
+
+        with patch("app.messagebox.showerror") as showerror:
+            App.use_selected_paper_trade(harness)
+
+        self.assertIn("Select a paper order history row first", harness.paper_status_var.get())
+        showerror.assert_called_once()
+
+    def test_use_selected_paper_position_loads_close_sized_order(self) -> None:
+        adapter = FakePaperAdapter()
+        harness = MarketSelectionHarness()
+        harness.cfg.markets["kalshi"].enabled = True
+        harness.adapter_registry = FakeRegistry(adapter)
+        record = PaperTradeRecord(
+            market_id="kalshi",
+            contract_id="KALSHI-CONTRACT",
+            side="BUY",
+            size=4,
+            limit_price=0.44,
+            accepted=True,
+            message="accepted",
+        )
+        harness.cfg.paper_trades = [record]
+        harness.paper_tree = FakeTree()
+        harness.paper_position_tree = FakeTree()
+        harness.paper_market_var = FakeVar("")
+        harness.paper_contract_var = FakeVar("")
+        harness.paper_side_var = FakeVar("BUY")
+        harness.paper_size_var = FakeVar("")
+        harness.paper_limit_var = FakeVar("0.99")
+        harness.paper_selected_var = FakeVar()
+        harness.paper_status_var = FakeVar()
+        harness.status_var = FakeVar()
+        harness.paper_submit_btn = FakeButton()
+        harness.paper_quote_btn = FakeButton()
+        harness.paper_quote_limit_btn = FakeButton()
+        harness.ui_queue = queue.Queue()
+
+        App._refresh_paper_trade_table(harness)
+        harness.paper_position_tree.selection_ids = ("kalshi:KALSHI-CONTRACT",)
+        App.use_selected_paper_position(harness)
+
+        self.assertEqual(harness.paper_market_var.get(), "kalshi")
+        self.assertEqual(harness.paper_contract_var.get(), "KALSHI-CONTRACT")
+        self.assertEqual(harness.paper_side_var.get(), "SELL")
+        self.assertEqual(harness.paper_size_var.get(), "4")
+        self.assertEqual(harness.paper_limit_var.get(), "")
+        self.assertEqual(harness.paper_selected_var.get(), "Selected contract: kalshi:KALSHI-CONTRACT")
+        self.assertEqual(harness.paper_submit_btn.state, "normal")
+        self.assertEqual(harness.status_var.get(), "Paper position loaded into form.")
+        self.assertIn("Loaded paper position into form", harness.paper_status_var.get())
+        self.assertEqual(harness.ui_queue.get_nowait()[0], "log")
+        self.assertEqual(adapter.orders, [])
+
+    def test_use_selected_paper_position_uses_back_lay_side_family(self) -> None:
+        side = App._paper_position_close_side(
+            [
+                PaperTradeRecord(
+                    market_id="azuro",
+                    contract_id="GAME:HOME",
+                    side="BACK",
+                    size=2,
+                    limit_price=0.50,
+                    accepted=True,
+                    message="accepted",
+                )
+            ],
+            "azuro",
+            "GAME:HOME",
+            2.0,
+        )
+
+        self.assertEqual(side, "LAY")
+
+    def test_use_selected_paper_position_requires_selection(self) -> None:
+        harness = MarketSelectionHarness()
+        harness.paper_position_tree = FakeTree()
+        harness.paper_status_var = FakeVar()
+
+        with patch("app.messagebox.showerror") as showerror:
+            App.use_selected_paper_position(harness)
+
+        self.assertIn("Select a paper exposure row first", harness.paper_status_var.get())
+        showerror.assert_called_once()
+
+    def test_refresh_paper_position_marks_updates_mark_and_unrealized_pnl(self) -> None:
+        adapter = FakePaperAdapter()
+        harness = MarketSelectionHarness()
+        harness.cfg.markets["kalshi"].enabled = True
+        harness.adapter_registry = FakeRegistry(adapter)
+        harness.cfg.paper_trades = [
+            PaperTradeRecord(
+                market_id="kalshi",
+                contract_id="KALSHI-CONTRACT",
+                side="BUY",
+                size=2,
+                limit_price=0.44,
+                accepted=True,
+                message="accepted",
+            )
+        ]
+        harness.paper_position_tree = FakeTree()
+        harness.paper_position_summary_var = FakeVar()
+        harness.paper_status_var = FakeVar()
+        harness.status_var = FakeVar()
+        harness.ui_queue = queue.Queue()
+
+        marked_at = 1_712_345_678
+        with patch("app.time.time", return_value=marked_at):
+            App.refresh_paper_position_marks(harness)
+
+        self.assertEqual(adapter.contracts, ["KALSHI-CONTRACT"])
+        row = next(iter(harness.paper_position_tree.rows.values()))
+        self.assertEqual(row[5], "0.6000")
+        self.assertEqual(row[6], "bid")
+        self.assertEqual(row[7], time.strftime("%H:%M:%S", time.localtime(marked_at)))
+        self.assertEqual(row[8], "0.3200")
+        self.assertEqual(row[9], 1)
+        self.assertIn("marked=1/1", harness.paper_position_summary_var.get())
+        self.assertIn("unrealized=0.3200", harness.paper_position_summary_var.get())
+        self.assertIn(f"last_mark={time.strftime('%H:%M:%S', time.localtime(marked_at))}", harness.paper_position_summary_var.get())
+        self.assertIn("mark_sources=bid:1", harness.paper_position_summary_var.get())
+        self.assertIn("Marked 1/1", harness.paper_status_var.get())
+        self.assertEqual(harness.status_var.get(), "Paper exposure marks refreshed.")
+        self.assertEqual(harness.ui_queue.get_nowait()[0], "log")
+
+    def test_paper_position_mark_price_prefers_close_side_quote(self) -> None:
+        snapshot = PriceSnapshot(
+            market_id="kalshi",
+            contract_id="KALSHI-CONTRACT",
+            last=0.62,
+            bid=0.60,
+            ask=0.64,
+            source="unit-test",
+        )
+
+        self.assertEqual(App._paper_position_mark_price(snapshot, 2.0), (0.60, "bid"))
+        self.assertEqual(App._paper_position_mark_price(snapshot, -2.0), (0.64, "ask"))
+
+    def test_refresh_paper_position_marks_skips_disabled_market_without_adapter_call(self) -> None:
+        adapter = FakePaperAdapter()
+        harness = MarketSelectionHarness()
+        harness.adapter_registry = FakeRegistry(adapter)
+        harness.cfg.paper_trades = [
+            PaperTradeRecord(
+                market_id="kalshi",
+                contract_id="KALSHI-CONTRACT",
+                side="BUY",
+                size=2,
+                limit_price=0.44,
+                accepted=True,
+                message="accepted",
+            )
+        ]
+        harness.paper_position_tree = FakeTree()
+        harness.paper_position_summary_var = FakeVar()
+        harness.paper_status_var = FakeVar()
+        harness.status_var = FakeVar()
+        harness.ui_queue = queue.Queue()
+
+        App.refresh_paper_position_marks(harness)
+
+        self.assertEqual(harness.adapter_registry.calls, [])
+        row = next(iter(harness.paper_position_tree.rows.values()))
+        self.assertEqual(row[5], "")
+        self.assertEqual(row[6], "")
+        self.assertEqual(row[7], "")
+        self.assertEqual(row[8], "")
+        self.assertIn("Marked 0/1", harness.paper_status_var.get())
+        self.assertIn("disabled", harness.paper_status_var.get())
+
+    def test_refresh_selected_paper_position_mark_updates_only_selected_mark(self) -> None:
+        adapter = FakePaperAdapter()
+        harness = MarketSelectionHarness()
+        harness.cfg.markets["kalshi"].enabled = True
+        harness.adapter_registry = FakeRegistry(adapter)
+        harness.cfg.paper_trades = [
+            PaperTradeRecord(
+                market_id="kalshi",
+                contract_id="KALSHI-CONTRACT",
+                side="BUY",
+                size=2,
+                limit_price=0.44,
+                accepted=True,
+                message="selected",
+            ),
+            PaperTradeRecord(
+                market_id="kalshi",
+                contract_id="OTHER-CONTRACT",
+                side="BUY",
+                size=1,
+                limit_price=0.33,
+                accepted=True,
+                message="other",
+            ),
+        ]
+        harness._paper_position_marks = {
+            ("kalshi", "OTHER-CONTRACT"): {
+                "mark_price": 0.50,
+                "source": "last",
+                "marked_at": 1_700_000_000,
+            }
+        }
+        harness.paper_tree = FakeTree()
+        harness.paper_position_tree = FakeTree()
+        harness.paper_position_summary_var = FakeVar()
+        harness.paper_status_var = FakeVar()
+        harness.status_var = FakeVar()
+        harness.ui_queue = queue.Queue()
+
+        App._refresh_paper_trade_table(harness)
+        harness.paper_position_tree.selection_ids = ("kalshi:KALSHI-CONTRACT",)
+        marked_at = 1_712_345_678
+        with patch("app.time.time", return_value=marked_at):
+            App.refresh_selected_paper_position_mark(harness)
+
+        self.assertEqual(adapter.contracts, ["KALSHI-CONTRACT"])
+        self.assertEqual(set(harness._paper_position_marks), {("kalshi", "KALSHI-CONTRACT"), ("kalshi", "OTHER-CONTRACT")})
+        selected_mark = harness._paper_position_marks[("kalshi", "KALSHI-CONTRACT")]
+        self.assertEqual(selected_mark["mark_price"], 0.60)
+        self.assertEqual(selected_mark["source"], "bid")
+        self.assertEqual(selected_mark["marked_at"], marked_at)
+        self.assertEqual(harness._paper_position_marks[("kalshi", "OTHER-CONTRACT")]["mark_price"], 0.50)
+        row = harness.paper_position_tree.rows["kalshi:KALSHI-CONTRACT"]
+        self.assertEqual(row[5], "0.6000")
+        self.assertEqual(row[6], "bid")
+        self.assertEqual(row[7], time.strftime("%H:%M:%S", time.localtime(marked_at)))
+        self.assertIn("Marked selected paper position", harness.paper_status_var.get())
+        self.assertEqual(harness.status_var.get(), "Selected paper exposure mark refreshed.")
+        self.assertEqual(harness.ui_queue.get_nowait()[0], "log")
+
+    def test_refresh_selected_paper_position_mark_requires_selection(self) -> None:
+        harness = MarketSelectionHarness()
+        harness.paper_position_tree = FakeTree()
+        harness.paper_status_var = FakeVar()
+
+        with patch("app.messagebox.showerror") as showerror:
+            App.refresh_selected_paper_position_mark(harness)
+
+        self.assertEqual(harness.paper_status_var.get(), "Selected paper mark refresh failed.")
+        showerror.assert_called_once()
+
+    def test_clear_selected_paper_position_mark_preserves_other_marks(self) -> None:
+        harness = MarketSelectionHarness()
+        harness.cfg.paper_trades = [
+            PaperTradeRecord(
+                market_id="kalshi",
+                contract_id="KALSHI-CONTRACT",
+                side="BUY",
+                size=2,
+                limit_price=0.44,
+                accepted=True,
+                message="selected",
+            ),
+            PaperTradeRecord(
+                market_id="kalshi",
+                contract_id="OTHER-CONTRACT",
+                side="BUY",
+                size=1,
+                limit_price=0.33,
+                accepted=True,
+                message="other",
+            ),
+        ]
+        harness._paper_position_marks = {
+            ("kalshi", "KALSHI-CONTRACT"): {
+                "mark_price": 0.60,
+                "source": "bid",
+                "marked_at": 1_712_345_678,
+            },
+            ("kalshi", "OTHER-CONTRACT"): {
+                "mark_price": 0.50,
+                "source": "last",
+                "marked_at": 1_700_000_000,
+            },
+        }
+        harness.paper_position_tree = FakeTree()
+        harness.paper_position_summary_var = FakeVar()
+        harness.paper_status_var = FakeVar()
+        harness.status_var = FakeVar()
+        harness.ui_queue = queue.Queue()
+
+        App._refresh_paper_position_table(harness)
+        harness.paper_position_tree.selection_ids = ("kalshi:KALSHI-CONTRACT",)
+        App.clear_selected_paper_position_mark(harness)
+
+        self.assertEqual(set(harness._paper_position_marks), {("kalshi", "OTHER-CONTRACT")})
+        selected_row = harness.paper_position_tree.rows["kalshi:KALSHI-CONTRACT"]
+        self.assertEqual(selected_row[5], "")
+        self.assertEqual(selected_row[6], "")
+        self.assertEqual(selected_row[7], "")
+        self.assertEqual(selected_row[8], "")
+        other_row = harness.paper_position_tree.rows["kalshi:OTHER-CONTRACT"]
+        self.assertEqual(other_row[5], "0.5000")
+        self.assertEqual(other_row[6], "last")
+        self.assertEqual(len(harness.cfg.paper_trades), 2)
+        self.assertIn("marked=1/2", harness.paper_position_summary_var.get())
+        self.assertEqual(harness.paper_status_var.get(), "Cleared selected paper exposure mark: kalshi:KALSHI-CONTRACT")
+        self.assertEqual(harness.status_var.get(), "Selected paper exposure mark cleared.")
+        self.assertEqual(harness.ui_queue.get_nowait()[0], "log")
+
+    def test_clear_selected_paper_position_mark_reports_missing_mark(self) -> None:
+        harness = MarketSelectionHarness()
+        harness.cfg.paper_trades = [
+            PaperTradeRecord(
+                market_id="kalshi",
+                contract_id="KALSHI-CONTRACT",
+                side="BUY",
+                size=2,
+                limit_price=0.44,
+                accepted=True,
+                message="selected",
+            )
+        ]
+        harness._paper_position_marks = {}
+        harness.paper_position_tree = FakeTree()
+        harness.paper_position_summary_var = FakeVar()
+        harness.paper_status_var = FakeVar()
+        harness.status_var = FakeVar()
+        harness.ui_queue = queue.Queue()
+
+        App._refresh_paper_position_table(harness)
+        harness.paper_position_tree.selection_ids = ("kalshi:KALSHI-CONTRACT",)
+        App.clear_selected_paper_position_mark(harness)
+
+        self.assertEqual(harness._paper_position_marks, {})
+        self.assertIn("No paper exposure mark to clear", harness.paper_status_var.get())
+        self.assertEqual(harness.status_var.get(), "No selected paper exposure mark to clear.")
+        self.assertTrue(harness.ui_queue.empty())
+
+    def test_clear_paper_position_marks_removes_marks_without_clearing_history(self) -> None:
+        harness = MarketSelectionHarness()
+        harness.cfg.paper_trades = [
+            PaperTradeRecord(
+                market_id="kalshi",
+                contract_id="KALSHI-CONTRACT",
+                side="BUY",
+                size=2,
+                limit_price=0.44,
+                accepted=True,
+                message="accepted",
+            )
+        ]
+        marked_at = 1_712_345_678
+        harness._paper_position_marks = {
+            ("kalshi", "KALSHI-CONTRACT"): {
+                "mark_price": 0.60,
+                "source": "bid",
+                "marked_at": marked_at,
+            }
+        }
+        harness.paper_position_tree = FakeTree()
+        harness.paper_position_summary_var = FakeVar()
+        harness.paper_status_var = FakeVar()
+        harness.status_var = FakeVar()
+        harness.ui_queue = queue.Queue()
+
+        App._refresh_paper_position_table(harness)
+        self.assertIn("unrealized=", harness.paper_position_summary_var.get())
+
+        App.clear_paper_position_marks(harness)
+
+        self.assertEqual(harness._paper_position_marks, {})
+        self.assertEqual(len(harness.cfg.paper_trades), 1)
+        row = harness.paper_position_tree.rows["kalshi:KALSHI-CONTRACT"]
+        self.assertEqual(row[5], "")
+        self.assertEqual(row[6], "")
+        self.assertEqual(row[7], "")
+        self.assertEqual(row[8], "")
+        self.assertEqual(row[9], 1)
+        summary = harness.paper_position_summary_var.get()
+        self.assertIn("marked=0/1", summary)
+        self.assertNotIn("unrealized=", summary)
+        self.assertNotIn("last_mark=", summary)
+        self.assertEqual(harness.paper_status_var.get(), "Paper exposure marks cleared.")
+        self.assertEqual(harness.status_var.get(), "Paper exposure marks cleared.")
+        self.assertEqual(harness.ui_queue.get_nowait(), ("log", "[paper] Paper exposure marks cleared."))
+
+    def test_clear_paper_position_marks_reports_when_empty(self) -> None:
+        harness = MarketSelectionHarness()
+        harness._paper_position_marks = {}
+        harness.paper_status_var = FakeVar()
+        harness.status_var = FakeVar()
+        harness.ui_queue = queue.Queue()
+
+        App.clear_paper_position_marks(harness)
+
+        self.assertEqual(harness.paper_status_var.get(), "No paper exposure marks to clear.")
+        self.assertEqual(harness.status_var.get(), "No paper exposure marks to clear.")
+        self.assertTrue(harness.ui_queue.empty())
+
+    def test_refresh_paper_quote_reads_price_and_orderbook_without_ordering(self) -> None:
+        adapter = FakeQuoteAdapter()
+        harness = MarketSelectionHarness()
+        harness.cfg.markets["kalshi"].enabled = True
+        harness.adapter_registry = FakeRegistry(adapter)
+        harness.paper_market_var = FakeVar("kalshi")
+        harness.paper_contract_var = FakeVar("KALSHI-CONTRACT")
+        harness.paper_status_var = FakeVar()
+        harness.status_var = FakeVar()
+        harness.ui_queue = queue.Queue()
+
+        App.refresh_paper_quote(harness)
+
+        self.assertEqual(adapter.contracts, ["KALSHI-CONTRACT"])
+        self.assertEqual(adapter.orderbooks, ["KALSHI-CONTRACT"])
+        self.assertEqual(adapter.orders, [])
+        self.assertIn("Quote: Kalshi", harness.paper_status_var.get())
+        self.assertIn("last=0.62", harness.paper_status_var.get())
+        self.assertIn("best_bid=0.58x12", harness.paper_status_var.get())
+        self.assertIn("best_ask=0.66x15", harness.paper_status_var.get())
+        self.assertEqual(harness.status_var.get(), "Paper quote refreshed.")
+        self.assertEqual(harness.ui_queue.get_nowait()[0], "log")
+
+    def test_use_quote_limit_for_paper_sets_side_aware_limit_without_ordering(self) -> None:
+        cases = (("BUY", "0.66", "best_ask"), ("SELL", "0.58", "best_bid"))
+        for side, expected_limit, expected_source in cases:
+            with self.subTest(side=side):
+                adapter = FakeQuoteAdapter()
+                harness = MarketSelectionHarness()
+                harness.cfg.markets["kalshi"].enabled = True
+                harness.adapter_registry = FakeRegistry(adapter)
+                harness.paper_market_var = FakeVar("kalshi")
+                harness.paper_contract_var = FakeVar("KALSHI-CONTRACT")
+                harness.paper_side_var = FakeVar(side)
+                harness.paper_limit_var = FakeVar("")
+                harness.paper_status_var = FakeVar()
+                harness.status_var = FakeVar()
+                harness.ui_queue = queue.Queue()
+
+                App.use_quote_limit_for_paper(harness)
+
+                self.assertEqual(harness.paper_limit_var.get(), expected_limit)
+                self.assertEqual(adapter.contracts, ["KALSHI-CONTRACT"])
+                self.assertEqual(adapter.orderbooks, ["KALSHI-CONTRACT"])
+                self.assertEqual(adapter.orders, [])
+                self.assertIn(expected_source, harness.paper_status_var.get())
+                self.assertEqual(harness.status_var.get(), "Paper limit updated from quote.")
+                self.assertEqual(harness.ui_queue.get_nowait()[0], "log")
+
+    def test_live_preflight_preview_uses_paper_order_form_without_submitting(self) -> None:
+        adapter = FakeLiveAdapter()
+        harness = MarketSelectionHarness()
+        harness.cfg.markets["kalshi"].enabled = True
+        harness.adapter_registry = FakeRegistry(adapter)
+        harness.paper_market_var = FakeVar("kalshi")
+        harness.paper_contract_var = FakeVar("KALSHI-CONTRACT")
+        harness.paper_side_var = FakeVar("BUY")
+        harness.paper_size_var = FakeVar("4")
+        harness.paper_limit_var = FakeVar("0.44")
+        harness.paper_status_var = FakeVar()
+        harness.status_var = FakeVar()
+        harness.ui_queue = queue.Queue()
+
+        App.preview_live_preflight(harness)
+
+        self.assertEqual(len(adapter.preflight_orders), 1)
+        order, feature_name = adapter.preflight_orders[0]
+        self.assertEqual(order.contract_id, "KALSHI-CONTRACT")
+        self.assertEqual(feature_name, "live preflight preview")
+        self.assertEqual(adapter.orders, [])
+        self.assertIn("Preflight OK", harness.paper_status_var.get())
+        self.assertIn("notional~1.76", harness.paper_status_var.get())
+        self.assertEqual(harness.status_var.get(), "Live preflight preview passed.")
+        self.assertEqual(harness.ui_queue.get_nowait()[0], "log")
+
+    def test_live_preflight_preview_reports_blocked_gate(self) -> None:
+        adapter = FakeLiveAdapter(error=MarketConfigurationError("needs acknowledgement"))
+        harness = MarketSelectionHarness()
+        harness.cfg.markets["kalshi"].enabled = True
+        harness.adapter_registry = FakeRegistry(adapter)
+        harness.paper_market_var = FakeVar("kalshi")
+        harness.paper_contract_var = FakeVar("KALSHI-CONTRACT")
+        harness.paper_side_var = FakeVar("BUY")
+        harness.paper_size_var = FakeVar("4")
+        harness.paper_limit_var = FakeVar("0.44")
+        harness.paper_status_var = FakeVar()
+        harness.status_var = FakeVar()
+        harness.ui_queue = queue.Queue()
+
+        App.preview_live_preflight(harness)
+
+        self.assertIn("Live preflight blocked", harness.paper_status_var.get())
+        self.assertIn("needs acknowledgement", harness.paper_status_var.get())
+        self.assertEqual(harness.status_var.get(), "Live preflight blocked.")
+        self.assertEqual(harness.ui_queue.get_nowait()[0], "log")
+
+    def test_paper_market_state_disables_submit_for_unsupported_adapter(self) -> None:
+        adapter = FakePriceAdapter()
+        harness = MarketSelectionHarness()
+        harness.cfg.markets["kalshi"].enabled = True
+        harness.adapter_registry = FakeRegistry(adapter)
+        harness.paper_market_var = FakeVar("kalshi")
+        harness.paper_status_var = FakeVar()
+        harness.paper_submit_btn = FakeButton()
+        harness.paper_quote_btn = FakeButton()
+        harness.paper_quote_limit_btn = FakeButton()
+
+        App._refresh_paper_market_state(harness)
+
+        self.assertEqual(harness.paper_submit_btn.state, "disabled")
+        self.assertEqual(harness.paper_quote_btn.state, "normal")
+        self.assertEqual(harness.paper_quote_limit_btn.state, "normal")
+        self.assertIn("does not support paper trading", harness.paper_status_var.get())
+
+    def test_paper_market_state_disables_all_actions_for_disabled_market(self) -> None:
+        adapter = FakeQuoteAdapter()
+        harness = MarketSelectionHarness()
+        harness.adapter_registry = FakeRegistry(adapter)
+        harness.paper_market_var = FakeVar("kalshi")
+        harness.paper_status_var = FakeVar()
+        harness.paper_submit_btn = FakeButton()
+        harness.paper_quote_btn = FakeButton()
+        harness.paper_quote_limit_btn = FakeButton()
+
+        App._refresh_paper_market_state(harness)
+
+        self.assertEqual(harness.paper_submit_btn.state, "disabled")
+        self.assertEqual(harness.paper_quote_btn.state, "disabled")
+        self.assertEqual(harness.paper_quote_limit_btn.state, "disabled")
+        self.assertEqual(harness.adapter_registry.calls, [])
+        self.assertIn("disabled in local market config", harness.paper_status_var.get())
+
+    def test_submit_paper_order_blocks_disabled_market_without_ordering(self) -> None:
+        adapter = FakePaperAdapter()
+        harness = MarketSelectionHarness()
+        harness.adapter_registry = FakeRegistry(adapter)
+        harness.paper_market_var = FakeVar("kalshi")
+        harness.paper_contract_var = FakeVar("KALSHI-CONTRACT")
+        harness.paper_side_var = FakeVar("BUY")
+        harness.paper_size_var = FakeVar("4")
+        harness.paper_limit_var = FakeVar("0.44")
+        harness.paper_status_var = FakeVar()
+        harness.status_var = FakeVar()
+        harness.ui_queue = queue.Queue()
+
+        with patch("app.messagebox.showinfo") as showinfo:
+            App.submit_paper_order(harness)
+
+        self.assertEqual(adapter.orders, [])
+        self.assertEqual(harness.adapter_registry.calls, [])
+        self.assertIn("disabled in local market config", harness.paper_status_var.get())
+        self.assertEqual(harness.ui_queue.get_nowait()[0], "log")
+        showinfo.assert_called_once()
 
     def test_repeat_alert_resets_after_condition_clears(self) -> None:
         alert = PriceAlert(
@@ -238,6 +1485,30 @@ class AppLogicTests(unittest.TestCase):
         self.assertIn("[copy SIM] BUY", message)
         self.assertIn("size=9.6154", message)
         self.assertIn("price<= 0.5200", message)
+
+    def test_copy_trade_live_runs_adapter_preflight_before_trader(self) -> None:
+        harness = CopyHarness()
+        harness.cfg.copytrading.live = True
+        harness._geoblock_cache = {"blocked": False}
+        harness.polymarket_adapter.preflight_error = MarketConfigurationError("central gate blocked")
+        harness._get_trader = lambda: self.fail("trader should not be created when preflight blocks")
+        item = {
+            "proxyWallet": WALLET,
+            "side": "BUY",
+            "asset": "token-1234567890",
+            "size": "100",
+            "price": "0.45",
+        }
+
+        App._copy_trade_from_activity(harness, item)
+
+        self.assertEqual(len(harness.polymarket_adapter.preflight_calls), 1)
+        order, feature_name = harness.polymarket_adapter.preflight_calls[0]
+        self.assertEqual(feature_name, "live copy trading")
+        self.assertEqual(order.contract_id, "token-1234567890")
+        kind, message = harness.ui_queue.get_nowait()
+        self.assertEqual(kind, "log")
+        self.assertIn("preflight blocked", message)
 
     def test_wallet_poller_deduplicates_same_timestamp_transactions(self) -> None:
         cfg = AppConfig(wallets=[WalletWatch(wallet=WALLET, display_name="tracked")])

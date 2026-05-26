@@ -106,7 +106,7 @@ class ManifoldAdapter(MarketAdapter):
     def place_live_order(self, order: PaperOrderRequest) -> Dict[str, Any]:
         self.ensure_capability("live_trading")
         self._validate_order(order)
-        self.ensure_live_trading_enabled()
+        preflight = self.preflight_live_order(order)
         payload, endpoint = self._build_order_payload(order, dry_run=False)
         if order.side.upper() == "BUY" and self._split_contract_id(order.contract_id)[2]:
             raise MarketConfigurationError(
@@ -125,6 +125,7 @@ class ManifoldAdapter(MarketAdapter):
             "contract_id": self._canonical_contract_id(order.contract_id),
             "live": True,
             "endpoint": endpoint,
+            "preflight": preflight,
             "request": payload,
             "response": response,
         }

@@ -3,8 +3,9 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from core.models import AppConfig, CopyTradeSettings, MarketConfig, PriceAlert, WalletWatch
+from core.models import AppConfig, CopyTradeSettings, MarketConfig, PaperTradeRecord, PriceAlert, WalletWatch
 from core.storage import load_config, save_config
 from market_adapters import MARKET_IDS
 from polymarket.util import is_wallet_address, normalize_wallet
@@ -29,6 +30,18 @@ class CoreModelTests(unittest.TestCase):
                     direction="above",
                     threshold=0.55,
                     source="last_trade",
+                )
+            ],
+            paper_trades=[
+                PaperTradeRecord(
+                    market_id="kalshi",
+                    contract_id="FED-YES:yes",
+                    side="BUY",
+                    size=3.0,
+                    limit_price=0.44,
+                    accepted=True,
+                    message="DRY RUN",
+                    raw={"request": {"ticker": "FED-YES"}},
                 )
             ],
             wallets=[
@@ -60,6 +73,11 @@ class CoreModelTests(unittest.TestCase):
         self.assertEqual(loaded.selected_market_id, "kalshi")
         self.assertEqual(len(loaded.alerts), 1)
         self.assertEqual(loaded.alerts[0].threshold, 0.55)
+        self.assertEqual(loaded.alerts[0].market_id, "polymarket")
+        self.assertEqual(len(loaded.paper_trades), 1)
+        self.assertEqual(loaded.paper_trades[0].market_id, "kalshi")
+        self.assertEqual(loaded.paper_trades[0].limit_price, 0.44)
+        self.assertEqual(loaded.paper_trades[0].raw["request"]["ticker"], "FED-YES")
         self.assertEqual(len(loaded.wallets), 1)
         self.assertEqual(loaded.wallets[0].seen_activity_keys, ["tx:tx1"])
         self.assertIn("polymarket", loaded.markets)
@@ -101,10 +119,59 @@ class CoreModelTests(unittest.TestCase):
         self.assertEqual(loaded.selected_market_id, "polymarket")
         self.assertEqual(set(loaded.markets), set(MARKET_IDS))
 
+    def test_save_config_does_not_clobber_existing_file_when_atomic_replace_fails(self) -> None:
+        original = AppConfig(theme="dark", selected_market_id="kalshi")
+        replacement = AppConfig(theme="light", selected_market_id="polymarket")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "config.json"
+            save_config(original, path)
+
+            with patch("core.storage.os.replace", side_effect=OSError("disk full super-secret-token")):
+                with self.assertRaises(OSError):
+                    save_config(replacement, path)
+
+            loaded = load_config(path)
+            leftovers = list(Path(temp_dir).glob(".config.json.*.tmp"))
+
+        self.assertEqual(loaded.theme, "dark")
+        self.assertEqual(loaded.selected_market_id, "kalshi")
+        self.assertEqual(leftovers, [])
+
     def test_unknown_selected_market_falls_back_to_polymarket(self) -> None:
         loaded = AppConfig.from_dict({"selected_market_id": "unknown-market"})
 
         self.assertEqual(loaded.selected_market_id, "polymarket")
+
+    def test_legacy_alert_without_market_id_defaults_to_polymarket(self) -> None:
+        alert = PriceAlert.from_dict(
+            {
+                "token_id": "token-1",
+                "label": "Legacy alert",
+                "direction": "above",
+                "threshold": 0.5,
+            }
+        )
+
+        self.assertEqual(alert.market_id, "polymarket")
+
+    def test_paper_trade_record_normalizes_loaded_values(self) -> None:
+        record = PaperTradeRecord.from_dict(
+            {
+                "market_id": "KALSHI",
+                "contract_id": "FED-YES:yes",
+                "side": "buy",
+                "size": "2",
+                "limit_price": "",
+                "accepted": True,
+                "message": "DRY RUN",
+            }
+        )
+
+        self.assertEqual(record.market_id, "kalshi")
+        self.assertEqual(record.side, "BUY")
+        self.assertEqual(record.size, 2.0)
+        self.assertIsNone(record.limit_price)
 
 
 if __name__ == "__main__":

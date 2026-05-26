@@ -148,7 +148,7 @@ class SxBetAdapter(MarketAdapter):
     def place_live_order(self, order: PaperOrderRequest) -> Dict[str, Any]:
         self.ensure_capability("live_trading")
         self._validate_order(order)
-        self.ensure_live_trading_enabled()
+        preflight = self.preflight_live_order(order)
         signed_order = self._signed_order(order)
         response = self.runtime.request_json(
             "POST",
@@ -160,6 +160,7 @@ class SxBetAdapter(MarketAdapter):
             "market_id": self.market_id,
             "contract_id": self._contract_id(*self._split_contract_id(order.contract_id)),
             "live": True,
+            "preflight": preflight,
             "request": {"orders": [signed_order]},
             "response": response,
         }

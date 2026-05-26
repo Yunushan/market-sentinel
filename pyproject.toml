@@ -31,5 +31,5 @@ classifiers = [
 ]
 
 [tool.setuptools]
-py-modules = ["app", "verify"]
+py-modules = ["app", "verify", "web_api"]
 packages = ["core", "market_adapters", "polymarket"]

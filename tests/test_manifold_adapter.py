@@ -157,7 +157,7 @@ class ManifoldAdapterTests(unittest.TestCase):
         self.assertIn("disabled", str(ctx.exception))
 
     def test_live_buy_posts_with_api_key_when_enabled(self) -> None:
-        adapter = ManifoldAdapter({"live_trading_enabled": True})
+        adapter = ManifoldAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})
         calls = []
 
         def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
@@ -187,7 +187,7 @@ class ManifoldAdapterTests(unittest.TestCase):
         self.assertEqual(headers["Authorization"], "Key unit-test-key")
 
     def test_live_sell_posts_to_documented_sell_endpoint(self) -> None:
-        adapter = ManifoldAdapter({"live_trading_enabled": True})
+        adapter = ManifoldAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})
         calls = []
 
         def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
@@ -213,7 +213,7 @@ class ManifoldAdapterTests(unittest.TestCase):
         self.assertEqual(headers["Authorization"], "Key unit-test-key")
 
     def test_live_buy_for_single_answer_is_blocked_until_documented_shape_maps_safely(self) -> None:
-        adapter = ManifoldAdapter({"live_trading_enabled": True})
+        adapter = ManifoldAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})
 
         with patch.dict("os.environ", {"MANIFOLD_API_KEY": "unit-test-key"}):
             with self.assertRaises(MarketConfigurationError) as ctx:

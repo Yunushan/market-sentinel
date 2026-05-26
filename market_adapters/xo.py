@@ -132,10 +132,17 @@ class XOMarketAdapter(MarketAdapter):
     def place_live_order(self, order: PaperOrderRequest) -> Dict[str, Any]:
         self.ensure_capability("live_trading")
         self._validate_order(order)
-        self.ensure_live_trading_enabled()
+        preflight = self.preflight_live_order(order)
         payload = self._order_payload(order)
         response = self._request("POST", "/orders", json_body=payload)
-        return {"market_id": self.market_id, "contract_id": order.contract_id, "live": True, "response": response}
+        return {
+            "market_id": self.market_id,
+            "contract_id": order.contract_id,
+            "live": True,
+            "preflight": preflight,
+            "request": payload,
+            "response": response,
+        }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
         raise UnsupportedFeatureError(

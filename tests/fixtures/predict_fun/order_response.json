@@ -1,0 +1,8 @@
+{
+  "success": true,
+  "data": {
+    "code": "OK",
+    "orderId": "pf_order_123",
+    "orderHash": "0xpredictorder"
+  }
+}

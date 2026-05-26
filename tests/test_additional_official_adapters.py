@@ -69,11 +69,44 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertAlmostEqual(price.midpoint or 0.0, 0.435)
         self.assertTrue(paper.accepted)
 
-    def test_myriad_adapter_maps_questions_outcomes_prices_and_dry_run_quotes(self) -> None:
+        with self.assertRaises(MarketConfigurationError):
+            adapter.place_live_order(
+                PaperOrderRequest("gemini_titan", "BTC100K2026:GEMI-BTC100K26-YES", "BUY", 3, 0.44)
+            )
+
+        live_adapter = GeminiPredictionAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})
+        calls = []
+
+        def fake_request(method: str, url: str, *, data=None, headers=None, timeout=None):
+            calls.append((method, url, data, headers, timeout))
+            return FakeResponse(load_fixture("gemini", "order_response"))
+
+        live_adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "gemini-key", "GEMINI_API_SECRET": "gemini-secret"}):
+            result = live_adapter.place_live_order(
+                PaperOrderRequest(
+                    "gemini_titan",
+                    "BTC100K2026:GEMI-BTC100K26-YES",
+                    "BUY",
+                    3,
+                    0.44,
+                    {"nonce": 123, "client_order_id": "client-1"},
+                )
+            )
+
+        self.assertEqual(result["response"]["order_id"], "106817811")
+        self.assertEqual(calls[0][0], "POST")
+        self.assertTrue(calls[0][1].endswith("/v1/order/new"))
+        self.assertEqual(calls[0][2], "")
+        self.assertEqual(calls[0][3]["X-GEMINI-APIKEY"], "gemini-key")
+        self.assertTrue(calls[0][3]["X-GEMINI-SIGNATURE"])
+
+    def test_myriad_adapter_maps_questions_outcomes_prices_orderbooks_and_dry_run_quotes(self) -> None:
         adapter = MyriadAdapter()
         questions = load_fixture("myriad_markets", "questions")
         question = load_fixture("myriad_markets", "question")
         market = load_fixture("myriad_markets", "market")
+        orderbook = load_fixture("myriad_markets", "orderbook")
 
         def fake_get_json(url: str, *, params=None, headers=None):
             if url.endswith("/questions"):
@@ -82,6 +115,9 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 return question
             if url.endswith("/markets/501"):
                 return market
+            if url.endswith("/markets/501/orderbook"):
+                self.assertEqual(params["outcome"], 1)
+                return orderbook
             raise AssertionError(f"unexpected Myriad URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
@@ -89,15 +125,49 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         events = adapter.list_events("BTC")
         contracts = adapter.list_contracts("10")
         price = adapter.get_price("501:1")
+        book = adapter.get_orderbook("501:1")
         paper = adapter.place_paper_order(PaperOrderRequest("myriad_markets", "501:1", "BUY", 20))
 
         self.assertEqual(events[0].event_id, "10")
         self.assertEqual([contract.contract_id for contract in contracts], ["501:1", "501:2"])
         self.assertEqual(price.last, 0.61)
+        self.assertEqual([level.price for level in book.bids], [0.62, 0.6])
+        self.assertEqual([level.size for level in book.asks], [2.0, 1.0])
         self.assertEqual(paper.raw["request"]["action"], "buy")
         self.assertEqual(paper.raw["request"]["value"], 20.0)
-        with self.assertRaises(UnsupportedFeatureError):
-            adapter.get_orderbook("501:1")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.place_live_order(PaperOrderRequest("myriad_markets", "501:1", "BUY", 20))
+
+        live_adapter = MyriadAdapter(
+            {"live_trading_enabled": True, "live_trading_confirmed": True, "myriad_network_id": 56}
+        )
+        calls = []
+
+        def fake_request(method: str, url: str, *, json=None, headers=None, timeout=None):
+            calls.append((method, url, json, headers, timeout))
+            return FakeResponse(load_fixture("myriad_markets", "order_response"))
+
+        live_adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"MYRIAD_API_KEY": "myriad-key"}):
+            result = live_adapter.place_live_order(
+                PaperOrderRequest(
+                    "myriad_markets",
+                    "501:1",
+                    "BUY",
+                    20,
+                    0.62,
+                    {
+                        "order": {"trader": "0xabc", "marketId": "501", "outcomeId": 1},
+                        "signature": "0xsig",
+                    },
+                )
+            )
+
+        self.assertEqual(result["response"]["orderHash"], "0xmyriadorder")
+        self.assertEqual(calls[0][0], "POST")
+        self.assertTrue(calls[0][1].endswith("/orders"))
+        self.assertEqual(calls[0][2]["network_id"], 56)
+        self.assertEqual(calls[0][3]["x-api-key"], "myriad-key")
 
     def test_opinion_adapter_requires_key_and_maps_market_data(self) -> None:
         adapter = OpinionAdapter()
@@ -161,6 +231,8 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             no_book = adapter.get_orderbook("9001:NO")
             price = adapter.get_price("9001:YES")
             paper = adapter.place_paper_order(PaperOrderRequest("predict_fun", "9001:NO", "BUY", 5, 0.44))
+            with self.assertRaises(MarketConfigurationError):
+                adapter.place_live_order(PaperOrderRequest("predict_fun", "9001:YES", "BUY", 5, 0.56))
 
         self.assertEqual(events[0].event_id, "9001")
         self.assertEqual([contract.contract_id for contract in contracts], ["9001:YES", "9001:NO"])
@@ -168,6 +240,40 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual([level.price for level in no_book.bids], [0.42, 0.4])
         self.assertAlmostEqual(price.midpoint or 0.0, 0.57)
         self.assertTrue(paper.accepted)
+
+        live_adapter = PredictFunAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})
+        calls = []
+
+        def fake_request(method: str, url: str, *, json=None, headers=None, timeout=None):
+            calls.append((method, url, json, headers, timeout))
+            return FakeResponse(load_fixture("predict_fun", "order_response"))
+
+        live_adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"PREDICT_FUN_API_KEY": "predict-key"}):
+            result = live_adapter.place_live_order(
+                PaperOrderRequest(
+                    "predict_fun",
+                    "9001:YES",
+                    "BUY",
+                    5,
+                    0.56,
+                    {
+                        "order": {
+                            "hash": "0xhash",
+                            "maker": "0xmaker",
+                            "tokenId": "token-yes",
+                            "signature": "0xsig",
+                        },
+                        "slippage_bps": 25,
+                    },
+                )
+            )
+
+        self.assertEqual(result["response"]["data"]["orderId"], "pf_order_123")
+        self.assertEqual(calls[0][0], "POST")
+        self.assertTrue(calls[0][1].endswith("/orders"))
+        self.assertEqual(calls[0][2]["data"]["pricePerShare"], "0.56")
+        self.assertEqual(calls[0][3]["x-api-key"], "predict-key")
 
     def test_xo_adapter_uses_hmac_headers_and_keeps_live_orders_guarded(self) -> None:
         adapter = XOMarketAdapter()
@@ -202,7 +308,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertAlmostEqual(price.midpoint or 0.0, 0.35)
         self.assertEqual(paper.raw["request"]["amount_usd"], 25.0)
 
-        live_adapter = XOMarketAdapter({"live_trading_enabled": True})
+        live_adapter = XOMarketAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})
         calls = []
 
         def fake_request(method: str, url: str, *, params=None, data=None, headers=None, timeout=None):
@@ -223,6 +329,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         adapter = BetfairExchangeAdapter()
         catalogue = load_fixture("betfair_exchange", "market_catalogue")["result"]
         market_book = load_fixture("betfair_exchange", "market_book")["result"]
+        place_response = load_fixture("betfair_exchange", "place_order_response")
 
         def fake_request(method: str, url: str, *, json=None, headers=None, timeout=None):
             self.assertEqual(headers["X-Application"], "betfair-app")
@@ -231,6 +338,8 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 return FakeResponse({"jsonrpc": "2.0", "result": catalogue, "id": 1})
             if json["method"].endswith("listMarketBook"):
                 return FakeResponse({"jsonrpc": "2.0", "result": market_book, "id": 1})
+            if json["method"].endswith("placeOrders"):
+                return FakeResponse({"jsonrpc": "2.0", "result": place_response, "id": 1})
             raise AssertionError(f"unexpected Betfair method: {json['method']}")
 
         adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
@@ -244,6 +353,8 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             book = adapter.get_orderbook("1.234:101")
             price = adapter.get_price("1.234:101")
             paper = adapter.place_paper_order(PaperOrderRequest("betfair_exchange", "1.234:101", "BACK", 10, 0.5))
+            with self.assertRaises(MarketConfigurationError):
+                adapter.place_live_order(PaperOrderRequest("betfair_exchange", "1.234:101", "BACK", 10, 0.5))
 
         self.assertEqual(events[0].event_id, "1.234")
         self.assertEqual([contract.contract_id for contract in contracts], ["1.234:101", "1.234:102"])
@@ -251,6 +362,28 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual([round(level.price, 4) for level in book.asks], [0.5556, 0.5882])
         self.assertAlmostEqual(price.midpoint or 0.0, (0.5 + (1 / 1.8)) / 2)
         self.assertTrue(paper.accepted)
+
+        live_adapter = BetfairExchangeAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})
+        calls = []
+
+        def fake_live_request(method: str, url: str, *, json=None, headers=None, timeout=None):
+            calls.append((method, url, json, headers, timeout))
+            return FakeResponse({"jsonrpc": "2.0", "result": place_response, "id": 1})
+
+        live_adapter.runtime.session.request = fake_live_request  # type: ignore[method-assign]
+        with patch.dict(
+            "os.environ",
+            {"BETFAIR_APP_KEY": "betfair-app", "BETFAIR_SESSION_TOKEN": "betfair-session"},
+        ):
+            result = live_adapter.place_live_order(
+                PaperOrderRequest("betfair_exchange", "1.234:101", "BACK", 10, 0.5, {"customer_ref": "client-1"})
+            )
+
+        self.assertEqual(result["response"]["status"], "SUCCESS")
+        self.assertEqual(calls[0][2]["method"], "SportsAPING/v1.0/placeOrders")
+        instruction = calls[0][2]["params"]["instructions"][0]
+        self.assertEqual(instruction["side"], "BACK")
+        self.assertEqual(instruction["limitOrder"]["price"], "2.0")
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, UnsupportedFeatureError
+from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
 from .types import (
     MarketContract,
     MarketEvent,
@@ -38,7 +38,8 @@ class PredictFunAdapter(MarketAdapter):
                 "api_base_url": self.api_base_url,
                 "references": list(PREDICT_FUN_REFERENCES),
                 "credential_sources": [{"name": api_key.name, "source": api_key.source}] if api_key else [],
-                "live_trading_supported": False,
+                "live_trading_supported": True,
+                "live_trading_enabled": self.config_bool("live_trading_enabled", False),
             }
         )
         return health
@@ -129,11 +130,19 @@ class PredictFunAdapter(MarketAdapter):
         )
 
     def place_live_order(self, order: PaperOrderRequest) -> Dict[str, Any]:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "live_trading",
-            "Predict.fun live trading requires authenticated wallet signing/SDK flows and is not implemented.",
-        )
+        self.ensure_capability("live_trading")
+        self._validate_order(order)
+        preflight = self.preflight_live_order(order)
+        payload = self._live_order_payload(order)
+        response = self._request_json("POST", "/orders", payload)
+        return {
+            "market_id": self.market_id,
+            "contract_id": order.contract_id,
+            "live": True,
+            "preflight": preflight,
+            "request": payload,
+            "response": response,
+        }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
         raise UnsupportedFeatureError(
@@ -156,6 +165,27 @@ class PredictFunAdapter(MarketAdapter):
 
     def _get(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> Any:
         return self.runtime.get_json(self._url(path), params=params, headers=self._headers())
+
+    def _request_json(self, method: str, path: str, payload: Mapping[str, Any]) -> Any:
+        headers = {"Content-Type": "application/json", **self._headers()}
+        self.runtime.rate_limiter.wait()
+        try:
+            response = self.runtime.session.request(
+                method,
+                self._url(path),
+                json=dict(payload),
+                headers=headers,
+                timeout=self.runtime.timeout_seconds,
+            )
+        except Exception as exc:
+            raise MarketHTTPError(f"{self.market_id} HTTP request failed: {exc}") from exc
+        status = int(getattr(response, "status_code", 0) or 0)
+        if status >= 400:
+            raise MarketHTTPError(f"{self.market_id} HTTP {status}: {str(getattr(response, 'text', ''))[:200]}")
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
 
     def _url(self, path: str) -> str:
         clean_path = "/" + str(path or "").strip("/")
@@ -223,6 +253,28 @@ class PredictFunAdapter(MarketAdapter):
             raise MarketConfigurationError("Predict.fun paper order size must be positive.")
         if order.limit_price is not None and self._safe_probability(order.limit_price) is None:
             raise MarketConfigurationError("Predict.fun paper order limit price must be between 0 and 1.")
+
+    def _live_order_payload(self, order: PaperOrderRequest) -> Dict[str, Any]:
+        existing = order.metadata.get("predict_fun_order_payload") or order.metadata.get("signed_order_payload")
+        if isinstance(existing, Mapping):
+            return dict(existing)
+        signed_order = order.metadata.get("order") or order.metadata.get("signed_order")
+        if not isinstance(signed_order, Mapping):
+            raise MarketConfigurationError("Predict.fun live orders require order.metadata['order'] with a signed order.")
+        data: Dict[str, Any] = {
+            "order": dict(signed_order),
+            "strategy": str(order.metadata.get("strategy") or "LIMIT"),
+            "isFillOrKill": bool(order.metadata.get("is_fill_or_kill", False)),
+        }
+        if order.limit_price is not None:
+            data["pricePerShare"] = str(order.limit_price)
+        if "price_per_share" in order.metadata:
+            data["pricePerShare"] = str(order.metadata["price_per_share"])
+        if "slippage_bps" in order.metadata:
+            data["slippageBps"] = str(order.metadata["slippage_bps"])
+        elif "slippageBps" in order.metadata:
+            data["slippageBps"] = str(order.metadata["slippageBps"])
+        return {"data": data}
 
     @staticmethod
     def _market_id(market: Mapping[str, Any]) -> str:

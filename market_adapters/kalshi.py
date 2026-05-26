@@ -178,7 +178,7 @@ class KalshiAdapter(MarketAdapter):
     def place_live_order(self, order: PaperOrderRequest) -> Dict[str, Any]:
         self.ensure_capability("live_trading")
         self._validate_order(order)
-        self.ensure_live_trading_enabled()
+        preflight = self.preflight_live_order(order)
         if order.limit_price is None:
             raise MarketConfigurationError("Kalshi live trading requires a limit price.")
 
@@ -195,6 +195,7 @@ class KalshiAdapter(MarketAdapter):
             "market_id": self.market_id,
             "contract_id": order.contract_id,
             "live": True,
+            "preflight": preflight,
             "request": payload,
             "response": response,
         }

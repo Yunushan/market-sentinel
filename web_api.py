@@ -1,0 +1,2190 @@
+from __future__ import annotations
+
+import argparse
+import json
+import mimetypes
+import posixpath
+import time
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Tuple
+from urllib.parse import unquote, urlparse
+
+from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, WalletWatch
+from core.storage import DEFAULT_CONFIG_PATH, load_config, save_config
+from market_adapters import build_default_registry
+from market_adapters.registry import AdapterRegistry
+from market_adapters.catalog import MARKET_CATALOG, MARKET_IDS
+from market_adapters.errors import UnsupportedFeatureError
+from market_adapters.types import (
+    MarketCapabilities,
+    MarketMetadata,
+    OrderBookSnapshot,
+    PaperOrderRequest,
+    PaperOrderResult,
+    PriceSnapshot,
+)
+from polymarket import data_api
+from polymarket.util import normalize_wallet
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+DEFAULT_FRONTEND_DIR = PROJECT_ROOT / "frontend" / "dist"
+API_VERSION = "0.1.0"
+MAX_JSON_BODY_BYTES = 1_000_000
+PYTHON_GUI_COMMAND = "python app.py"
+PYTHON_GUI_SCRIPT = "run_gui.bat"
+REACT_DEV_COMMAND = "run_web_gui_dev.bat"
+REACT_DEV_MANUAL_COMMAND = "python web_api.py --host 127.0.0.1 --port 8765 + cd frontend && npm run dev"
+REACT_BUILD_COMMAND = "cd frontend && npm install && npm run build"
+REACT_PROD_COMMAND = "run_web_gui_prod.bat"
+API_ROUTES = {
+    "GET": [
+        "/api/health",
+        "/api/state",
+        "/api/config",
+        "/api/markets",
+        "/api/alerts",
+        "/api/wallets",
+        "/api/copy",
+        "/api/live-safety",
+        "/api/paper",
+        "/api/paper/history",
+        "/api/paper/positions",
+    ],
+    "PATCH": [
+        "/api/config",
+        "/api/markets/{market_id}",
+        "/api/wallets/{wallet_id}",
+        "/api/wallets/polling",
+        "/api/copy",
+    ],
+    "POST": [
+        "/api/alerts",
+        "/api/alerts/refresh",
+        "/api/alerts/{alert_id}/refresh",
+        "/api/wallets",
+        "/api/wallets/poll",
+        "/api/copy/preview",
+        "/api/live-safety/preflight",
+        "/api/paper/quote",
+        "/api/paper/quote-limit",
+        "/api/paper/preview-impact",
+        "/api/paper/orders",
+        "/api/paper/history/use",
+        "/api/paper/history/clear",
+        "/api/paper/positions/use",
+        "/api/paper/marks/refresh",
+        "/api/paper/marks/refresh-selected",
+        "/api/paper/marks/clear",
+        "/api/paper/marks/clear-selected",
+    ],
+    "DELETE": [
+        "/api/alerts/{alert_id}",
+        "/api/wallets/{wallet_id}",
+    ],
+}
+SENSITIVE_SETTING_FRAGMENTS = (
+    "api_key",
+    "apikey",
+    "secret",
+    "token",
+    "password",
+    "private",
+    "cookie",
+    "session",
+)
+LIVE_SETTING_KEYS = {
+    "live_trading_enabled",
+    "live_trading_confirmed",
+    "live_trading_kill_switch",
+    "live_trading_max_size",
+    "live_trading_max_notional",
+}
+ALERT_SOURCE_OPTIONS = [
+    {"id": "last_trade", "label": "Last trade"},
+    {"id": "midpoint", "label": "Midpoint"},
+    {"id": "best_bid", "label": "Best bid"},
+    {"id": "best_ask", "label": "Best ask"},
+]
+ALERT_SOURCE_IDS = {str(option["id"]) for option in ALERT_SOURCE_OPTIONS}
+ALERT_DIRECTIONS = {"above", "below"}
+
+
+def _json_bytes(payload: Dict[str, Any]) -> bytes:
+    return json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+
+
+def _read_json_body(handler: BaseHTTPRequestHandler) -> Dict[str, Any]:
+    try:
+        length = int(handler.headers.get("Content-Length") or 0)
+    except ValueError as exc:
+        raise ValueError("Content-Length must be an integer.") from exc
+    if length > MAX_JSON_BODY_BYTES:
+        raise ValueError("JSON request body is too large.")
+    if length <= 0:
+        return {}
+    raw = handler.rfile.read(length)
+    if not raw:
+        return {}
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("JSON request body must be UTF-8.") from exc
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("JSON request body must be an object.")
+    return data
+
+
+def api_error_payload(
+    status: int,
+    code: str,
+    message: str,
+    details: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    error: Dict[str, Any] = {
+        "code": code,
+        "message": message,
+        "status": int(status),
+    }
+    if details:
+        error["details"] = sanitize_audit_value(dict(details))
+    return {"ok": False, "error": error}
+
+
+def _paper_record_signed_size(record: PaperTradeRecord) -> float:
+    size = float(record.filled_size or record.size or 0.0)
+    side = str(record.side or "").upper()
+    if side in {"SELL", "LAY"}:
+        return -size
+    if side in {"BUY", "BACK"}:
+        return size
+    return 0.0
+
+
+def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+    if value in (None, ""):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def activity_key(item: Mapping[str, Any]) -> str:
+    tx = str(item.get("transactionHash") or item.get("transaction_hash") or "").strip().lower()
+    if tx:
+        return f"tx:{tx}"
+    fields = ("timestamp", "proxyWallet", "asset", "side", "price", "size", "slug", "outcome")
+    return "activity:" + "|".join(str(item.get(key) or "").strip().lower() for key in fields)
+
+
+def _alert_market_id(alert: PriceAlert) -> str:
+    return str(getattr(alert, "market_id", "polymarket") or "polymarket").strip().lower()
+
+
+def _alert_price_state_key(market_id: str, contract_id: str) -> Tuple[str, str]:
+    return str(market_id or "polymarket").strip().lower(), str(contract_id or "").strip()
+
+
+def price_snapshot_values(snapshot: PriceSnapshot) -> Dict[str, Optional[float]]:
+    midpoint = snapshot.midpoint
+    if midpoint is None and snapshot.bid is not None and snapshot.ask is not None:
+        midpoint = (float(snapshot.bid) + float(snapshot.ask)) / 2.0
+    return {
+        "last_trade": _safe_float(snapshot.last, None),
+        "midpoint": _safe_float(midpoint, None),
+        "best_bid": _safe_float(snapshot.bid, None),
+        "best_ask": _safe_float(snapshot.ask, None),
+    }
+
+
+def _alert_values(
+    alert: PriceAlert,
+    price_state: Optional[Mapping[Tuple[str, str], Mapping[str, Any]]] = None,
+) -> Dict[str, Optional[float]]:
+    key = _alert_price_state_key(_alert_market_id(alert), alert.token_id)
+    raw_values = dict((price_state or {}).get(key, {}))
+    return {source: _safe_float(raw_values.get(source), None) for source in ALERT_SOURCE_IDS}
+
+
+def _alert_current_value(
+    alert: PriceAlert,
+    price_state: Optional[Mapping[Tuple[str, str], Mapping[str, Any]]] = None,
+) -> Optional[float]:
+    values = _alert_values(alert, price_state)
+    value = values.get(str(alert.source))
+    if value is not None:
+        return value
+    return _safe_float(alert.last_value, None)
+
+
+def _alert_condition(alert: PriceAlert, value: float) -> bool:
+    return value >= float(alert.threshold) if alert.direction == "above" else value <= float(alert.threshold)
+
+
+def _paper_order_signed_size(order: PaperOrderRequest) -> float:
+    side = str(order.side or "").upper()
+    size = float(order.size or 0.0)
+    if side in {"SELL", "LAY"}:
+        return -size
+    if side in {"BUY", "BACK"}:
+        return size
+    return 0.0
+
+
+def _paper_order_effect(current_net: float, signed_size: float, projected_net: float) -> str:
+    if signed_size == 0:
+        return "unchanged"
+    if current_net == 0:
+        return "opens position"
+    if projected_net == 0:
+        return "closes position"
+    if (current_net > 0 > projected_net) or (current_net < 0 < projected_net):
+        return "flips position"
+    if (current_net > 0 and signed_size > 0) or (current_net < 0 and signed_size < 0):
+        return "adds to position"
+    return "reduces position"
+
+
+def _paper_position_mark_price(snapshot: PriceSnapshot, net_size: float) -> Tuple[float, str]:
+    midpoint = snapshot.midpoint
+    if midpoint is None and snapshot.bid is not None and snapshot.ask is not None:
+        midpoint = (float(snapshot.bid) + float(snapshot.ask)) / 2.0
+    values = {
+        "best_bid": snapshot.bid,
+        "best_ask": snapshot.ask,
+        "midpoint": midpoint,
+        "last_trade": snapshot.last,
+    }
+    ordered_sources = (
+        (("best_bid", "bid"), ("midpoint", "midpoint"), ("last_trade", "last"), ("best_ask", "ask"))
+        if net_size >= 0
+        else (("best_ask", "ask"), ("midpoint", "midpoint"), ("last_trade", "last"), ("best_bid", "bid"))
+    )
+    for key, label in ordered_sources:
+        value = values.get(key)
+        if value is not None:
+            return float(value), label
+    raise ValueError("No mark price is available for this position.")
+
+
+def _paper_position_unrealized(row: Dict[str, Any], mark: Mapping[str, Any]) -> Optional[float]:
+    mark_price = _safe_float(mark.get("mark_price"), None)
+    notional = row.get("notional")
+    if mark_price is None or notional is None:
+        return None
+    return float(row["net_size"]) * mark_price - float(notional)
+
+
+def paper_position_rows(records: List[PaperTradeRecord]) -> List[Dict[str, Any]]:
+    grouped: Dict[tuple[str, str], Dict[str, Any]] = {}
+    for record in records:
+        if not record.accepted:
+            continue
+        signed_size = _paper_record_signed_size(record)
+        if signed_size == 0:
+            continue
+        price = record.average_price if record.average_price is not None else record.limit_price
+        key = (record.market_id, record.contract_id)
+        row = grouped.setdefault(
+            key,
+            {
+                "market_id": record.market_id,
+                "contract_id": record.contract_id,
+                "net_size": 0.0,
+                "notional": 0.0,
+                "priced_size": 0.0,
+                "trades": 0,
+            },
+        )
+        row["net_size"] += signed_size
+        row["trades"] += 1
+        if price is not None:
+            row["notional"] += signed_size * float(price)
+            row["priced_size"] += abs(signed_size)
+
+    rows: List[Dict[str, Any]] = []
+    for row in grouped.values():
+        priced_size = float(row.pop("priced_size"))
+        notional = float(row["notional"])
+        net_size = float(row["net_size"])
+        row["average_price"] = abs(notional) / abs(net_size) if priced_size > 0 and net_size != 0 else None
+        row["notional"] = notional if priced_size > 0 else None
+        rows.append(row)
+    return sorted(rows, key=lambda item: (str(item["market_id"]), str(item["contract_id"])))
+
+
+def _paper_marks_for_rows(
+    marks: Mapping[Tuple[str, str], Dict[str, Any]],
+    rows: List[Dict[str, Any]],
+) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    active = {(str(row["market_id"]), str(row["contract_id"])) for row in rows}
+    return {key: value for key, value in marks.items() if isinstance(key, tuple) and len(key) == 2 and key in active}
+
+
+def paper_position_summary(
+    rows: List[Dict[str, Any]],
+    marks: Optional[Mapping[Tuple[str, str], Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    marks = marks or {}
+    priced_rows = [row for row in rows if row.get("notional") is not None]
+    unrealized_values = []
+    mark_sources: Dict[str, int] = {}
+    last_marked_at: Optional[float] = None
+    marked_count = 0
+    for row in rows:
+        mark = marks.get((str(row["market_id"]), str(row["contract_id"])), {})
+        if _safe_float(mark.get("mark_price"), None) is not None:
+            marked_count += 1
+        unrealized = _paper_position_unrealized(row, mark)
+        if unrealized is not None:
+            unrealized_values.append(float(unrealized))
+        source = str(mark.get("source") or "")
+        if source:
+            mark_sources[source] = mark_sources.get(source, 0) + 1
+        marked_at = _safe_float(mark.get("marked_at"), None)
+        if marked_at is not None:
+            last_marked_at = marked_at if last_marked_at is None else max(last_marked_at, marked_at)
+    return {
+        "positions": len(rows),
+        "gross_size": sum(abs(float(row["net_size"])) for row in rows),
+        "entry_notional": sum(abs(float(row["notional"])) for row in priced_rows),
+        "net_notional": sum(float(row["notional"]) for row in priced_rows),
+        "marked": marked_count,
+        "unrealized": sum(unrealized_values) if unrealized_values else None,
+        "mark_sources": mark_sources,
+        "last_marked_at": last_marked_at,
+    }
+
+
+def bool_from_setting(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value in (None, ""):
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def optional_positive_float(raw: Any, label: str) -> Optional[float]:
+    if raw in (None, ""):
+        return None
+    value = raw
+    if isinstance(raw, str):
+        value = raw.strip()
+        if value == "":
+            return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be blank or a positive number.") from exc
+    if number <= 0:
+        raise ValueError(f"{label} must be blank or a positive number.")
+    return float(number)
+
+
+def sanitize_settings(settings: Mapping[str, Any]) -> Dict[str, Any]:
+    sanitized: Dict[str, Any] = {}
+    for key, value in settings.items():
+        normalized = str(key).strip().lower()
+        if any(fragment in normalized for fragment in SENSITIVE_SETTING_FRAGMENTS):
+            sanitized[str(key)] = "***" if value not in (None, "") else ""
+        else:
+            sanitized[str(key)] = sanitize_audit_value(value, str(key))
+    return sanitized
+
+
+def sanitize_audit_value(value: Any, key: str = "") -> Any:
+    normalized = str(key).strip().lower()
+    if any(fragment in normalized for fragment in SENSITIVE_SETTING_FRAGMENTS):
+        return "***" if value not in (None, "") else ""
+    if isinstance(value, Mapping):
+        return {str(child_key): sanitize_audit_value(child_value, str(child_key)) for child_key, child_value in value.items()}
+    if isinstance(value, list):
+        return [sanitize_audit_value(item, key) for item in value]
+    if isinstance(value, tuple):
+        return [sanitize_audit_value(item, key) for item in value]
+    return value
+
+
+def enabled_capabilities(capabilities: MarketCapabilities) -> List[str]:
+    return [key for key, value in capabilities.to_dict().items() if value]
+
+
+def market_live_status(capabilities: MarketCapabilities, settings: Mapping[str, Any]) -> str:
+    if not capabilities.live_trading:
+        return "no"
+    if not bool_from_setting(settings.get("live_trading_enabled"), False):
+        return "guarded/off"
+    if bool_from_setting(settings.get("live_trading_kill_switch"), False) or bool_from_setting(
+        settings.get("live_trading_paused"), False
+    ):
+        return "kill-switch"
+    if not (
+        bool_from_setting(settings.get("live_trading_confirmed"), False)
+        or bool_from_setting(settings.get("live_trading_acknowledged"), False)
+    ):
+        return "needs-confirmation"
+    return "armed"
+
+
+def market_status_text(meta: MarketMetadata, enabled: bool, health: Dict[str, Any], settings: Mapping[str, Any]) -> str:
+    message = str(health.get("message") or "").strip()
+    if health.get("verified_blocker"):
+        return f"{meta.display_name}: verified blocked. {message}"
+
+    capabilities = meta.capabilities
+    read_supported = (
+        capabilities.market_discovery
+        or capabilities.event_listing
+        or capabilities.price_reading
+        or capabilities.orderbook_reading
+    )
+    return (
+        f"{meta.display_name}: adapter loaded. "
+        f"Config {'enabled' if enabled else 'disabled'}; "
+        f"Alerts {'yes' if capabilities.alerts else 'no'}; "
+        f"read-only {'yes' if read_supported else 'no'}; "
+        f"paper {'yes' if capabilities.paper_trading else 'no'}; "
+        f"live {market_live_status(capabilities, settings)}; "
+        f"copy {'yes' if capabilities.copy_trading else 'no'}."
+    )
+
+
+def market_safety_payload(settings: Mapping[str, Any], enabled: bool) -> Dict[str, Any]:
+    return {
+        "enabled": bool(enabled),
+        "live_trading_enabled": bool_from_setting(settings.get("live_trading_enabled"), False),
+        "live_trading_confirmed": bool_from_setting(settings.get("live_trading_confirmed"), False)
+        or bool_from_setting(settings.get("live_trading_acknowledged"), False),
+        "live_trading_kill_switch": bool_from_setting(settings.get("live_trading_kill_switch"), False)
+        or bool_from_setting(settings.get("live_trading_paused"), False),
+        "live_trading_max_size": settings.get("live_trading_max_size") if settings.get("live_trading_max_size") not in (None, "") else None,
+        "live_trading_max_notional": settings.get("live_trading_max_notional")
+        if settings.get("live_trading_max_notional") not in (None, "")
+        else None,
+    }
+
+
+def market_health_payload(meta: MarketMetadata, cfg: AppConfig, registry: Optional[AdapterRegistry] = None) -> Dict[str, Any]:
+    market_cfg = cfg.markets.get(meta.market_id)
+    settings = dict(market_cfg.settings) if market_cfg else {}
+    registry = registry or build_default_registry()
+    try:
+        adapter = registry.create(meta.market_id, settings)
+        health = adapter.health_check()
+    except Exception as exc:
+        health = {
+            "market_id": meta.market_id,
+            "ok": False,
+            "message": "Adapter health check failed.",
+            "error_type": type(exc).__name__,
+            "adapter": "",
+            "capabilities": meta.capabilities.to_dict(),
+        }
+    credential_sources = health.get("credential_sources") if isinstance(health.get("credential_sources"), list) else []
+    credential_env_vars = [str(value) for value in settings.get("credential_env_vars") or []]
+    return {
+        "market_id": meta.market_id,
+        "display_name": meta.display_name,
+        "enabled": bool(market_cfg and market_cfg.enabled),
+        "default_enabled": bool(meta.default_enabled),
+        "homepage_url": meta.homepage_url,
+        "description": meta.description,
+        "capabilities": meta.capabilities.to_dict(),
+        "enabled_capabilities": enabled_capabilities(meta.capabilities),
+        "settings": sanitize_settings(settings),
+        "safety": market_safety_payload(settings, bool(market_cfg and market_cfg.enabled)),
+        "health": health,
+        "status_text": market_status_text(meta, bool(market_cfg and market_cfg.enabled), health, settings),
+        "credential_env_vars": credential_env_vars,
+        "credential_sources": credential_sources,
+        "credential_summary": ", ".join(
+            f"{str(item.get('name') or 'credential')} from {str(item.get('source') or 'configured')}"
+            for item in credential_sources
+            if isinstance(item, dict)
+        )
+        or "none detected",
+    }
+
+
+def markets_payload(cfg: AppConfig, registry: Optional[AdapterRegistry] = None) -> Dict[str, Any]:
+    registry = registry or build_default_registry()
+    markets = [market_health_payload(meta, cfg, registry) for meta in MARKET_CATALOG]
+    return {
+        "selected_market_id": cfg.selected_market_id,
+        "markets": markets,
+        "counts": {
+            "total": len(markets),
+            "enabled": sum(1 for market in markets if market["enabled"]),
+            "implemented": sum(1 for market in markets if any(market["capabilities"].values())),
+        },
+    }
+
+
+def live_safety_payload(
+    cfg: AppConfig,
+    registry: Optional[AdapterRegistry] = None,
+    market_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    registry = registry or build_default_registry()
+    normalized = str(market_id or cfg.selected_market_id or "").strip().lower()
+    meta = next((item for item in MARKET_CATALOG if item.market_id == normalized), None)
+    if meta is None:
+        raise ValueError(f"Unknown market id: {normalized}")
+
+    market_cfg = cfg.markets.get(normalized)
+    settings = dict(market_cfg.settings) if market_cfg else {}
+    enabled = bool(market_cfg and market_cfg.enabled)
+    safety = market_safety_payload(settings, enabled)
+    status = market_live_status(meta.capabilities, settings)
+    blockers: List[str] = []
+    if not enabled:
+        blockers.append("market disabled")
+    if not meta.capabilities.live_trading:
+        blockers.append("live trading unsupported")
+    if meta.capabilities.live_trading and not safety["live_trading_enabled"]:
+        blockers.append("live trading disabled")
+    if safety["live_trading_kill_switch"]:
+        blockers.append("kill switch active")
+    if meta.capabilities.live_trading and safety["live_trading_enabled"] and not safety["live_trading_confirmed"]:
+        blockers.append("acknowledgement required")
+
+    if enabled and status == "armed":
+        tone = "good"
+    elif blockers:
+        tone = "warn"
+    else:
+        tone = "neutral"
+
+    return {
+        "selected_market_id": normalized,
+        "market": market_health_payload(meta, cfg, registry),
+        "status": status,
+        "tone": tone,
+        "blockers": blockers,
+        "can_preflight": bool(enabled and meta.capabilities.live_trading),
+        "controls": safety,
+        "redaction": {
+            "sensitive_key_fragments": list(SENSITIVE_SETTING_FRAGMENTS),
+            "audit_payloads_redacted": True,
+        },
+    }
+
+
+def format_live_preflight(preflight: Mapping[str, Any]) -> str:
+    preview = str(preflight.get("dry_run_preview") or "Live order preflight passed.")
+    notional = preflight.get("approx_notional")
+    max_notional = preflight.get("max_notional")
+    warnings = preflight.get("warnings") if isinstance(preflight.get("warnings"), list) else []
+
+    parts = [f"Preflight OK: {preview}"]
+    if isinstance(notional, (int, float)):
+        parts.append(f"notional~{float(notional):g}")
+    if isinstance(max_notional, (int, float)):
+        parts.append(f"max_notional={float(max_notional):g}")
+    if warnings:
+        parts.append("warnings=" + ",".join(str(item) for item in warnings))
+    return "; ".join(parts)
+
+
+def live_order_audit_payload(order: PaperOrderRequest) -> Dict[str, Any]:
+    return {
+        "market_id": order.market_id,
+        "contract_id": order.contract_id,
+        "side": order.side,
+        "size": order.size,
+        "limit_price": order.limit_price,
+        "approx_notional": order.size * float(order.limit_price) if order.limit_price is not None else order.size,
+        "metadata_keys": sorted(str(key) for key in order.metadata.keys()),
+    }
+
+
+def live_preflight_payload(cfg: AppConfig, registry: AdapterRegistry, payload: Mapping[str, Any]) -> Dict[str, Any]:
+    order = paper_order_from_payload(payload)
+    response: Dict[str, Any] = {
+        "ok": False,
+        "blocked": True,
+        "order": live_order_audit_payload(order),
+        "preflight": None,
+        "message": "",
+        "live_safety": live_safety_payload(cfg, registry, order.market_id),
+    }
+    try:
+        require_market_enabled(cfg, order.market_id, "live preflight preview")
+        adapter = adapter_for_market(cfg, order.market_id, registry)
+        if not adapter.capabilities.live_trading:
+            raise UnsupportedFeatureError(
+                adapter.market_id,
+                "live_trading",
+                f"{adapter.display_name} does not support live trading in this app.",
+            )
+        preflight = sanitize_audit_value(adapter.preflight_live_order(order, feature_name="live preflight preview"))
+    except Exception as exc:
+        response["message"] = f"Live preflight blocked: {exc}"
+        response["error"] = str(exc)
+        response["live_safety"] = live_safety_payload(cfg, registry, order.market_id)
+        return response
+
+    response.update(
+        {
+            "ok": True,
+            "blocked": False,
+            "preflight": preflight,
+            "message": format_live_preflight(preflight),
+            "live_safety": live_safety_payload(cfg, registry, order.market_id),
+        }
+    )
+    return response
+
+
+def paper_payload(
+    cfg: AppConfig,
+    marks: Optional[Mapping[Tuple[str, str], Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    positions = paper_position_rows(cfg.paper_trades)
+    active_marks = _paper_marks_for_rows(marks or {}, positions)
+    marked_positions = []
+    for row in positions:
+        key = (str(row["market_id"]), str(row["contract_id"]))
+        mark = active_marks.get(key, {})
+        unrealized = _paper_position_unrealized(row, mark)
+        marked_positions.append(
+            {
+                **row,
+                "mark_price": _safe_float(mark.get("mark_price"), None),
+                "mark_source": str(mark.get("source") or ""),
+                "marked_at": _safe_float(mark.get("marked_at"), None),
+                "unrealized": unrealized,
+            }
+        )
+    history = [record.to_dict() for record in cfg.paper_trades]
+    return {
+        "summary": paper_position_summary(positions, active_marks),
+        "positions": marked_positions,
+        "history": history,
+        "counts": {
+            "history": len(history),
+            "accepted": sum(1 for record in cfg.paper_trades if record.accepted),
+            "rejected": sum(1 for record in cfg.paper_trades if not record.accepted),
+        },
+    }
+
+
+def config_payload(cfg: AppConfig) -> Dict[str, Any]:
+    return {
+        "selected_market_id": cfg.selected_market_id,
+        "theme": cfg.theme,
+        "alerts": [alert.to_dict() for alert in cfg.alerts],
+        "wallets": [wallet.to_dict() for wallet in cfg.wallets],
+        "copytrading": cfg.copytrading.to_dict(),
+    }
+
+
+def health_payload(config_path: Path = DEFAULT_CONFIG_PATH, frontend_dir: Path = DEFAULT_FRONTEND_DIR) -> Dict[str, Any]:
+    frontend_index = frontend_dir / "index.html"
+    return {
+        "status": "ok",
+        "api_version": API_VERSION,
+        "mode": "parallel",
+        "python_gui_available": True,
+        "python_gui_command": PYTHON_GUI_COMMAND,
+        "python_gui_script": PYTHON_GUI_SCRIPT,
+        "tkinter_fallback": f"{PYTHON_GUI_SCRIPT} or {PYTHON_GUI_COMMAND}",
+        "react_gui": "parallel",
+        "react_dev_command": REACT_DEV_COMMAND,
+        "react_dev_manual_command": REACT_DEV_MANUAL_COMMAND,
+        "react_build_command": REACT_BUILD_COMMAND,
+        "react_prod_command": REACT_PROD_COMMAND,
+        "config_path": str(config_path),
+        "frontend_dist": str(frontend_dir),
+        "frontend_build_available": frontend_index.exists(),
+        "routes": API_ROUTES,
+    }
+
+
+def app_state_payload(
+    cfg: AppConfig,
+    config_path: Path = DEFAULT_CONFIG_PATH,
+    frontend_dir: Path = DEFAULT_FRONTEND_DIR,
+    paper_marks: Optional[Mapping[Tuple[str, str], Dict[str, Any]]] = None,
+    registry: Optional[AdapterRegistry] = None,
+    alert_price_state: Optional[Mapping[Tuple[str, str], Mapping[str, Any]]] = None,
+    wallet_polling: Optional[Mapping[str, Any]] = None,
+    recent_wallet_activity: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    registry = registry or build_default_registry()
+    return {
+        "health": health_payload(config_path, frontend_dir),
+        "config": config_payload(cfg),
+        "markets": markets_payload(cfg, registry),
+        "alerts": alerts_payload(cfg, registry, alert_price_state),
+        "wallets": wallets_payload(cfg, wallet_polling, recent_wallet_activity),
+        "copy": copy_payload(cfg, registry),
+        "live_safety": live_safety_payload(cfg, registry),
+        "paper": paper_payload(cfg, paper_marks),
+    }
+
+
+def apply_config_patch(cfg: AppConfig, payload: Dict[str, Any]) -> AppConfig:
+    if "selected_market_id" in payload:
+        selected_market_id = str(payload["selected_market_id"] or "").strip().lower()
+        if selected_market_id not in MARKET_IDS:
+            raise ValueError(f"Unknown market id: {selected_market_id}")
+        cfg.selected_market_id = selected_market_id
+    if "theme" in payload:
+        theme = str(payload["theme"] or "").strip().lower()
+        if theme not in {"light", "dark"}:
+            raise ValueError("theme must be light or dark.")
+        cfg.theme = "dark" if theme == "dark" else "light"
+    return cfg
+
+
+def apply_market_patch(cfg: AppConfig, market_id: str, payload: Dict[str, Any]) -> AppConfig:
+    normalized = str(market_id or "").strip().lower()
+    if normalized not in cfg.markets:
+        raise ValueError(f"Unknown market id: {normalized}")
+    market_cfg = cfg.markets[normalized]
+    if "enabled" in payload:
+        market_cfg.enabled = bool(payload["enabled"])
+    settings = dict(market_cfg.settings)
+    for key in ("live_trading_enabled", "live_trading_confirmed", "live_trading_kill_switch"):
+        if key in payload:
+            settings[key] = bool(payload[key])
+    if "live_trading_max_size" in payload:
+        max_size = optional_positive_float(payload["live_trading_max_size"], "Max order size")
+        if max_size is None:
+            settings.pop("live_trading_max_size", None)
+        else:
+            settings["live_trading_max_size"] = max_size
+    if "live_trading_max_notional" in payload:
+        max_notional = optional_positive_float(payload["live_trading_max_notional"], "Max notional")
+        if max_notional is None:
+            settings.pop("live_trading_max_notional", None)
+        else:
+            settings["live_trading_max_notional"] = max_notional
+    if "settings" in payload:
+        raw_settings = payload["settings"]
+        if not isinstance(raw_settings, dict):
+            raise ValueError("settings must be an object.")
+        settings.update(raw_settings)
+    market_cfg.settings = settings
+    return cfg
+
+
+def require_market_enabled(cfg: AppConfig, market_id: str, feature: str) -> None:
+    market_cfg = cfg.markets.get(market_id)
+    if not market_cfg or not market_cfg.enabled:
+        raise ValueError(f"{market_id} is disabled in local market config. Enable it before using {feature}.")
+
+
+def adapter_for_market(cfg: AppConfig, market_id: str, registry: AdapterRegistry):
+    market_cfg = cfg.markets.get(market_id)
+    settings = market_cfg.settings if market_cfg else {}
+    return registry.create(market_id, settings)
+
+
+def find_alert(cfg: AppConfig, alert_id: str) -> PriceAlert:
+    normalized = str(alert_id or "").strip()
+    for alert in cfg.alerts:
+        if alert.id == normalized:
+            return alert
+    raise ValueError(f"Unknown alert id: {normalized}")
+
+
+def alert_status(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    alert: PriceAlert,
+    price_state: Optional[Mapping[Tuple[str, str], Mapping[str, Any]]] = None,
+) -> Dict[str, str]:
+    market_id = _alert_market_id(alert)
+    market_cfg = cfg.markets.get(market_id)
+    if not alert.enabled:
+        return {"label": "triggered/disabled" if alert.triggered else "disabled", "tone": "neutral"}
+    if not market_cfg or not market_cfg.enabled:
+        return {"label": "market disabled", "tone": "warn"}
+    try:
+        adapter = adapter_for_market(cfg, market_id, registry)
+    except Exception as exc:
+        return {"label": f"adapter unavailable: {exc}", "tone": "warn"}
+    if not adapter.capabilities.alerts:
+        return {"label": "alerts unsupported", "tone": "warn"}
+    if not adapter.capabilities.price_reading:
+        return {"label": "price feed unavailable", "tone": "warn"}
+    if alert.triggered:
+        return {"label": "triggered", "tone": "warn"}
+    if _alert_current_value(alert, price_state) is None:
+        return {"label": f"waiting for {alert.source}", "tone": "neutral"}
+    return {"label": "armed", "tone": "good"}
+
+
+def alert_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    alert: PriceAlert,
+    price_state: Optional[Mapping[Tuple[str, str], Mapping[str, Any]]] = None,
+) -> Dict[str, Any]:
+    market_id = _alert_market_id(alert)
+    values = _alert_values(alert, price_state)
+    return {
+        **alert.to_dict(),
+        "market_id": market_id,
+        "contract_id": alert.token_id,
+        "values": values,
+        "current_value": _alert_current_value(alert, price_state),
+        "status": alert_status(cfg, registry, alert, price_state),
+    }
+
+
+def alerts_payload(
+    cfg: AppConfig,
+    registry: Optional[AdapterRegistry] = None,
+    price_state: Optional[Mapping[Tuple[str, str], Mapping[str, Any]]] = None,
+) -> Dict[str, Any]:
+    registry = registry or build_default_registry()
+    alerts = [alert_payload(cfg, registry, alert, price_state) for alert in cfg.alerts]
+    return {
+        "alerts": alerts,
+        "source_options": ALERT_SOURCE_OPTIONS,
+        "counts": {
+            "total": len(alerts),
+            "enabled": sum(1 for alert in cfg.alerts if alert.enabled),
+            "triggered": sum(1 for alert in cfg.alerts if alert.triggered),
+        },
+    }
+
+
+def alert_from_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    payload: Mapping[str, Any],
+    existing: Optional[PriceAlert] = None,
+) -> PriceAlert:
+    market_id = str(payload.get("market_id") or (existing.market_id if existing else "") or "").strip().lower()
+    token_id = str(
+        payload.get("contract_id")
+        or payload.get("token_id")
+        or (existing.token_id if existing else "")
+        or ""
+    ).strip()
+    label = str(payload.get("label") if "label" in payload else (existing.label if existing else "")).strip()
+    direction = str(payload.get("direction") or (existing.direction if existing else "above")).strip().lower()
+    source = str(payload.get("source") or (existing.source if existing else "last_trade")).strip().lower()
+    threshold = _safe_float(payload.get("threshold") if "threshold" in payload else (existing.threshold if existing else None), None)
+
+    if not market_id:
+        raise ValueError("market_id is required.")
+    if market_id not in MARKET_IDS:
+        raise ValueError(f"Unknown market id: {market_id}")
+    if not token_id:
+        raise ValueError("contract_id is required.")
+    if direction not in ALERT_DIRECTIONS:
+        raise ValueError("direction must be above or below.")
+    if source not in ALERT_SOURCE_IDS:
+        raise ValueError("source must be one of: last_trade, midpoint, best_bid, best_ask.")
+    if threshold is None or threshold < 0 or threshold > 1:
+        raise ValueError("threshold must be a number between 0 and 1.")
+
+    once = bool_from_setting(payload.get("once"), existing.once if existing else True)
+    enabled = bool_from_setting(payload.get("enabled"), existing.enabled if existing else True)
+    label = label or f"Alert {token_id[:8]}"
+    watched_change_requested = existing is None or any(
+        key in payload for key in ("market_id", "contract_id", "token_id", "direction", "threshold", "source")
+    )
+    if existing is None or enabled or watched_change_requested:
+        require_market_enabled(cfg, market_id, "price alerts")
+        adapter = adapter_for_market(cfg, market_id, registry)
+        if not adapter.capabilities.alerts:
+            raise UnsupportedFeatureError(market_id, "alerts", f"{adapter.display_name} does not support price alerts.")
+        if not adapter.capabilities.price_reading:
+            raise UnsupportedFeatureError(market_id, "price_reading", f"{adapter.display_name} has no price feed for alerts.")
+
+    if existing is None:
+        return PriceAlert(
+            token_id=token_id,
+            label=label,
+            direction=direction,  # type: ignore[arg-type]
+            threshold=float(threshold),
+            source=source,  # type: ignore[arg-type]
+            once=once,
+            enabled=enabled,
+            market_id=market_id,
+        )
+
+    watched_before = (existing.market_id, existing.token_id, existing.direction, existing.threshold, existing.source)
+    existing.market_id = market_id
+    existing.token_id = token_id
+    existing.label = label
+    existing.direction = direction  # type: ignore[assignment]
+    existing.threshold = float(threshold)
+    existing.source = source  # type: ignore[assignment]
+    existing.once = once
+    existing.enabled = enabled
+    watched_after = (existing.market_id, existing.token_id, existing.direction, existing.threshold, existing.source)
+    if watched_after != watched_before:
+        existing.last_value = None
+        existing.triggered = False
+    return existing
+
+
+def evaluate_alerts_for_contract(
+    cfg: AppConfig,
+    market_id: str,
+    contract_id: str,
+    price_state: Mapping[Tuple[str, str], Mapping[str, Any]],
+) -> List[str]:
+    normalized_market, normalized_contract = _alert_price_state_key(market_id, contract_id)
+    values = dict(price_state.get((normalized_market, normalized_contract), {}))
+    messages: List[str] = []
+    for alert in cfg.alerts:
+        if not alert.enabled:
+            continue
+        if _alert_market_id(alert) != normalized_market or alert.token_id != normalized_contract:
+            continue
+        value = _safe_float(values.get(str(alert.source)), None)
+        if value is None:
+            continue
+        previous = alert.last_value
+        alert.last_value = float(value)
+        condition_now = _alert_condition(alert, float(value))
+        condition_previous = None
+        if previous is not None:
+            condition_previous = _alert_condition(alert, float(previous))
+        crossed = condition_now and (condition_previous is False or condition_previous is None)
+        if crossed and not alert.triggered:
+            alert.triggered = True
+            messages.append(
+                f"{normalized_market}:{alert.label} {alert.source}={float(value):g} crossed {alert.direction} {float(alert.threshold):g}"
+            )
+            if alert.once:
+                alert.enabled = False
+        if not alert.once and alert.triggered and not condition_now:
+            alert.triggered = False
+    return messages
+
+
+def refresh_alert_price(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    alert: PriceAlert,
+    price_state: Dict[Tuple[str, str], Dict[str, Any]],
+) -> Dict[str, Any]:
+    market_id = _alert_market_id(alert)
+    require_market_enabled(cfg, market_id, "alert price refresh")
+    adapter = adapter_for_market(cfg, market_id, registry)
+    if not adapter.capabilities.alerts:
+        raise UnsupportedFeatureError(market_id, "alerts", f"{adapter.display_name} does not support price alerts.")
+    if not adapter.capabilities.price_reading:
+        raise UnsupportedFeatureError(market_id, "price_reading", f"{adapter.display_name} has no price feed for alerts.")
+    snapshot = adapter.get_price(alert.token_id)
+    key = _alert_price_state_key(market_id, alert.token_id)
+    price_state[key] = price_snapshot_values(snapshot)
+    messages = evaluate_alerts_for_contract(cfg, market_id, alert.token_id, price_state)
+    return {
+        "market_id": key[0],
+        "contract_id": key[1],
+        "values": price_state[key],
+        "messages": messages,
+        "source": snapshot.source,
+    }
+
+
+def refresh_all_alert_prices(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    price_state: Dict[Tuple[str, str], Dict[str, Any]],
+) -> Dict[str, Any]:
+    refreshed: List[Dict[str, Any]] = []
+    problems: List[str] = []
+    seen: set[Tuple[str, str]] = set()
+    for alert in cfg.alerts:
+        if not alert.enabled:
+            continue
+        key = _alert_price_state_key(_alert_market_id(alert), alert.token_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            refreshed.append(refresh_alert_price(cfg, registry, alert, price_state))
+        except Exception as exc:
+            problems.append(f"{key[0]}:{key[1]}: {exc}")
+    return {"refreshed": refreshed, "problems": problems}
+
+
+def delete_alert(cfg: AppConfig, alert_id: str) -> PriceAlert:
+    alert = find_alert(cfg, alert_id)
+    cfg.alerts = [item for item in cfg.alerts if item.id != alert.id]
+    return alert
+
+
+def require_polymarket_selected(cfg: AppConfig, feature: str) -> None:
+    if str(cfg.selected_market_id or "").strip().lower() != "polymarket":
+        raise ValueError(f"{feature} is only available when the selected market is polymarket.")
+    require_market_enabled(cfg, "polymarket", feature)
+
+
+def wallet_payload(wallet: WalletWatch) -> Dict[str, Any]:
+    return {
+        **wallet.to_dict(),
+        "seen_count": len(wallet.seen_activity_keys or []),
+    }
+
+
+def wallet_activity_payload(wallet: WalletWatch, item: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": activity_key(item),
+        "wallet_id": wallet.id,
+        "wallet": wallet.wallet,
+        "display_name": wallet.display_name,
+        "timestamp": int(item.get("timestamp") or 0),
+        "transaction_hash": str(item.get("transactionHash") or item.get("transaction_hash") or ""),
+        "proxy_wallet": str(item.get("proxyWallet") or ""),
+        "side": str(item.get("side") or ""),
+        "asset": str(item.get("asset") or ""),
+        "price": _safe_float(item.get("price"), None),
+        "size": _safe_float(item.get("size"), None),
+        "slug": str(item.get("slug") or ""),
+        "outcome": str(item.get("outcome") or ""),
+        "pseudonym": str(item.get("pseudonym") or item.get("name") or ""),
+        "raw": dict(item),
+    }
+
+
+def wallets_payload(
+    cfg: AppConfig,
+    polling: Optional[Mapping[str, Any]] = None,
+    recent_activity: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    enabled_wallets = [wallet for wallet in cfg.wallets if wallet.enabled]
+    return {
+        "wallets": [wallet_payload(wallet) for wallet in cfg.wallets],
+        "counts": {
+            "total": len(cfg.wallets),
+            "enabled": len(enabled_wallets),
+        },
+        "polling": {
+            "mode": "manual",
+            "poll_interval_seconds": float((polling or {}).get("poll_interval_seconds") or 10.0),
+            "last_polled_at": _safe_float((polling or {}).get("last_polled_at"), None),
+            "last_message": str((polling or {}).get("last_message") or "Not polled yet."),
+        },
+        "recent_activity": list(recent_activity or []),
+    }
+
+
+def find_wallet(cfg: AppConfig, wallet_id: str) -> WalletWatch:
+    normalized = str(wallet_id or "").strip()
+    for wallet in cfg.wallets:
+        if wallet.id == normalized:
+            return wallet
+    raise ValueError(f"Unknown wallet id: {normalized}")
+
+
+def wallet_from_payload(payload: Mapping[str, Any], existing: Optional[WalletWatch] = None) -> WalletWatch:
+    raw_wallet = str(payload.get("wallet") if "wallet" in payload else (existing.wallet if existing else "")).strip()
+    wallet = normalize_wallet(raw_wallet)
+    if not wallet:
+        raise ValueError("wallet must be a valid 0x wallet/proxyWallet address.")
+    display_name = str(
+        payload.get("display_name") if "display_name" in payload else (existing.display_name if existing else "")
+    ).strip()
+    enabled = bool_from_setting(payload.get("enabled"), existing.enabled if existing else True)
+    only_market_slug = str(
+        payload.get("only_market_slug")
+        if "only_market_slug" in payload
+        else (existing.only_market_slug if existing else "")
+    ).strip()
+    if existing is None:
+        return WalletWatch(wallet=wallet, display_name=display_name or f"{wallet[:10]}...", enabled=enabled, only_market_slug=only_market_slug)
+    existing.wallet = wallet
+    existing.display_name = display_name
+    existing.enabled = enabled
+    existing.only_market_slug = only_market_slug
+    return existing
+
+
+def add_wallet_watch(cfg: AppConfig, payload: Mapping[str, Any]) -> WalletWatch:
+    require_polymarket_selected(cfg, "Wallet tracking")
+    wallet = wallet_from_payload(payload)
+    if any(item.wallet == wallet.wallet for item in cfg.wallets):
+        raise ValueError("This wallet is already being tracked.")
+    cfg.wallets.append(wallet)
+    return wallet
+
+
+def update_wallet_watch(cfg: AppConfig, wallet_id: str, payload: Mapping[str, Any]) -> WalletWatch:
+    wallet = find_wallet(cfg, wallet_id)
+    wallet_from_payload(payload, existing=wallet)
+    duplicates = [item for item in cfg.wallets if item.wallet == wallet.wallet and item.id != wallet.id]
+    if duplicates:
+        raise ValueError("This wallet is already being tracked.")
+    return wallet
+
+
+def delete_wallet_watch(cfg: AppConfig, wallet_id: str) -> WalletWatch:
+    wallet = find_wallet(cfg, wallet_id)
+    cfg.wallets = [item for item in cfg.wallets if item.id != wallet.id]
+    return wallet
+
+
+def copy_payload(
+    cfg: AppConfig,
+    registry: Optional[AdapterRegistry] = None,
+) -> Dict[str, Any]:
+    registry = registry or build_default_registry()
+    market_cfg = cfg.markets.get("polymarket")
+    settings = market_cfg.settings if market_cfg else {}
+    status = "simulation"
+    if not cfg.copytrading.enabled:
+        status = "disabled"
+    elif cfg.copytrading.live:
+        status = "live requested"
+    live_gate = {
+        "market_enabled": bool(market_cfg.enabled) if market_cfg else False,
+        "live_trading_enabled": bool_from_setting(settings.get("live_trading_enabled"), False),
+        "live_trading_confirmed": bool_from_setting(settings.get("live_trading_confirmed"), False)
+        or bool_from_setting(settings.get("live_trading_acknowledged"), False),
+        "live_trading_kill_switch": bool_from_setting(settings.get("live_trading_kill_switch"), False)
+        or bool_from_setting(settings.get("live_trading_paused"), False),
+        "max_size": _safe_float(settings.get("live_trading_max_size"), None),
+        "max_notional": _safe_float(settings.get("live_trading_max_notional"), None),
+    }
+    try:
+        adapter = adapter_for_market(cfg, "polymarket", registry)
+        capability = adapter.capabilities.copy_trading
+        adapter_name = adapter.display_name
+    except Exception:
+        capability = False
+        adapter_name = "polymarket"
+    return {
+        "settings": cfg.copytrading.to_dict(),
+        "wallet_choices": [wallet.wallet for wallet in cfg.wallets],
+        "follow_wallet_tracked": any(wallet.wallet == cfg.copytrading.follow_wallet for wallet in cfg.wallets),
+        "status": status,
+        "simulation_first": not cfg.copytrading.live,
+        "copy_trading_supported": bool(capability),
+        "adapter": adapter_name,
+        "live_gate": live_gate,
+    }
+
+
+def copy_settings_from_payload(payload: Mapping[str, Any], existing: CopyTradeSettings) -> CopyTradeSettings:
+    follow_wallet_raw = str(payload.get("follow_wallet", existing.follow_wallet) or "").strip().lower()
+    follow_wallet = ""
+    if follow_wallet_raw:
+        normalized = normalize_wallet(follow_wallet_raw)
+        if not normalized:
+            raise ValueError("follow_wallet must be blank or a valid 0x wallet/proxyWallet address.")
+        follow_wallet = normalized
+    scale = _safe_float(payload.get("scale", existing.scale), None)
+    max_usdc = _safe_float(payload.get("max_usdc_per_trade", existing.max_usdc_per_trade), None)
+    slippage = _safe_float(payload.get("slippage", existing.slippage), None)
+    if scale is None or scale <= 0:
+        raise ValueError("scale must be a positive number.")
+    if max_usdc is None or max_usdc <= 0:
+        raise ValueError("max_usdc_per_trade must be a positive number.")
+    if slippage is None or slippage < 0 or slippage > 1:
+        raise ValueError("slippage must be a number between 0 and 1.")
+    return CopyTradeSettings(
+        enabled=bool_from_setting(payload.get("enabled"), existing.enabled),
+        live=bool_from_setting(payload.get("live"), existing.live),
+        follow_wallet=follow_wallet,
+        scale=float(scale),
+        max_usdc_per_trade=float(max_usdc),
+        slippage=float(slippage),
+        allow_sells=bool_from_setting(payload.get("allow_sells"), existing.allow_sells),
+    )
+
+
+def apply_copy_settings_patch(cfg: AppConfig, payload: Mapping[str, Any]) -> CopyTradeSettings:
+    require_polymarket_selected(cfg, "Copy trading settings")
+    cfg.copytrading = copy_settings_from_payload(payload, cfg.copytrading)
+    return cfg.copytrading
+
+
+def copy_trade_preview_from_activity(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    activity: Mapping[str, Any],
+) -> Dict[str, Any]:
+    if str(cfg.selected_market_id or "").strip().lower() != "polymarket":
+        return {"status": "skipped", "reason": "selected market is not polymarket"}
+    settings = cfg.copytrading
+    if not settings.enabled:
+        return {"status": "skipped", "reason": "copy trading disabled"}
+    if not settings.follow_wallet:
+        return {"status": "skipped", "reason": "follow wallet is not set"}
+    if str(activity.get("proxyWallet") or "").strip().lower() != settings.follow_wallet.lower():
+        return {"status": "skipped", "reason": "activity wallet does not match follow wallet"}
+    side = str(activity.get("side") or "").strip().upper()
+    if side not in {"BUY", "SELL"}:
+        return {"status": "skipped", "reason": "activity side is not BUY or SELL"}
+    if side == "SELL" and not settings.allow_sells:
+        return {"status": "skipped", "reason": "SELL copying disabled"}
+    token_id = str(activity.get("asset") or "").strip()
+    if not token_id:
+        return {"status": "skipped", "reason": "activity has no asset token"}
+    raw_size = _safe_float(activity.get("size"), 0.0) or 0.0
+    raw_price = _safe_float(activity.get("price"), None)
+    size = max(0.0, raw_size * float(settings.scale))
+    adapter = adapter_for_market(cfg, "polymarket", registry)
+    best_bid = best_ask = None
+    try:
+        orderbook = adapter.get_orderbook(token_id)
+        best_bid = orderbook.bids[0].price if orderbook.bids else None
+        best_ask = orderbook.asks[0].price if orderbook.asks else None
+    except Exception:
+        pass
+    slippage = max(0.0, min(float(settings.slippage), 1.0))
+    if side == "BUY":
+        reference_price = best_ask if best_ask is not None else raw_price
+        limit_price = min(1.0, float(reference_price if reference_price is not None else 0.99) + slippage)
+    else:
+        reference_price = best_bid if best_bid is not None else raw_price
+        limit_price = max(0.0, float(reference_price if reference_price is not None else 0.01) - slippage)
+    max_usdc = max(0.01, float(settings.max_usdc_per_trade))
+    capped = False
+    if limit_price > 0:
+        max_shares = max_usdc / limit_price
+        if size > max_shares:
+            size = max_shares
+            capped = True
+    if size <= 0:
+        return {"status": "skipped", "reason": "computed copy size is zero"}
+    order = PaperOrderRequest(
+        market_id="polymarket",
+        contract_id=token_id,
+        side=side,
+        size=size,
+        limit_price=limit_price,
+        metadata={"source": "copy_trading", "tif": "FOK", "activity_key": activity_key(activity)},
+    )
+    result: Dict[str, Any] = {
+        "status": "live_preflight" if settings.live else "simulation",
+        "live": bool(settings.live),
+        "would_place_order": bool(settings.live),
+        "order": {
+            "market_id": order.market_id,
+            "contract_id": order.contract_id,
+            "side": order.side,
+            "size": order.size,
+            "limit_price": order.limit_price,
+            "approx_notional": order.size * float(order.limit_price or 0.0),
+        },
+        "pricing": {
+            "raw_price": raw_price,
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "slippage": slippage,
+            "capped_by_max_usdc": capped,
+        },
+    }
+    if settings.live:
+        try:
+            result["preflight"] = adapter.preflight_live_order(order, feature_name="live copy trading")
+            result["blocked"] = False
+            result["message"] = "Live copy preflight passed. No order was placed."
+        except Exception as exc:
+            result["blocked"] = True
+            result["message"] = f"Live copy preflight blocked: {exc}"
+    else:
+        result["blocked"] = False
+        result["message"] = (
+            f"Simulation: would {side} token={token_id[:10]}... size={size:.4f} "
+            f"limit={limit_price:.4f}; no order placed."
+        )
+    return result
+
+
+def copy_preview_payload(cfg: AppConfig, registry: AdapterRegistry, payload: Mapping[str, Any]) -> Dict[str, Any]:
+    require_polymarket_selected(cfg, "Copy trading preview")
+    activity = {
+        "proxyWallet": payload.get("proxyWallet") or payload.get("proxy_wallet") or cfg.copytrading.follow_wallet,
+        "asset": payload.get("asset") or payload.get("token_id") or "",
+        "side": payload.get("side") or "BUY",
+        "size": payload.get("size") if "size" in payload else 0,
+        "price": payload.get("price") if "price" in payload else None,
+        "timestamp": int(time.time()),
+        "slug": payload.get("slug") or "",
+        "outcome": payload.get("outcome") or "",
+    }
+    preview = copy_trade_preview_from_activity(cfg, registry, activity)
+    return {"preview": preview, "copy": copy_payload(cfg, registry)}
+
+
+def poll_wallet_activity(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    recent_activity: List[Dict[str, Any]],
+    *,
+    limit: int = 25,
+) -> Dict[str, Any]:
+    require_polymarket_selected(cfg, "Wallet polling")
+    emitted: List[Dict[str, Any]] = []
+    problems: List[str] = []
+    for wallet in list(cfg.wallets):
+        if not wallet.enabled:
+            continue
+        try:
+            items = data_api.get_activity(wallet.wallet, limit=limit, types=["TRADE"])
+        except Exception as exc:
+            problems.append(f"{wallet.wallet}: {exc}")
+            continue
+        seen_keys = set(wallet.seen_activity_keys or [])
+        new_items: List[Tuple[str, Mapping[str, Any]]] = []
+        for item in reversed(items):
+            key = activity_key(item)
+            if key in seen_keys:
+                continue
+            timestamp = int(item.get("timestamp") or 0)
+            tx = str(item.get("transactionHash") or "")
+            if timestamp > (wallet.last_seen_ts or 0):
+                new_items.append((key, item))
+                seen_keys.add(key)
+            elif timestamp == (wallet.last_seen_ts or 0) and (not tx or tx != (wallet.last_seen_tx or "")):
+                new_items.append((key, item))
+                seen_keys.add(key)
+        for key, item in new_items:
+            if wallet.only_market_slug and str(item.get("slug") or "") != wallet.only_market_slug:
+                continue
+            wallet.last_seen_ts = max(wallet.last_seen_ts or 0, int(item.get("timestamp") or 0))
+            wallet.last_seen_tx = str(item.get("transactionHash") or wallet.last_seen_tx or "")
+            wallet.seen_activity_keys.append(key)
+            if len(wallet.seen_activity_keys) > 200:
+                wallet.seen_activity_keys = wallet.seen_activity_keys[-200:]
+            activity = wallet_activity_payload(wallet, item)
+            activity["copy_preview"] = copy_trade_preview_from_activity(cfg, registry, item)
+            emitted.insert(0, activity)
+            recent_activity.insert(0, activity)
+    del recent_activity[100:]
+    return {"activity": emitted, "problems": problems, "polled_wallets": sum(1 for wallet in cfg.wallets if wallet.enabled)}
+
+
+def paper_order_from_payload(payload: Mapping[str, Any]) -> PaperOrderRequest:
+    market_id = str(payload.get("market_id") or "").strip().lower()
+    contract_id = str(payload.get("contract_id") or "").strip()
+    side = str(payload.get("side") or "").strip().upper()
+    if not market_id:
+        raise ValueError("market_id is required.")
+    if not contract_id:
+        raise ValueError("contract_id is required.")
+    if side not in {"BUY", "SELL", "BACK", "LAY"}:
+        raise ValueError("side must be BUY, SELL, BACK, or LAY.")
+    size = optional_positive_float(payload.get("size"), "Order size")
+    if size is None:
+        raise ValueError("Order size is required.")
+    limit_price = optional_positive_float(payload.get("limit_price"), "Limit price")
+    return PaperOrderRequest(
+        market_id=market_id,
+        contract_id=contract_id,
+        side=side,
+        size=size,
+        limit_price=limit_price,
+        metadata=dict(payload.get("metadata") or {}),
+    )
+
+
+def paper_order_impact(records: List[PaperTradeRecord], order: PaperOrderRequest) -> Dict[str, Any]:
+    current_row = next(
+        (
+            row
+            for row in paper_position_rows(records)
+            if row["market_id"] == order.market_id and row["contract_id"] == order.contract_id
+        ),
+        None,
+    )
+    current_net = float(current_row["net_size"]) if current_row else 0.0
+    current_notional = current_row.get("notional") if current_row else None
+    signed_size = _paper_order_signed_size(order)
+    projected_net = current_net + signed_size
+    order_notional = signed_size * float(order.limit_price) if order.limit_price is not None else None
+    projected_notional = (
+        float(current_notional) + float(order_notional)
+        if current_notional is not None and order_notional is not None
+        else None
+    )
+    projected_average = (
+        abs(projected_notional) / abs(projected_net)
+        if projected_notional is not None and projected_net != 0
+        else None
+    )
+    return {
+        "market_id": order.market_id,
+        "contract_id": order.contract_id,
+        "side": order.side,
+        "size": order.size,
+        "limit_price": order.limit_price,
+        "current_net": current_net,
+        "signed_size": signed_size,
+        "projected_net": projected_net,
+        "effect": _paper_order_effect(current_net, signed_size, projected_net),
+        "order_notional": order_notional,
+        "projected_notional": projected_notional,
+        "projected_average": projected_average,
+    }
+
+
+def format_paper_order_impact(impact: Mapping[str, Any]) -> str:
+    parts = [
+        f"Impact: {impact['market_id']}:{impact['contract_id']}",
+        f"{impact['side']} size={float(impact['size']):g}",
+        f"current_net={float(impact['current_net']):.4f}",
+        f"order_net={float(impact['signed_size']):.4f}",
+        f"projected_net={float(impact['projected_net']):.4f}",
+        f"effect={impact['effect']}",
+    ]
+    if impact.get("order_notional") is None:
+        parts.append("limit blank")
+    else:
+        parts.append(f"order_notional={float(impact['order_notional']):.4f}")
+    if impact.get("projected_notional") is not None:
+        parts.append(f"projected_notional={float(impact['projected_notional']):.4f}")
+    if impact.get("projected_average") is not None:
+        parts.append(f"projected_avg={float(impact['projected_average']):.4f}")
+    return "; ".join(parts)
+
+
+def serialize_price_snapshot(snapshot: Optional[PriceSnapshot]) -> Optional[Dict[str, Any]]:
+    if snapshot is None:
+        return None
+    midpoint = snapshot.midpoint
+    if midpoint is None and snapshot.bid is not None and snapshot.ask is not None:
+        midpoint = (float(snapshot.bid) + float(snapshot.ask)) / 2.0
+    return {
+        "market_id": snapshot.market_id,
+        "contract_id": snapshot.contract_id,
+        "last": snapshot.last,
+        "bid": snapshot.bid,
+        "ask": snapshot.ask,
+        "midpoint": midpoint,
+        "source": snapshot.source,
+    }
+
+
+def serialize_orderbook(orderbook: Optional[OrderBookSnapshot]) -> Optional[Dict[str, Any]]:
+    if orderbook is None:
+        return None
+    return {
+        "market_id": orderbook.market_id,
+        "contract_id": orderbook.contract_id,
+        "bids": [{"price": level.price, "size": level.size} for level in orderbook.bids],
+        "asks": [{"price": level.price, "size": level.size} for level in orderbook.asks],
+        "best_bid": orderbook.bids[0].price if orderbook.bids else None,
+        "best_ask": orderbook.asks[0].price if orderbook.asks else None,
+    }
+
+
+def paper_quote_payload(cfg: AppConfig, registry: AdapterRegistry, payload: Mapping[str, Any]) -> Dict[str, Any]:
+    market_id = str(payload.get("market_id") or "").strip().lower()
+    contract_id = str(payload.get("contract_id") or "").strip()
+    if not market_id:
+        raise ValueError("market_id is required.")
+    if not contract_id:
+        raise ValueError("contract_id is required.")
+    require_market_enabled(cfg, market_id, "paper quote")
+    adapter = adapter_for_market(cfg, market_id, registry)
+    if not (adapter.capabilities.price_reading or adapter.capabilities.orderbook_reading):
+        raise UnsupportedFeatureError(market_id, "price_reading", f"{adapter.display_name} does not support quote previews.")
+    snapshot = adapter.get_price(contract_id) if adapter.capabilities.price_reading else None
+    orderbook = adapter.get_orderbook(contract_id) if adapter.capabilities.orderbook_reading else None
+    price = serialize_price_snapshot(snapshot)
+    book = serialize_orderbook(orderbook)
+    best_bid = (book or {}).get("best_bid")
+    best_ask = (book or {}).get("best_ask")
+    if price:
+        best_bid = best_bid if best_bid is not None else price.get("bid")
+        best_ask = best_ask if best_ask is not None else price.get("ask")
+    return {
+        "market_id": market_id,
+        "contract_id": contract_id,
+        "display_name": adapter.display_name,
+        "price": price,
+        "orderbook": book,
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "suggested_limits": {
+            "BUY": best_ask,
+            "BACK": best_ask,
+            "SELL": best_bid,
+            "LAY": best_bid,
+        },
+        "message": f"Quote: {adapter.display_name} {contract_id}",
+    }
+
+
+def paper_quote_limit_payload(cfg: AppConfig, registry: AdapterRegistry, payload: Mapping[str, Any]) -> Dict[str, Any]:
+    side = str(payload.get("side") or "").strip().upper()
+    if side not in {"BUY", "SELL", "BACK", "LAY"}:
+        raise ValueError("side must be BUY, SELL, BACK, or LAY.")
+    quote = paper_quote_payload(cfg, registry, payload)
+    source = "best_ask" if side in {"BUY", "BACK"} else "best_bid"
+    limit_price = quote["best_ask"] if source == "best_ask" else quote["best_bid"]
+    if limit_price is None:
+        raise ValueError(f"No {source} is available for {side}.")
+    return {
+        "market_id": quote["market_id"],
+        "contract_id": quote["contract_id"],
+        "side": side,
+        "limit_price": float(limit_price),
+        "source": source,
+        "quote": quote,
+        "message": f"Loaded {source} limit {float(limit_price):g} for {side}.",
+    }
+
+
+def record_paper_trade(cfg: AppConfig, order: PaperOrderRequest, result: PaperOrderResult) -> PaperTradeRecord:
+    record = PaperTradeRecord(
+        market_id=order.market_id,
+        contract_id=order.contract_id,
+        side=order.side,
+        size=order.size,
+        limit_price=order.limit_price,
+        accepted=result.accepted,
+        message=result.message,
+        filled_size=result.filled_size,
+        average_price=result.average_price,
+        raw={"request": order.metadata, "result": result.raw},
+    )
+    cfg.paper_trades.insert(0, record)
+    if len(cfg.paper_trades) > 200:
+        cfg.paper_trades = cfg.paper_trades[:200]
+    return record
+
+
+def submit_paper_order(cfg: AppConfig, registry: AdapterRegistry, payload: Mapping[str, Any]) -> Dict[str, Any]:
+    order = paper_order_from_payload(payload)
+    require_market_enabled(cfg, order.market_id, "paper trading")
+    adapter = adapter_for_market(cfg, order.market_id, registry)
+    if not adapter.capabilities.paper_trading:
+        raise UnsupportedFeatureError(order.market_id, "paper_trading")
+    result = adapter.place_paper_order(order)
+    record = record_paper_trade(cfg, order, result)
+    return {
+        "order": {
+            "market_id": order.market_id,
+            "contract_id": order.contract_id,
+            "side": order.side,
+            "size": order.size,
+            "limit_price": order.limit_price,
+        },
+        "result": {
+            "market_id": result.market_id,
+            "contract_id": result.contract_id,
+            "accepted": result.accepted,
+            "message": result.message,
+            "filled_size": result.filled_size,
+            "average_price": result.average_price,
+        },
+        "record": record.to_dict(),
+    }
+
+
+def history_refill_payload(cfg: AppConfig, record_id: str) -> Dict[str, Any]:
+    for record in cfg.paper_trades:
+        if record.id == record_id:
+            return {
+                "market_id": record.market_id,
+                "contract_id": record.contract_id,
+                "side": record.side,
+                "size": record.size,
+                "limit_price": record.limit_price,
+                "message": f"Loaded paper history order: {record.market_id}:{record.contract_id} {record.side} size={record.size:g}",
+            }
+    raise ValueError("Paper history record was not found.")
+
+
+def position_close_side(records: List[PaperTradeRecord], market_id: str, contract_id: str, net_size: float) -> str:
+    matching_sides = [
+        str(record.side or "").upper()
+        for record in records
+        if record.accepted and record.market_id == market_id and record.contract_id == contract_id
+    ]
+    uses_back_lay = any(side in {"BACK", "LAY"} for side in matching_sides)
+    uses_buy_sell = any(side in {"BUY", "SELL"} for side in matching_sides)
+    if uses_back_lay and not uses_buy_sell:
+        return "LAY" if net_size > 0 else "BACK"
+    return "SELL" if net_size > 0 else "BUY"
+
+
+def position_refill_payload(cfg: AppConfig, market_id: str, contract_id: str) -> Dict[str, Any]:
+    normalized = str(market_id or "").strip().lower()
+    contract = str(contract_id or "").strip()
+    row = next(
+        (
+            item
+            for item in paper_position_rows(cfg.paper_trades)
+            if item["market_id"] == normalized and item["contract_id"] == contract
+        ),
+        None,
+    )
+    if not row:
+        raise ValueError("Paper position was not found.")
+    net_size = float(row["net_size"])
+    side = position_close_side(cfg.paper_trades, normalized, contract, net_size)
+    return {
+        "market_id": normalized,
+        "contract_id": contract,
+        "side": side,
+        "size": abs(net_size),
+        "limit_price": None,
+        "message": f"Loaded paper position: {normalized}:{contract} {side} size={abs(net_size):g}; limit cleared.",
+    }
+
+
+def refresh_paper_marks(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    rows: List[Dict[str, Any]],
+    existing_marks: Optional[Mapping[Tuple[str, str], Dict[str, Any]]] = None,
+) -> Tuple[Dict[Tuple[str, str], Dict[str, Any]], List[str]]:
+    marks: Dict[Tuple[str, str], Dict[str, Any]] = _paper_marks_for_rows(existing_marks or {}, rows)
+    problems: List[str] = []
+    marked_at = int(time.time())
+    for row in rows:
+        market_id = str(row["market_id"])
+        contract_id = str(row["contract_id"])
+        if not cfg.markets.get(market_id) or not cfg.markets[market_id].enabled:
+            problems.append(f"{market_id}: disabled")
+            continue
+        try:
+            adapter = adapter_for_market(cfg, market_id, registry)
+            if not adapter.capabilities.price_reading:
+                problems.append(f"{adapter.display_name}: no price feed")
+                continue
+            snapshot = adapter.get_price(contract_id)
+            mark_price, source = _paper_position_mark_price(snapshot, float(row["net_size"]))
+            marks[(market_id, contract_id)] = {
+                "mark_price": mark_price,
+                "source": source,
+                "marked_at": marked_at,
+            }
+        except Exception as exc:
+            problems.append(f"{market_id}:{contract_id}: {exc}")
+    return _paper_marks_for_rows(marks, rows), problems
+
+
+def refresh_selected_paper_mark(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    contract_id: str,
+    marks: Mapping[Tuple[str, str], Dict[str, Any]],
+) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    normalized = str(market_id or "").strip().lower()
+    contract = str(contract_id or "").strip()
+    rows = paper_position_rows(cfg.paper_trades)
+    row = next((item for item in rows if item["market_id"] == normalized and item["contract_id"] == contract), None)
+    if not row:
+        raise ValueError("Paper position was not found.")
+    require_market_enabled(cfg, normalized, "paper mark refresh")
+    adapter = adapter_for_market(cfg, normalized, registry)
+    if not adapter.capabilities.price_reading:
+        raise UnsupportedFeatureError(normalized, "price_reading", f"{adapter.display_name} does not support paper mark refresh.")
+    snapshot = adapter.get_price(contract)
+    mark_price, source = _paper_position_mark_price(snapshot, float(row["net_size"]))
+    updated = _paper_marks_for_rows(marks, rows)
+    updated[(normalized, contract)] = {
+        "mark_price": mark_price,
+        "source": source,
+        "marked_at": int(time.time()),
+    }
+    return updated
+
+
+class ReactGuiServer(ThreadingHTTPServer):
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        request_handler_class: type[BaseHTTPRequestHandler],
+        *,
+        config_path: Path = DEFAULT_CONFIG_PATH,
+        frontend_dir: Path = DEFAULT_FRONTEND_DIR,
+        adapter_registry: Optional[AdapterRegistry] = None,
+    ) -> None:
+        super().__init__(server_address, request_handler_class)
+        self.config_path = config_path
+        self.frontend_dir = frontend_dir
+        self.adapter_registry = adapter_registry or build_default_registry()
+        self.paper_position_marks: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self.alert_price_state: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self.wallet_recent_activity: List[Dict[str, Any]] = []
+        self.wallet_polling: Dict[str, Any] = {
+            "poll_interval_seconds": 10.0,
+            "last_polled_at": None,
+            "last_message": "Not polled yet.",
+        }
+
+
+class ReactGuiHandler(BaseHTTPRequestHandler):
+    server_version = "PredictionMarketReactGui/0.1"
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self._send_cors_headers()
+        self.end_headers()
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/"):
+            self._handle_api_get(parsed.path)
+            return
+        self._serve_static(parsed.path)
+
+    def do_PATCH(self) -> None:
+        self._handle_mutation("PATCH")
+
+    def do_POST(self) -> None:
+        self._handle_mutation("POST")
+
+    def do_DELETE(self) -> None:
+        self._handle_mutation("DELETE")
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        print(f"[web-gui] {self.address_string()} - {fmt % args}")
+
+    @property
+    def app_server(self) -> ReactGuiServer:
+        return self.server  # type: ignore[return-value]
+
+    def _load_config(self) -> AppConfig:
+        return load_config(self.app_server.config_path)
+
+    def _save_config(self, cfg: AppConfig) -> None:
+        save_config(cfg, self.app_server.config_path)
+
+    def _handle_api_get(self, path: str) -> None:
+        try:
+            cfg = self._load_config()
+            if path == "/api/health":
+                self._send_json(HTTPStatus.OK, health_payload(self.app_server.config_path, self.app_server.frontend_dir))
+                return
+            if path == "/api/state":
+                self._send_json(
+                    HTTPStatus.OK,
+                    app_state_payload(
+                        cfg,
+                        self.app_server.config_path,
+                        self.app_server.frontend_dir,
+                        self.app_server.paper_position_marks,
+                        self.app_server.adapter_registry,
+                        self.app_server.alert_price_state,
+                        self.app_server.wallet_polling,
+                        self.app_server.wallet_recent_activity,
+                    ),
+                )
+                return
+            if path == "/api/config":
+                self._send_json(HTTPStatus.OK, config_payload(cfg))
+                return
+            if path == "/api/markets":
+                self._send_json(HTTPStatus.OK, markets_payload(cfg, self.app_server.adapter_registry))
+                return
+            if path == "/api/alerts":
+                self._send_json(HTTPStatus.OK, alerts_payload(cfg, self.app_server.adapter_registry, self.app_server.alert_price_state))
+                return
+            if path == "/api/wallets":
+                self._send_json(HTTPStatus.OK, wallets_payload(cfg, self.app_server.wallet_polling, self.app_server.wallet_recent_activity))
+                return
+            if path == "/api/copy":
+                self._send_json(HTTPStatus.OK, copy_payload(cfg, self.app_server.adapter_registry))
+                return
+            if path == "/api/live-safety":
+                self._send_json(HTTPStatus.OK, live_safety_payload(cfg, self.app_server.adapter_registry))
+                return
+            if path == "/api/paper":
+                self._send_json(HTTPStatus.OK, paper_payload(cfg, self.app_server.paper_position_marks))
+                return
+            if path == "/api/paper/history":
+                self._send_json(HTTPStatus.OK, {"history": paper_payload(cfg, self.app_server.paper_position_marks)["history"]})
+                return
+            if path == "/api/paper/positions":
+                paper = paper_payload(cfg, self.app_server.paper_position_marks)
+                self._send_json(HTTPStatus.OK, {"summary": paper["summary"], "positions": paper["positions"]})
+                return
+            self._send_error(HTTPStatus.NOT_FOUND, "not_found", "Unknown API route.")
+        except ValueError as exc:
+            self._send_error(HTTPStatus.BAD_REQUEST, "validation_error", str(exc))
+        except Exception as exc:
+            print(f"[web-gui] internal error while handling GET {path}: {type(exc).__name__}")
+            self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error", "Internal server error.")
+
+    def _handle_mutation(self, method: str) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if not path.startswith("/api/"):
+            self._send_error(HTTPStatus.NOT_FOUND, "not_found", "Unknown route.")
+            return
+
+        try:
+            payload = _read_json_body(self)
+            cfg = self._load_config()
+            if method == "PATCH" and path == "/api/config":
+                apply_config_patch(cfg, payload)
+                self._save_config(cfg)
+                self._send_json(HTTPStatus.OK, config_payload(cfg))
+                return
+            if method == "PATCH" and path.startswith("/api/markets/"):
+                market_id = path.rsplit("/", 1)[-1]
+                apply_market_patch(cfg, market_id, payload)
+                self._save_config(cfg)
+                self._send_json(HTTPStatus.OK, markets_payload(cfg, self.app_server.adapter_registry))
+                return
+            if method == "POST" and path == "/api/alerts":
+                alert = alert_from_payload(cfg, self.app_server.adapter_registry, payload)
+                cfg.alerts.append(alert)
+                self._save_config(cfg)
+                self._send_json(
+                    HTTPStatus.OK,
+                    alerts_payload(cfg, self.app_server.adapter_registry, self.app_server.alert_price_state),
+                )
+                return
+            if method == "POST" and path == "/api/alerts/refresh":
+                result = refresh_all_alert_prices(cfg, self.app_server.adapter_registry, self.app_server.alert_price_state)
+                self._save_config(cfg)
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "alerts": alerts_payload(cfg, self.app_server.adapter_registry, self.app_server.alert_price_state),
+                        "message": f"Refreshed {len(result['refreshed'])} alert price source(s).",
+                        **result,
+                    },
+                )
+                return
+            if method == "POST" and path.startswith("/api/alerts/") and path.endswith("/refresh"):
+                alert_id = path.strip("/").split("/")[-2]
+                alert = find_alert(cfg, alert_id)
+                result = refresh_alert_price(
+                    cfg,
+                    self.app_server.adapter_registry,
+                    alert,
+                    self.app_server.alert_price_state,
+                )
+                self._save_config(cfg)
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "alerts": alerts_payload(cfg, self.app_server.adapter_registry, self.app_server.alert_price_state),
+                        "message": f"Refreshed {alert.label}: {alert.source}.",
+                        "refreshed": [result],
+                        "problems": [],
+                    },
+                )
+                return
+            if method == "PATCH" and path.startswith("/api/alerts/"):
+                alert_id = path.rsplit("/", 1)[-1]
+                alert = find_alert(cfg, alert_id)
+                previous_key = _alert_price_state_key(_alert_market_id(alert), alert.token_id)
+                alert_from_payload(cfg, self.app_server.adapter_registry, payload, existing=alert)
+                next_key = _alert_price_state_key(_alert_market_id(alert), alert.token_id)
+                if next_key != previous_key:
+                    self.app_server.alert_price_state.pop(previous_key, None)
+                self._save_config(cfg)
+                self._send_json(
+                    HTTPStatus.OK,
+                    alerts_payload(cfg, self.app_server.adapter_registry, self.app_server.alert_price_state),
+                )
+                return
+            if method == "DELETE" and path.startswith("/api/alerts/"):
+                alert_id = path.rsplit("/", 1)[-1]
+                alert = delete_alert(cfg, alert_id)
+                if not any(_alert_price_state_key(_alert_market_id(item), item.token_id) == _alert_price_state_key(_alert_market_id(alert), alert.token_id) for item in cfg.alerts):
+                    self.app_server.alert_price_state.pop(_alert_price_state_key(_alert_market_id(alert), alert.token_id), None)
+                self._save_config(cfg)
+                self._send_json(
+                    HTTPStatus.OK,
+                    alerts_payload(cfg, self.app_server.adapter_registry, self.app_server.alert_price_state),
+                )
+                return
+            if method == "POST" and path == "/api/wallets":
+                add_wallet_watch(cfg, payload)
+                self._save_config(cfg)
+                self._send_json(
+                    HTTPStatus.OK,
+                    wallets_payload(cfg, self.app_server.wallet_polling, self.app_server.wallet_recent_activity),
+                )
+                return
+            if method == "PATCH" and path == "/api/wallets/polling":
+                interval = optional_positive_float(payload.get("poll_interval_seconds"), "Poll interval")
+                if interval is not None:
+                    self.app_server.wallet_polling["poll_interval_seconds"] = max(2.0, float(interval))
+                self.app_server.wallet_polling["last_message"] = "Polling settings updated."
+                self._send_json(
+                    HTTPStatus.OK,
+                    wallets_payload(cfg, self.app_server.wallet_polling, self.app_server.wallet_recent_activity),
+                )
+                return
+            if method == "POST" and path == "/api/wallets/poll":
+                limit = int(_safe_float(payload.get("limit"), 25) or 25)
+                result = poll_wallet_activity(
+                    cfg,
+                    self.app_server.adapter_registry,
+                    self.app_server.wallet_recent_activity,
+                    limit=max(1, min(limit, 100)),
+                )
+                self.app_server.wallet_polling["last_polled_at"] = time.time()
+                self.app_server.wallet_polling["last_message"] = (
+                    f"Polled {result['polled_wallets']} wallet(s); {len(result['activity'])} new activity item(s)."
+                )
+                self._save_config(cfg)
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "wallets": wallets_payload(cfg, self.app_server.wallet_polling, self.app_server.wallet_recent_activity),
+                        "copy": copy_payload(cfg, self.app_server.adapter_registry),
+                        "message": self.app_server.wallet_polling["last_message"],
+                        **result,
+                    },
+                )
+                return
+            if method == "PATCH" and path.startswith("/api/wallets/"):
+                wallet_id = path.rsplit("/", 1)[-1]
+                update_wallet_watch(cfg, wallet_id, payload)
+                self._save_config(cfg)
+                self._send_json(
+                    HTTPStatus.OK,
+                    wallets_payload(cfg, self.app_server.wallet_polling, self.app_server.wallet_recent_activity),
+                )
+                return
+            if method == "DELETE" and path.startswith("/api/wallets/"):
+                wallet_id = path.rsplit("/", 1)[-1]
+                wallet = delete_wallet_watch(cfg, wallet_id)
+                self.app_server.wallet_recent_activity = [
+                    item for item in self.app_server.wallet_recent_activity if item.get("wallet_id") != wallet.id
+                ]
+                self._save_config(cfg)
+                self._send_json(
+                    HTTPStatus.OK,
+                    wallets_payload(cfg, self.app_server.wallet_polling, self.app_server.wallet_recent_activity),
+                )
+                return
+            if method == "PATCH" and path == "/api/copy":
+                apply_copy_settings_patch(cfg, payload)
+                self._save_config(cfg)
+                self._send_json(HTTPStatus.OK, copy_payload(cfg, self.app_server.adapter_registry))
+                return
+            if method == "POST" and path == "/api/copy/preview":
+                self._send_json(HTTPStatus.OK, copy_preview_payload(cfg, self.app_server.adapter_registry, payload))
+                return
+            if method == "POST" and path == "/api/live-safety/preflight":
+                self._send_json(HTTPStatus.OK, live_preflight_payload(cfg, self.app_server.adapter_registry, payload))
+                return
+            if method == "POST" and path == "/api/paper/quote":
+                self._send_json(HTTPStatus.OK, paper_quote_payload(cfg, self.app_server.adapter_registry, payload))
+                return
+            if method == "POST" and path == "/api/paper/quote-limit":
+                self._send_json(HTTPStatus.OK, paper_quote_limit_payload(cfg, self.app_server.adapter_registry, payload))
+                return
+            if method == "POST" and path == "/api/paper/preview-impact":
+                order = paper_order_from_payload(payload)
+                impact = paper_order_impact(cfg.paper_trades, order)
+                self._send_json(HTTPStatus.OK, {"impact": impact, "message": format_paper_order_impact(impact)})
+                return
+            if method == "POST" and path == "/api/paper/orders":
+                result = submit_paper_order(cfg, self.app_server.adapter_registry, payload)
+                self._save_config(cfg)
+                self.app_server.paper_position_marks = _paper_marks_for_rows(
+                    self.app_server.paper_position_marks,
+                    paper_position_rows(cfg.paper_trades),
+                )
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        **result,
+                        "paper": paper_payload(cfg, self.app_server.paper_position_marks),
+                    },
+                )
+                return
+            if method == "POST" and path == "/api/paper/history/use":
+                self._send_json(HTTPStatus.OK, history_refill_payload(cfg, str(payload.get("record_id") or "")))
+                return
+            if method == "POST" and path == "/api/paper/positions/use":
+                self._send_json(
+                    HTTPStatus.OK,
+                    position_refill_payload(
+                        cfg,
+                        str(payload.get("market_id") or ""),
+                        str(payload.get("contract_id") or ""),
+                    ),
+                )
+                return
+            if method == "POST" and path == "/api/paper/marks/refresh":
+                rows = paper_position_rows(cfg.paper_trades)
+                self.app_server.paper_position_marks, problems = refresh_paper_marks(
+                    cfg,
+                    self.app_server.adapter_registry,
+                    rows,
+                    self.app_server.paper_position_marks,
+                )
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "paper": paper_payload(cfg, self.app_server.paper_position_marks),
+                        "problems": problems,
+                        "message": f"Marked {len(self.app_server.paper_position_marks)}/{len(rows)} paper positions.",
+                    },
+                )
+                return
+            if method == "POST" and path == "/api/paper/marks/refresh-selected":
+                self.app_server.paper_position_marks = refresh_selected_paper_mark(
+                    cfg,
+                    self.app_server.adapter_registry,
+                    str(payload.get("market_id") or ""),
+                    str(payload.get("contract_id") or ""),
+                    self.app_server.paper_position_marks,
+                )
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "paper": paper_payload(cfg, self.app_server.paper_position_marks),
+                        "message": "Selected paper exposure mark refreshed.",
+                    },
+                )
+                return
+            if method == "POST" and path == "/api/paper/marks/clear":
+                self.app_server.paper_position_marks = {}
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"paper": paper_payload(cfg, self.app_server.paper_position_marks), "message": "Paper exposure marks cleared."},
+                )
+                return
+            if method == "POST" and path == "/api/paper/marks/clear-selected":
+                key = (str(payload.get("market_id") or "").strip().lower(), str(payload.get("contract_id") or "").strip())
+                marks = _paper_marks_for_rows(self.app_server.paper_position_marks, paper_position_rows(cfg.paper_trades))
+                marks.pop(key, None)
+                self.app_server.paper_position_marks = marks
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "paper": paper_payload(cfg, self.app_server.paper_position_marks),
+                        "message": f"Selected paper exposure mark cleared: {key[0]}:{key[1]}",
+                    },
+                )
+                return
+            if method == "POST" and path == "/api/paper/history/clear":
+                cfg.paper_trades = []
+                self.app_server.paper_position_marks = {}
+                self._save_config(cfg)
+                self._send_json(HTTPStatus.OK, paper_payload(cfg, self.app_server.paper_position_marks))
+                return
+        except json.JSONDecodeError:
+            self._send_error(HTTPStatus.BAD_REQUEST, "invalid_json", "Invalid JSON request body.")
+            return
+        except UnsupportedFeatureError as exc:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "unsupported_feature",
+                str(exc),
+                {"market_id": exc.market_id, "feature": exc.feature},
+            )
+            return
+        except ValueError as exc:
+            self._send_error(HTTPStatus.BAD_REQUEST, "validation_error", str(exc))
+            return
+        except Exception as exc:
+            print(f"[web-gui] internal error while handling {method} {path}: {type(exc).__name__}")
+            self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error", "Internal server error.")
+            return
+
+        self._send_error(HTTPStatus.NOT_FOUND, "not_found", "Unknown API route.")
+
+    def _serve_static(self, raw_path: str) -> None:
+        frontend_dir = self.app_server.frontend_dir
+        index = frontend_dir / "index.html"
+        if not index.exists():
+            self._send_error(
+                HTTPStatus.NOT_FOUND,
+                "react_build_missing",
+                "React build is missing.",
+                {
+                    "hint": "Build the React app, use the Vite dev server, or start the Tkinter fallback.",
+                    "build_command": REACT_BUILD_COMMAND,
+                    "dev_command": REACT_DEV_COMMAND,
+                    "prod_command": REACT_PROD_COMMAND,
+                    "tkinter_fallback": f"{PYTHON_GUI_SCRIPT} or {PYTHON_GUI_COMMAND}",
+                },
+            )
+            return
+
+        target = self._resolve_static_path(frontend_dir, raw_path)
+        if target is None or not target.exists() or not target.is_file():
+            target = index
+
+        content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        data = target.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self._send_cors_headers()
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _resolve_static_path(self, frontend_dir: Path, raw_path: str) -> Optional[Path]:
+        path = unquote(raw_path.split("?", 1)[0])
+        if path in {"", "/"}:
+            return frontend_dir / "index.html"
+        normalized = posixpath.normpath(path.lstrip("/"))
+        if normalized.startswith("../") or normalized == "..":
+            return None
+        return frontend_dir / normalized
+
+    def _send_json(self, status: int, payload: Dict[str, Any]) -> None:
+        data = _json_bytes(payload)
+        self.send_response(status)
+        self._send_cors_headers()
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(data)
+        self.wfile.flush()
+        self.close_connection = True
+
+    def _send_error(
+        self,
+        status: int,
+        code: str,
+        message: str,
+        details: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        self._send_json(status, api_error_payload(status, code, message, details))
+
+    def _send_cors_headers(self) -> None:
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, PATCH, POST, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+
+def run_server(host: str, port: int, config_path: Path, frontend_dir: Path) -> None:
+    server = ReactGuiServer((host, port), ReactGuiHandler, config_path=config_path, frontend_dir=frontend_dir)
+    print(f"React GUI API listening on http://{host}:{port}")
+    if (frontend_dir / "index.html").exists():
+        print(f"Serving built React GUI from {frontend_dir}")
+    else:
+        print(f"React build not found at {frontend_dir}")
+        print(f"Build it with `{REACT_BUILD_COMMAND}`, or run `{REACT_DEV_COMMAND}` for Vite.")
+    print(f"Tkinter GUI is unchanged: run `{PYTHON_GUI_SCRIPT}` or `{PYTHON_GUI_COMMAND}`.")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopping React GUI API.")
+    finally:
+        server.server_close()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the optional local API for the React/TypeScript GUI.")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    parser.add_argument("--frontend-dir", type=Path, default=DEFAULT_FRONTEND_DIR)
+    args = parser.parse_args()
+    run_server(args.host, args.port, args.config, args.frontend_dir)
+
+
+if __name__ == "__main__":
+    main()

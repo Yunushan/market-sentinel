@@ -168,7 +168,7 @@ class AzuroAdapterTests(unittest.TestCase):
         self.assertIn("disabled", str(ctx.exception))
 
     def test_live_order_posts_pre_signed_official_order_payload_when_enabled(self) -> None:
-        adapter = self.make_adapter({"live_trading_enabled": True})
+        adapter = self.make_adapter({"live_trading_enabled": True, "live_trading_confirmed": True})
         client_bet_data = {
             "clientData": {
                 "attention": "",
@@ -208,7 +208,7 @@ class AzuroAdapterTests(unittest.TestCase):
         self.assertEqual(result["request"]["clientBetData"], client_bet_data)
 
     def test_live_order_requires_wallet_signed_payload_metadata(self) -> None:
-        adapter = self.make_adapter({"live_trading_enabled": True})
+        adapter = self.make_adapter({"live_trading_enabled": True, "live_trading_confirmed": True})
 
         with patch.dict("os.environ", {"AZURO_BETTOR_ADDRESS": "0x0000000000000000000000000000000000000001"}):
             with self.assertRaises(MarketConfigurationError) as ctx:

@@ -175,7 +175,9 @@ class PolymarketAdapterTests(unittest.TestCase):
         self.assertIn("disabled", str(ctx.exception).lower())
 
     def test_live_order_requires_limit_before_geoblock_or_credentials(self) -> None:
-        adapter = PolymarketAdapter({"live_trading_enabled": True, "private_key": "not-used"})
+        adapter = PolymarketAdapter(
+            {"live_trading_enabled": True, "live_trading_confirmed": True, "private_key": "not-used"}
+        )
 
         with patch.object(adapter, "check_geoblock") as check_geoblock:
             with self.assertRaises(MarketConfigurationError) as ctx:
@@ -196,6 +198,7 @@ class PolymarketAdapterTests(unittest.TestCase):
         adapter = PolymarketAdapter(
             {
                 "live_trading_enabled": True,
+                "live_trading_confirmed": True,
                 "private_key": "not-a-real-key",
                 "signature_type": "bad",
             }
@@ -219,6 +222,7 @@ class PolymarketAdapterTests(unittest.TestCase):
         adapter = PolymarketAdapter(
             {
                 "live_trading_enabled": True,
+                "live_trading_confirmed": True,
                 "private_key": "super-secret",
                 "http_timeout_seconds": 4,
             }

@@ -158,7 +158,7 @@ class AzuroAdapter(MarketAdapter):
     def place_live_order(self, order: PaperOrderRequest) -> Dict[str, Any]:
         self.ensure_capability("live_trading")
         self._validate_order(order)
-        self.ensure_live_trading_enabled()
+        preflight = self.preflight_live_order(order)
         payload, endpoint = self._live_order_payload(order)
         response = self.runtime.request_json(
             "POST",
@@ -171,6 +171,7 @@ class AzuroAdapter(MarketAdapter):
             "contract_id": self._contract_id(*self._split_contract_id(order.contract_id)),
             "live": True,
             "endpoint": endpoint,
+            "preflight": preflight,
             "request": payload,
             "response": response,
         }

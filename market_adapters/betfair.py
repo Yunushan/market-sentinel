@@ -22,6 +22,7 @@ BETFAIR_REFERENCES = (
     "https://developer.betfair.com/",
     "https://support.developer.betfair.com/hc/en-us/categories/360000245252-Exchange-API",
     "https://support.developer.betfair.com/hc/en-us/articles/115003864651-How-do-I-get-started",
+    "https://support.developer.betfair.com/hc/en-us/articles/360016170431-How-do-I-place-bets-on-handicap-markets",
 )
 
 
@@ -47,7 +48,8 @@ class BetfairExchangeAdapter(MarketAdapter):
                 "api_base_url": self.api_base_url,
                 "references": list(BETFAIR_REFERENCES),
                 "credential_sources": credential_sources,
-                "live_trading_supported": False,
+                "live_trading_supported": True,
+                "live_trading_enabled": self.config_bool("live_trading_enabled", False),
             }
         )
         return health
@@ -146,11 +148,28 @@ class BetfairExchangeAdapter(MarketAdapter):
         )
 
     def place_live_order(self, order: PaperOrderRequest) -> Dict[str, Any]:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "live_trading",
-            "Betfair live betting is not implemented; this adapter is read-only plus dry-run.",
-        )
+        self.ensure_capability("live_trading")
+        self._validate_order(order)
+        preflight = self.preflight_live_order(order)
+        if order.limit_price is None:
+            raise MarketConfigurationError("Betfair live orders require a limit probability.")
+        market_id, selection_id = self._split_contract_id(order.contract_id)
+        params = {
+            "marketId": market_id,
+            "instructions": [self._place_instruction(order, selection_id=selection_id)],
+        }
+        customer_ref = order.metadata.get("customer_ref") or order.metadata.get("customerRef")
+        if customer_ref:
+            params["customerRef"] = str(customer_ref)
+        result = self._rpc("SportsAPING/v1.0/placeOrders", params)
+        return {
+            "market_id": self.market_id,
+            "contract_id": order.contract_id,
+            "live": True,
+            "preflight": preflight,
+            "request": params,
+            "response": result,
+        }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
         raise UnsupportedFeatureError(
@@ -270,6 +289,32 @@ class BetfairExchangeAdapter(MarketAdapter):
             raise MarketConfigurationError("Betfair paper order stake must be positive.")
         if order.limit_price is not None and self._safe_probability(order.limit_price) is None:
             raise MarketConfigurationError("Betfair paper order limit probability must be between 0 and 1.")
+
+    def _place_instruction(self, order: PaperOrderRequest, *, selection_id: str) -> Dict[str, Any]:
+        probability = self._safe_probability(order.limit_price)
+        if probability is None or probability <= 0:
+            raise MarketConfigurationError("Betfair live order limit probability must be greater than 0 and at most 1.")
+        side = str(order.side or "").upper()
+        betfair_side = "LAY" if side in {"SELL", "LAY"} else "BACK"
+        instruction: Dict[str, Any] = {
+            "selectionId": int(selection_id) if selection_id.isdigit() else selection_id,
+            "side": betfair_side,
+            "orderType": "LIMIT",
+            "limitOrder": {
+                "size": str(order.size),
+                "price": str(round(1.0 / probability, 4)),
+                "persistenceType": str(
+                    order.metadata.get("persistence_type")
+                    or order.metadata.get("persistenceType")
+                    or self.config.get("betfair_persistence_type")
+                    or "LAPSE"
+                ),
+            },
+        }
+        handicap = order.metadata.get("handicap")
+        if handicap not in (None, ""):
+            instruction["handicap"] = str(handicap)
+        return instruction
 
     @staticmethod
     def _market_id(market: Mapping[str, Any]) -> str:

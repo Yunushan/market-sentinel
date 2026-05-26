@@ -19,13 +19,21 @@ from tkinter import ttk, messagebox
 
 from dotenv import load_dotenv
 
-from core.models import AppConfig, PriceAlert, WalletWatch, CopyTradeSettings
+from core.models import AppConfig, MarketConfig, PaperTradeRecord, PriceAlert, WalletWatch, CopyTradeSettings
 from core.storage import load_config, save_config
 from market_adapters import build_default_registry
 from market_adapters.base import MarketAdapter
-from market_adapters.errors import UnsupportedFeatureError
+from market_adapters.errors import MarketConfigurationError, UnsupportedFeatureError
 from market_adapters.polymarket import PolymarketAdapter
-from market_adapters.types import MarketMetadata
+from market_adapters.types import (
+    MarketContract,
+    MarketEvent,
+    MarketMetadata,
+    OrderBookSnapshot,
+    PaperOrderRequest,
+    PaperOrderResult,
+    PriceSnapshot,
+)
 
 from polymarket.util import is_wallet_address, normalize_wallet
 from polymarket import data_api
@@ -78,6 +86,32 @@ def market_id_from_choice(choice: str) -> str:
     if match:
         return match.group(1).strip().lower()
     return str(choice or "").strip().lower()
+
+
+def bool_from_setting(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value in (None, ""):
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def optional_positive_float(raw: Any, label: str) -> Optional[float]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    value = safe_float(text, None)
+    if value is None or value <= 0:
+        raise ValueError(f"{label} must be blank or a positive number.")
+    return float(value)
+
+
+def market_config_enabled(cfg: AppConfig, market_id: str) -> bool:
+    normalized = str(market_id or "polymarket").strip().lower()
+    market_cfg = cfg.markets.get(normalized)
+    return bool(market_cfg and market_cfg.enabled)
 
 
 def set_windows_app_id(app_id: str) -> None:
@@ -171,6 +205,102 @@ class WalletPoller:
                 time.sleep(0.2)
 
 
+class AdapterPricePoller:
+    def __init__(
+        self,
+        ui_queue: "queue.Queue[tuple]",
+        cfg: AppConfig,
+        adapter_registry: Any,
+        poll_interval: float = 30.0,
+    ):
+        self.ui_queue = ui_queue
+        self.cfg = cfg
+        self.adapter_registry = adapter_registry
+        self.poll_interval = poll_interval
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        if not self._thread.is_alive():
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def poll_once(self):
+        grouped: Dict[str, set[str]] = {}
+        for alert in list(self.cfg.alerts):
+            if not alert.enabled:
+                continue
+            market_id = str(getattr(alert, "market_id", "polymarket") or "polymarket").strip().lower()
+            if market_id == "polymarket":
+                continue
+            grouped.setdefault(market_id, set()).add(alert.token_id)
+
+        for market_id, contract_ids in grouped.items():
+            market_cfg = self.cfg.markets.get(market_id)
+            if not market_config_enabled(self.cfg, market_id):
+                self.ui_queue.put(("log", f"[alerts] {market_id}: disabled in local market config."))
+                continue
+            settings = market_cfg.settings if market_cfg else {}
+            try:
+                adapter = self.adapter_registry.create(market_id, settings)
+            except Exception as exc:
+                self.ui_queue.put(("log", f"[alerts] {market_id}: adapter unavailable: {exc}"))
+                continue
+
+            if not adapter.capabilities.price_reading:
+                self.ui_queue.put(("log", f"[alerts] {adapter.display_name}: price alerts are not supported."))
+                continue
+
+            for contract_id in sorted(contract_ids):
+                if self._stop.is_set():
+                    return
+                try:
+                    snapshot = adapter.get_price(contract_id)
+                    self.ui_queue.put(
+                        (
+                            "adapter_price",
+                            {
+                                "market_id": market_id,
+                                "contract_id": contract_id,
+                                "values": self._snapshot_values(snapshot),
+                                "source": snapshot.source,
+                            },
+                            None,
+                        )
+                    )
+                except UnsupportedFeatureError as exc:
+                    self.ui_queue.put(("log", f"[alerts] {adapter.display_name}: {exc}"))
+                except Exception as exc:
+                    self.ui_queue.put(("log", f"[alerts] {adapter.display_name} {contract_id}: {exc}"))
+
+    def _run(self):
+        while not self._stop.is_set():
+            self.poll_once()
+            end = time.time() + self.poll_interval
+            while time.time() < end:
+                if self._stop.is_set():
+                    break
+                time.sleep(0.2)
+
+    @staticmethod
+    def _snapshot_values(snapshot: PriceSnapshot) -> Dict[str, Optional[float]]:
+        bid = snapshot.bid
+        ask = snapshot.ask
+        midpoint = snapshot.midpoint
+        if midpoint is None and bid is not None and ask is not None:
+            midpoint = (bid + ask) / 2.0
+        return {
+            "last_trade": snapshot.last,
+            "midpoint": midpoint,
+            "best_bid": bid,
+            "best_ask": ask,
+        }
+
+
 # ---------------------------
 # Main GUI App
 # ---------------------------
@@ -199,10 +329,11 @@ class App(tk.Tk):
 
         # price state by token_id
         self.price_state: Dict[str, Dict[str, Optional[float]]] = {}
+        self._paper_position_marks: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
         # WebSocket client (market channel)
         self.market_ws = MarketWSClient(
-            token_ids=[a.token_id for a in self.cfg.alerts if a.enabled],
+            token_ids=self._enabled_polymarket_alert_ids(),
             on_event=self._on_market_event_bg,
             custom_feature_enabled=False,
             verbose=False,
@@ -211,6 +342,8 @@ class App(tk.Tk):
 
         # Wallet poller
         self.wallet_poller = WalletPoller(self.ui_queue, self.cfg, poll_interval=10.0)
+        self.adapter_price_poller = AdapterPricePoller(self.ui_queue, self.cfg, self.adapter_registry)
+        self.adapter_price_poller.start()
 
         # Cached trader
         self._trader: Optional[PolymarketTrader] = None
@@ -237,6 +370,22 @@ class App(tk.Tk):
             self.polymarket_adapter = adapter
         return adapter
 
+    @staticmethod
+    def _alert_market_id(alert: PriceAlert) -> str:
+        return str(getattr(alert, "market_id", "polymarket") or "polymarket").strip().lower()
+
+    @staticmethod
+    def _price_state_key(market_id: str, contract_id: str) -> str:
+        normalized = str(market_id or "polymarket").strip().lower()
+        return str(contract_id) if normalized == "polymarket" else f"{normalized}:{contract_id}"
+
+    def _enabled_polymarket_alert_ids(self) -> List[str]:
+        return [
+            a.token_id
+            for a in self.cfg.alerts
+            if a.enabled and self._alert_market_id(a) == "polymarket"
+        ]
+
     def _market_choices(self) -> List[str]:
         return [market_choice_label(meta) for meta in self.adapter_registry.list_metadata()]
 
@@ -251,6 +400,21 @@ class App(tk.Tk):
         market_cfg = self.cfg.markets.get(market_id)
         settings = market_cfg.settings if market_cfg else {}
         return self.adapter_registry.create(market_id, settings)
+
+    def _market_config_for(self, market_id: str) -> MarketConfig:
+        normalized = str(market_id or "polymarket").strip().lower()
+        market_cfg = self.cfg.markets.get(normalized)
+        if market_cfg is None:
+            market_cfg = MarketConfig(market_id=normalized)
+            self.cfg.markets[normalized] = market_cfg
+        return market_cfg
+
+    def _market_display_name_for_id(self, market_id: str) -> str:
+        normalized = str(market_id or "polymarket").strip().lower()
+        try:
+            return self.adapter_registry.get_metadata(normalized).display_name
+        except Exception:
+            return normalized
 
     def _selected_market_display_name(self) -> str:
         return self.adapter_registry.get_metadata(self.cfg.selected_market_id).display_name
@@ -270,15 +434,47 @@ class App(tk.Tk):
         )
         live_status = "no"
         if capabilities.live_trading:
-            live_status = "yes" if adapter.config_bool("live_trading_enabled", False) else "guarded/off"
+            if not adapter.config_bool("live_trading_enabled", False):
+                live_status = "guarded/off"
+            elif adapter.config_bool("live_trading_kill_switch", False):
+                live_status = "kill-switch"
+            elif not (
+                adapter.config_bool("live_trading_confirmed", False)
+                or adapter.config_bool("live_trading_acknowledged", False)
+            ):
+                live_status = "needs-confirmation"
+            else:
+                live_status = "armed"
         return (
             f"{adapter.display_name}: adapter loaded. "
+            f"Config {'enabled' if market_config_enabled(self.cfg, adapter.market_id) else 'disabled'}; "
             f"Alerts {'yes' if capabilities.alerts else 'no'}; "
             f"read-only {'yes' if read_supported else 'no'}; "
             f"paper {'yes' if capabilities.paper_trading else 'no'}; "
             f"live {live_status}; "
             f"copy {'yes' if capabilities.copy_trading else 'no'}."
         )
+
+    def _market_disabled_message(self, market_id: str, feature: str) -> str:
+        display_name = App._market_display_name_for_id(self, market_id)
+        return (
+            f"{display_name} is disabled in local market config. "
+            f"Enable it in Market Safety before using {feature}."
+        )
+
+    def _require_market_enabled(self, market_id: str, feature: str) -> bool:
+        normalized = str(market_id or "polymarket").strip().lower()
+        if market_config_enabled(self.cfg, normalized):
+            return True
+        message = App._market_disabled_message(self, normalized, feature)
+        if hasattr(self, "status_var"):
+            self.status_var.set(message)
+        if hasattr(self, "paper_status_var"):
+            self.paper_status_var.set(message)
+        if hasattr(self, "ui_queue"):
+            self.ui_queue.put(("log", f"[market] {message}"))
+        messagebox.showinfo("Market disabled", message)
+        return False
 
     def _require_polymarket_selected(self, feature: str) -> bool:
         if self.cfg.selected_market_id == "polymarket":
@@ -312,6 +508,11 @@ class App(tk.Tk):
         adapter_status = self._selected_market_status_text(adapter)
         if hasattr(self, "market_status_var"):
             self.market_status_var.set(adapter_status)
+        if hasattr(self, "paper_market_var"):
+            self.paper_market_var.set(market_id)
+            App._refresh_paper_market_state(self)
+        if hasattr(self, "safety_market_var"):
+            App._refresh_market_safety_tab(self)
         if health.get("ok"):
             msg = f"Selected market: {adapter.display_name}."
         else:
@@ -360,18 +561,24 @@ class App(tk.Tk):
         nb.pack(fill="both", expand=True)
 
         self.tab_alerts = ttk.Frame(nb)
+        self.tab_paper = ttk.Frame(nb)
+        self.tab_safety = ttk.Frame(nb)
         self.tab_wallets = ttk.Frame(nb)
         self.tab_copy = ttk.Frame(nb)
         self.tab_logs = ttk.Frame(nb)
         self.tab_about = ttk.Frame(nb)
 
         nb.add(self.tab_alerts, text="Markets & Alerts")
+        nb.add(self.tab_paper, text="Paper Trading")
+        nb.add(self.tab_safety, text="Market Safety")
         nb.add(self.tab_wallets, text="Wallet Tracker")
         nb.add(self.tab_copy, text="Copy Trading")
         nb.add(self.tab_logs, text="Logs")
         nb.add(self.tab_about, text="About")
 
         self._build_alerts_tab()
+        self._build_paper_tab()
+        self._build_market_safety_tab()
         self._build_wallets_tab()
         self._build_copy_tab()
         self._build_logs_tab()
@@ -777,7 +984,7 @@ class App(tk.Tk):
         top = ttk.Frame(frm)
         top.pack(fill="x", padx=10, pady=10)
 
-        ttk.Label(top, text="Market slug or URL:").grid(row=0, column=0, sticky="w")
+        ttk.Label(top, text="Market search, id, slug, or URL:").grid(row=0, column=0, sticky="w")
         self.market_entry = ttk.Entry(top, width=60)
         self.market_entry.grid(row=0, column=1, padx=5)
 
@@ -829,10 +1036,11 @@ class App(tk.Tk):
         bottom = ttk.Frame(frm)
         bottom.pack(fill="both", expand=True, padx=10, pady=(0,10))
 
-        cols = ("label","token","dir","threshold","source","enabled","triggered","last")
+        cols = ("market","label","token","dir","threshold","source","enabled","triggered","last")
         self.alert_tree = ttk.Treeview(bottom, columns=cols, show="headings", height=10)
         for c in cols:
             self.alert_tree.heading(c, text=c)
+        self.alert_tree.column("market", width=120)
         self.alert_tree.column("label", width=180)
         self.alert_tree.column("token", width=220)
         self.alert_tree.column("dir", width=60)
@@ -855,6 +1063,212 @@ class App(tk.Tk):
         self._market_loaded: Optional[Dict[str, Any]] = None
         self._market_outcomes: List[Any] = []
         self._selected_token_id: Optional[str] = None
+        self._selected_alert_market_id: str = self.cfg.selected_market_id
+
+    def _build_paper_tab(self):
+        frm = self.tab_paper
+
+        top = ttk.Frame(frm)
+        top.pack(fill="x", padx=10, pady=10)
+
+        self.paper_selected_var = tk.StringVar(value="No contract selected.")
+        ttk.Label(top, textvariable=self.paper_selected_var, wraplength=900).pack(anchor="w")
+
+        form = ttk.Frame(frm)
+        form.pack(fill="x", padx=10, pady=(0, 10))
+
+        ttk.Label(form, text="Market:").grid(row=0, column=0, sticky="e", padx=5, pady=4)
+        self.paper_market_var = tk.StringVar(value=self.cfg.selected_market_id)
+        self.paper_market_combo = ttk.Combobox(
+            form,
+            textvariable=self.paper_market_var,
+            values=self.adapter_registry.list_market_ids(),
+            width=28,
+            state="readonly",
+        )
+        self.paper_market_combo.grid(row=0, column=1, sticky="w", padx=5, pady=4)
+        self.paper_market_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_paper_market_state())
+
+        ttk.Label(form, text="Contract:").grid(row=1, column=0, sticky="e", padx=5, pady=4)
+        self.paper_contract_var = tk.StringVar(value="")
+        ttk.Entry(form, textvariable=self.paper_contract_var, width=52).grid(row=1, column=1, sticky="w", padx=5, pady=4)
+
+        ttk.Label(form, text="Side:").grid(row=2, column=0, sticky="e", padx=5, pady=4)
+        self.paper_side_var = tk.StringVar(value="BUY")
+        ttk.Combobox(
+            form,
+            textvariable=self.paper_side_var,
+            values=["BUY", "SELL", "BACK", "LAY"],
+            width=10,
+            state="readonly",
+        ).grid(row=2, column=1, sticky="w", padx=5, pady=4)
+
+        ttk.Label(form, text="Size:").grid(row=3, column=0, sticky="e", padx=5, pady=4)
+        self.paper_size_var = tk.StringVar(value="")
+        ttk.Entry(form, textvariable=self.paper_size_var, width=12).grid(row=3, column=1, sticky="w", padx=5, pady=4)
+
+        ttk.Label(form, text="Limit:").grid(row=4, column=0, sticky="e", padx=5, pady=4)
+        self.paper_limit_var = tk.StringVar(value="")
+        ttk.Entry(form, textvariable=self.paper_limit_var, width=12).grid(row=4, column=1, sticky="w", padx=5, pady=4)
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", padx=10, pady=(0, 10))
+
+        ttk.Button(btns, text="Use selected contract", command=self.use_selected_contract_for_paper).pack(side="left")
+        self.paper_quote_btn = ttk.Button(btns, text="Refresh Quote", command=self.refresh_paper_quote)
+        self.paper_quote_btn.pack(side="left", padx=(8, 0))
+        self.paper_quote_limit_btn = ttk.Button(btns, text="Use Quote Limit", command=self.use_quote_limit_for_paper)
+        self.paper_quote_limit_btn.pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="Preview Impact", command=self.preview_paper_order_impact).pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="Preview Live Preflight", command=self.preview_live_preflight).pack(side="left", padx=(8, 0))
+        self.paper_submit_btn = ttk.Button(btns, text="Submit Paper Order", command=self.submit_paper_order)
+        self.paper_submit_btn.pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="Use History Order", command=self.use_selected_paper_trade).pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="Clear History", command=self.clear_paper_history).pack(side="left", padx=(8, 0))
+
+        self.paper_status_var = tk.StringVar(value="")
+        ttk.Label(frm, textvariable=self.paper_status_var, wraplength=900).pack(anchor="w", padx=10, pady=(0, 8))
+
+        pos_header = ttk.Frame(frm)
+        pos_header.pack(fill="x", padx=10)
+        ttk.Label(pos_header, text="Paper exposure summary:").pack(side="left")
+        ttk.Button(pos_header, text="Refresh Marks", command=self.refresh_paper_position_marks).pack(side="left", padx=(8, 0))
+        ttk.Button(pos_header, text="Refresh Selected Mark", command=self.refresh_selected_paper_position_mark).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(pos_header, text="Clear Selected Mark", command=self.clear_selected_paper_position_mark).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(pos_header, text="Clear Marks", command=self.clear_paper_position_marks).pack(side="left", padx=(8, 0))
+        ttk.Button(pos_header, text="Use Position", command=self.use_selected_paper_position).pack(side="left", padx=(8, 0))
+        self.paper_position_summary_var = tk.StringVar(value="No paper exposure.")
+        ttk.Label(frm, textvariable=self.paper_position_summary_var, wraplength=900).pack(
+            anchor="w", padx=10, pady=(2, 4)
+        )
+        pos_cols = (
+            "market",
+            "contract",
+            "net_size",
+            "avg_price",
+            "notional",
+            "mark",
+            "mark_src",
+            "mark_time",
+            "unrealized",
+            "trades",
+        )
+        self.paper_position_tree = ttk.Treeview(frm, columns=pos_cols, show="headings", height=5)
+        for c in pos_cols:
+            self.paper_position_tree.heading(c, text=c)
+        self.paper_position_tree.column("market", width=120, stretch=False)
+        self.paper_position_tree.column("contract", width=190)
+        self.paper_position_tree.column("net_size", width=80, stretch=False, anchor="e")
+        self.paper_position_tree.column("avg_price", width=80, stretch=False, anchor="e")
+        self.paper_position_tree.column("notional", width=90, stretch=False, anchor="e")
+        self.paper_position_tree.column("mark", width=80, stretch=False, anchor="e")
+        self.paper_position_tree.column("mark_src", width=70, stretch=False, anchor="center")
+        self.paper_position_tree.column("mark_time", width=80, stretch=False, anchor="center")
+        self.paper_position_tree.column("unrealized", width=95, stretch=False, anchor="e")
+        self.paper_position_tree.column("trades", width=60, stretch=False, anchor="center")
+        self.paper_position_tree.pack(fill="x", padx=10, pady=(0, 8))
+
+        ttk.Label(frm, text="Paper order history:").pack(anchor="w", padx=10)
+        cols = ("time", "market", "contract", "side", "size", "limit", "accepted", "message")
+        self.paper_tree = ttk.Treeview(frm, columns=cols, show="headings", height=12)
+        for c in cols:
+            self.paper_tree.heading(c, text=c)
+        self.paper_tree.column("time", width=90, stretch=False)
+        self.paper_tree.column("market", width=120, stretch=False)
+        self.paper_tree.column("contract", width=220)
+        self.paper_tree.column("side", width=60, stretch=False, anchor="center")
+        self.paper_tree.column("size", width=80, stretch=False, anchor="e")
+        self.paper_tree.column("limit", width=80, stretch=False, anchor="e")
+        self.paper_tree.column("accepted", width=80, stretch=False, anchor="center")
+        self.paper_tree.column("message", width=330)
+        self.paper_tree.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        self._refresh_paper_market_state()
+        self._refresh_paper_trade_table()
+
+    def _build_market_safety_tab(self):
+        frm = self.tab_safety
+
+        content = ttk.Frame(frm)
+        content.pack(fill="both", expand=True, padx=10, pady=10)
+
+        self.safety_market_var = tk.StringVar(value="")
+        ttk.Label(content, textvariable=self.safety_market_var).pack(anchor="w", pady=(0, 8))
+
+        form = ttk.Labelframe(content, text="Selected market live safety")
+        form.pack(fill="x", pady=(0, 10))
+
+        self.safety_market_enabled_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(form, text="Enable market in local config", variable=self.safety_market_enabled_var).grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=5,
+            pady=5,
+        )
+
+        self.safety_live_enabled_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(form, text="Enable live trading", variable=self.safety_live_enabled_var).grid(
+            row=1,
+            column=0,
+            sticky="w",
+            padx=5,
+            pady=5,
+        )
+
+        self.safety_live_confirmed_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(form, text="Acknowledge live-order risk", variable=self.safety_live_confirmed_var).grid(
+            row=1,
+            column=1,
+            sticky="w",
+            padx=5,
+            pady=5,
+        )
+
+        self.safety_kill_switch_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(form, text="Kill switch", variable=self.safety_kill_switch_var).grid(
+            row=1,
+            column=2,
+            sticky="w",
+            padx=5,
+            pady=5,
+        )
+
+        ttk.Label(form, text="Max order size:").grid(row=2, column=0, sticky="e", padx=5, pady=5)
+        self.safety_max_size_var = tk.StringVar(value="")
+        ttk.Entry(form, textvariable=self.safety_max_size_var, width=12).grid(row=2, column=1, sticky="w", padx=5, pady=5)
+
+        ttk.Label(form, text="Max notional:").grid(row=3, column=0, sticky="e", padx=5, pady=5)
+        self.safety_max_notional_var = tk.StringVar(value="")
+        ttk.Entry(form, textvariable=self.safety_max_notional_var, width=12).grid(
+            row=3,
+            column=1,
+            sticky="w",
+            padx=5,
+            pady=5,
+        )
+
+        buttons = ttk.Frame(form)
+        buttons.grid(row=4, column=1, columnspan=2, sticky="w", padx=5, pady=10)
+        ttk.Button(buttons, text="Save safety settings", command=self.save_market_safety_settings).pack(side="left")
+        ttk.Button(buttons, text="Refresh health", command=self._refresh_market_safety_tab).pack(side="left", padx=(8, 0))
+
+        self.safety_status_var = tk.StringVar(value="")
+        ttk.Label(content, textvariable=self.safety_status_var, wraplength=900).pack(anchor="w", pady=(0, 8))
+
+        cols = ("field", "value")
+        self.safety_tree = ttk.Treeview(content, columns=cols, show="headings", height=13)
+        for c in cols:
+            self.safety_tree.heading(c, text=c)
+        self.safety_tree.column("field", width=220, stretch=False)
+        self.safety_tree.column("value", width=760, stretch=True)
+        self.safety_tree.pack(fill="both", expand=True)
+
+        self._refresh_market_safety_tab()
 
     def _build_wallets_tab(self):
         frm = self.tab_wallets
@@ -976,6 +1390,41 @@ class App(tk.Tk):
 
         self.status_var.set("Market loaded. Select an outcome to create an alert.")
         self._selected_token_id = None
+        self._selected_alert_market_id = "polymarket"
+        App._set_paper_contract_selection(self, "polymarket", "")
+
+    def _set_adapter_event_loaded(
+        self,
+        adapter: MarketAdapter,
+        event: MarketEvent,
+        contracts: List[MarketContract],
+    ) -> None:
+        self._market_loaded = {
+            "market_id": adapter.market_id,
+            "event_id": event.event_id,
+            "title": event.title,
+            "status": event.status,
+            "url": event.url,
+        }
+        self._market_outcomes = list(contracts)
+        self._selected_token_id = None
+        self._selected_alert_market_id = adapter.market_id
+
+        status = f", {event.status}" if event.status else ""
+        self.market_info_var.set(
+            f"Loaded: {event.title} ({adapter.display_name}, event {event.event_id}{status})"
+        )
+
+        self.outcome_list.delete(0, "end")
+        for contract in self._market_outcomes:
+            title = contract.outcome or contract.title or contract.contract_id
+            contract_id = contract.contract_id
+            short_id = contract_id if len(contract_id) <= 28 else f"{contract_id[:25]}..."
+            status_text = f"  |  {contract.status}" if contract.status else ""
+            self.outcome_list.insert("end", f"{title}  |  contract {short_id}{status_text}")
+
+        self.status_var.set("Market loaded. Select a contract to create an adapter-backed alert.")
+        App._set_paper_contract_selection(self, adapter.market_id, "")
 
     def _select_market_from_event(self, event: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], bool]:
         markets = list(event.get("markets") or [])
@@ -1028,15 +1477,68 @@ class App(tk.Tk):
         self.wait_window(win)
         return result.get("market") if result else None, True
 
+    def _select_adapter_event(self, events: List[MarketEvent]) -> Optional[MarketEvent]:
+        if not events:
+            return None
+        if len(events) == 1:
+            return events[0]
+
+        win = tk.Toplevel(self)
+        win.title("Select market event")
+        win.geometry("820x360")
+        self._apply_window_icon(win)
+        palette = self._palette
+        win.configure(background=palette["bg"])
+
+        lb = tk.Listbox(win)
+        lb.configure(
+            bg=palette["field_bg"],
+            fg=palette["field_fg"],
+            selectbackground=palette["select_bg"],
+            selectforeground=palette["select_fg"],
+            highlightbackground=palette["border"],
+            highlightcolor=palette["border"],
+        )
+        lb.pack(fill="both", expand=True, padx=10, pady=10)
+
+        for event in events:
+            status = f" [{event.status}]" if event.status else ""
+            lb.insert("end", f"{event.title}{status}  |  {event.event_id}")
+
+        result: Dict[str, MarketEvent] = {}
+
+        def load_selected():
+            sel = lb.curselection()
+            if not sel:
+                return
+            result["event"] = events[sel[0]]
+            win.destroy()
+
+        ttk.Button(win, text="Load event", command=load_selected).pack(pady=(0, 10))
+        self.status_var.set("Select an event from the selected adapter.")
+        win.grab_set()
+        self.wait_window(win)
+        return result.get("event")
+
     def fetch_market(self):
-        if not self._require_polymarket_selected("Market fetch"):
-            return
         raw = self.market_entry.get()
+        if not str(raw or "").strip():
+            messagebox.showerror("Error", "Enter a market search term, event id, slug, or URL.")
+            return
+
+        adapter = self._get_selected_market_adapter()
+        if not App._require_market_enabled(self, adapter.market_id, "market search"):
+            return
+        if adapter.market_id == "polymarket":
+            self._fetch_polymarket_market(raw)
+            return
+        self._fetch_adapter_market(adapter, raw)
+
+    def _fetch_polymarket_market(self, raw: str):
         slug = extract_slug(raw)
         if not slug:
             messagebox.showerror("Error", "Enter a market slug or a Polymarket URL.")
             return
-
         self.status_var.set("Fetching market from Polymarket adapter...")
         self.update_idletasks()
         adapter = self._get_polymarket_adapter()
@@ -1092,6 +1594,56 @@ class App(tk.Tk):
             messagebox.showerror("Error", str(e))
             self.status_var.set("Error fetching market.")
 
+    def _fetch_adapter_market(self, adapter: MarketAdapter, raw: str) -> None:
+        if not adapter.capabilities.event_listing:
+            messagebox.showinfo(
+                "Unsupported market",
+                f"{adapter.display_name} does not support market/event listing in this app.",
+            )
+            self.status_var.set(f"{adapter.display_name} market listing is unsupported.")
+            return
+
+        query = extract_slug(raw) or str(raw or "").strip()
+        self.status_var.set(f"Searching {adapter.display_name}...")
+        self.update_idletasks()
+
+        try:
+            events = adapter.list_events(query, limit=25)
+            if not events:
+                try:
+                    contracts = adapter.list_contracts(query)
+                except Exception:
+                    contracts = []
+                if contracts:
+                    event = MarketEvent(
+                        market_id=adapter.market_id,
+                        event_id=query,
+                        title=query,
+                    )
+                    self._set_adapter_event_loaded(adapter, event, contracts)
+                    return
+                messagebox.showerror("Not found", f"No {adapter.display_name} events found for: {query}")
+                self.status_var.set("Market not found.")
+                return
+
+            event = self._select_adapter_event(events)
+            if event is None:
+                self.status_var.set("Market selection canceled.")
+                return
+
+            contracts = adapter.list_contracts(event.event_id)
+            if not contracts:
+                messagebox.showerror("Not found", "Event has no contracts.")
+                self.status_var.set("No contracts found for event.")
+                return
+            self._set_adapter_event_loaded(adapter, event, contracts)
+        except UnsupportedFeatureError as e:
+            messagebox.showinfo("Unsupported market", str(e))
+            self.status_var.set(str(e))
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            self.status_var.set("Error fetching market.")
+
     def _on_outcome_selected(self):
         idxs = self.outcome_list.curselection()
         if not idxs:
@@ -1099,17 +1651,39 @@ class App(tk.Tk):
         i = idxs[0]
         if i >= len(self._market_outcomes):
             return
-        tok = self._market_outcomes[i].token_id
+        outcome = self._market_outcomes[i]
+        tok = str(getattr(outcome, "token_id", "") or getattr(outcome, "contract_id", "") or "")
+        if not tok:
+            return
         self._selected_token_id = tok
+        self._selected_alert_market_id = str(
+            getattr(outcome, "market_id", "") or self.cfg.selected_market_id or "polymarket"
+        ).strip().lower()
         # Pre-fill label if blank
         if not self.alert_label_entry.get().strip():
-            self.alert_label_entry.insert(0, self._market_outcomes[i].outcome)
-        self.status_var.set(f"Selected token_id: {tok}")
+            label = str(getattr(outcome, "outcome", "") or getattr(outcome, "title", "") or tok)
+            self.alert_label_entry.insert(0, label)
+        noun = "token_id" if self._selected_alert_market_id == "polymarket" else "contract_id"
+        self.status_var.set(f"Selected {noun}: {tok}")
+        App._set_paper_contract_selection(self, self._selected_alert_market_id, tok)
 
     def add_alert(self):
         token_id = self._selected_token_id
         if not token_id:
             messagebox.showerror("Error", "Select a market outcome first.")
+            return
+        market_id = str(self._selected_alert_market_id or self.cfg.selected_market_id or "polymarket").strip().lower()
+        if not App._require_market_enabled(self, market_id, "price alerts"):
+            return
+        adapter = self.adapter_registry.create(
+            market_id,
+            self.cfg.markets.get(market_id).settings if self.cfg.markets.get(market_id) else {},
+        )
+        if not adapter.capabilities.alerts:
+            messagebox.showinfo(
+                "Unsupported market",
+                f"{adapter.display_name} does not support price alerts in this app.",
+            )
             return
 
         label = self.alert_label_entry.get().strip() or f"Alert {token_id[:8]}"
@@ -1130,16 +1704,19 @@ class App(tk.Tk):
             source=source,  # type: ignore
             once=once,
             enabled=True,
+            market_id=market_id,
         )
         self.cfg.alerts.append(a)
         save_config(self.cfg)
         self._refresh_alert_table()
 
-        # subscribe WS
-        self.market_ws.subscribe([token_id])
+        if market_id == "polymarket":
+            self.market_ws.subscribe([token_id])
 
         self.status_var.set("Alert added.")
-        self.ui_queue.put(("log", f"Added alert: {label} {direction} {thr} ({source}) on token {token_id}"))
+        self.ui_queue.put(
+            ("log", f"Added alert: {label} {direction} {thr} ({source}) on {market_id}:{token_id}")
+        )
 
     def _refresh_alert_table(self):
         for iid in self.alert_tree.get_children():
@@ -1151,6 +1728,7 @@ class App(tk.Tk):
                 "end",
                 iid=a.id,
                 values=(
+                    self._alert_market_id(a),
                     a.label,
                     a.token_id,
                     a.direction,
@@ -1173,7 +1751,7 @@ class App(tk.Tk):
         for a in self.cfg.alerts:
             if a.id == aid:
                 a.enabled = not a.enabled
-                if a.enabled:
+                if a.enabled and self._alert_market_id(a) == "polymarket":
                     self.market_ws.subscribe([a.token_id])
                 else:
                     # we don't unsubscribe automatically because another alert might use same token
@@ -1196,7 +1774,7 @@ class App(tk.Tk):
         self.resubscribe_ws()
 
     def resubscribe_ws(self):
-        ids = [a.token_id for a in self.cfg.alerts if a.enabled]
+        ids = self._enabled_polymarket_alert_ids()
         self.market_ws.set_tokens(ids)
         # Reconnect by stopping and restarting client (simple, brute-force)
         self.market_ws.stop()
@@ -1208,6 +1786,1008 @@ class App(tk.Tk):
         )
         self.market_ws.start()
         self.ui_queue.put(("log", f"Resubscribed WS to {len(ids)} tokens."))
+
+    # ------------------ Paper trading ------------------
+
+    def _adapter_for_market(self, market_id: str) -> MarketAdapter:
+        normalized = str(market_id or "polymarket").strip().lower()
+        market_cfg = self.cfg.markets.get(normalized)
+        settings = market_cfg.settings if market_cfg else {}
+        return self.adapter_registry.create(normalized, settings)
+
+    def _set_paper_contract_selection(self, market_id: str, contract_id: str) -> None:
+        if not hasattr(self, "paper_market_var"):
+            return
+        normalized = str(market_id or self.cfg.selected_market_id or "polymarket").strip().lower()
+        self.paper_market_var.set(normalized)
+        self.paper_contract_var.set(str(contract_id or ""))
+        label = f"Selected contract: {normalized}:{contract_id}" if contract_id else "No contract selected."
+        self.paper_selected_var.set(label)
+        App._refresh_paper_market_state(self)
+
+    def _refresh_paper_market_state(self) -> None:
+        if not hasattr(self, "paper_submit_btn"):
+            return
+        market_id = str(self.paper_market_var.get() or self.cfg.selected_market_id or "polymarket").strip().lower()
+        if not market_config_enabled(self.cfg, market_id):
+            display_name = App._market_display_name_for_id(self, market_id)
+            self.paper_status_var.set(
+                f"{display_name} is disabled in local market config. Enable it in Market Safety before paper actions."
+            )
+            self.paper_submit_btn.configure(state="disabled")
+            if hasattr(self, "paper_quote_btn"):
+                self.paper_quote_btn.configure(state="disabled")
+            if hasattr(self, "paper_quote_limit_btn"):
+                self.paper_quote_limit_btn.configure(state="disabled")
+            return
+        try:
+            adapter = App._adapter_for_market(self, market_id)
+        except Exception as exc:
+            self.paper_status_var.set(f"Market adapter unavailable: {exc}")
+            self.paper_submit_btn.configure(state="disabled")
+            if hasattr(self, "paper_quote_btn"):
+                self.paper_quote_btn.configure(state="disabled")
+            if hasattr(self, "paper_quote_limit_btn"):
+                self.paper_quote_limit_btn.configure(state="disabled")
+            return
+        quote_supported = bool(adapter.capabilities.price_reading or adapter.capabilities.orderbook_reading)
+        if hasattr(self, "paper_quote_btn"):
+            self.paper_quote_btn.configure(state="normal" if quote_supported else "disabled")
+        if hasattr(self, "paper_quote_limit_btn"):
+            self.paper_quote_limit_btn.configure(state="normal" if quote_supported else "disabled")
+        if adapter.capabilities.paper_trading:
+            suffix = " and quote previews" if quote_supported else ""
+            self.paper_status_var.set(f"{adapter.display_name} supports local paper orders{suffix}.")
+            self.paper_submit_btn.configure(state="normal")
+        elif quote_supported:
+            self.paper_status_var.set(
+                f"{adapter.display_name} does not support paper trading in this app; quote previews are available."
+            )
+            self.paper_submit_btn.configure(state="disabled")
+        else:
+            self.paper_status_var.set(f"{adapter.display_name} does not support paper trading in this app.")
+            self.paper_submit_btn.configure(state="disabled")
+
+    def use_selected_contract_for_paper(self) -> None:
+        if not self._selected_token_id:
+            messagebox.showerror("Error", "Select a market outcome or contract first.")
+            return
+        App._set_paper_contract_selection(self, self._selected_alert_market_id, self._selected_token_id)
+
+    def _paper_order_from_form(self) -> PaperOrderRequest:
+        market_id = str(self.paper_market_var.get() or "").strip().lower()
+        contract_id = str(self.paper_contract_var.get() or "").strip()
+        side = str(self.paper_side_var.get() or "").strip().upper()
+        size = safe_float(self.paper_size_var.get(), None)
+        raw_limit = str(self.paper_limit_var.get() or "").strip()
+        limit_price = None if raw_limit == "" else safe_float(raw_limit, None)
+
+        if not market_id:
+            raise ValueError("Select a market.")
+        if not contract_id:
+            raise ValueError("Enter a contract id.")
+        if side not in {"BUY", "SELL", "BACK", "LAY"}:
+            raise ValueError("Side must be BUY, SELL, BACK, or LAY.")
+        if size is None or size <= 0:
+            raise ValueError("Size must be a positive number.")
+        if raw_limit and limit_price is None:
+            raise ValueError("Limit must be a number, or blank for adapters that allow market-style paper orders.")
+
+        return PaperOrderRequest(
+            market_id=market_id,
+            contract_id=contract_id,
+            side=side,
+            size=float(size),
+            limit_price=limit_price,
+        )
+
+    def submit_paper_order(self) -> None:
+        try:
+            order = App._paper_order_from_form(self)
+            if not App._require_market_enabled(self, order.market_id, "paper orders"):
+                return
+            adapter = App._adapter_for_market(self, order.market_id)
+            if not adapter.capabilities.paper_trading:
+                messagebox.showinfo(
+                    "Unsupported market",
+                    f"{adapter.display_name} does not support paper trading in this app.",
+                )
+                App._refresh_paper_market_state(self)
+                return
+            result = adapter.place_paper_order(order)
+        except UnsupportedFeatureError as exc:
+            messagebox.showinfo("Unsupported market", str(exc))
+            self.paper_status_var.set(str(exc))
+            return
+        except Exception as exc:
+            messagebox.showerror("Paper order error", str(exc))
+            self.paper_status_var.set("Paper order rejected.")
+            return
+
+        record = App._record_paper_trade(self, order, result)
+        self.paper_status_var.set(record.message)
+        self.status_var.set("Paper order recorded.")
+        self.ui_queue.put(
+            (
+                "log",
+                f"[paper] {record.market_id}:{record.contract_id} {record.side} "
+                f"size={record.size:g} accepted={record.accepted}: {record.message}",
+            )
+        )
+
+    def preview_paper_order_impact(self) -> None:
+        try:
+            order = App._paper_order_from_form(self)
+            if not App._require_market_enabled(self, order.market_id, "paper order impact preview"):
+                return
+            impact = App._paper_order_impact(self.cfg.paper_trades, order)
+        except Exception as exc:
+            messagebox.showerror("Paper impact error", str(exc))
+            self.paper_status_var.set("Paper order impact preview failed.")
+            return
+
+        message = App._format_paper_order_impact(impact)
+        self.paper_status_var.set(message)
+        self.status_var.set("Paper order impact previewed.")
+        self.ui_queue.put(("log", f"[paper-impact] {order.market_id}:{order.contract_id} {message}"))
+
+    def refresh_paper_quote(self) -> None:
+        try:
+            market_id, contract_id, adapter, snapshot, orderbook = App._paper_quote_from_form(self)
+        except UnsupportedFeatureError as exc:
+            messagebox.showinfo("Unsupported market", str(exc))
+            self.paper_status_var.set(str(exc))
+            return
+        except MarketConfigurationError as exc:
+            messagebox.showinfo("Market disabled", str(exc))
+            self.paper_status_var.set(str(exc))
+            return
+        except Exception as exc:
+            messagebox.showerror("Quote error", str(exc))
+            self.paper_status_var.set("Quote refresh failed.")
+            return
+
+        message = App._format_paper_quote(adapter.display_name, snapshot, orderbook)
+        self.paper_status_var.set(message)
+        self.status_var.set("Paper quote refreshed.")
+        self.ui_queue.put(("log", f"[quote] {market_id}:{contract_id} {message}"))
+
+    def use_quote_limit_for_paper(self) -> None:
+        try:
+            market_id, contract_id, _adapter, snapshot, orderbook = App._paper_quote_from_form(self)
+            side = str(self.paper_side_var.get() or "").strip().upper()
+            limit, source = App._quote_limit_for_side(side, snapshot, orderbook)
+        except UnsupportedFeatureError as exc:
+            messagebox.showinfo("Unsupported market", str(exc))
+            self.paper_status_var.set(str(exc))
+            return
+        except MarketConfigurationError as exc:
+            messagebox.showinfo("Market disabled", str(exc))
+            self.paper_status_var.set(str(exc))
+            return
+        except Exception as exc:
+            messagebox.showerror("Quote limit error", str(exc))
+            self.paper_status_var.set("Quote limit update failed.")
+            return
+
+        self.paper_limit_var.set(f"{limit:g}")
+        message = f"Limit set from {source}: {limit:g}"
+        self.paper_status_var.set(message)
+        self.status_var.set("Paper limit updated from quote.")
+        self.ui_queue.put(("log", f"[quote-limit] {market_id}:{contract_id} {side} {message}"))
+
+    def _paper_quote_from_form(
+        self,
+    ) -> Tuple[str, str, MarketAdapter, Optional[PriceSnapshot], Optional[OrderBookSnapshot]]:
+        market_id = str(self.paper_market_var.get() or "").strip().lower()
+        contract_id = str(self.paper_contract_var.get() or "").strip()
+        if not market_id:
+            raise ValueError("Select a market.")
+        if not contract_id:
+            raise ValueError("Enter a contract id.")
+
+        if not market_config_enabled(self.cfg, market_id):
+            raise MarketConfigurationError(App._market_disabled_message(self, market_id, "quote previews"))
+
+        adapter = App._adapter_for_market(self, market_id)
+        if not (adapter.capabilities.price_reading or adapter.capabilities.orderbook_reading):
+            raise UnsupportedFeatureError(
+                adapter.market_id,
+                "price_reading",
+                f"{adapter.display_name} does not support quote or orderbook previews in this app.",
+            )
+
+        snapshot = adapter.get_price(contract_id) if adapter.capabilities.price_reading else None
+        orderbook = adapter.get_orderbook(contract_id) if adapter.capabilities.orderbook_reading else None
+        return market_id, contract_id, adapter, snapshot, orderbook
+
+    def preview_live_preflight(self) -> None:
+        try:
+            order = App._paper_order_from_form(self)
+            if not App._require_market_enabled(self, order.market_id, "live preflight preview"):
+                return
+            adapter = App._adapter_for_market(self, order.market_id)
+            if not adapter.capabilities.live_trading:
+                raise UnsupportedFeatureError(
+                    adapter.market_id,
+                    "live_trading",
+                    f"{adapter.display_name} does not support live trading in this app.",
+                )
+            preflight = adapter.preflight_live_order(order, feature_name="live preflight preview")
+        except UnsupportedFeatureError as exc:
+            messagebox.showinfo("Unsupported market", str(exc))
+            self.paper_status_var.set(str(exc))
+            return
+        except Exception as exc:
+            self.paper_status_var.set(f"Live preflight blocked: {exc}")
+            self.status_var.set("Live preflight blocked.")
+            self.ui_queue.put(("log", f"[preflight] blocked: {exc}"))
+            return
+
+        message = App._format_live_preflight(preflight)
+        self.paper_status_var.set(message)
+        self.status_var.set("Live preflight preview passed.")
+        self.ui_queue.put(("log", f"[preflight] {message}"))
+
+    @staticmethod
+    def _format_live_preflight(preflight: Dict[str, Any]) -> str:
+        preview = str(preflight.get("dry_run_preview") or "Live order preflight passed.")
+        notional = preflight.get("approx_notional")
+        max_notional = preflight.get("max_notional")
+        warnings = preflight.get("warnings") if isinstance(preflight.get("warnings"), list) else []
+
+        parts = [f"Preflight OK: {preview}"]
+        if isinstance(notional, (int, float)):
+            parts.append(f"notional~{float(notional):g}")
+        if isinstance(max_notional, (int, float)):
+            parts.append(f"max_notional={float(max_notional):g}")
+        if warnings:
+            parts.append("warnings=" + ",".join(str(item) for item in warnings))
+        return "; ".join(parts)
+
+    @staticmethod
+    def _format_paper_quote(
+        display_name: str,
+        snapshot: Optional[PriceSnapshot],
+        orderbook: Optional[OrderBookSnapshot],
+    ) -> str:
+        parts = [f"Quote: {display_name}"]
+        if snapshot is not None:
+            parts.extend(App._format_snapshot_parts(snapshot))
+        if orderbook is not None:
+            parts.extend(App._format_orderbook_parts(orderbook))
+        return "; ".join(parts)
+
+    @staticmethod
+    def _format_snapshot_parts(snapshot: PriceSnapshot) -> List[str]:
+        values = AdapterPricePoller._snapshot_values(snapshot)
+        labels = (
+            ("last", values["last_trade"]),
+            ("midpoint", values["midpoint"]),
+            ("bid", values["best_bid"]),
+            ("ask", values["best_ask"]),
+        )
+        parts = [f"{label}={float(value):g}" for label, value in labels if value is not None]
+        if snapshot.source:
+            parts.append(f"source={snapshot.source}")
+        return parts
+
+    @staticmethod
+    def _format_orderbook_parts(orderbook: OrderBookSnapshot) -> List[str]:
+        parts = []
+        if orderbook.bids:
+            bid = orderbook.bids[0]
+            parts.append(f"best_bid={bid.price:g}x{bid.size:g}")
+        if orderbook.asks:
+            ask = orderbook.asks[0]
+            parts.append(f"best_ask={ask.price:g}x{ask.size:g}")
+        depth = len(orderbook.bids) + len(orderbook.asks)
+        if depth:
+            parts.append(f"book_levels={depth}")
+        return parts
+
+    @staticmethod
+    def _quote_limit_for_side(
+        side: str,
+        snapshot: Optional[PriceSnapshot],
+        orderbook: Optional[OrderBookSnapshot],
+    ) -> Tuple[float, str]:
+        normalized_side = str(side or "").strip().upper()
+        if normalized_side not in {"BUY", "SELL", "BACK", "LAY"}:
+            raise ValueError("Side must be BUY, SELL, BACK, or LAY.")
+
+        wants_ask = normalized_side in {"BUY", "BACK"}
+        if wants_ask and orderbook is not None and orderbook.asks:
+            return float(orderbook.asks[0].price), "best_ask"
+        if not wants_ask and orderbook is not None and orderbook.bids:
+            return float(orderbook.bids[0].price), "best_bid"
+
+        values = AdapterPricePoller._snapshot_values(snapshot) if snapshot is not None else {}
+        fallback_order = (
+            ("best_ask", "ask"),
+            ("midpoint", "midpoint"),
+            ("last_trade", "last"),
+            ("best_bid", "bid"),
+        ) if wants_ask else (
+            ("best_bid", "bid"),
+            ("midpoint", "midpoint"),
+            ("last_trade", "last"),
+            ("best_ask", "ask"),
+        )
+        for key, label in fallback_order:
+            value = values.get(key)
+            if value is not None:
+                return float(value), label
+        raise ValueError("No quote price is available for the selected side.")
+
+    def _record_paper_trade(self, order: PaperOrderRequest, result: PaperOrderResult) -> PaperTradeRecord:
+        record = PaperTradeRecord(
+            market_id=order.market_id,
+            contract_id=order.contract_id,
+            side=order.side.upper(),
+            size=float(order.size),
+            limit_price=order.limit_price,
+            accepted=bool(result.accepted),
+            message=str(result.message),
+            filled_size=float(result.filled_size or 0.0),
+            average_price=result.average_price,
+            raw=dict(result.raw or {}),
+        )
+        self.cfg.paper_trades.insert(0, record)
+        if len(self.cfg.paper_trades) > 200:
+            self.cfg.paper_trades = self.cfg.paper_trades[:200]
+        save_config(self.cfg)
+        App._refresh_paper_trade_table(self)
+        return record
+
+    def use_selected_paper_trade(self) -> None:
+        try:
+            record = App._selected_paper_trade_record(self)
+        except Exception as exc:
+            messagebox.showerror("Paper history", str(exc))
+            self.paper_status_var.set(str(exc))
+            return
+
+        market_id = str(record.market_id or self.cfg.selected_market_id or "polymarket").strip().lower()
+        contract_id = str(record.contract_id or "").strip()
+        side = str(record.side or "").strip().upper()
+        size = float(record.size or 0.0)
+
+        self.paper_market_var.set(market_id)
+        self.paper_contract_var.set(contract_id)
+        self.paper_side_var.set(side)
+        self.paper_size_var.set(f"{size:g}")
+        self.paper_limit_var.set("" if record.limit_price is None else f"{float(record.limit_price):g}")
+        self.paper_selected_var.set(
+            f"Selected contract: {market_id}:{contract_id}" if contract_id else "No contract selected."
+        )
+        App._refresh_paper_market_state(self)
+
+        message = f"Loaded paper history order: {market_id}:{contract_id} {side} size={size:g}"
+        self.paper_status_var.set(message)
+        self.status_var.set("Paper order loaded into form.")
+        self.ui_queue.put(("log", f"[paper] loaded history order {market_id}:{contract_id} {side} size={size:g}"))
+
+    def _selected_paper_trade_record(self) -> PaperTradeRecord:
+        if not hasattr(self, "paper_tree"):
+            raise ValueError("Paper order history is not available.")
+        selected = tuple(self.paper_tree.selection())
+        if not selected:
+            raise ValueError("Select a paper order history row first.")
+        selected_id = str(selected[0])
+        for record in self.cfg.paper_trades:
+            if record.id == selected_id:
+                return record
+        raise ValueError("Selected paper order is no longer in history.")
+
+    def use_selected_paper_position(self) -> None:
+        try:
+            row = App._selected_paper_position_row(self)
+        except Exception as exc:
+            messagebox.showerror("Paper exposure", str(exc))
+            self.paper_status_var.set(str(exc))
+            return
+
+        market_id = str(row["market_id"]).strip().lower()
+        contract_id = str(row["contract_id"]).strip()
+        net_size = float(row["net_size"])
+        size = abs(net_size)
+        side = App._paper_position_close_side(self.cfg.paper_trades, market_id, contract_id, net_size)
+
+        self.paper_market_var.set(market_id)
+        self.paper_contract_var.set(contract_id)
+        self.paper_side_var.set(side)
+        self.paper_size_var.set(f"{size:g}")
+        self.paper_limit_var.set("")
+        self.paper_selected_var.set(f"Selected contract: {market_id}:{contract_id}")
+        App._refresh_paper_market_state(self)
+
+        message = f"Loaded paper position into form: {market_id}:{contract_id} {side} size={size:g}; limit cleared."
+        if not market_config_enabled(self.cfg, market_id):
+            message += " Market is disabled in local config."
+        self.paper_status_var.set(message)
+        self.status_var.set("Paper position loaded into form.")
+        self.ui_queue.put(("log", f"[paper] loaded position {market_id}:{contract_id} {side} size={size:g}"))
+
+    def refresh_paper_position_marks(self) -> None:
+        rows = App._paper_position_rows(self.cfg.paper_trades)
+        if not rows:
+            self._paper_position_marks = {}
+            App._refresh_paper_position_table(self)
+            self.paper_status_var.set("No open paper exposure to mark.")
+            self.status_var.set("No paper exposure to mark.")
+            return
+
+        marks: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        adapter_cache: Dict[str, MarketAdapter] = {}
+        problems: List[str] = []
+        marked_at = int(time.time())
+
+        for row in rows:
+            market_id = str(row["market_id"] or "").strip().lower()
+            contract_id = str(row["contract_id"] or "").strip()
+            if not market_config_enabled(self.cfg, market_id):
+                problems.append(f"{market_id}: disabled")
+                continue
+            try:
+                adapter = adapter_cache.get(market_id)
+                if adapter is None:
+                    adapter = App._adapter_for_market(self, market_id)
+                    adapter_cache[market_id] = adapter
+                if not adapter.capabilities.price_reading:
+                    problems.append(f"{adapter.display_name}: no price feed")
+                    continue
+                snapshot = adapter.get_price(contract_id)
+                mark_price, source = App._paper_position_mark_price(snapshot, float(row["net_size"]))
+                marks[(market_id, contract_id)] = {
+                    "mark_price": mark_price,
+                    "source": source,
+                    "marked_at": marked_at,
+                }
+            except Exception as exc:
+                problems.append(f"{market_id}:{contract_id}: {exc}")
+
+        self._paper_position_marks = marks
+        App._refresh_paper_position_table(self)
+
+        message = f"Marked {len(marks)}/{len(rows)} paper positions."
+        if problems:
+            message += " Skipped: " + "; ".join(problems[:3])
+            if len(problems) > 3:
+                message += f"; +{len(problems) - 3} more"
+        self.paper_status_var.set(message)
+        self.status_var.set("Paper exposure marks refreshed.")
+        self.ui_queue.put(("log", f"[paper] {message}"))
+
+    def refresh_selected_paper_position_mark(self) -> None:
+        try:
+            row = App._selected_paper_position_row(self)
+            market_id = str(row["market_id"]).strip().lower()
+            contract_id = str(row["contract_id"]).strip()
+            net_size = float(row["net_size"])
+            if not App._require_market_enabled(self, market_id, "paper mark refresh"):
+                return
+            adapter = App._adapter_for_market(self, market_id)
+            if not adapter.capabilities.price_reading:
+                raise UnsupportedFeatureError(
+                    adapter.market_id,
+                    "price_reading",
+                    f"{adapter.display_name} does not support paper mark refresh in this app.",
+                )
+            snapshot = adapter.get_price(contract_id)
+            mark_price, source = App._paper_position_mark_price(snapshot, net_size)
+        except UnsupportedFeatureError as exc:
+            messagebox.showinfo("Unsupported market", str(exc))
+            self.paper_status_var.set(str(exc))
+            return
+        except Exception as exc:
+            messagebox.showerror("Paper mark error", str(exc))
+            self.paper_status_var.set("Selected paper mark refresh failed.")
+            return
+
+        current_rows = App._paper_position_rows(self.cfg.paper_trades)
+        marks = App._paper_marks_for_rows(getattr(self, "_paper_position_marks", {}) or {}, current_rows)
+        marks[(market_id, contract_id)] = {
+            "mark_price": mark_price,
+            "source": source,
+            "marked_at": int(time.time()),
+        }
+        self._paper_position_marks = marks
+        App._refresh_paper_position_table(self)
+
+        message = f"Marked selected paper position: {market_id}:{contract_id} {source}={mark_price:g}"
+        self.paper_status_var.set(message)
+        self.status_var.set("Selected paper exposure mark refreshed.")
+        self.ui_queue.put(("log", f"[paper] {message}"))
+
+    def clear_selected_paper_position_mark(self) -> None:
+        try:
+            row = App._selected_paper_position_row(self)
+        except Exception as exc:
+            messagebox.showerror("Paper exposure", str(exc))
+            self.paper_status_var.set(str(exc))
+            return
+
+        market_id = str(row["market_id"]).strip().lower()
+        contract_id = str(row["contract_id"]).strip()
+        key = (market_id, contract_id)
+        current_rows = App._paper_position_rows(self.cfg.paper_trades)
+        marks = App._paper_marks_for_rows(getattr(self, "_paper_position_marks", {}) or {}, current_rows)
+        if key not in marks:
+            self._paper_position_marks = marks
+            App._refresh_paper_position_table(self)
+            message = f"No paper exposure mark to clear for {market_id}:{contract_id}."
+            self.paper_status_var.set(message)
+            self.status_var.set("No selected paper exposure mark to clear.")
+            return
+
+        marks.pop(key, None)
+        self._paper_position_marks = marks
+        App._refresh_paper_position_table(self)
+
+        message = f"Cleared selected paper exposure mark: {market_id}:{contract_id}"
+        self.paper_status_var.set(message)
+        self.status_var.set("Selected paper exposure mark cleared.")
+        self.ui_queue.put(("log", f"[paper] {message}"))
+
+    def clear_paper_position_marks(self) -> None:
+        if not getattr(self, "_paper_position_marks", {}):
+            self.paper_status_var.set("No paper exposure marks to clear.")
+            self.status_var.set("No paper exposure marks to clear.")
+            return
+
+        self._paper_position_marks = {}
+        App._refresh_paper_position_table(self)
+        self.paper_status_var.set("Paper exposure marks cleared.")
+        self.status_var.set("Paper exposure marks cleared.")
+        self.ui_queue.put(("log", "[paper] Paper exposure marks cleared."))
+
+    def _selected_paper_position_row(self) -> Dict[str, Any]:
+        if not hasattr(self, "paper_position_tree"):
+            raise ValueError("Paper exposure summary is not available.")
+        selected = tuple(self.paper_position_tree.selection())
+        if not selected:
+            raise ValueError("Select a paper exposure row first.")
+        values = tuple(self.paper_position_tree.item(selected[0], "values") or ())
+        if len(values) < 3:
+            raise ValueError("Selected paper exposure row is incomplete.")
+
+        market_id = str(values[0] or "").strip().lower()
+        contract_id = str(values[1] or "").strip()
+        net_size = safe_float(values[2], None)
+        if not market_id or not contract_id or net_size is None or net_size == 0:
+            raise ValueError("Selected paper exposure row is incomplete.")
+        return {"market_id": market_id, "contract_id": contract_id, "net_size": float(net_size)}
+
+    def _refresh_paper_trade_table(self) -> None:
+        if not hasattr(self, "paper_tree"):
+            return
+        for iid in self.paper_tree.get_children():
+            self.paper_tree.delete(iid)
+        for record in self.cfg.paper_trades:
+            limit = "" if record.limit_price is None else f"{record.limit_price:g}"
+            self.paper_tree.insert(
+                "",
+                "end",
+                iid=record.id,
+                values=(
+                    time.strftime("%H:%M:%S", time.localtime(record.created_at)),
+                    record.market_id,
+                    record.contract_id,
+                    record.side,
+                    f"{record.size:g}",
+                    limit,
+                    "yes" if record.accepted else "no",
+                    record.message,
+                ),
+            )
+        App._refresh_paper_position_table(self)
+
+    def _refresh_paper_position_table(self) -> None:
+        if not hasattr(self, "paper_position_tree"):
+            return
+        for iid in self.paper_position_tree.get_children():
+            self.paper_position_tree.delete(iid)
+        rows = App._paper_position_rows(self.cfg.paper_trades)
+        marks = App._paper_marks_for_rows(getattr(self, "_paper_position_marks", {}) or {}, rows)
+        self._paper_position_marks = marks
+        if hasattr(self, "paper_position_summary_var"):
+            self.paper_position_summary_var.set(App._format_paper_position_summary(rows, marks))
+        for row in rows:
+            iid = f"{row['market_id']}:{row['contract_id']}"
+            mark = marks.get((str(row["market_id"]), str(row["contract_id"])), {})
+            mark_price = mark.get("mark_price")
+            mark_source = str(mark.get("source") or "")
+            mark_time = App._paper_mark_time_text(mark)
+            unrealized = App._paper_position_mark_unrealized(row, mark)
+            self.paper_position_tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(
+                    row["market_id"],
+                    row["contract_id"],
+                    f"{row['net_size']:.4f}",
+                    "" if row["average_price"] is None else f"{row['average_price']:.4f}",
+                    "" if row["notional"] is None else f"{row['notional']:.4f}",
+                    "" if mark_price is None else f"{float(mark_price):.4f}",
+                    mark_source,
+                    mark_time,
+                    "" if unrealized is None else f"{float(unrealized):.4f}",
+                    row["trades"],
+                ),
+            )
+
+    @staticmethod
+    def _paper_position_rows(records: List[PaperTradeRecord]) -> List[Dict[str, Any]]:
+        grouped: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for record in records:
+            if not record.accepted:
+                continue
+            signed_size = App._paper_record_signed_size(record)
+            if signed_size == 0:
+                continue
+            price = record.average_price if record.average_price is not None else record.limit_price
+            key = (record.market_id, record.contract_id)
+            row = grouped.setdefault(
+                key,
+                {
+                    "market_id": record.market_id,
+                    "contract_id": record.contract_id,
+                    "net_size": 0.0,
+                    "notional": 0.0,
+                    "priced_size": 0.0,
+                    "trades": 0,
+                },
+            )
+            row["net_size"] += signed_size
+            row["trades"] += 1
+            if price is not None:
+                row["notional"] += signed_size * float(price)
+                row["priced_size"] += abs(signed_size)
+
+        rows: List[Dict[str, Any]] = []
+        for row in grouped.values():
+            priced_size = float(row.pop("priced_size"))
+            notional = float(row["notional"])
+            net_size = float(row["net_size"])
+            row["average_price"] = abs(notional) / abs(net_size) if priced_size > 0 and net_size != 0 else None
+            row["notional"] = notional if priced_size > 0 else None
+            rows.append(row)
+        return sorted(rows, key=lambda item: (str(item["market_id"]), str(item["contract_id"])))
+
+    @staticmethod
+    def _format_paper_position_summary(rows: List[Dict[str, Any]], marks: Dict[Tuple[str, str], Dict[str, Any]]) -> str:
+        if not rows:
+            return "No paper exposure."
+
+        gross_size = sum(abs(float(row["net_size"])) for row in rows)
+        priced_rows = [row for row in rows if row.get("notional") is not None]
+        gross_entry = sum(abs(float(row["notional"])) for row in priced_rows)
+        net_entry = sum(float(row["notional"]) for row in priced_rows)
+
+        marked_count = 0
+        last_marked_at: Optional[float] = None
+        unrealized_values: List[float] = []
+        mark_sources: Dict[str, int] = {}
+        for row in rows:
+            mark = marks.get((str(row["market_id"]), str(row["contract_id"])), {})
+            mark_price = safe_float(mark.get("mark_price"), None)
+            if mark_price is not None:
+                marked_count += 1
+            marked_at = safe_float(mark.get("marked_at"), None)
+            if marked_at is not None:
+                last_marked_at = marked_at if last_marked_at is None else max(last_marked_at, marked_at)
+            unrealized = App._paper_position_mark_unrealized(row, mark)
+            if unrealized is not None:
+                unrealized_values.append(float(unrealized))
+            source = str(mark.get("source") or "")
+            if source:
+                mark_sources[source] = mark_sources.get(source, 0) + 1
+
+        parts = [
+            f"Positions: {len(rows)}",
+            f"gross_size={gross_size:.4f}",
+            f"entry_notional={gross_entry:.4f}",
+            f"net_notional={net_entry:.4f}",
+            f"marked={marked_count}/{len(rows)}",
+        ]
+        if unrealized_values:
+            parts.append(f"unrealized={sum(unrealized_values):.4f}")
+        if last_marked_at is not None:
+            parts.append(f"last_mark={time.strftime('%H:%M:%S', time.localtime(last_marked_at))}")
+        if mark_sources:
+            parts.append(
+                "mark_sources=" + ",".join(f"{source}:{mark_sources[source]}" for source in sorted(mark_sources))
+            )
+        return "; ".join(parts)
+
+    @staticmethod
+    def _paper_marks_for_rows(
+        marks: Dict[Tuple[str, str], Dict[str, Any]],
+        rows: List[Dict[str, Any]],
+    ) -> Dict[Tuple[str, str], Dict[str, Any]]:
+        active_keys = {(str(row["market_id"]), str(row["contract_id"])) for row in rows}
+        pruned: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for key, value in marks.items():
+            if not isinstance(key, tuple) or len(key) != 2:
+                continue
+            normalized_key = (str(key[0]), str(key[1]))
+            if normalized_key in active_keys:
+                pruned[normalized_key] = value
+        return pruned
+
+    @staticmethod
+    def _paper_order_impact(records: List[PaperTradeRecord], order: PaperOrderRequest) -> Dict[str, Any]:
+        current_row = next(
+            (
+                row
+                for row in App._paper_position_rows(records)
+                if row["market_id"] == order.market_id and row["contract_id"] == order.contract_id
+            ),
+            None,
+        )
+        current_net = float(current_row["net_size"]) if current_row else 0.0
+        current_notional = current_row.get("notional") if current_row else None
+        signed_size = App._paper_order_signed_size(order)
+        projected_net = current_net + signed_size
+        order_notional = signed_size * float(order.limit_price) if order.limit_price is not None else None
+        projected_notional = (
+            float(current_notional) + float(order_notional)
+            if current_notional is not None and order_notional is not None
+            else None
+        )
+        projected_average = (
+            abs(projected_notional) / abs(projected_net)
+            if projected_notional is not None and projected_net != 0
+            else None
+        )
+        return {
+            "market_id": order.market_id,
+            "contract_id": order.contract_id,
+            "side": order.side,
+            "size": order.size,
+            "limit_price": order.limit_price,
+            "current_net": current_net,
+            "signed_size": signed_size,
+            "projected_net": projected_net,
+            "effect": App._paper_order_impact_effect(current_net, signed_size, projected_net),
+            "order_notional": order_notional,
+            "projected_notional": projected_notional,
+            "projected_average": projected_average,
+        }
+
+    @staticmethod
+    def _format_paper_order_impact(impact: Dict[str, Any]) -> str:
+        parts = [
+            f"Impact: {impact['market_id']}:{impact['contract_id']}",
+            f"{impact['side']} size={float(impact['size']):g}",
+            f"current_net={float(impact['current_net']):.4f}",
+            f"order_net={float(impact['signed_size']):.4f}",
+            f"projected_net={float(impact['projected_net']):.4f}",
+            f"effect={impact['effect']}",
+        ]
+        if impact.get("order_notional") is None:
+            parts.append("limit blank")
+        else:
+            parts.append(f"order_notional={float(impact['order_notional']):.4f}")
+        if impact.get("projected_notional") is not None:
+            parts.append(f"projected_notional={float(impact['projected_notional']):.4f}")
+        if impact.get("projected_average") is not None:
+            parts.append(f"projected_avg={float(impact['projected_average']):.4f}")
+        return "; ".join(parts)
+
+    @staticmethod
+    def _paper_order_signed_size(order: PaperOrderRequest) -> float:
+        side = str(order.side or "").upper()
+        size = float(order.size or 0.0)
+        if side in {"SELL", "LAY"}:
+            return -size
+        if side in {"BUY", "BACK"}:
+            return size
+        return 0.0
+
+    @staticmethod
+    def _paper_order_impact_effect(current_net: float, signed_size: float, projected_net: float) -> str:
+        if signed_size == 0:
+            return "unchanged"
+        if current_net == 0:
+            return "opens position"
+        if projected_net == 0:
+            return "closes position"
+        if (current_net > 0 > projected_net) or (current_net < 0 < projected_net):
+            return "flips position"
+        if (current_net > 0 and signed_size > 0) or (current_net < 0 and signed_size < 0):
+            return "adds to position"
+        return "reduces position"
+
+    @staticmethod
+    def _paper_record_signed_size(record: PaperTradeRecord) -> float:
+        size = float(record.filled_size or record.size or 0.0)
+        side = str(record.side or "").upper()
+        if side in {"SELL", "LAY"}:
+            return -size
+        if side in {"BUY", "BACK"}:
+            return size
+        return 0.0
+
+    @staticmethod
+    def _paper_position_close_side(records: List[PaperTradeRecord], market_id: str, contract_id: str, net_size: float) -> str:
+        matching_sides = [
+            str(record.side or "").upper()
+            for record in records
+            if record.accepted and record.market_id == market_id and record.contract_id == contract_id
+        ]
+        uses_back_lay = any(side in {"BACK", "LAY"} for side in matching_sides)
+        uses_buy_sell = any(side in {"BUY", "SELL"} for side in matching_sides)
+        if uses_back_lay and not uses_buy_sell:
+            return "LAY" if net_size > 0 else "BACK"
+        return "SELL" if net_size > 0 else "BUY"
+
+    @staticmethod
+    def _paper_position_mark_price(snapshot: PriceSnapshot, net_size: float) -> Tuple[float, str]:
+        values = AdapterPricePoller._snapshot_values(snapshot)
+        ordered_sources = (
+            (("best_bid", "bid"), ("midpoint", "midpoint"), ("last_trade", "last"), ("best_ask", "ask"))
+            if net_size >= 0
+            else (("best_ask", "ask"), ("midpoint", "midpoint"), ("last_trade", "last"), ("best_bid", "bid"))
+        )
+        for key, label in ordered_sources:
+            value = values.get(key)
+            if value is not None:
+                return float(value), label
+        raise ValueError("No mark price is available for this position.")
+
+    @staticmethod
+    def _paper_position_unrealized_pnl(row: Dict[str, Any], mark_price: float) -> Optional[float]:
+        notional = row.get("notional")
+        if notional is None:
+            return None
+        return float(row["net_size"]) * float(mark_price) - float(notional)
+
+    @staticmethod
+    def _paper_position_mark_unrealized(row: Dict[str, Any], mark: Dict[str, Any]) -> Optional[float]:
+        mark_price = safe_float(mark.get("mark_price"), None)
+        if mark_price is None:
+            return None
+        return App._paper_position_unrealized_pnl(row, mark_price)
+
+    @staticmethod
+    def _paper_mark_time_text(mark: Dict[str, Any]) -> str:
+        marked_at = safe_float(mark.get("marked_at"), None)
+        if marked_at is None:
+            return ""
+        return time.strftime("%H:%M:%S", time.localtime(marked_at))
+
+    def clear_paper_history(self) -> None:
+        if not self.cfg.paper_trades:
+            return
+        if not messagebox.askyesno("Clear paper history", "Clear local paper trade history?"):
+            return
+        self.cfg.paper_trades = []
+        save_config(self.cfg)
+        self._refresh_paper_trade_table()
+        self.paper_status_var.set("Paper trade history cleared.")
+
+    # ------------------ Market safety settings ------------------
+
+    def _refresh_market_safety_tab(self) -> None:
+        if not hasattr(self, "safety_market_var"):
+            return
+        market_id = str(self.cfg.selected_market_id or "polymarket").strip().lower()
+        market_cfg = App._market_config_for(self, market_id)
+        settings = market_cfg.settings
+        display_name = App._selected_market_display_name(self)
+
+        self.safety_market_var.set(f"Selected market: {display_name} ({market_id})")
+        self.safety_market_enabled_var.set(bool(market_cfg.enabled))
+        self.safety_live_enabled_var.set(bool_from_setting(settings.get("live_trading_enabled"), False))
+        self.safety_live_confirmed_var.set(
+            bool_from_setting(settings.get("live_trading_confirmed"), False)
+            or bool_from_setting(settings.get("live_trading_acknowledged"), False)
+        )
+        self.safety_kill_switch_var.set(
+            bool_from_setting(settings.get("live_trading_kill_switch"), False)
+            or bool_from_setting(settings.get("live_trading_paused"), False)
+        )
+        self.safety_max_size_var.set("" if settings.get("live_trading_max_size") in (None, "") else str(settings.get("live_trading_max_size")))
+        self.safety_max_notional_var.set(
+            "" if settings.get("live_trading_max_notional") in (None, "") else str(settings.get("live_trading_max_notional"))
+        )
+
+        try:
+            adapter = App._get_selected_market_adapter(self)
+            health = adapter.health_check()
+            status = App._selected_market_status_text(self, adapter)
+        except Exception as exc:
+            health = {"ok": False, "message": str(exc)}
+            status = f"{display_name}: adapter unavailable. {exc}"
+
+        self.safety_status_var.set(status)
+        App._refresh_market_health_table(self, health)
+
+    def _refresh_market_health_table(self, health: Dict[str, Any]) -> None:
+        if not hasattr(self, "safety_tree"):
+            return
+        for iid in self.safety_tree.get_children():
+            self.safety_tree.delete(iid)
+
+        market_id = str(self.cfg.selected_market_id or "polymarket").strip().lower()
+        market_cfg = App._market_config_for(self, market_id)
+        settings = market_cfg.settings
+        capabilities = health.get("capabilities")
+        enabled_capabilities = []
+        if isinstance(capabilities, dict):
+            enabled_capabilities = [key for key, value in capabilities.items() if value]
+
+        rows = [
+            ("market_id", market_id),
+            ("enabled", "yes" if market_cfg.enabled else "no"),
+            ("adapter", str(health.get("adapter") or "")),
+            ("health", "ok" if health.get("ok") else "not ok"),
+            ("message", str(health.get("message") or "")),
+            ("capabilities", ", ".join(enabled_capabilities) if enabled_capabilities else "none"),
+            ("credential_env_vars", ", ".join(str(v) for v in settings.get("credential_env_vars") or []) or "none listed"),
+            ("credential_sources", App._format_credential_sources(health.get("credential_sources"))),
+            ("live_trading_enabled", str(bool_from_setting(settings.get("live_trading_enabled"), False)).lower()),
+            ("live_trading_confirmed", str(self.safety_live_confirmed_var.get()).lower()),
+            ("live_trading_kill_switch", str(self.safety_kill_switch_var.get()).lower()),
+            ("live_trading_max_size", str(settings.get("live_trading_max_size") or "")),
+            ("live_trading_max_notional", str(settings.get("live_trading_max_notional") or "")),
+        ]
+
+        for key, value in rows:
+            self.safety_tree.insert("", "end", iid=key, values=(key, value))
+
+    @staticmethod
+    def _format_credential_sources(raw: Any) -> str:
+        if not isinstance(raw, list) or not raw:
+            return "none detected"
+        parts = []
+        for item in raw:
+            if isinstance(item, dict):
+                name = str(item.get("name") or "credential")
+                source = str(item.get("source") or "configured")
+                parts.append(f"{name} from {source}")
+        return ", ".join(parts) if parts else "none detected"
+
+    def save_market_safety_settings(self) -> None:
+        market_id = str(self.cfg.selected_market_id or "polymarket").strip().lower()
+        market_cfg = App._market_config_for(self, market_id)
+        settings = dict(market_cfg.settings)
+
+        try:
+            max_size = optional_positive_float(self.safety_max_size_var.get(), "Max order size")
+            max_notional = optional_positive_float(self.safety_max_notional_var.get(), "Max notional")
+        except Exception as exc:
+            messagebox.showerror("Market safety settings", str(exc))
+            self.safety_status_var.set(str(exc))
+            return
+
+        market_cfg.enabled = bool(self.safety_market_enabled_var.get())
+        settings["live_trading_enabled"] = bool(self.safety_live_enabled_var.get())
+        settings["live_trading_confirmed"] = bool(self.safety_live_confirmed_var.get())
+        settings["live_trading_kill_switch"] = bool(self.safety_kill_switch_var.get())
+        if max_size is None:
+            settings.pop("live_trading_max_size", None)
+        else:
+            settings["live_trading_max_size"] = max_size
+        if max_notional is None:
+            settings.pop("live_trading_max_notional", None)
+        else:
+            settings["live_trading_max_notional"] = max_notional
+        market_cfg.settings = settings
+        self.cfg.markets[market_id] = market_cfg
+
+        save_config(self.cfg)
+        if hasattr(self, "market_status_var"):
+            self.market_status_var.set(App._selected_market_status_text(self))
+        if hasattr(self, "paper_market_var"):
+            self.paper_market_var.set(market_id)
+            App._refresh_paper_market_state(self)
+        App._refresh_market_safety_tab(self)
+        self.status_var.set("Market safety settings saved.")
+        self.ui_queue.put(("log", f"[market] Saved safety settings for {market_id}."))
 
     # ------------------ Wallet tracking ------------------
 
@@ -1433,11 +3013,12 @@ class App(tk.Tk):
         raw_size = safe_float(item.get("size"), 0.0) or 0.0
         raw_price = safe_float(item.get("price"), None)
         size = max(0.0, raw_size * float(s.scale))
+        adapter = self._get_polymarket_adapter()
 
         # Pull current best bid/ask for safer limit pricing
         best_bid = best_ask = None
         try:
-            book = self._get_polymarket_adapter().get_orderbook(token_id)
+            book = adapter.get_orderbook(token_id)
             best_bid = book.bids[0].price if book.bids else None
             best_ask = book.asks[0].price if book.asks else None
         except Exception:
@@ -1477,8 +3058,29 @@ class App(tk.Tk):
             self.ui_queue.put(("log", f"[copy] BLOCKED by geoblock. Refusing to place order."))
             return
 
+        order = PaperOrderRequest(
+            market_id="polymarket",
+            contract_id=token_id,
+            side=side,
+            size=size,
+            limit_price=limit_price,
+            metadata={"source": "copy_trading", "tif": "FOK"},
+        )
+        try:
+            preflight = adapter.preflight_live_order(order, feature_name="live copy trading")
+        except Exception as e:
+            self.ui_queue.put(("log", f"[copy LIVE] preflight blocked order: {e}"))
+            return
+
         trader = self._get_trader()
-        self.ui_queue.put(("log", f"[copy LIVE] Placing {side} order token={token_id} size={size:.4f} price={limit_price:.4f} FOK"))
+        self.ui_queue.put(
+            (
+                "log",
+                "[copy LIVE] Placing "
+                f"{side} order token={token_id} size={size:.4f} price={limit_price:.4f} "
+                f"notional~{preflight['approx_notional']:.4f} FOK",
+            )
+        )
         try:
             resp = trader.place_limit_order(token_id=token_id, side=side, price=limit_price, size=size, tif="FOK")
             self.ui_queue.put(("log", f"[copy LIVE] response: {resp}"))
@@ -1501,10 +3103,10 @@ class App(tk.Tk):
             price = safe_float(ev.get("price"))
             if not token_id or price is None:
                 return
-            st = self.price_state.setdefault(token_id, {})
+            st = self.price_state.setdefault(self._price_state_key("polymarket", token_id), {})
             st["last_trade"] = price
             # Evaluate alerts
-            self._eval_alerts_for_token(token_id)
+            self._eval_alerts_for_contract("polymarket", token_id)
 
         elif et == "best_bid_ask":
             token_id = str(ev.get("asset_id") or "")
@@ -1512,14 +3114,14 @@ class App(tk.Tk):
             ask = safe_float(ev.get("best_ask"))
             if not token_id:
                 return
-            st = self.price_state.setdefault(token_id, {})
+            st = self.price_state.setdefault(self._price_state_key("polymarket", token_id), {})
             if bid is not None:
                 st["best_bid"] = bid
             if ask is not None:
                 st["best_ask"] = ask
             if st.get("best_bid") is not None and st.get("best_ask") is not None:
                 st["midpoint"] = (st["best_bid"] + st["best_ask"]) / 2.0  # type: ignore
-            self._eval_alerts_for_token(token_id)
+            self._eval_alerts_for_contract("polymarket", token_id)
 
         elif et == "price_change":
             changes = ev.get("price_changes") or []
@@ -1531,14 +3133,14 @@ class App(tk.Tk):
                     continue
                 bid = safe_float(ch.get("best_bid"))
                 ask = safe_float(ch.get("best_ask"))
-                st = self.price_state.setdefault(token_id, {})
+                st = self.price_state.setdefault(self._price_state_key("polymarket", token_id), {})
                 if bid is not None:
                     st["best_bid"] = bid
                 if ask is not None:
                     st["best_ask"] = ask
                 if st.get("best_bid") is not None and st.get("best_ask") is not None:
                     st["midpoint"] = (st["best_bid"] + st["best_ask"]) / 2.0  # type: ignore
-                self._eval_alerts_for_token(token_id)
+                self._eval_alerts_for_contract("polymarket", token_id)
 
         elif et == "book":
             token_id = str(ev.get("asset_id") or "")
@@ -1554,23 +3156,42 @@ class App(tk.Tk):
                     ask = safe_float(asks[0].get("price"))
             except Exception:
                 pass
-            st = self.price_state.setdefault(token_id, {})
+            st = self.price_state.setdefault(self._price_state_key("polymarket", token_id), {})
             if bid is not None:
                 st["best_bid"] = bid
             if ask is not None:
                 st["best_ask"] = ask
             if st.get("best_bid") is not None and st.get("best_ask") is not None:
                 st["midpoint"] = (st["best_bid"] + st["best_ask"]) / 2.0  # type: ignore
-            self._eval_alerts_for_token(token_id)
+            self._eval_alerts_for_contract("polymarket", token_id)
 
     def _eval_alerts_for_token(self, token_id: str):
-        st = self.price_state.get(token_id) or {}
+        App._eval_alerts_for_contract(self, "polymarket", token_id)
+
+    def _update_adapter_price_state(self, payload: Dict[str, Any]) -> None:
+        market_id = str(payload.get("market_id") or "").strip().lower()
+        contract_id = str(payload.get("contract_id") or "")
+        values = payload.get("values") if isinstance(payload.get("values"), dict) else {}
+        if not market_id or not contract_id:
+            return
+        st = self.price_state.setdefault(App._price_state_key(market_id, contract_id), {})
+        for key in ("last_trade", "midpoint", "best_bid", "best_ask"):
+            value = safe_float(values.get(key), None)
+            if value is not None:
+                st[key] = value
+        self._eval_alerts_for_contract(market_id, contract_id)
+
+    def _eval_alerts_for_contract(self, market_id: str, contract_id: str):
+        normalized_market = str(market_id or "polymarket").strip().lower()
+        st = self.price_state.get(App._price_state_key(normalized_market, contract_id)) or {}
         # evaluate all alerts for this token
         changed = False
         for a in self.cfg.alerts:
             if not a.enabled:
                 continue
-            if a.token_id != token_id:
+            if App._alert_market_id(a) != normalized_market:
+                continue
+            if a.token_id != contract_id:
                 continue
 
             val = st.get(a.source)
@@ -1606,7 +3227,10 @@ class App(tk.Tk):
             self._refresh_alert_table()
 
     def _fire_alert(self, alert: PriceAlert, value: float):
-        msg = f"ALERT: {alert.label} | {alert.source}={value:.3f} crossed {alert.direction} {alert.threshold:.3f}"
+        msg = (
+            f"ALERT: {self._alert_market_id(alert)}:{alert.label} | "
+            f"{alert.source}={value:.3f} crossed {alert.direction} {alert.threshold:.3f}"
+        )
         self.ui_queue.put(("log", msg))
         try:
             self.bell()
@@ -1632,6 +3256,8 @@ class App(tk.Tk):
                     self.log(str(a))
                 elif kind == "market_event":
                     self._update_price_state(b)  # type: ignore
+                elif kind == "adapter_price":
+                    self._update_adapter_price_state(a)  # type: ignore
                 elif kind == "wallet_activity":
                     watch_id = a
                     item = b
@@ -1683,7 +3309,35 @@ class App(tk.Tk):
         self._copy_trade_from_activity(item)
 
 
-if __name__ == "__main__":
+def tkinter_smoke_payload() -> Dict[str, Any]:
+    registry = build_default_registry()
+    cfg = AppConfig()
+    market_ids = [metadata.market_id for metadata in registry.list_metadata()]
+    choices = [market_choice_label(metadata) for metadata in registry.list_metadata()]
+    return {
+        "ok": True,
+        "app_class": App.__name__,
+        "tkinter_base": issubclass(App, tk.Tk),
+        "window_title": "prediction-market-alert-and-copy-trade-gui",
+        "selected_market_id": cfg.selected_market_id,
+        "market_count": len(market_ids),
+        "choice_count": len(choices),
+        "all_markets_configured": set(market_ids) == set(cfg.markets),
+        "fallback_command": "python app.py",
+    }
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if "--smoke-test" in args:
+        print(json.dumps(tkinter_smoke_payload(), sort_keys=True))
+        return 0
+
     set_windows_app_id("prediction-market-alert-and-copy-trade-gui")
     app = App()
     app.mainloop()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
