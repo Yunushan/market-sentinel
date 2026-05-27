@@ -55,6 +55,15 @@ class PolymarketApiWrapperTests(unittest.TestCase):
         self.assertEqual(mock_get.call_args.kwargs["params"], {"token_id": "token-1"})
         self.assertEqual(mock_get.call_args.kwargs["timeout"], 3)
 
+    def test_get_last_trade_price_accepts_dict_payload(self) -> None:
+        with patch("polymarket.clob_rest.requests.get", return_value=FakeResponse({"price": "0.58"})) as mock_get:
+            price = clob_rest.get_last_trade_price("token-1", timeout=3)
+
+        self.assertEqual(price, 0.58)
+        self.assertIn("/last-trade-price", mock_get.call_args.args[0])
+        self.assertEqual(mock_get.call_args.kwargs["params"], {"token_id": "token-1"})
+        self.assertEqual(mock_get.call_args.kwargs["timeout"], 3)
+
     def test_activity_request_clamps_limit_and_offset_and_passes_filters(self) -> None:
         with patch("polymarket.data_api.requests.get", return_value=FakeResponse([{"id": 1}])) as mock_get:
             result = data_api.get_activity(
@@ -79,6 +88,28 @@ class PolymarketApiWrapperTests(unittest.TestCase):
         self.assertEqual(params["start"], 10)
         self.assertEqual(params["end"], 20)
         self.assertEqual(mock_get.call_args.kwargs["timeout"], 4)
+
+    def test_leaderboard_request_clamps_page_and_accepts_wrapped_payload(self) -> None:
+        payload = {"data": [{"proxyWallet": "0xabc", "pnl": "12", "volume": "120"}]}
+        with patch("polymarket.data_api.requests.get", return_value=FakeResponse(payload)) as mock_get:
+            result = data_api.get_leaderboard(
+                limit=100,
+                offset=-2,
+                sort_by="ROI",
+                sort_direction="SIDEWAYS",
+                period="all",
+                timeout=5,
+            )
+
+        params = mock_get.call_args.kwargs["params"]
+        self.assertEqual(result, payload["data"])
+        self.assertIn("/v1/leaderboard", mock_get.call_args.args[0])
+        self.assertEqual(params["limit"], 50)
+        self.assertEqual(params["offset"], 0)
+        self.assertEqual(params["sortBy"], "PNL")
+        self.assertEqual(params["sortDirection"], "DESC")
+        self.assertEqual(params["period"], "all")
+        self.assertEqual(mock_get.call_args.kwargs["timeout"], 5)
 
 
 if __name__ == "__main__":

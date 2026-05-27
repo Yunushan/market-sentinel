@@ -170,12 +170,13 @@ These articles completed the catalog, adapter architecture, verification, docs, 
 - Article 35 Adapter Capability Expansion Re-Audit: scope complete; verified-blocked markets were re-checked against current official sources, no market was safely promotable without production APIs/entitlements/wallet safeguards/fixtures, and blocker notes were tightened for Context, Hyperliquid, Thales, Smarkets, CME, and consumer-app products.
 - Article 36 Packaging and Launch UX: scope complete; Windows smart/dev/prod/build launch scripts now document and enforce React setup paths, `web_api.py` exposes React build/dev/prod launch metadata and serves built `frontend/dist` assets with SPA fallback, and Tkinter remains the explicit fallback through `run_gui.bat` or `python app.py`.
 - Article 37 Final Parity Verification: Python/Tkinter/API scope complete; `python app.py --smoke-test`, `python -m pytest`, and `python verify.py` pass with explicit Tkinter fallback, React workflow API parity, launch UX, and frontend build-readiness checks. Strict React build/browser verification remains blocked in this environment because `npm install` timed out and `frontend/node_modules` plus `package-lock.json` are absent.
+- Article 38 Polymarket User Analytics: Python/API/React source scope complete; public profile search and Data API leaderboard scanning are wired with computed ROI %, PnL/volume/ROI min-max filters, explicit unavailable MDD fields, docs, and focused unit tests. Strict React build/browser verification remains pending successful `npm install`.
 
 ## Active continuation goals
 
 When continuing article by article, complete each task to 100% of its scoped objective with tests and docs. Do not reinterpret blocked markets as implemented unless the official-access constraints are solved.
 
-- Frontend dependency unblocker: complete `cd frontend && npm install` or `build_web_gui.bat` in an environment where npm can finish, then run `npm run build`, `python verify.py --frontend-build`, and local browser smoke tests for the React state, markets, paper trading, alerts, wallets/copy, and live safety views.
+- Frontend dependency unblocker: complete `cd frontend && npm install` or `build_web_gui.bat` in an environment where npm can finish, then run `npm run build`, `python verify.py --frontend-build`, and local browser smoke tests for the React state, markets, analytics, paper trading, alerts, wallets/copy, and live safety views.
 
 ## Non-negotiable remaining blockers
 

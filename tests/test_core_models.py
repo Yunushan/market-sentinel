@@ -57,6 +57,7 @@ class CoreModelTests(unittest.TestCase):
                 enabled=True,
                 live=False,
                 follow_wallet=WALLET,
+                follow_wallets=[WALLET],
                 scale=0.5,
                 max_usdc_per_trade=10.0,
             ),
@@ -84,6 +85,30 @@ class CoreModelTests(unittest.TestCase):
         self.assertTrue(loaded.markets["polymarket"].enabled)
         self.assertTrue(loaded.copytrading.enabled)
         self.assertFalse(loaded.copytrading.live)
+        self.assertEqual(loaded.copytrading.normalized_follow_wallets(), [WALLET])
+        self.assertEqual(loaded.copytrading.to_dict()["copy_percentage"], 50.0)
+
+    def test_copy_settings_load_percentage_and_clamp_legacy_scale(self) -> None:
+        from_percentage = CopyTradeSettings.from_dict({"copy_percentage": 25})
+        from_legacy = CopyTradeSettings.from_dict({"scale": 2.0})
+
+        self.assertEqual(from_percentage.scale, 0.25)
+        self.assertEqual(from_legacy.scale, 1.0)
+
+    def test_copy_settings_preserve_multiple_follow_wallets(self) -> None:
+        other = "0x" + "b" * 40
+        settings = CopyTradeSettings.from_dict(
+            {
+                "follow_wallet": WALLET,
+                "follow_wallets": [other, WALLET],
+                "conflict_guard": True,
+                "conflict_window_seconds": 120,
+            }
+        )
+
+        self.assertEqual(settings.normalized_follow_wallets(), [WALLET, other])
+        self.assertEqual(settings.to_dict()["follow_wallet"], WALLET)
+        self.assertEqual(settings.to_dict()["follow_wallets"], [WALLET, other])
 
     def test_default_config_includes_all_catalog_markets(self) -> None:
         cfg = AppConfig()

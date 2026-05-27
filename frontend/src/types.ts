@@ -41,6 +41,7 @@ export interface Market {
     capabilities: MarketCapabilities;
     runtime?: Record<string, unknown>;
     verified_blocker?: boolean;
+    credential_requirement?: string;
   };
   status_text: string;
   credential_env_vars: string[];
@@ -219,20 +220,96 @@ export interface WalletPollResponse {
   polled_wallets: number;
 }
 
+export interface PolymarketUserProfile {
+  pseudonym: string;
+  proxy_wallet: string;
+  profile_image: string;
+  display_username_public: boolean;
+}
+
+export interface PolymarketUserSearchPayload {
+  query: string;
+  profiles: PolymarketUserProfile[];
+  counts: {
+    profiles: number;
+  };
+  source: string;
+}
+
+export type PolymarketLeaderboardSort = "roi_pct" | "pnl_usd" | "volume_usd";
+
+export interface PolymarketLeaderboardFilters {
+  sort: PolymarketLeaderboardSort;
+  limit: string;
+  scan_limit: string;
+  min_pnl_usd: string;
+  max_pnl_usd: string;
+  min_volume_usd: string;
+  max_volume_usd: string;
+  min_roi_pct: string;
+  max_roi_pct: string;
+  min_mdd_usd: string;
+  max_mdd_usd: string;
+  min_mdd_pct: string;
+  max_mdd_pct: string;
+}
+
+export interface PolymarketLeaderboardRow {
+  rank: number;
+  wallet: string;
+  display_name: string;
+  profile_image: string;
+  display_username_public: boolean;
+  pnl_usd: number | null;
+  volume_usd: number | null;
+  roi_pct: number | null;
+  trade_count: number;
+  mdd_usd: number | null;
+  mdd_pct: number | null;
+  mdd_available: boolean;
+  raw: Record<string, unknown>;
+}
+
+export interface PolymarketLeaderboardPayload {
+  rows: PolymarketLeaderboardRow[];
+  counts: {
+    returned: number;
+    filtered: number;
+    scanned: number;
+  };
+  sort: PolymarketLeaderboardSort;
+  direction: "ASC" | "DESC";
+  period: string;
+  limit: number;
+  scan_limit: number;
+  source: string;
+  source_sort: string;
+  ranking_scope: string;
+  mdd_available: boolean;
+  mdd_note: string;
+  warnings: string[];
+}
+
 export interface CopySettings {
   enabled: boolean;
   live: boolean;
   follow_wallet: string;
+  follow_wallets: string[];
   scale: number;
+  copy_percentage: number;
   max_usdc_per_trade: number;
   slippage: number;
   allow_sells: boolean;
+  conflict_guard: boolean;
+  conflict_window_seconds: number;
 }
 
 export interface CopyPayload {
   settings: CopySettings;
   wallet_choices: string[];
   follow_wallet_tracked: boolean;
+  follow_wallets_tracked: number;
+  follow_wallets_untracked: string[];
   status: string;
   simulation_first: boolean;
   copy_trading_supported: boolean;
@@ -250,11 +327,12 @@ export interface CopyPayload {
 export interface CopyForm {
   enabled: boolean;
   live: boolean;
-  follow_wallet: string;
-  scale: string;
+  follow_wallets: string;
+  copy_percentage: string;
   max_usdc_per_trade: string;
   slippage: string;
   allow_sells: boolean;
+  conflict_guard: boolean;
 }
 
 export interface CopyPreviewForm {
@@ -315,10 +393,14 @@ export interface ConfigPayload {
     enabled: boolean;
     live: boolean;
     follow_wallet: string;
+    follow_wallets: string[];
     scale: number;
+    copy_percentage: number;
     max_usdc_per_trade: number;
     slippage: number;
     allow_sells: boolean;
+    conflict_guard: boolean;
+    conflict_window_seconds: number;
   };
 }
 

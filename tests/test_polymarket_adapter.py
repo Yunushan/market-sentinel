@@ -47,6 +47,8 @@ class PolymarketAdapterTests(unittest.TestCase):
         book = load_fixture("orderbook.json")
         with patch("market_adapters.polymarket.clob_rest.get_book", return_value=book), patch(
             "market_adapters.polymarket.clob_rest.get_midpoint", return_value=0.62
+        ), patch(
+            "market_adapters.polymarket.clob_rest.get_last_trade_price", return_value=0.61
         ):
             orderbook = adapter.get_orderbook("token-yes")
             price = adapter.get_price("token-yes")
@@ -56,6 +58,7 @@ class PolymarketAdapterTests(unittest.TestCase):
         self.assertEqual(orderbook.asks[0].price, 0.64)
         self.assertEqual(price.bid, 0.60)
         self.assertEqual(price.ask, 0.64)
+        self.assertEqual(price.last, 0.61)
         self.assertEqual(price.midpoint, 0.62)
 
     def test_get_orderbook_filters_invalid_levels_and_sorts_book(self) -> None:
@@ -88,10 +91,13 @@ class PolymarketAdapterTests(unittest.TestCase):
         }
         with patch("market_adapters.polymarket.clob_rest.get_book", return_value=book), patch(
             "market_adapters.polymarket.clob_rest.get_midpoint", side_effect=RuntimeError("bad midpoint")
+        ), patch(
+            "market_adapters.polymarket.clob_rest.get_last_trade_price", side_effect=RuntimeError("bad last")
         ):
             price = adapter.get_price("token-yes")
 
         self.assertEqual(price.midpoint, 0.50)
+        self.assertIsNone(price.last)
 
     def test_list_events_skips_malformed_search_items_and_clamps_limit(self) -> None:
         adapter = PolymarketAdapter()

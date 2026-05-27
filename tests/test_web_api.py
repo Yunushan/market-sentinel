@@ -22,6 +22,7 @@ from market_adapters.types import (
     PaperOrderResult,
     PriceSnapshot,
 )
+from polymarket.gamma import ProfileResult
 from web_api import (
     _read_json_body,
     add_wallet_watch,
@@ -34,6 +35,7 @@ from web_api import (
     apply_market_patch,
     copy_payload,
     copy_preview_payload,
+    copy_trade_preview_from_activity,
     delete_alert,
     delete_wallet_watch,
     health_payload,
@@ -47,6 +49,8 @@ from web_api import (
     paper_quote_limit_payload,
     paper_quote_payload,
     paper_position_rows,
+    polymarket_leaderboard_payload,
+    polymarket_user_search_payload,
     position_refill_payload,
     poll_wallet_activity,
     refresh_selected_paper_mark,
@@ -60,6 +64,7 @@ from web_api import (
 
 
 WALLET = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+WALLET_2 = "0xcccccccccccccccccccccccccccccccccccccccc"
 
 
 class FakePaperAdapter(MarketAdapter):
@@ -119,6 +124,8 @@ class FakePolymarketAdapter(MarketAdapter):
         market_id="polymarket",
         display_name="Polymarket",
         capabilities=MarketCapabilities(
+            price_reading=True,
+            alerts=True,
             orderbook_reading=True,
             live_trading=True,
             copy_trading=True,
@@ -127,7 +134,20 @@ class FakePolymarketAdapter(MarketAdapter):
 
     def __init__(self) -> None:
         super().__init__({})
+        self.prices: list[str] = []
         self.orderbooks: list[str] = []
+
+    def get_price(self, contract_id: str) -> PriceSnapshot:
+        self.prices.append(contract_id)
+        return PriceSnapshot(
+            market_id="polymarket",
+            contract_id=contract_id,
+            last=0.61,
+            bid=0.60,
+            ask=0.64,
+            midpoint=0.62,
+            source="test-polymarket",
+        )
 
     def get_orderbook(self, contract_id: str) -> OrderBookSnapshot:
         self.orderbooks.append(contract_id)
@@ -482,6 +502,29 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["alerts"][0]["current_value"], 0.62)
         self.assertEqual(payload["alerts"][0]["status"]["label"], "triggered/disabled")
 
+    def test_refresh_polymarket_alert_uses_last_trade_price(self) -> None:
+        cfg = AppConfig()
+        cfg.markets["polymarket"].enabled = True
+        adapter = FakePolymarketAdapter()
+        alert = PriceAlert(
+            market_id="polymarket",
+            token_id="token-yes",
+            label="Polymarket last trade",
+            direction="above",
+            threshold=0.60,
+            source="last_trade",
+            once=True,
+        )
+        cfg.alerts.append(alert)
+        price_state = {}
+
+        result = refresh_alert_price(cfg, FakeRegistry(adapter), alert, price_state)
+
+        self.assertEqual(adapter.prices, ["token-yes"])
+        self.assertEqual(result["values"]["last_trade"], 0.61)
+        self.assertTrue(alert.triggered)
+        self.assertFalse(alert.enabled)
+
     def test_wallet_payload_add_update_delete(self) -> None:
         cfg = AppConfig()
         cfg.markets["polymarket"].enabled = True
@@ -509,7 +552,8 @@ class WebApiTests(unittest.TestCase):
             enabled=True,
             live=False,
             follow_wallet=WALLET,
-            scale=2.0,
+            follow_wallets=[WALLET],
+            scale=1.0,
             max_usdc_per_trade=1.0,
             slippage=0.02,
         )
@@ -571,7 +615,8 @@ class WebApiTests(unittest.TestCase):
                 "enabled": True,
                 "live": True,
                 "follow_wallet": WALLET,
-                "scale": 1,
+                "follow_wallets": [WALLET],
+                "copy_percentage": 100,
                 "max_usdc_per_trade": 2,
                 "slippage": 0.01,
                 "allow_sells": True,
@@ -591,6 +636,125 @@ class WebApiTests(unittest.TestCase):
         self.assertFalse(payload["preview"]["blocked"])
         self.assertEqual(payload["preview"]["preflight"]["feature"], "live copy trading")
         self.assertEqual(payload["preview"]["preflight"]["metadata_keys"], ["activity_key", "source", "tif"])
+
+    def test_copy_settings_accept_zero_to_one_hundred_percent(self) -> None:
+        cfg = AppConfig()
+        cfg.markets["polymarket"].enabled = True
+
+        settings = apply_copy_settings_patch(
+            cfg,
+            {
+                "enabled": True,
+                "follow_wallets": [WALLET, WALLET_2],
+                "copy_percentage": 0,
+                "max_usdc_per_trade": 2,
+                "slippage": 0.01,
+            },
+        )
+
+        self.assertEqual(settings.scale, 0.0)
+        self.assertEqual(settings.normalized_follow_wallets(), [WALLET, WALLET_2])
+        self.assertEqual(settings.to_dict()["copy_percentage"], 0.0)
+        with self.assertRaises(ValueError):
+            apply_copy_settings_patch(cfg, {"copy_percentage": 101})
+
+    def test_copy_preview_supports_multiple_follow_wallets_and_conflict_guard(self) -> None:
+        cfg = AppConfig()
+        cfg.markets["polymarket"].enabled = True
+        cfg.copytrading = CopyTradeSettings(
+            enabled=True,
+            live=False,
+            follow_wallet=WALLET,
+            follow_wallets=[WALLET, WALLET_2],
+            scale=1.0,
+            max_usdc_per_trade=10.0,
+            slippage=0.01,
+            conflict_guard=True,
+        )
+        conflict_state: dict[str, dict] = {}
+        first = {
+            "transactionHash": "tx1",
+            "timestamp": 100,
+            "proxyWallet": WALLET,
+            "asset": "token-yes",
+            "side": "BUY",
+            "price": "0.44",
+            "size": "2",
+            "slug": "market",
+            "outcome": "Yes",
+        }
+        duplicate = {**first, "transactionHash": "tx2", "proxyWallet": WALLET_2, "timestamp": 101}
+
+        accepted = copy_trade_preview_from_activity(cfg, FakeRegistry(FakePolymarketAdapter()), first, conflict_state)
+        skipped = copy_trade_preview_from_activity(cfg, FakeRegistry(FakePolymarketAdapter()), duplicate, conflict_state)
+
+        self.assertEqual(accepted["status"], "simulation")
+        self.assertEqual(skipped["status"], "skipped")
+        self.assertIn("duplicate", skipped["reason"])
+
+    def test_polymarket_leaderboard_payload_computes_roi_and_scans_pages(self) -> None:
+        first_page = [
+            {"rank": index, "proxyWallet": f"0x{index:040x}", "pseudonym": f"user-{index}", "pnl": "1", "volume": "100"}
+            for index in range(1, 51)
+        ]
+        first_page[0] = {"rank": 1, "proxyWallet": "0xaaa", "pseudonym": "alpha", "pnl": "10", "volume": "100"}
+        pages = [
+            first_page,
+            [
+                {"rank": 51, "proxyWallet": "0xccc", "pseudonym": "gamma", "pnl": "4", "volume": "20"},
+            ],
+        ]
+
+        def fake_leaderboard(*_args, **kwargs):
+            return pages[0] if kwargs["offset"] == 0 else pages[1]
+
+        with patch("web_api.data_api.get_leaderboard", side_effect=fake_leaderboard) as mock_get:
+            payload = polymarket_leaderboard_payload(
+                {
+                    "sort": ["roi_pct"],
+                    "limit": ["2"],
+                    "scan_limit": ["51"],
+                    "min_volume_usd": ["20"],
+                }
+            )
+
+        self.assertEqual(mock_get.call_count, 2)
+        self.assertEqual(payload["counts"]["scanned"], 51)
+        self.assertEqual(payload["rows"][0]["display_name"], "gamma")
+        self.assertAlmostEqual(payload["rows"][0]["roi_pct"], 20.0)
+        self.assertEqual(payload["rows"][1]["display_name"], "alpha")
+        self.assertFalse(payload["mdd_available"])
+        self.assertEqual(payload["source_sort"], "PNL")
+
+    def test_polymarket_leaderboard_payload_reports_unavailable_mdd_filter(self) -> None:
+        with patch(
+            "web_api.data_api.get_leaderboard",
+            return_value=[{"proxyWallet": "0xaaa", "pnl": "10", "volume": "100"}],
+        ):
+            payload = polymarket_leaderboard_payload({"min_mdd_pct": ["-10"], "limit": ["1"], "scan_limit": ["1"]})
+
+        self.assertEqual(payload["counts"]["returned"], 1)
+        self.assertFalse(payload["rows"][0]["mdd_available"])
+        self.assertTrue(payload["warnings"])
+        self.assertIn("drawdown", payload["mdd_note"].lower())
+
+    def test_polymarket_user_search_payload_returns_profile_rows(self) -> None:
+        with patch(
+            "web_api.gamma.search_profiles",
+            return_value=[
+                ProfileResult(
+                    pseudonym="Trader",
+                    proxy_wallet=WALLET,
+                    profile_image="https://example.test/avatar.png",
+                    display_username_public=True,
+                )
+            ],
+        ) as mock_search:
+            payload = polymarket_user_search_payload("trade", limit=3)
+
+        mock_search.assert_called_once_with("trade", limit=3)
+        self.assertEqual(payload["counts"]["profiles"], 1)
+        self.assertEqual(payload["profiles"][0]["proxy_wallet"], WALLET)
 
     def test_apply_config_patch_validates_selected_market_and_theme(self) -> None:
         cfg = AppConfig()

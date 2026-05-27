@@ -3,12 +3,16 @@
   "paper_trades": [],
   "copytrading": {
     "allow_sells": false,
+    "copy_percentage": 100.0,
     "enabled": false,
     "follow_wallet": "",
+    "follow_wallets": [],
     "live": false,
     "max_usdc_per_trade": 25.0,
     "scale": 1.0,
-    "slippage": 0.02
+    "slippage": 0.02,
+    "conflict_guard": true,
+    "conflict_window_seconds": 300
   },
   "markets": {
     "augur": {

@@ -170,13 +170,15 @@ class CopyHarness:
                 enabled=True,
                 live=False,
                 follow_wallet=WALLET,
-                scale=2.0,
+                follow_wallets=[WALLET],
+                scale=1.0,
                 max_usdc_per_trade=5.0,
                 slippage=0.02,
             )
         )
         self.ui_queue: "queue.Queue[tuple]" = queue.Queue()
         self._geoblock_cache = None
+        self._copy_conflict_cache = {}
         self.polymarket_adapter = FakePolymarketAdapter()
 
     def _get_polymarket_adapter(self) -> "FakePolymarketAdapter":
@@ -1509,6 +1511,32 @@ class AppLogicTests(unittest.TestCase):
         kind, message = harness.ui_queue.get_nowait()
         self.assertEqual(kind, "log")
         self.assertIn("preflight blocked", message)
+
+    def test_copy_trade_conflict_guard_skips_duplicate_followed_wallet_signal(self) -> None:
+        other_wallet = "0x" + "c" * 40
+        harness = CopyHarness()
+        harness.cfg.copytrading.follow_wallets = [WALLET, other_wallet]
+        first = {
+            "proxyWallet": WALLET,
+            "side": "BUY",
+            "asset": "token-1234567890",
+            "size": "2",
+            "price": "0.45",
+            "timestamp": 100,
+            "slug": "market",
+            "outcome": "Yes",
+        }
+        duplicate = {**first, "proxyWallet": other_wallet, "timestamp": 101}
+
+        App._copy_trade_from_activity(harness, first)
+        App._copy_trade_from_activity(harness, duplicate)
+
+        first_kind, first_message = harness.ui_queue.get_nowait()
+        second_kind, second_message = harness.ui_queue.get_nowait()
+        self.assertEqual(first_kind, "log")
+        self.assertIn("[copy SIM] BUY", first_message)
+        self.assertEqual(second_kind, "log")
+        self.assertIn("Conflict guard skipped", second_message)
 
     def test_wallet_poller_deduplicates_same_timestamp_transactions(self) -> None:
         cfg = AppConfig(wallets=[WalletWatch(wallet=WALLET, display_name="tracked")])

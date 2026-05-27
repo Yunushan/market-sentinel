@@ -14,6 +14,7 @@ POLYMARKET_CAPABILITIES = MarketCapabilities(
     paper_trading=True,
     live_trading=True,
     copy_trading=True,
+    api_required=True,
     credentials_required=True,
     kyc_required=True,
     region_limited=True,

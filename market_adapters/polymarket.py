@@ -39,6 +39,7 @@ class PolymarketAdapter(MarketAdapter):
             {
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "credential_sources": credential_sources,
+                "credential_requirement": "live_trading_only",
                 "geoblock_required_for_live": True,
             }
         )
@@ -145,16 +146,24 @@ class PolymarketAdapter(MarketAdapter):
             midpoint = self._safe_probability(clob_rest.get_midpoint(contract_id))
         except Exception:
             midpoint = None
+        try:
+            last_trade = self._safe_probability(clob_rest.get_last_trade_price(contract_id))
+        except Exception:
+            last_trade = None
         if midpoint is None and orderbook.bids and orderbook.asks:
             midpoint = (orderbook.bids[0].price + orderbook.asks[0].price) / 2.0
+        raw = dict(orderbook.raw)
+        raw["last_trade"] = last_trade
+        raw["midpoint"] = midpoint
         return PriceSnapshot(
             market_id=self.market_id,
             contract_id=contract_id,
+            last=last_trade,
             bid=orderbook.bids[0].price if orderbook.bids else None,
             ask=orderbook.asks[0].price if orderbook.asks else None,
             midpoint=midpoint,
             source="polymarket_clob",
-            raw=orderbook.raw,
+            raw=raw,
         )
 
     def get_orderbook(self, contract_id: str) -> OrderBookSnapshot:

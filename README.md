@@ -14,6 +14,7 @@ A local multi-market prediction-market GUI app (Tkinter) for:
 
 ### 1) Price triggers
 - Polymarket alerts subscribe to the CLOB WebSocket market channel
+- Polymarket adapter-backed alert refresh reads CLOB last-trade, midpoint, best bid, and best ask state
 - Other implemented adapters can load events/contracts from the selected market and poll official price endpoints for adapter-backed alerts
 - Alerts support **last trade / last value**, midpoint, best bid, and best ask sources where the selected adapter exposes them
 - The React Alerts tab can create, edit, enable/disable, delete, and refresh market-scoped alerts against the local Python API
@@ -25,13 +26,23 @@ A local multi-market prediction-market GUI app (Tkinter) for:
 - The React Wallets tab can add, edit, enable/disable, delete, and manually poll tracked wallets
 - The React Wallets tab shows recent activity cached by the local API session, including simulation copy previews
 
-### 3) Copy trading (paper mode by default)
+### 3) Polymarket user analytics
+- Search public Polymarket profiles by username/pseudonym and return proxy wallets for tracking or copy setup
+- Load public leaderboard rows and rank them by PnL USD, volume USD, or computed ROI %
+- The default ROI view returns up to the top 100 rows from as many as 500 scanned public leaderboard rows
+- Min/max filters are available for PnL USD, volume USD, and ROI %
+- MDD USD/% fields are exposed as unavailable unless a trusted upstream drawdown/equity-curve source supplies them; the app does not fake drawdown values
+- The React Analytics tab exposes user search, leaderboard sorting, and filters through the local Python API
+
+### 4) Copy trading (paper mode by default)
 - Follows a tracked wallet’s **BUY** trades (SELL optional, guarded)
 - Default mode is **SIMULATION** (logs what it *would* do)
+- Copy sizing is a bounded **0..100%** setting; `0%` watches without copying and `100%` mirrors full detected size before max-USDC caps
+- Multiple followed wallets are supported; the conflict guard skips duplicate or opposite-side same-token copies inside the guard window
 - Enable **LIVE** mode only after the adapter live preflight settings are explicitly acknowledged
 - The React Wallets & Copy tab edits simulation-first copy settings and previews guarded live-copy preflight without placing orders
 
-### 4) Adapter-backed paper trading
+### 5) Adapter-backed paper trading
 - Load an implemented market, select a contract, and submit dry-run paper orders through the selected adapter
 - Refresh the selected contract's quote/orderbook preview before sizing a paper or preflighted live order
 - Fill the order limit from the selected contract's current quote using side-aware bid/ask selection
@@ -51,19 +62,19 @@ A local multi-market prediction-market GUI app (Tkinter) for:
 - Uses the adapter’s own validation and dry-run payload builder, including market-specific price/odds rules
 - Stores local paper-order history in `data/config.json`
 
-### 5) Central live trading safety
+### 6) Central live trading safety
 - Every implemented live adapter and the Polymarket copy-trading live path run the same preflight before an order can be posted
 - Preflight requires `live_trading_enabled=true` and `live_trading_confirmed=true`, honors `live_trading_kill_switch`, and blocks orders above configured size/notional caps
 - Preflight returns a redacted audit payload with contract, side, size, approximate notional, metadata key names, dry-run preview text, and region/KYC/credential warnings
 - The React Live Safety tab edits the selected market's live gate and displays the redacted preflight audit without placing orders
 - The Paper Trading tab can run **Preview Live Preflight** for the current order form without submitting a paper or live order
 
-### 6) Market safety and credential diagnostics
+### 7) Market safety and credential diagnostics
 - The Markets tab shows the selected adapter's health, enabled capabilities, configured credential environment variables, and detected credential sources without secret values
 - The Markets and Live Safety tabs persist selected-market enablement, live enablement, live acknowledgement, kill switch, max size, and max notional settings
 - Adapter-backed market search, alerts, paper actions, quote previews, and live preflight previews require the selected market to be enabled in local config
 
-### 7) Kalshi adapter support
+### 8) Kalshi adapter support
 - Lists Kalshi events/contracts through official REST market-data endpoints
 - Reads binary orderbooks and derives YES/NO best bid/ask prices
 - Supports dry-run/paper orders; live orders are opt-in and require signed API credentials
@@ -169,8 +180,10 @@ Useful local API endpoints:
 - `PATCH /api/wallets/{wallet_id}` edits wallet display name, enablement, or market-slug filter.
 - `DELETE /api/wallets/{wallet_id}` deletes a wallet watch from local config.
 - `POST /api/wallets/poll` polls enabled wallet watches once through the Polymarket Data API and updates dedupe state.
+- `GET /api/polymarket/users/search?q=...` searches public Polymarket profiles and returns proxy-wallet candidates.
+- `GET /api/polymarket/users/leaderboard` returns public leaderboard rows ranked by PnL USD, volume USD, or computed ROI %, with min/max filters for PnL, volume, ROI, and pass-through MDD fields when upstream data includes them.
 - `GET /api/copy` returns copy-trading settings, tracked-wallet status, and live gate state.
-- `PATCH /api/copy` updates simulation-first copy settings.
+- `PATCH /api/copy` updates simulation-first copy settings, including multiple followed wallets, bounded copy percentage (`0..100`), and conflict-guard settings.
 - `POST /api/copy/preview` previews copy-trade sizing and guarded live preflight without placing orders.
 - `GET /api/live-safety` returns selected-market live gate state, blockers, and redaction metadata.
 - `POST /api/live-safety/preflight` runs the shared live-order preflight for the current order form and returns a redacted pass/block audit without placing orders.
@@ -260,7 +273,7 @@ This runs:
 - Windows launch UX checks
 - Tkinter fallback smoke checks
 - frontend build readiness checks; the build is skipped unless `frontend/node_modules` exists
-- offline unit tests for config/storage, API wrapper parsing, alert crossing, copy-trade simulation sizing, and wallet activity de-duplication
+- offline unit tests for config/storage, API wrapper parsing, alert crossing, copy-trade percentage sizing, and wallet activity de-duplication
 
 Pytest is included in `requirements.txt`; run the pytest suite directly with:
 ```bash
@@ -308,8 +321,10 @@ In-app checks:
 - **Alerts -> Refresh Prices** polls adapter-backed current price state and updates trigger status without placing orders.
 - **Wallets & Copy** manages tracked Polymarket proxy wallets and manual Data API activity polling.
 - **Wallets & Copy** shows recent wallet activity with the copy-trading simulation or skip reason for each item.
-- **Wallets & Copy** edits copy scale, max USDC, slippage, live mode, and SELL-copy permission.
+- **Wallets & Copy** edits followed wallets, copy percentage, max USDC, slippage, live mode, SELL-copy permission, and the same-token conflict guard.
 - **Wallets & Copy -> Preview** runs the live-copy preflight gate for a sample activity and does not place an order.
+- **Analytics** searches public Polymarket profiles and loads leaderboard rows by ROI %, PnL USD, or volume USD.
+- **Analytics** shows MDD USD/% as unavailable unless the upstream leaderboard row includes drawdown data.
 - **Paper Trading -> Refresh Quote** previews the selected contract's current adapter quote/orderbook without placing an order.
 - **Paper Trading -> Use Quote Limit** fills the limit field from best ask for BUY/BACK and best bid for SELL/LAY where available.
 - **Paper Trading** keeps a local paper exposure summary above the order-history table.

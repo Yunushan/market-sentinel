@@ -9,7 +9,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, WalletWatch
 from core.storage import DEFAULT_CONFIG_PATH, load_config, save_config
@@ -25,7 +25,7 @@ from market_adapters.types import (
     PaperOrderResult,
     PriceSnapshot,
 )
-from polymarket import data_api
+from polymarket import data_api, gamma
 from polymarket.util import normalize_wallet
 
 
@@ -52,6 +52,8 @@ API_ROUTES = {
         "/api/paper",
         "/api/paper/history",
         "/api/paper/positions",
+        "/api/polymarket/users/search",
+        "/api/polymarket/users/leaderboard",
     ],
     "PATCH": [
         "/api/config",
@@ -171,6 +173,30 @@ def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    number = _safe_float(value, None)
+    if number is None:
+        return default
+    return int(number)
+
+
+def _clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    return max(minimum, min(_safe_int(value, default), maximum))
+
+
+def _query_value(params: Mapping[str, List[str]], key: str, default: str = "") -> str:
+    values = params.get(key)
+    if not values:
+        return default
+    return str(values[0] if values[0] is not None else default).strip()
+
+
+def _query_float(params: Mapping[str, List[str]], key: str) -> Optional[float]:
+    if key not in params:
+        return None
+    return _safe_float(_query_value(params, key), None)
 
 
 def activity_key(item: Mapping[str, Any]) -> str:
@@ -1077,6 +1103,209 @@ def wallets_payload(
     }
 
 
+LEADERBOARD_SORTS = {
+    "roi_pct": "PNL",
+    "pnl_usd": "PNL",
+    "volume_usd": "VOL",
+}
+
+
+def _leaderboard_lookup(row: Mapping[str, Any], *keys: str) -> Any:
+    sources: List[Mapping[str, Any]] = [row]
+    for nested_key in ("user", "profile", "trader"):
+        nested = row.get(nested_key)
+        if isinstance(nested, Mapping):
+            sources.append(nested)
+    for source in sources:
+        for key in keys:
+            if key in source and source.get(key) not in (None, ""):
+                return source.get(key)
+    return None
+
+
+def _leaderboard_display_name(row: Mapping[str, Any], wallet: str) -> str:
+    name = _leaderboard_lookup(
+        row,
+        "pseudonym",
+        "displayName",
+        "display_name",
+        "username",
+        "name",
+    )
+    if name:
+        return str(name)
+    return f"{wallet[:8]}...{wallet[-6:]}" if wallet else "-"
+
+
+def normalize_polymarket_leaderboard_row(raw: Mapping[str, Any], fallback_rank: int) -> Dict[str, Any]:
+    wallet = str(
+        _leaderboard_lookup(raw, "proxyWallet", "proxy_wallet", "wallet", "address", "userAddress") or ""
+    )
+    pnl = _safe_float(
+        _leaderboard_lookup(raw, "pnl", "pnlUsd", "pnl_usd", "profit", "profitLoss", "realizedPnl", "realizedPnlUsd"),
+        None,
+    )
+    volume = _safe_float(
+        _leaderboard_lookup(raw, "volume", "volumeUsd", "volume_usd", "vol", "totalVolume", "totalVolumeUsd"),
+        None,
+    )
+    roi = (float(pnl) / float(volume) * 100.0) if pnl is not None and volume and volume > 0 else None
+    mdd_usd = _safe_float(
+        _leaderboard_lookup(raw, "mdd", "mddUsd", "mdd_usd", "maxDrawdown", "max_drawdown", "maxDrawdownUsd"),
+        None,
+    )
+    mdd_pct = _safe_float(
+        _leaderboard_lookup(raw, "mddPct", "mdd_pct", "maxDrawdownPct", "max_drawdown_pct"),
+        None,
+    )
+    rank = _safe_int(_leaderboard_lookup(raw, "rank", "position"), fallback_rank)
+    display_public = _leaderboard_lookup(raw, "displayUsernamePublic", "display_username_public")
+    return {
+        "rank": rank or fallback_rank,
+        "wallet": wallet,
+        "display_name": _leaderboard_display_name(raw, wallet),
+        "profile_image": str(_leaderboard_lookup(raw, "profileImage", "profile_image", "avatar") or ""),
+        "display_username_public": bool(display_public) if display_public is not None else True,
+        "pnl_usd": pnl,
+        "volume_usd": volume,
+        "roi_pct": roi,
+        "trade_count": _safe_int(_leaderboard_lookup(raw, "trades", "tradeCount", "trade_count", "totalTrades"), 0),
+        "mdd_usd": mdd_usd,
+        "mdd_pct": mdd_pct,
+        "mdd_available": mdd_usd is not None or mdd_pct is not None,
+        "raw": dict(raw),
+    }
+
+
+def polymarket_user_search_payload(query: str, limit: int = 10) -> Dict[str, Any]:
+    clean_query = str(query or "").strip()
+    clean_limit = _clamp_int(limit, 10, 1, 50)
+    if not clean_query:
+        return {"query": clean_query, "profiles": [], "counts": {"profiles": 0}, "source": "gamma_public_search"}
+    profiles = gamma.search_profiles(clean_query, limit=clean_limit)
+    return {
+        "query": clean_query,
+        "profiles": [
+            {
+                "pseudonym": profile.pseudonym,
+                "proxy_wallet": profile.proxy_wallet,
+                "profile_image": profile.profile_image,
+                "display_username_public": profile.display_username_public,
+            }
+            for profile in profiles
+        ],
+        "counts": {"profiles": len(profiles)},
+        "source": "gamma_public_search",
+    }
+
+
+def _number_in_range(value: Optional[float], minimum: Optional[float], maximum: Optional[float]) -> bool:
+    if value is None:
+        return minimum is None and maximum is None
+    if minimum is not None and value < minimum:
+        return False
+    if maximum is not None and value > maximum:
+        return False
+    return True
+
+
+def polymarket_leaderboard_payload(params: Optional[Mapping[str, List[str]]] = None) -> Dict[str, Any]:
+    query = params or {}
+    sort = _query_value(query, "sort", "roi_pct").lower()
+    if sort not in LEADERBOARD_SORTS:
+        sort = "roi_pct"
+    direction = _query_value(query, "direction", "DESC").upper()
+    if direction not in {"ASC", "DESC"}:
+        direction = "DESC"
+    period = _query_value(query, "period", "all") or "all"
+    limit = _clamp_int(_query_value(query, "limit", "100"), 100, 1, 100)
+    default_scan = 500 if sort == "roi_pct" else max(100, limit)
+    scan_limit = _clamp_int(_query_value(query, "scan_limit", str(default_scan)), default_scan, limit, 500)
+
+    min_pnl = _query_float(query, "min_pnl_usd")
+    max_pnl = _query_float(query, "max_pnl_usd")
+    min_volume = _query_float(query, "min_volume_usd")
+    max_volume = _query_float(query, "max_volume_usd")
+    min_roi = _query_float(query, "min_roi_pct")
+    max_roi = _query_float(query, "max_roi_pct")
+    min_mdd_usd = _query_float(query, "min_mdd_usd")
+    max_mdd_usd = _query_float(query, "max_mdd_usd")
+    min_mdd_pct = _query_float(query, "min_mdd_pct")
+    max_mdd_pct = _query_float(query, "max_mdd_pct")
+
+    remote_sort = LEADERBOARD_SORTS[sort]
+    raw_rows: List[Dict[str, Any]] = []
+    offset = 0
+    while len(raw_rows) < scan_limit:
+        page_limit = min(50, scan_limit - len(raw_rows))
+        page = data_api.get_leaderboard(
+            limit=page_limit,
+            offset=offset,
+            sort_by=remote_sort,
+            sort_direction=direction,
+            period=period,
+        )
+        if not page:
+            break
+        raw_rows.extend(page)
+        if len(page) < page_limit:
+            break
+        offset += len(page)
+
+    rows = [normalize_polymarket_leaderboard_row(row, index + 1) for index, row in enumerate(raw_rows)]
+    mdd_filter_requested = any(
+        value is not None for value in (min_mdd_usd, max_mdd_usd, min_mdd_pct, max_mdd_pct)
+    )
+    mdd_values_available = any(row["mdd_available"] for row in rows)
+    warnings: List[str] = []
+    if mdd_filter_requested and not mdd_values_available:
+        warnings.append("MDD filters were not applied because the public leaderboard does not include drawdown fields.")
+
+    filtered: List[Dict[str, Any]] = []
+    for row in rows:
+        if not _number_in_range(row["pnl_usd"], min_pnl, max_pnl):
+            continue
+        if not _number_in_range(row["volume_usd"], min_volume, max_volume):
+            continue
+        if not _number_in_range(row["roi_pct"], min_roi, max_roi):
+            continue
+        if mdd_values_available:
+            if not _number_in_range(row["mdd_usd"], min_mdd_usd, max_mdd_usd):
+                continue
+            if not _number_in_range(row["mdd_pct"], min_mdd_pct, max_mdd_pct):
+                continue
+        filtered.append(row)
+
+    reverse = direction != "ASC"
+    missing_numeric = float("-inf") if reverse else float("inf")
+    if sort == "roi_pct":
+        filtered.sort(key=lambda row: row["roi_pct"] if row["roi_pct"] is not None else missing_numeric, reverse=reverse)
+    elif sort == "volume_usd":
+        filtered.sort(key=lambda row: row["volume_usd"] if row["volume_usd"] is not None else missing_numeric, reverse=reverse)
+    else:
+        filtered.sort(key=lambda row: row["pnl_usd"] if row["pnl_usd"] is not None else missing_numeric, reverse=reverse)
+
+    return {
+        "rows": filtered[:limit],
+        "counts": {
+            "returned": len(filtered[:limit]),
+            "filtered": len(filtered),
+            "scanned": len(rows),
+        },
+        "sort": sort,
+        "direction": direction,
+        "period": period,
+        "limit": limit,
+        "scan_limit": scan_limit,
+        "source": "polymarket_data_api_leaderboard",
+        "source_sort": remote_sort,
+        "ranking_scope": "computed_from_scanned_public_leaderboard_rows",
+        "mdd_available": mdd_values_available,
+        "mdd_note": "True maximum drawdown requires an equity-curve history source; public leaderboard rows normally do not include it.",
+        "warnings": warnings,
+    }
+
+
 def find_wallet(cfg: AppConfig, wallet_id: str) -> WalletWatch:
     normalized = str(wallet_id or "").strip()
     for wallet in cfg.wallets:
@@ -1161,10 +1390,14 @@ def copy_payload(
     except Exception:
         capability = False
         adapter_name = "polymarket"
+    followed_wallets = cfg.copytrading.normalized_follow_wallets()
+    tracked_wallets = {wallet.wallet for wallet in cfg.wallets}
     return {
         "settings": cfg.copytrading.to_dict(),
         "wallet_choices": [wallet.wallet for wallet in cfg.wallets],
-        "follow_wallet_tracked": any(wallet.wallet == cfg.copytrading.follow_wallet for wallet in cfg.wallets),
+        "follow_wallet_tracked": any(wallet in tracked_wallets for wallet in followed_wallets),
+        "follow_wallets_tracked": sum(1 for wallet in followed_wallets if wallet in tracked_wallets),
+        "follow_wallets_untracked": [wallet for wallet in followed_wallets if wallet not in tracked_wallets],
         "status": status,
         "simulation_first": not cfg.copytrading.live,
         "copy_trading_supported": bool(capability),
@@ -1173,31 +1406,72 @@ def copy_payload(
     }
 
 
-def copy_settings_from_payload(payload: Mapping[str, Any], existing: CopyTradeSettings) -> CopyTradeSettings:
-    follow_wallet_raw = str(payload.get("follow_wallet", existing.follow_wallet) or "").strip().lower()
-    follow_wallet = ""
-    if follow_wallet_raw:
-        normalized = normalize_wallet(follow_wallet_raw)
+def _wallets_from_copy_payload(payload: Mapping[str, Any], existing: CopyTradeSettings) -> List[str]:
+    raw_values: List[Any] = []
+    if "follow_wallets" in payload:
+        raw = payload.get("follow_wallets")
+        if isinstance(raw, list):
+            raw_values.extend(raw)
+        elif isinstance(raw, str):
+            raw_values.extend(raw.replace(";", ",").split(","))
+        elif raw not in (None, ""):
+            raise ValueError("follow_wallets must be a list or comma-separated string.")
+    elif "follow_wallet" in payload:
+        raw_values.append(payload.get("follow_wallet"))
+    else:
+        raw_values.extend(existing.normalized_follow_wallets())
+
+    wallets: List[str] = []
+    for raw in raw_values:
+        raw_wallet = str(raw or "").strip().lower()
+        if not raw_wallet:
+            continue
+        normalized = normalize_wallet(raw_wallet)
         if not normalized:
-            raise ValueError("follow_wallet must be blank or a valid 0x wallet/proxyWallet address.")
-        follow_wallet = normalized
-    scale = _safe_float(payload.get("scale", existing.scale), None)
+            raise ValueError("follow_wallets must contain only valid 0x wallet/proxyWallet addresses.")
+        if normalized not in wallets:
+            wallets.append(normalized)
+    return wallets
+
+
+def copy_settings_from_payload(payload: Mapping[str, Any], existing: CopyTradeSettings) -> CopyTradeSettings:
+    follow_wallets = _wallets_from_copy_payload(payload, existing)
+    percentage_keys = ("copy_percentage", "scale_percent", "percentage")
+    percentage_value = next((payload[key] for key in percentage_keys if key in payload), None)
+    if percentage_value is not None:
+        copy_percentage = _safe_float(percentage_value, None)
+        if copy_percentage is None or copy_percentage < 0 or copy_percentage > 100:
+            raise ValueError("copy_percentage must be a number between 0 and 100.")
+        scale = float(copy_percentage) / 100.0
+    elif "scale" in payload:
+        scale = _safe_float(payload.get("scale"), None)
+    else:
+        scale = max(0.0, min(float(existing.scale), 1.0))
     max_usdc = _safe_float(payload.get("max_usdc_per_trade", existing.max_usdc_per_trade), None)
     slippage = _safe_float(payload.get("slippage", existing.slippage), None)
-    if scale is None or scale <= 0:
-        raise ValueError("scale must be a positive number.")
+    if scale is None or scale < 0 or scale > 1:
+        raise ValueError("scale must be a number between 0 and 1, matching copy_percentage 0..100.")
     if max_usdc is None or max_usdc <= 0:
         raise ValueError("max_usdc_per_trade must be a positive number.")
     if slippage is None or slippage < 0 or slippage > 1:
         raise ValueError("slippage must be a number between 0 and 1.")
+    try:
+        conflict_window = int(payload.get("conflict_window_seconds", existing.conflict_window_seconds))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("conflict_window_seconds must be an integer.") from exc
+    if conflict_window < 0 or conflict_window > 86400:
+        raise ValueError("conflict_window_seconds must be between 0 and 86400.")
     return CopyTradeSettings(
         enabled=bool_from_setting(payload.get("enabled"), existing.enabled),
         live=bool_from_setting(payload.get("live"), existing.live),
-        follow_wallet=follow_wallet,
+        follow_wallet=follow_wallets[0] if follow_wallets else "",
+        follow_wallets=follow_wallets,
         scale=float(scale),
         max_usdc_per_trade=float(max_usdc),
         slippage=float(slippage),
         allow_sells=bool_from_setting(payload.get("allow_sells"), existing.allow_sells),
+        conflict_guard=bool_from_setting(payload.get("conflict_guard"), existing.conflict_guard),
+        conflict_window_seconds=conflict_window,
     )
 
 
@@ -1207,19 +1481,74 @@ def apply_copy_settings_patch(cfg: AppConfig, payload: Mapping[str, Any]) -> Cop
     return cfg.copytrading
 
 
+def copy_trade_guard_key(activity: Mapping[str, Any]) -> str:
+    token_id = str(activity.get("asset") or "").strip().lower()
+    market_slug = str(activity.get("slug") or "").strip().lower()
+    outcome = str(activity.get("outcome") or "").strip().lower()
+    return "|".join(part for part in (token_id, market_slug, outcome) if part)
+
+
+def copy_trade_conflict_reason(
+    settings: CopyTradeSettings,
+    activity: Mapping[str, Any],
+    conflict_state: Optional[Dict[str, Dict[str, Any]]],
+) -> Optional[str]:
+    if conflict_state is None or not settings.conflict_guard:
+        return None
+    key = copy_trade_guard_key(activity)
+    if not key:
+        return None
+    side = str(activity.get("side") or "").strip().upper()
+    wallet = str(activity.get("proxyWallet") or "").strip().lower()
+    timestamp = int(_safe_float(activity.get("timestamp"), time.time()) or time.time())
+    window = max(0, int(settings.conflict_window_seconds or 0))
+    if window:
+        stale = [
+            state_key
+            for state_key, state in conflict_state.items()
+            if timestamp - int(state.get("timestamp") or timestamp) > window
+        ]
+        for state_key in stale:
+            conflict_state.pop(state_key, None)
+    existing = conflict_state.get(key)
+    if existing:
+        previous_side = str(existing.get("side") or "").upper()
+        previous_wallet = str(existing.get("wallet") or "")
+        if previous_wallet == wallet:
+            conflict_state[key] = {
+                "side": side,
+                "wallet": wallet,
+                "activity_key": activity_key(activity),
+                "timestamp": timestamp,
+            }
+            return None
+        if previous_side and previous_side != side:
+            return f"conflict guard blocked opposite-side copy for the same token from {previous_wallet}"
+        return f"conflict guard skipped duplicate same-token copy already accepted from {previous_wallet}"
+    conflict_state[key] = {
+        "side": side,
+        "wallet": wallet,
+        "activity_key": activity_key(activity),
+        "timestamp": timestamp,
+    }
+    return None
+
+
 def copy_trade_preview_from_activity(
     cfg: AppConfig,
     registry: AdapterRegistry,
     activity: Mapping[str, Any],
+    conflict_state: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     if str(cfg.selected_market_id or "").strip().lower() != "polymarket":
         return {"status": "skipped", "reason": "selected market is not polymarket"}
     settings = cfg.copytrading
     if not settings.enabled:
         return {"status": "skipped", "reason": "copy trading disabled"}
-    if not settings.follow_wallet:
+    followed_wallets = settings.normalized_follow_wallets()
+    if not followed_wallets:
         return {"status": "skipped", "reason": "follow wallet is not set"}
-    if str(activity.get("proxyWallet") or "").strip().lower() != settings.follow_wallet.lower():
+    if str(activity.get("proxyWallet") or "").strip().lower() not in followed_wallets:
         return {"status": "skipped", "reason": "activity wallet does not match follow wallet"}
     side = str(activity.get("side") or "").strip().upper()
     if side not in {"BUY", "SELL"}:
@@ -1256,6 +1585,9 @@ def copy_trade_preview_from_activity(
             capped = True
     if size <= 0:
         return {"status": "skipped", "reason": "computed copy size is zero"}
+    conflict_reason = copy_trade_conflict_reason(settings, activity, conflict_state)
+    if conflict_reason:
+        return {"status": "skipped", "reason": conflict_reason, "conflict_guard": True}
     order = PaperOrderRequest(
         market_id="polymarket",
         contract_id=token_id,
@@ -1283,6 +1615,7 @@ def copy_trade_preview_from_activity(
             "slippage": slippage,
             "capped_by_max_usdc": capped,
         },
+        "conflict_guard": bool(settings.conflict_guard),
     }
     if settings.live:
         try:
@@ -1303,8 +1636,9 @@ def copy_trade_preview_from_activity(
 
 def copy_preview_payload(cfg: AppConfig, registry: AdapterRegistry, payload: Mapping[str, Any]) -> Dict[str, Any]:
     require_polymarket_selected(cfg, "Copy trading preview")
+    default_wallets = cfg.copytrading.normalized_follow_wallets()
     activity = {
-        "proxyWallet": payload.get("proxyWallet") or payload.get("proxy_wallet") or cfg.copytrading.follow_wallet,
+        "proxyWallet": payload.get("proxyWallet") or payload.get("proxy_wallet") or (default_wallets[0] if default_wallets else ""),
         "asset": payload.get("asset") or payload.get("token_id") or "",
         "side": payload.get("side") or "BUY",
         "size": payload.get("size") if "size" in payload else 0,
@@ -1327,6 +1661,7 @@ def poll_wallet_activity(
     require_polymarket_selected(cfg, "Wallet polling")
     emitted: List[Dict[str, Any]] = []
     problems: List[str] = []
+    copy_conflicts: Dict[str, Dict[str, Any]] = {}
     for wallet in list(cfg.wallets):
         if not wallet.enabled:
             continue
@@ -1358,7 +1693,7 @@ def poll_wallet_activity(
             if len(wallet.seen_activity_keys) > 200:
                 wallet.seen_activity_keys = wallet.seen_activity_keys[-200:]
             activity = wallet_activity_payload(wallet, item)
-            activity["copy_preview"] = copy_trade_preview_from_activity(cfg, registry, item)
+            activity["copy_preview"] = copy_trade_preview_from_activity(cfg, registry, item, copy_conflicts)
             emitted.insert(0, activity)
             recent_activity.insert(0, activity)
     del recent_activity[100:]
@@ -1731,7 +2066,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/"):
-            self._handle_api_get(parsed.path)
+            self._handle_api_get(parsed.path, parsed.query)
             return
         self._serve_static(parsed.path)
 
@@ -1757,9 +2092,10 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
     def _save_config(self, cfg: AppConfig) -> None:
         save_config(cfg, self.app_server.config_path)
 
-    def _handle_api_get(self, path: str) -> None:
+    def _handle_api_get(self, path: str, query: str = "") -> None:
         try:
             cfg = self._load_config()
+            query_params = parse_qs(query, keep_blank_values=True)
             if path == "/api/health":
                 self._send_json(HTTPStatus.OK, health_payload(self.app_server.config_path, self.app_server.frontend_dir))
                 return
@@ -1805,6 +2141,18 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             if path == "/api/paper/positions":
                 paper = paper_payload(cfg, self.app_server.paper_position_marks)
                 self._send_json(HTTPStatus.OK, {"summary": paper["summary"], "positions": paper["positions"]})
+                return
+            if path == "/api/polymarket/users/search":
+                self._send_json(
+                    HTTPStatus.OK,
+                    polymarket_user_search_payload(
+                        _query_value(query_params, "q"),
+                        _clamp_int(_query_value(query_params, "limit", "10"), 10, 1, 50),
+                    ),
+                )
+                return
+            if path == "/api/polymarket/users/leaderboard":
+                self._send_json(HTTPStatus.OK, polymarket_leaderboard_payload(query_params))
                 return
             self._send_error(HTTPStatus.NOT_FOUND, "not_found", "Unknown API route.")
         except ValueError as exc:

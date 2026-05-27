@@ -112,17 +112,62 @@ class CopyTradeSettings:
     enabled: bool = False
     live: bool = False  # False = paper/sim
     follow_wallet: str = ""  # wallet address to follow
-    scale: float = 1.0  # multiplier on trade size/usdc
+    follow_wallets: List[str] = field(default_factory=list)
+    scale: float = 1.0  # 0..1 multiplier derived from copy_percentage
     max_usdc_per_trade: float = 25.0
     slippage: float = 0.02  # in price units (0..1)
     allow_sells: bool = False
+    conflict_guard: bool = True
+    conflict_window_seconds: int = 300
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data["follow_wallets"] = self.normalized_follow_wallets()
+        data["follow_wallet"] = data["follow_wallets"][0] if data["follow_wallets"] else ""
+        data["copy_percentage"] = round(max(0.0, min(float(self.scale), 1.0)) * 100.0, 10)
+        return data
+
+    def normalized_follow_wallets(self) -> List[str]:
+        wallets: List[str] = []
+        for value in [self.follow_wallet, *(self.follow_wallets or [])]:
+            wallet = str(value or "").strip().lower()
+            if wallet and wallet not in wallets:
+                wallets.append(wallet)
+        return wallets
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "CopyTradeSettings":
-        return CopyTradeSettings(**d)
+        data = dict(d or {})
+        raw_percentage = data.pop("copy_percentage", None)
+        if raw_percentage not in (None, ""):
+            try:
+                data["scale"] = float(raw_percentage) / 100.0
+            except (TypeError, ValueError):
+                data["scale"] = 1.0
+        try:
+            scale = float(data.get("scale", 1.0))
+        except (TypeError, ValueError):
+            scale = 1.0
+        data["scale"] = max(0.0, min(scale, 1.0))
+        raw_wallets = data.get("follow_wallets", [])
+        if isinstance(raw_wallets, str):
+            raw_wallets = raw_wallets.replace(";", ",").split(",")
+        if not isinstance(raw_wallets, list):
+            raw_wallets = []
+        wallets: List[str] = []
+        for value in [data.get("follow_wallet", ""), *raw_wallets]:
+            wallet = str(value or "").strip().lower()
+            if wallet and wallet not in wallets:
+                wallets.append(wallet)
+        data["follow_wallet"] = wallets[0] if wallets else ""
+        data["follow_wallets"] = wallets
+        try:
+            window = int(data.get("conflict_window_seconds", 300))
+        except (TypeError, ValueError):
+            window = 300
+        data["conflict_window_seconds"] = max(0, min(window, 86400))
+        data["conflict_guard"] = bool(data.get("conflict_guard", True))
+        return CopyTradeSettings(**data)
 
 
 @dataclass

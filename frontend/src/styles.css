@@ -322,7 +322,8 @@ h2 {
 .paper-form,
 .alert-form,
 .wallet-form,
-.copy-form {
+.copy-form,
+.analytics-form {
   display: grid;
   grid-template-columns: 1.1fr 1.5fr 0.75fr 0.75fr 0.75fr;
   gap: 10px;
@@ -344,10 +345,28 @@ h2 {
   margin-bottom: 14px;
 }
 
+.analytics-form {
+  grid-template-columns: repeat(4, minmax(150px, 1fr)) auto;
+  margin-bottom: 14px;
+}
+
+.analytics-form.user-search-form {
+  grid-template-columns: minmax(260px, 1fr) auto;
+}
+
+.analytics-form.leaderboard-form {
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
+}
+
+.analytics-form.leaderboard-form button {
+  align-self: end;
+}
+
 .paper-form label,
 .alert-form label,
 .wallet-form label,
 .copy-form label,
+.analytics-form label,
 .inline-field {
   display: grid;
   gap: 7px;
@@ -357,6 +376,7 @@ h2 {
 .alert-form span,
 .wallet-form span,
 .copy-form span,
+.analytics-form span,
 .inline-field span {
   color: #68726c;
   font-size: 12px;
@@ -711,6 +731,9 @@ td small,
   .alert-form,
   .wallet-form,
   .paper-form,
+  .analytics-form,
+  .analytics-form.user-search-form,
+  .analytics-form.leaderboard-form,
   .safety-grid {
     grid-template-columns: 1fr;
   }

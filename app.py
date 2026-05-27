@@ -348,6 +348,7 @@ class App(tk.Tk):
         # Cached trader
         self._trader: Optional[PolymarketTrader] = None
         self._geoblock_cache: Optional[Dict[str, Any]] = None
+        self._copy_conflict_cache: Dict[str, Dict[str, Any]] = {}
 
         # UI
         self._build_ui()
@@ -1338,13 +1339,13 @@ class App(tk.Tk):
         self.ct_live_var = tk.BooleanVar(value=self.cfg.copytrading.live)
         ttk.Checkbutton(form, text="LIVE mode (places real orders)", variable=self.ct_live_var).grid(row=0, column=1, sticky="w", padx=5, pady=5)
 
-        ttk.Label(form, text="Follow wallet:").grid(row=1, column=0, sticky="e", padx=5, pady=5)
-        self.ct_follow_var = tk.StringVar(value=self.cfg.copytrading.follow_wallet)
+        ttk.Label(form, text="Follow wallets:").grid(row=1, column=0, sticky="e", padx=5, pady=5)
+        self.ct_follow_var = tk.StringVar(value=", ".join(self.cfg.copytrading.normalized_follow_wallets()))
         self.ct_follow_combo = ttk.Combobox(form, textvariable=self.ct_follow_var, values=self._wallet_choices(), width=50)
         self.ct_follow_combo.grid(row=1, column=1, sticky="w", padx=5, pady=5)
 
-        ttk.Label(form, text="Scale:").grid(row=2, column=0, sticky="e", padx=5, pady=5)
-        self.ct_scale_var = tk.StringVar(value=str(self.cfg.copytrading.scale))
+        ttk.Label(form, text="Copy % (0..100):").grid(row=2, column=0, sticky="e", padx=5, pady=5)
+        self.ct_scale_var = tk.StringVar(value=f"{max(0.0, min(float(self.cfg.copytrading.scale), 1.0)) * 100.0:g}")
         ttk.Entry(form, textvariable=self.ct_scale_var, width=10).grid(row=2, column=1, sticky="w", padx=5, pady=5)
 
         ttk.Label(form, text="Max USDC / trade:").grid(row=3, column=0, sticky="e", padx=5, pady=5)
@@ -1358,7 +1359,14 @@ class App(tk.Tk):
         self.ct_allow_sells_var = tk.BooleanVar(value=self.cfg.copytrading.allow_sells)
         ttk.Checkbutton(form, text="Allow copying SELL trades (riskier)", variable=self.ct_allow_sells_var).grid(row=5, column=1, sticky="w", padx=5, pady=5)
 
-        ttk.Button(form, text="Save settings", command=self.save_copy_settings).grid(row=6, column=1, sticky="w", padx=5, pady=10)
+        self.ct_conflict_guard_var = tk.BooleanVar(value=self.cfg.copytrading.conflict_guard)
+        ttk.Checkbutton(
+            form,
+            text="Conflict guard: skip duplicate/opposite same-token copies",
+            variable=self.ct_conflict_guard_var,
+        ).grid(row=6, column=1, sticky="w", padx=5, pady=5)
+
+        ttk.Button(form, text="Save settings", command=self.save_copy_settings).grid(row=7, column=1, sticky="w", padx=5, pady=10)
 
         hint = ttk.Label(frm, text="LIVE mode requires PRIVATE_KEY (+ optional FUNDER_ADDRESS/SIGNATURE_TYPE) set in .env or environment variables.")
         hint.pack(anchor="w", padx=10)
@@ -2946,18 +2954,52 @@ class App(tk.Tk):
             self.ui_queue.put(("log", f"Geoblock error: {e}"))
             self.status_var.set("Geoblock check error.")
 
+    def _copy_follow_wallets_from_text(self) -> Optional[List[str]]:
+        raw = str(self.ct_follow_var.get() or "")
+        wallets: List[str] = []
+        for part in re.split(r"[,;\s]+", raw):
+            candidate = part.strip().lower()
+            if not candidate:
+                continue
+            wallet = normalize_wallet(candidate)
+            if not wallet:
+                messagebox.showerror("Copy trading settings", f"Invalid follow wallet: {candidate}")
+                return None
+            if wallet not in wallets:
+                wallets.append(wallet)
+        return wallets
+
     def save_copy_settings(self):
         if not self._require_polymarket_selected("Copy trading settings"):
+            return
+        follow_wallets = self._copy_follow_wallets_from_text()
+        if follow_wallets is None:
+            return
+        copy_percentage = safe_float(self.ct_scale_var.get(), None)
+        max_usdc = safe_float(self.ct_max_var.get(), None)
+        slippage = safe_float(self.ct_slip_var.get(), None)
+        if copy_percentage is None or copy_percentage < 0 or copy_percentage > 100:
+            messagebox.showerror("Copy trading settings", "Copy percentage must be a number between 0 and 100.")
+            return
+        if max_usdc is None or max_usdc <= 0:
+            messagebox.showerror("Copy trading settings", "Max USDC / trade must be a positive number.")
+            return
+        if slippage is None or slippage < 0 or slippage > 1:
+            messagebox.showerror("Copy trading settings", "Slippage must be a number between 0 and 1.")
             return
         s = CopyTradeSettings(
             enabled=bool(self.ct_enabled_var.get()),
             live=bool(self.ct_live_var.get()),
-            follow_wallet=str(self.ct_follow_var.get() or "").strip().lower(),
-            scale=float(safe_float(self.ct_scale_var.get(), 1.0) or 1.0),
-            max_usdc_per_trade=float(safe_float(self.ct_max_var.get(), 25.0) or 25.0),
-            slippage=float(safe_float(self.ct_slip_var.get(), 0.02) or 0.02),
+            follow_wallet=follow_wallets[0] if follow_wallets else "",
+            follow_wallets=follow_wallets,
+            scale=float(copy_percentage) / 100.0,
+            max_usdc_per_trade=float(max_usdc),
+            slippage=float(slippage),
             allow_sells=bool(self.ct_allow_sells_var.get()),
+            conflict_guard=bool(self.ct_conflict_guard_var.get()),
+            conflict_window_seconds=self.cfg.copytrading.conflict_window_seconds,
         )
+        self.ct_follow_var.set(", ".join(s.normalized_follow_wallets()))
         self.cfg.copytrading = s
         save_config(self.cfg)
         self.ui_queue.put(("log", f"Saved copy settings: {asdict(s)}"))
@@ -2987,16 +3029,68 @@ class App(tk.Tk):
         self._trader = PolymarketTrader(cfg)
         return self._trader
 
+    @staticmethod
+    def _copy_guard_key(item: Dict[str, Any]) -> str:
+        parts = (
+            str(item.get("asset") or "").strip().lower(),
+            str(item.get("slug") or "").strip().lower(),
+            str(item.get("outcome") or "").strip().lower(),
+        )
+        return "|".join(part for part in parts if part)
+
+    def _copy_conflict_reason(self, item: Dict[str, Any]) -> Optional[str]:
+        settings = self.cfg.copytrading
+        if not settings.conflict_guard:
+            return None
+        key = App._copy_guard_key(item)
+        if not key:
+            return None
+        side = str(item.get("side") or "").upper()
+        wallet = str(item.get("proxyWallet") or "").strip().lower()
+        timestamp = int(safe_float(item.get("timestamp"), time.time()) or time.time())
+        window = max(0, int(settings.conflict_window_seconds or 0))
+        if window:
+            stale = [
+                state_key
+                for state_key, state in self._copy_conflict_cache.items()
+                if timestamp - int(state.get("timestamp") or timestamp) > window
+            ]
+            for state_key in stale:
+                self._copy_conflict_cache.pop(state_key, None)
+        existing = self._copy_conflict_cache.get(key)
+        if existing:
+            previous_side = str(existing.get("side") or "").upper()
+            previous_wallet = str(existing.get("wallet") or "")
+            if previous_wallet == wallet:
+                self._copy_conflict_cache[key] = {
+                    "side": side,
+                    "wallet": wallet,
+                    "timestamp": timestamp,
+                    "activity_key": activity_key(item),
+                }
+                return None
+            if previous_side and previous_side != side:
+                return f"opposite-side same-token copy already accepted from {previous_wallet}"
+            return f"duplicate same-token copy already accepted from {previous_wallet}"
+        self._copy_conflict_cache[key] = {
+            "side": side,
+            "wallet": wallet,
+            "timestamp": timestamp,
+            "activity_key": activity_key(item),
+        }
+        return None
+
     def _copy_trade_from_activity(self, item: Dict[str, Any]):
         if self.cfg.selected_market_id != "polymarket":
             return
         s = self.cfg.copytrading
         if not s.enabled:
             return
-        if not s.follow_wallet:
+        followed_wallets = set(s.normalized_follow_wallets())
+        if not followed_wallets:
             return
 
-        if str(item.get("proxyWallet") or "").lower() != s.follow_wallet.lower():
+        if str(item.get("proxyWallet") or "").lower() not in followed_wallets:
             return
 
         side = str(item.get("side") or "").upper()
@@ -3045,6 +3139,10 @@ class App(tk.Tk):
                 size = max_shares
 
         if size <= 0:
+            return
+        conflict_reason = App._copy_conflict_reason(self, item)
+        if conflict_reason:
+            self.ui_queue.put(("log", f"[copy] Conflict guard skipped {token_id[:10]}...: {conflict_reason}."))
             return
 
         if not s.live:

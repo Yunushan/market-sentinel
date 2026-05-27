@@ -16,6 +16,7 @@ import {
   Settings,
   ShieldCheck,
   SlidersHorizontal,
+  Trophy,
   Trash2,
   Wallet,
   XCircle
@@ -30,6 +31,7 @@ import {
   deleteWallet,
   fillPaperQuoteLimit,
   fetchLiveSafety,
+  fetchPolymarketLeaderboard,
   fetchState,
   pollWallets,
   previewLivePreflight,
@@ -40,6 +42,7 @@ import {
   refreshPaperMarks,
   refreshPaperQuote,
   refreshSelectedPaperMark,
+  searchPolymarketUsers,
   submitPaperOrder,
   updateAlert,
   updateCopySettings,
@@ -66,6 +69,10 @@ import type {
   MarketsPayload,
   PaperOrderForm,
   PaperPayload,
+  PolymarketLeaderboardFilters,
+  PolymarketLeaderboardPayload,
+  PolymarketLeaderboardSort,
+  PolymarketUserSearchPayload,
   PriceAlert,
   Theme,
   WalletActivity,
@@ -75,7 +82,7 @@ import type {
 } from "./types";
 import "./styles.css";
 
-type Tab = "overview" | "markets" | "live" | "alerts" | "wallets" | "paper" | "settings";
+type Tab = "overview" | "markets" | "analytics" | "live" | "alerts" | "wallets" | "paper" | "settings";
 
 function formatNumber(value: number | null | undefined, digits = 4): string {
   if (value === null || value === undefined || Number.isNaN(value)) {
@@ -85,6 +92,25 @@ function formatNumber(value: number | null | undefined, digits = 4): string {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits
   });
+}
+
+function formatUsd(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "-";
+  }
+  return value.toLocaleString(undefined, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
+}
+
+function formatPercent(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "-";
+  }
+  return `${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`;
 }
 
 function formatTime(seconds: number): string {
@@ -113,11 +139,18 @@ function enabledCapabilities(market: Market): string[] {
     .map(([name]) => name);
 }
 
+function credentialRequirementText(market: Market): string {
+  if (market.health?.credential_requirement === "live_trading_only") {
+    return "credentials: live only";
+  }
+  return market.capabilities.credentials_required ? "credentials required" : "no credential flag";
+}
+
 function StatusPill({ children, tone = "neutral" }: { children: ReactNode; tone?: "good" | "warn" | "neutral" }) {
   return <span className={`status-pill ${tone}`}>{children}</span>;
 }
 
-function Metric({ label, value, tone }: { label: string; value: string | number; tone?: "good" | "warn" }) {
+function Metric({ label, value, tone }: { label: string; value: string | number; tone?: "good" | "warn" | "neutral" }) {
   return (
     <div className={`metric ${tone ?? ""}`}>
       <span>{label}</span>
@@ -175,11 +208,12 @@ function copyToForm(copy: CopyPayload | null): CopyForm {
   return {
     enabled: settings?.enabled ?? false,
     live: settings?.live ?? false,
-    follow_wallet: settings?.follow_wallet ?? "",
-    scale: String(settings?.scale ?? 1),
+    follow_wallets: (settings?.follow_wallets?.length ? settings.follow_wallets : settings?.follow_wallet ? [settings.follow_wallet] : []).join(", "),
+    copy_percentage: String(settings?.copy_percentage ?? (settings?.scale ?? 1) * 100),
     max_usdc_per_trade: String(settings?.max_usdc_per_trade ?? 25),
     slippage: String(settings?.slippage ?? 0.02),
-    allow_sells: settings?.allow_sells ?? false
+    allow_sells: settings?.allow_sells ?? false,
+    conflict_guard: settings?.conflict_guard ?? true
   };
 }
 
@@ -192,6 +226,24 @@ function emptyCopyPreviewForm(followWallet = ""): CopyPreviewForm {
     price: "",
     slug: "",
     outcome: ""
+  };
+}
+
+function defaultLeaderboardFilters(): PolymarketLeaderboardFilters {
+  return {
+    sort: "roi_pct",
+    limit: "100",
+    scan_limit: "500",
+    min_pnl_usd: "",
+    max_pnl_usd: "",
+    min_volume_usd: "",
+    max_volume_usd: "",
+    min_roi_pct: "",
+    max_roi_pct: "",
+    min_mdd_usd: "",
+    max_mdd_usd: "",
+    min_mdd_pct: "",
+    max_mdd_pct: ""
   };
 }
 
@@ -234,6 +286,12 @@ export default function App() {
   });
   const [paperMessage, setPaperMessage] = useState("");
   const [marketQuery, setMarketQuery] = useState("");
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  const [analyticsMessage, setAnalyticsMessage] = useState("");
+  const [userSearchQuery, setUserSearchQuery] = useState("");
+  const [userSearch, setUserSearch] = useState<PolymarketUserSearchPayload | null>(null);
+  const [leaderboardFilters, setLeaderboardFilters] = useState<PolymarketLeaderboardFilters>(defaultLeaderboardFilters());
+  const [leaderboard, setLeaderboard] = useState<PolymarketLeaderboardPayload | null>(null);
   const [busyMarket, setBusyMarket] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -357,6 +415,39 @@ export default function App() {
       setConfig(payload);
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
+    }
+  }
+
+  async function handleUserSearch(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
+    setError(null);
+    setAnalyticsMessage("");
+    setAnalyticsLoading(true);
+    try {
+      const payload = await searchPolymarketUsers(userSearchQuery, 10);
+      setUserSearch(payload);
+      setAnalyticsMessage(payload.counts.profiles ? `Found ${payload.counts.profiles} profile(s).` : "No matching profiles found.");
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setAnalyticsLoading(false);
+    }
+  }
+
+  async function handleLeaderboardRefresh(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
+    setError(null);
+    setAnalyticsMessage("");
+    setAnalyticsLoading(true);
+    try {
+      const payload = await fetchPolymarketLeaderboard(leaderboardFilters);
+      setLeaderboard(payload);
+      const warning = payload.warnings.length ? ` ${payload.warnings[0]}` : "";
+      setAnalyticsMessage(`Loaded ${payload.counts.returned} trader row(s) from ${payload.counts.scanned} scanned rows.${warning}`);
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setAnalyticsLoading(false);
     }
   }
 
@@ -603,6 +694,9 @@ export default function App() {
           <button className={tab === "markets" ? "active" : ""} onClick={() => setTab("markets")}>
             <SlidersHorizontal size={18} /> Markets
           </button>
+          <button className={tab === "analytics" ? "active" : ""} onClick={() => setTab("analytics")}>
+            <Trophy size={18} /> Analytics
+          </button>
           <button className={tab === "live" ? "active" : ""} onClick={() => setTab("live")}>
             <ShieldCheck size={18} /> Live Safety
           </button>
@@ -657,6 +751,20 @@ export default function App() {
             onToggle={(market) => void handleMarketToggle(market)}
             selectedMarket={selectedMarket}
             selectedMarketId={config?.selected_market_id ?? ""}
+          />
+        ) : null}
+        {tab === "analytics" ? (
+          <PolymarketAnalyticsView
+            filters={leaderboardFilters}
+            loading={analyticsLoading}
+            message={analyticsMessage}
+            onFiltersChange={setLeaderboardFilters}
+            onLeaderboardRefresh={(event) => void handleLeaderboardRefresh(event)}
+            onUserSearch={(event) => void handleUserSearch(event)}
+            onUserSearchQueryChange={setUserSearchQuery}
+            searchQuery={userSearchQuery}
+            searchResults={userSearch}
+            leaderboard={leaderboard}
           />
         ) : null}
         {tab === "live" ? (
@@ -741,6 +849,9 @@ export default function App() {
 function tabLabel(tab: Tab): string {
   if (tab === "markets") {
     return "Market Operations";
+  }
+  if (tab === "analytics") {
+    return "Polymarket Analytics";
   }
   if (tab === "live") {
     return "Live Safety";
@@ -995,7 +1106,7 @@ function MarketsView({
                   <td>
                     <div className="stacked">
                       <span>{market.capabilities.api_required ? "API required" : "No API flag"}</span>
-                      <small>{market.capabilities.credentials_required ? "credentials required" : "no credential flag"}</small>
+                      <small>{credentialRequirementText(market)}</small>
                     </div>
                   </td>
                   <td>
@@ -1010,6 +1121,225 @@ function MarketsView({
         </table>
       </div>
     </section>
+  );
+}
+
+function PolymarketAnalyticsView({
+  filters,
+  loading,
+  message,
+  onFiltersChange,
+  onLeaderboardRefresh,
+  onUserSearch,
+  onUserSearchQueryChange,
+  searchQuery,
+  searchResults,
+  leaderboard
+}: {
+  filters: PolymarketLeaderboardFilters;
+  loading: boolean;
+  message: string;
+  onFiltersChange: (filters: PolymarketLeaderboardFilters) => void;
+  onLeaderboardRefresh: (event: FormEvent<HTMLFormElement>) => void;
+  onUserSearch: (event: FormEvent<HTMLFormElement>) => void;
+  onUserSearchQueryChange: (value: string) => void;
+  searchQuery: string;
+  searchResults: PolymarketUserSearchPayload | null;
+  leaderboard: PolymarketLeaderboardPayload | null;
+}) {
+  const updateFilter = <K extends keyof PolymarketLeaderboardFilters>(field: K, value: PolymarketLeaderboardFilters[K]) => {
+    onFiltersChange({ ...filters, [field]: value });
+  };
+
+  return (
+    <div className="content-grid">
+      <section className="panel span-2">
+        <div className="panel-title">
+          <Search size={18} />
+          <h2>User Search</h2>
+        </div>
+        <form className="analytics-form user-search-form" onSubmit={onUserSearch}>
+          <label>
+            <span>Search</span>
+            <input value={searchQuery} onChange={(event) => onUserSearchQueryChange(event.target.value)} placeholder="Profile, name, wallet" />
+          </label>
+          <button className="icon-button" type="submit" disabled={loading || !searchQuery.trim()}>
+            <Search size={17} /> Search
+          </button>
+        </form>
+        {searchResults ? (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Profile</th>
+                  <th>Wallet</th>
+                  <th>Public</th>
+                </tr>
+              </thead>
+              <tbody>
+                {searchResults.profiles.map((profile) => (
+                  <tr key={profile.proxy_wallet}>
+                    <td>
+                      <strong>{profile.pseudonym || "-"}</strong>
+                      <small>{profile.profile_image || "-"}</small>
+                    </td>
+                    <td>{profile.proxy_wallet}</td>
+                    <td>
+                      <StatusPill tone={profile.display_username_public ? "good" : "neutral"}>
+                        {profile.display_username_public ? "yes" : "hidden"}
+                      </StatusPill>
+                    </td>
+                  </tr>
+                ))}
+                {!searchResults.profiles.length ? (
+                  <tr>
+                    <td colSpan={3} className="empty-cell">
+                      No matching profiles.
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+      </section>
+
+      <section className="panel span-2">
+        <div className="panel-title">
+          <Trophy size={18} />
+          <h2>Leaderboard</h2>
+        </div>
+        <form className="analytics-form leaderboard-form" onSubmit={onLeaderboardRefresh}>
+          <label>
+            <span>Sort</span>
+            <select value={filters.sort} onChange={(event) => updateFilter("sort", event.target.value as PolymarketLeaderboardSort)}>
+              <option value="roi_pct">ROI %</option>
+              <option value="pnl_usd">PnL USD</option>
+              <option value="volume_usd">Volume USD</option>
+            </select>
+          </label>
+          <label>
+            <span>Returned</span>
+            <input
+              inputMode="numeric"
+              min="1"
+              max="100"
+              type="number"
+              value={filters.limit}
+              onChange={(event) => updateFilter("limit", event.target.value)}
+            />
+          </label>
+          <label>
+            <span>Scanned</span>
+            <input
+              inputMode="numeric"
+              min="1"
+              max="500"
+              type="number"
+              value={filters.scan_limit}
+              onChange={(event) => updateFilter("scan_limit", event.target.value)}
+            />
+          </label>
+          <label>
+            <span>Min PnL</span>
+            <input inputMode="decimal" value={filters.min_pnl_usd} onChange={(event) => updateFilter("min_pnl_usd", event.target.value)} />
+          </label>
+          <label>
+            <span>Max PnL</span>
+            <input inputMode="decimal" value={filters.max_pnl_usd} onChange={(event) => updateFilter("max_pnl_usd", event.target.value)} />
+          </label>
+          <label>
+            <span>Min Volume</span>
+            <input inputMode="decimal" value={filters.min_volume_usd} onChange={(event) => updateFilter("min_volume_usd", event.target.value)} />
+          </label>
+          <label>
+            <span>Max Volume</span>
+            <input inputMode="decimal" value={filters.max_volume_usd} onChange={(event) => updateFilter("max_volume_usd", event.target.value)} />
+          </label>
+          <label>
+            <span>Min ROI %</span>
+            <input inputMode="decimal" value={filters.min_roi_pct} onChange={(event) => updateFilter("min_roi_pct", event.target.value)} />
+          </label>
+          <label>
+            <span>Max ROI %</span>
+            <input inputMode="decimal" value={filters.max_roi_pct} onChange={(event) => updateFilter("max_roi_pct", event.target.value)} />
+          </label>
+          <label>
+            <span>Min MDD USD</span>
+            <input inputMode="decimal" value={filters.min_mdd_usd} onChange={(event) => updateFilter("min_mdd_usd", event.target.value)} />
+          </label>
+          <label>
+            <span>Max MDD USD</span>
+            <input inputMode="decimal" value={filters.max_mdd_usd} onChange={(event) => updateFilter("max_mdd_usd", event.target.value)} />
+          </label>
+          <label>
+            <span>Min MDD %</span>
+            <input inputMode="decimal" value={filters.min_mdd_pct} onChange={(event) => updateFilter("min_mdd_pct", event.target.value)} />
+          </label>
+          <label>
+            <span>Max MDD %</span>
+            <input inputMode="decimal" value={filters.max_mdd_pct} onChange={(event) => updateFilter("max_mdd_pct", event.target.value)} />
+          </label>
+          <button className="icon-button" type="submit" disabled={loading}>
+            <RefreshCw size={17} /> Load
+          </button>
+        </form>
+
+        {message ? <div className={`info-banner ${leaderboard?.warnings.length ? "warn" : ""}`}>{message}</div> : null}
+        {leaderboard ? (
+          <>
+            <div className="metrics-grid four">
+              <Metric label="Returned" value={leaderboard.counts.returned} tone="good" />
+              <Metric label="Filtered" value={leaderboard.counts.filtered} />
+              <Metric label="Scanned" value={leaderboard.counts.scanned} />
+              <Metric label="Source sort" value={leaderboard.source_sort} />
+            </div>
+            {!leaderboard.mdd_available ? <div className="info-banner warn">{leaderboard.mdd_note}</div> : null}
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Rank</th>
+                    <th>User</th>
+                    <th className="numeric">PnL</th>
+                    <th className="numeric">Volume</th>
+                    <th className="numeric">ROI</th>
+                    <th className="numeric">Trades</th>
+                    <th className="numeric">MDD USD</th>
+                    <th className="numeric">MDD %</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {leaderboard.rows.map((row) => (
+                    <tr key={`${row.rank}-${row.wallet || row.display_name}`}>
+                      <td>{row.rank}</td>
+                      <td>
+                        <strong>{row.display_name}</strong>
+                        <small>{row.wallet || "-"}</small>
+                      </td>
+                      <td className="numeric">{formatUsd(row.pnl_usd)}</td>
+                      <td className="numeric">{formatUsd(row.volume_usd)}</td>
+                      <td className="numeric">{formatPercent(row.roi_pct)}</td>
+                      <td className="numeric">{row.trade_count || "-"}</td>
+                      <td className="numeric">{row.mdd_available ? formatUsd(row.mdd_usd) : "-"}</td>
+                      <td className="numeric">{row.mdd_available ? formatPercent(row.mdd_pct) : "-"}</td>
+                    </tr>
+                  ))}
+                  {!leaderboard.rows.length ? (
+                    <tr>
+                      <td colSpan={8} className="empty-cell">
+                        No leaderboard rows matched the filters.
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          </>
+        ) : null}
+      </section>
+    </div>
   );
 }
 
@@ -1604,12 +1934,12 @@ function WalletsCopyView({
             <span>Live mode</span>
           </label>
           <label>
-            <span>Follow wallet</span>
+            <span>Follow wallets</span>
             <input
               list="wallet-choices"
-              value={copyForm.follow_wallet}
-              onChange={(event) => onCopyFormChange({ ...copyForm, follow_wallet: event.target.value })}
-              placeholder="0x..."
+              value={copyForm.follow_wallets}
+              onChange={(event) => onCopyFormChange({ ...copyForm, follow_wallets: event.target.value })}
+              placeholder="0x..., 0x..."
             />
             <datalist id="wallet-choices">
               {(copy?.wallet_choices ?? []).map((wallet) => (
@@ -1618,8 +1948,16 @@ function WalletsCopyView({
             </datalist>
           </label>
           <label>
-            <span>Scale</span>
-            <input inputMode="decimal" value={copyForm.scale} onChange={(event) => onCopyFormChange({ ...copyForm, scale: event.target.value })} />
+            <span>Copy %</span>
+            <input
+              type="number"
+              inputMode="decimal"
+              min="0"
+              max="100"
+              step="0.01"
+              value={copyForm.copy_percentage}
+              onChange={(event) => onCopyFormChange({ ...copyForm, copy_percentage: event.target.value })}
+            />
           </label>
           <label>
             <span>Max USDC</span>
@@ -1641,6 +1979,14 @@ function WalletsCopyView({
             />
             <span>Allow sells</span>
           </label>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={copyForm.conflict_guard}
+              onChange={(event) => onCopyFormChange({ ...copyForm, conflict_guard: event.target.checked })}
+            />
+            <span>Conflict guard</span>
+          </label>
           <button className="icon-button" type="submit">
             <Save size={17} /> Save Copy Settings
           </button>
@@ -1648,7 +1994,7 @@ function WalletsCopyView({
         <div className="metrics-grid two">
           <Metric label="Mode" value={copy?.status ?? "disabled"} tone={copy?.settings.enabled ? "good" : undefined} />
           <Metric label="Supported" value={copy?.copy_trading_supported ? "yes" : "no"} tone={copy?.copy_trading_supported ? "good" : "warn"} />
-          <Metric label="Follow tracked" value={copy?.follow_wallet_tracked ? "yes" : "no"} tone={copy?.follow_wallet_tracked ? "good" : undefined} />
+          <Metric label="Tracked follows" value={copy?.follow_wallets_tracked ?? 0} tone={copy?.follow_wallet_tracked ? "good" : undefined} />
           <Metric label="Kill switch" value={copy?.live_gate.live_trading_kill_switch ? "on" : "off"} tone={copy?.live_gate.live_trading_kill_switch ? "warn" : undefined} />
         </div>
       </section>

@@ -31,16 +31,10 @@ def best_bid_ask_from_book(book: Dict[str, Any]) -> Tuple[Optional[float], Optio
     return best_bid, best_ask
 
 
-def get_midpoint(token_id: str, timeout: float = 10.0) -> Optional[float]:
-    r = requests.get(f"{CLOB_API}/midpoint", params={"token_id": token_id}, timeout=timeout)
-    if r.status_code != 200:
-        return None
+def _price_from_payload(data: Any, keys: Tuple[str, ...]) -> Optional[float]:
     try:
-        data = r.json()
-        # docs are inconsistent; handle numbers or dicts
         if isinstance(data, dict):
-            # possible {"mid": "..."} or {"midpoint": "..."}
-            for k in ("mid", "midpoint", "price"):
+            for k in keys:
                 if k in data:
                     return float(data[k])
         if isinstance(data, (int, float, str)):
@@ -48,3 +42,25 @@ def get_midpoint(token_id: str, timeout: float = 10.0) -> Optional[float]:
     except Exception:
         return None
     return None
+
+
+def get_midpoint(token_id: str, timeout: float = 10.0) -> Optional[float]:
+    r = requests.get(f"{CLOB_API}/midpoint", params={"token_id": token_id}, timeout=timeout)
+    if r.status_code != 200:
+        return None
+    try:
+        data = r.json()
+    except Exception:
+        return None
+    return _price_from_payload(data, ("mid", "midpoint", "price"))
+
+
+def get_last_trade_price(token_id: str, timeout: float = 10.0) -> Optional[float]:
+    r = requests.get(f"{CLOB_API}/last-trade-price", params={"token_id": token_id}, timeout=timeout)
+    if r.status_code != 200:
+        return None
+    try:
+        data = r.json()
+    except Exception:
+        return None
+    return _price_from_payload(data, ("last_trade_price", "lastTradePrice", "last", "price"))

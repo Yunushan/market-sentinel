@@ -18,6 +18,9 @@ import type {
   PaperOrderResponse,
   PaperPayload,
   PaperQuotePayload,
+  PolymarketLeaderboardFilters,
+  PolymarketLeaderboardPayload,
+  PolymarketUserSearchPayload,
   WalletForm,
   WalletPollResponse,
   WalletsPayload
@@ -180,6 +183,21 @@ export function pollWallets(limit = 25): Promise<WalletPollResponse> {
     method: "POST",
     body: JSON.stringify({ limit })
   });
+}
+
+export function searchPolymarketUsers(query: string, limit = 10): Promise<PolymarketUserSearchPayload> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  return request<PolymarketUserSearchPayload>(`/api/polymarket/users/search?${params.toString()}`);
+}
+
+export function fetchPolymarketLeaderboard(filters: PolymarketLeaderboardFilters): Promise<PolymarketLeaderboardPayload> {
+  const params = new URLSearchParams();
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value !== "") {
+      params.set(key, value);
+    }
+  });
+  return request<PolymarketLeaderboardPayload>(`/api/polymarket/users/leaderboard?${params.toString()}`);
 }
 
 export function updateCopySettings(form: CopyForm): Promise<CopyPayload> {
