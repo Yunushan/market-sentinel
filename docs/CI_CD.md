@@ -29,10 +29,10 @@ Runs on pushes, pull requests, weekly schedule, and manual dispatch.
 
 Jobs:
 
-- Dependency review on pull requests, configured as advisory until GitHub dependency graph is enabled for the repository.
+- Dependency review on pull requests, automatically skipped when GitHub dependency graph is disabled for the repository.
 - CodeQL analysis for Python and JavaScript/TypeScript.
 
-The CodeQL job is the only job with `security-events: write`; all other jobs use least-privilege read permissions unless they need more. After dependency graph is enabled, remove `continue-on-error: true` from the dependency review step if high-severity dependency changes should block merges.
+The CodeQL job is the only job with `security-events: write`; all other jobs use least-privilege read permissions unless they need more. After dependency graph is enabled, dependency review will run normally and fail on high-severity dependency changes. If GitHub's repository metadata API cannot report dependency graph status, set repository variable `DEPENDENCY_REVIEW_ENABLED=true` to force the check.
 
 ### Release
 
@@ -43,10 +43,13 @@ Runs on tags matching `v*.*.*` and manual dispatch.
 Release jobs:
 
 - Validate release tag shape.
+- Validate that `pyproject.toml` project version matches the release tag.
 - Verify Python, Tkinter fallback, and project checks.
 - Build Python wheel/source distribution.
 - Build React production assets.
 - Package `frontend/dist` as a zip file.
+- Build a Windows x64 PyInstaller executable package.
+- Package the Windows executable as a portable zip and MSI installer.
 - Generate `SHA256SUMS.txt`.
 - Publish or update a GitHub Release using the built-in `GITHUB_TOKEN`.
 
@@ -62,7 +65,9 @@ The publish job targets the `release` environment. Treat this as the release env
    python verify.py
    ```
 
-2. Build frontend dependencies in an environment where npm can complete:
+2. Make sure `[project].version` in `pyproject.toml` matches the release tag you plan to publish.
+
+3. Build frontend dependencies in an environment where npm can complete:
 
    ```bash
    cd frontend
@@ -72,18 +77,20 @@ The publish job targets the `release` environment. Treat this as the release env
    python verify.py --frontend-build
    ```
 
-3. Create and push a semver tag:
+4. Create and push a semver tag:
 
    ```bash
    git tag v0.1.0
    git push origin v0.1.0
    ```
 
-4. Watch the Release workflow. A successful run publishes:
+5. Watch the Release workflow. A successful run publishes:
 
    - Python wheel
    - Python source distribution
    - React production frontend zip
+   - Windows x64 portable zip with the bundled `.exe`, React assets, launchers, and example config
+   - Windows x64 MSI installer
    - SHA256 checksums
 
 Manual releases can also be started from the GitHub Actions UI with `workflow_dispatch`.
@@ -99,6 +106,22 @@ Dependabot opens grouped weekly pull requests for:
 - Frontend npm dependencies
 
 Once `frontend/package-lock.json` exists, CI automatically prefers `npm ci` for deterministic frontend installs. Until then it falls back to `npm install --no-audit --no-fund`.
+
+## Windows Release Packages
+
+Windows artifacts are produced by `scripts/build_windows_release.py` on the `windows-latest` GitHub Actions runner.
+
+The portable zip contains:
+
+- `prediction-market-alert-and-copy-trade-gui.exe`
+- `start_tkinter_gui.bat`
+- `start_web_gui.bat`
+- bundled `frontend/dist` React assets
+- `README.md`, `README_WINDOWS.txt`, `LICENSE`, `.env.example`, and `data/config.example.json`
+
+The MSI installs the same payload under Program Files, creates Start Menu shortcuts for the Tkinter and React launchers, and supports normal Windows uninstall/upgrade behavior through MSI product metadata. The package is currently unsigned; add code-signing certificate secrets before treating the installer as a polished public Windows distribution.
+
+The Windows launchers use `data/config.json` when the package folder is writable, which keeps the portable zip self-contained. If the app is installed under a protected folder such as Program Files, the launchers set `PREDICTION_MARKET_CONFIG_PATH` to `%APPDATA%\prediction-market-alert-and-copy-trade-gui\data\config.json` so normal users can save settings without administrator privileges.
 
 ## Required Repository Settings
 

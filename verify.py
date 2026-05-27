@@ -389,12 +389,17 @@ def run_ci_cd_workflow_check() -> None:
             "workflow_dispatch:",
             "environment: release",
             "contents: write",
+            "Validate package version matches release tag",
+            "Build Windows EXE and MSI",
+            "scripts/build_windows_release.py",
+            "windows-dist",
             "sha256sum * > SHA256SUMS.txt",
             "gh release create",
         ),
         ROOT / ".github" / "workflows" / "security.yml": (
             "actions/dependency-review-action@v5",
-            "continue-on-error: true",
+            "Detect dependency graph support",
+            "DEPENDENCY_REVIEW_ENABLED",
             "github/codeql-action/init@v4",
             "security-events: write",
         ),
@@ -406,6 +411,7 @@ def run_ci_cd_workflow_check() -> None:
         ROOT / "docs" / "CI_CD.md": (
             "Release Process",
             "python verify.py --frontend-build",
+            "Windows Release Packages",
             "No custom release secrets are required",
         ),
     }

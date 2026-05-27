@@ -290,8 +290,8 @@ If `frontend/node_modules` is missing, the normal verifier records frontend buil
 
 GitHub Actions workflows live under `.github/workflows`:
 - `ci.yml` runs Python verification across Ubuntu/Windows and Python `3.10` through `3.14`, builds the React frontend with Node.js `24`, and builds Python distributions.
-- `security.yml` runs advisory dependency review and CodeQL analysis. Enable GitHub dependency graph before making dependency review a required blocking check.
-- `release.yml` publishes tagged releases (`v*.*.*`) with Python package artifacts, a zipped React production bundle, and SHA256 checksums.
+- `security.yml` runs CodeQL analysis and runs dependency review only when GitHub dependency graph is enabled.
+- `release.yml` publishes tagged releases (`v*.*.*`) with Python package artifacts, a zipped React production bundle, Windows x64 portable/installer packages, and SHA256 checksums.
 
 Dependabot is configured in `.github/dependabot.yml` for GitHub Actions, Python, and frontend npm dependency updates.
 

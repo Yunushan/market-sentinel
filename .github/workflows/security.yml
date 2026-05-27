@@ -33,11 +33,28 @@ jobs:
       contents: read
       pull-requests: read
     steps:
+      - name: Detect dependency graph support
+        id: dependency_graph
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPENDENCY_REVIEW_ENABLED: ${{ vars.DEPENDENCY_REVIEW_ENABLED }}
+        shell: bash
+        run: |
+          graph_status="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.security_and_analysis.dependency_graph.status // "unknown"' 2>/dev/null || echo unknown)"
+          if [ "${DEPENDENCY_REVIEW_ENABLED}" = "true" ] || [ "${graph_status}" = "enabled" ]; then
+            echo "enabled=true" >> "${GITHUB_OUTPUT}"
+            echo "Dependency review enabled; dependency_graph=${graph_status}."
+          else
+            echo "enabled=false" >> "${GITHUB_OUTPUT}"
+            echo "Dependency review skipped; dependency_graph=${graph_status}. Enable GitHub dependency graph or set DEPENDENCY_REVIEW_ENABLED=true to force this check."
+          fi
+
       - name: Checkout
+        if: steps.dependency_graph.outputs.enabled == 'true'
         uses: actions/checkout@v6
 
       - name: Review dependency changes
-        continue-on-error: true
+        if: steps.dependency_graph.outputs.enabled == 'true'
         uses: actions/dependency-review-action@v5
         with:
           fail-on-severity: high

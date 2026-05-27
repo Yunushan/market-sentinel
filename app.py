@@ -3332,6 +3332,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     if "--smoke-test" in args:
         print(json.dumps(tkinter_smoke_payload(), sort_keys=True))
         return 0
+    if "--web-gui" in args:
+        import argparse
+
+        from web_api import DEFAULT_CONFIG_PATH, DEFAULT_FRONTEND_DIR, run_server
+
+        parser = argparse.ArgumentParser(description="Run the packaged React/TypeScript GUI server.")
+        parser.add_argument("--web-gui", action="store_true")
+        parser.add_argument("--host", default="127.0.0.1")
+        parser.add_argument("--port", type=int, default=8765)
+        parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+        parser.add_argument("--frontend-dir", type=Path, default=DEFAULT_FRONTEND_DIR)
+        parsed = parser.parse_args(args)
+        run_server(parsed.host, parsed.port, parsed.config, parsed.frontend_dir)
+        return 0
 
     set_windows_app_id("prediction-market-alert-and-copy-trade-gui")
     app = App()

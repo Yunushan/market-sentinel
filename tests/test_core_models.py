@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from core.models import AppConfig, CopyTradeSettings, MarketConfig, PaperTradeRecord, PriceAlert, WalletWatch
-from core.storage import load_config, save_config
+from core.storage import CONFIG_PATH_ENV, default_config_path, load_config, save_config
 from market_adapters import MARKET_IDS
 from polymarket.util import is_wallet_address, normalize_wallet
 
@@ -118,6 +118,12 @@ class CoreModelTests(unittest.TestCase):
         self.assertEqual(loaded.theme, "light")
         self.assertEqual(loaded.selected_market_id, "polymarket")
         self.assertEqual(set(loaded.markets), set(MARKET_IDS))
+
+    def test_default_config_path_can_use_environment_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "installed" / "config.json"
+            with patch.dict("core.storage.os.environ", {CONFIG_PATH_ENV: str(path)}):
+                self.assertEqual(default_config_path(), path)
 
     def test_save_config_does_not_clobber_existing_file_when_atomic_replace_fails(self) -> None:
         original = AppConfig(theme="dark", selected_market_id="kalshi")

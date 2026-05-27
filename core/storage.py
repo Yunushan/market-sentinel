@@ -9,7 +9,17 @@ from typing import Any, Dict
 from .models import AppConfig
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "data" / "config.json"
+CONFIG_PATH_ENV = "PREDICTION_MARKET_CONFIG_PATH"
+
+
+def default_config_path() -> Path:
+    configured_path = os.environ.get(CONFIG_PATH_ENV)
+    if configured_path:
+        return Path(configured_path).expanduser()
+    return Path(__file__).resolve().parent.parent / "data" / "config.json"
+
+
+DEFAULT_CONFIG_PATH = default_config_path()
 
 
 def load_config(path: Path = DEFAULT_CONFIG_PATH) -> AppConfig:

@@ -59,6 +59,21 @@ class FinalParityTests(unittest.TestCase):
         self.assertIn("import type { FormEvent, ReactNode } from \"react\";", source)
         self.assertIn("{ children: ReactNode; tone?: \"good\" | \"warn\" | \"neutral\" }", source)
 
+    def test_windows_package_supports_tkinter_and_react_modes(self) -> None:
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        build_source = (ROOT / "scripts" / "build_windows_release.py").read_text(encoding="utf-8")
+
+        self.assertIn("--web-gui", app_source)
+        self.assertIn("run_server(parsed.host, parsed.port, parsed.config, parsed.frontend_dir)", app_source)
+        self.assertIn("PyInstaller", build_source)
+        self.assertIn("start_tkinter_gui.bat", build_source)
+        self.assertIn("start_web_gui.bat", build_source)
+        self.assertIn("PREDICTION_MARKET_CONFIG_PATH", build_source)
+        self.assertIn("--config \"%PREDICTION_MARKET_CONFIG_PATH%\"", build_source)
+        self.assertIn("StartMenuTkinterShortcut", build_source)
+        self.assertIn("Target=\"[INSTALLFOLDER]start_tkinter_gui.bat\"", build_source)
+        self.assertIn("wix, \"build\"", build_source)
+
     def test_readme_documents_final_parity_commands(self) -> None:
         text = (ROOT / "README.md").read_text(encoding="utf-8")
 
