@@ -14,6 +14,13 @@ from .constants import CLOB_WSS_BASE
 MarketEventHandler = Callable[[Dict[str, Any]], None]
 
 
+def build_market_subscription(token_ids: Iterable[str], *, custom_feature_enabled: bool = False) -> Dict[str, Any]:
+    msg: Dict[str, Any] = {"assets_ids": [str(x) for x in token_ids if x], "type": "market"}
+    if custom_feature_enabled:
+        msg["custom_feature_enabled"] = True
+    return msg
+
+
 class MarketWSClient:
     """
     Minimal market-channel WebSocket client for Polymarket CLOB.
@@ -101,9 +108,7 @@ class MarketWSClient:
             if self._verbose:
                 print("[ws] open")
             # initial subscribe
-            init = {"assets_ids": list(self._token_ids), "type": "market"}
-            if self._custom_feature_enabled:
-                init["custom_feature_enabled"] = True
+            init = build_market_subscription(self._token_ids, custom_feature_enabled=self._custom_feature_enabled)
             ws.send(json.dumps(init))
 
             # start ping + outbox pumps

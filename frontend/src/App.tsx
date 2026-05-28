@@ -7,6 +7,7 @@ import {
   BellRing,
   Copy,
   Database,
+  Download,
   Edit3,
   Power,
   Radio,
@@ -18,6 +19,7 @@ import {
   SlidersHorizontal,
   Trophy,
   Trash2,
+  Upload,
   Wallet,
   XCircle
 } from "lucide-react";
@@ -28,15 +30,23 @@ import {
   clearSelectedPaperMark,
   clearPaperHistory,
   deleteAlert,
+  deletePolymarketLiveValidationReport,
   deleteWallet,
   fillPaperQuoteLimit,
   fetchLiveSafety,
   fetchPolymarketLeaderboard,
+  fetchPolymarketLiveValidation,
+  fetchPolymarketLiveValidationReports,
+  fetchPolymarketMdd,
+  fetchPolymarketMddAudit,
+  fetchPolymarketMddCache,
   fetchState,
+  polymarketMddExportUrl,
   pollWallets,
   previewLivePreflight,
   previewPaperImpact,
   previewCopyTrade,
+  purgePolymarketMddCache,
   refreshAlert,
   refreshAlerts,
   refreshPaperMarks,
@@ -44,6 +54,7 @@ import {
   refreshSelectedPaperMark,
   searchPolymarketUsers,
   submitPaperOrder,
+  storePolymarketLiveValidationReport,
   updateAlert,
   updateCopySettings,
   updateConfig,
@@ -72,6 +83,13 @@ import type {
   PolymarketLeaderboardFilters,
   PolymarketLeaderboardPayload,
   PolymarketLeaderboardSort,
+  PolymarketLiveValidationReportsPayload,
+  PolymarketLiveValidationPayload,
+  PolymarketMddAuditExport,
+  PolymarketMddCachePayload,
+  PolymarketMddCachePurgeRequest,
+  PolymarketMddForm,
+  PolymarketMddPayload,
   PolymarketUserSearchPayload,
   PriceAlert,
   Theme,
@@ -83,6 +101,16 @@ import type {
 import "./styles.css";
 
 type Tab = "overview" | "markets" | "analytics" | "live" | "alerts" | "wallets" | "paper" | "settings";
+const TABS: Tab[] = ["overview", "markets", "analytics", "live", "alerts", "wallets", "paper", "settings"];
+
+function isTab(value: string | null): value is Tab {
+  return TABS.includes(value as Tab);
+}
+
+function initialTabFromUrl(): Tab {
+  const value = new URLSearchParams(window.location.search).get("tab");
+  return isTab(value) ? value : "overview";
+}
 
 function formatNumber(value: number | null | undefined, digits = 4): string {
   if (value === null || value === undefined || Number.isNaN(value)) {
@@ -118,6 +146,29 @@ function formatTime(seconds: number): string {
     return "-";
   }
   return new Date(seconds * 1000).toLocaleString();
+}
+
+function formatUnknownTime(value: unknown): string {
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? formatTime(numeric) : "-";
+}
+
+function formatUnknownNumber(value: unknown, digits = 4): string {
+  const numeric = typeof value === "number" ? value : Number(value);
+  return formatNumber(numeric, digits);
+}
+
+function formatBytes(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "-";
+  }
+  if (value < 1024) {
+    return `${value} B`;
+  }
+  if (value < 1024 * 1024) {
+    return `${(value / 1024).toLocaleString(undefined, { maximumFractionDigits: 1 })} KB`;
+  }
+  return `${(value / (1024 * 1024)).toLocaleString(undefined, { maximumFractionDigits: 1 })} MB`;
 }
 
 function formatAuditValue(value: unknown): string {
@@ -157,6 +208,16 @@ function Metric({ label, value, tone }: { label: string; value: string | number;
       <strong>{value}</strong>
     </div>
   );
+}
+
+function validationTone(status: string | undefined): "good" | "warn" | "neutral" {
+  if (status === "ok" || status === "passed" || status === "partial") {
+    return "good";
+  }
+  if (status === "blocked" || status === "failed") {
+    return "warn";
+  }
+  return "neutral";
 }
 
 function emptyAlertForm(marketId = "polymarket"): AlertForm {
@@ -232,8 +293,25 @@ function emptyCopyPreviewForm(followWallet = ""): CopyPreviewForm {
 function defaultLeaderboardFilters(): PolymarketLeaderboardFilters {
   return {
     sort: "roi_pct",
+    direction: "DESC",
     limit: "100",
     scan_limit: "500",
+    compute_mdd: false,
+    mdd_scan_limit: "100",
+    mdd_history_limit: "500",
+    mdd_activity_limit: "1000",
+    mdd_trade_limit: "1000",
+    mdd_open_limit: "500",
+    mdd_mode: "fast",
+    mdd_mark_replay_token_limit: "10",
+    mdd_mark_replay_point_limit: "5000",
+    mdd_mark_replay_interval: "1h",
+    mdd_mark_replay_fidelity: "60",
+    mdd_include_accounting: false,
+    mdd_accounting_timeout: "30",
+    mdd_persist_cache: false,
+    mdd_cache_ttl_seconds: "60",
+    equity_base_usd: "",
     min_pnl_usd: "",
     max_pnl_usd: "",
     min_volume_usd: "",
@@ -247,8 +325,26 @@ function defaultLeaderboardFilters(): PolymarketLeaderboardFilters {
   };
 }
 
+function defaultMddForm(): PolymarketMddForm {
+  return {
+    wallet: "",
+    mode: "fast",
+    closed_limit: "500",
+    activity_limit: "1000",
+    trade_limit: "1000",
+    open_limit: "500",
+    max_points: "100",
+    equity_base_usd: "",
+    mark_replay_token_limit: "10",
+    mark_replay_interval: "1h",
+    mark_replay_fidelity: "60",
+    include_accounting_snapshot: false,
+    persist_cache: true
+  };
+}
+
 export default function App() {
-  const [tab, setTab] = useState<Tab>("overview");
+  const [tab, setTab] = useState<Tab>(initialTabFromUrl);
   const [health, setHealth] = useState<HealthPayload | null>(null);
   const [config, setConfig] = useState<ConfigPayload | null>(null);
   const [markets, setMarkets] = useState<MarketsPayload | null>(null);
@@ -274,6 +370,11 @@ export default function App() {
   const [copyPreviewForm, setCopyPreviewForm] = useState<CopyPreviewForm>(emptyCopyPreviewForm());
   const [copyPreview, setCopyPreview] = useState<CopyTradePreview | null>(null);
   const [liveSafety, setLiveSafety] = useState<LiveSafetyPayload | null>(null);
+  const [liveValidation, setLiveValidation] = useState<PolymarketLiveValidationPayload | null>(null);
+  const [liveValidationReports, setLiveValidationReports] = useState<PolymarketLiveValidationReportsPayload | null>(null);
+  const [liveValidationImport, setLiveValidationImport] = useState("");
+  const [liveValidationReportMessage, setLiveValidationReportMessage] = useState("");
+  const [liveValidationReportBusyKey, setLiveValidationReportBusyKey] = useState<string | null>(null);
   const [livePreflight, setLivePreflight] = useState<LivePreflightPayload | null>(null);
   const [liveMessage, setLiveMessage] = useState("");
   const [paper, setPaper] = useState<PaperPayload | null>(null);
@@ -292,6 +393,11 @@ export default function App() {
   const [userSearch, setUserSearch] = useState<PolymarketUserSearchPayload | null>(null);
   const [leaderboardFilters, setLeaderboardFilters] = useState<PolymarketLeaderboardFilters>(defaultLeaderboardFilters());
   const [leaderboard, setLeaderboard] = useState<PolymarketLeaderboardPayload | null>(null);
+  const [mddForm, setMddForm] = useState<PolymarketMddForm>(defaultMddForm());
+  const [walletMdd, setWalletMdd] = useState<PolymarketMddPayload | null>(null);
+  const [mddAuditDetail, setMddAuditDetail] = useState<PolymarketMddAuditExport | null>(null);
+  const [mddCache, setMddCache] = useState<PolymarketMddCachePayload | null>(null);
+  const [mddCacheBusyKey, setMddCacheBusyKey] = useState<string | null>(null);
   const [busyMarket, setBusyMarket] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -310,6 +416,8 @@ export default function App() {
       setCopyForm(copyToForm(state.copy));
       setCopyPreviewForm((current) => ({ ...current, proxyWallet: current.proxyWallet || state.copy.settings.follow_wallet }));
       setLiveSafety(state.live_safety);
+      setLiveValidation(state.polymarket_live_validation);
+      setLiveValidationReports(state.polymarket_live_validation_reports);
       setPaper(state.paper);
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
@@ -359,6 +467,9 @@ export default function App() {
       if (market.market_id === config?.selected_market_id) {
         setLiveSafety(await fetchLiveSafety());
       }
+      if (market.market_id === "polymarket") {
+        setLiveValidation(await fetchPolymarketLiveValidation());
+      }
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
     } finally {
@@ -386,6 +497,9 @@ export default function App() {
       const payload = await updateMarket(selectedMarket.market_id, patch);
       setMarkets(payload);
       setLiveSafety(await fetchLiveSafety());
+      if (selectedMarket.market_id === "polymarket") {
+        setLiveValidation(await fetchPolymarketLiveValidation());
+      }
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
     } finally {
@@ -403,6 +517,7 @@ export default function App() {
       setLivePreflight(null);
       setLiveMessage("");
       setLiveSafety(await fetchLiveSafety());
+      setLiveValidation(await fetchPolymarketLiveValidation());
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
     }
@@ -443,11 +558,91 @@ export default function App() {
       const payload = await fetchPolymarketLeaderboard(leaderboardFilters);
       setLeaderboard(payload);
       const warning = payload.warnings.length ? ` ${payload.warnings[0]}` : "";
-      setAnalyticsMessage(`Loaded ${payload.counts.returned} trader row(s) from ${payload.counts.scanned} scanned rows.${warning}`);
+      const cache = payload.analytics_cache.enabled ? ` Audit cache entries: ${payload.analytics_cache.entries}.` : "";
+      setAnalyticsMessage(
+        `Loaded ${payload.counts.returned} trader row(s) from ${payload.counts.scanned} scanned rows; computed MDD for ${payload.counts.mdd_computed}.${cache}${warning}`
+      );
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
     } finally {
       setAnalyticsLoading(false);
+    }
+  }
+
+  async function handleMddLookup(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
+    setError(null);
+    setAnalyticsMessage("");
+    setAnalyticsLoading(true);
+    try {
+      const payload = await fetchPolymarketMdd(mddForm);
+      setWalletMdd(payload);
+      if (payload.audit_cache?.key) {
+        setMddAuditDetail({
+          cache: payload.audit_cache,
+          payload,
+          export: { format: "json", source: "direct_wallet_mdd" }
+        });
+      }
+      const cache = payload.audit_cache?.key ? ` Audit cache key ${payload.audit_cache.key.slice(0, 8)}.` : "";
+      setAnalyticsMessage(`Computed wallet MDD ${formatUsd(payload.mdd_usd)} / ${formatPercent(payload.mdd_pct)}.${cache}`);
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setAnalyticsLoading(false);
+    }
+  }
+
+  async function handleAuditDetailLoad(cacheKey: string) {
+    setError(null);
+    setAnalyticsMessage("");
+    setAnalyticsLoading(true);
+    try {
+      const payload = await fetchPolymarketMddAudit(cacheKey);
+      setMddAuditDetail(payload);
+      setAnalyticsMessage(`Loaded cached MDD audit ${cacheKey.slice(0, 8)}.`);
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setAnalyticsLoading(false);
+    }
+  }
+
+  async function handleMddCacheRefresh() {
+    setError(null);
+    setAnalyticsMessage("");
+    setAnalyticsLoading(true);
+    try {
+      const payload = await fetchPolymarketMddCache(true);
+      setMddCache(payload);
+      setAnalyticsMessage(
+        `MDD audit cache has ${payload.counts.entries} artifact(s), ${payload.counts.expired_entries} expired.`
+      );
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setAnalyticsLoading(false);
+    }
+  }
+
+  async function handleMddCachePurge(request: PolymarketMddCachePurgeRequest) {
+    if (request.all && !window.confirm("Clear all cached Polymarket MDD audit artifacts?")) {
+      return;
+    }
+    setError(null);
+    setAnalyticsMessage("");
+    setMddCacheBusyKey(request.key ?? (request.expired_only ? "__expired__" : "__all__"));
+    try {
+      const payload = await purgePolymarketMddCache(request);
+      setMddCache(payload);
+      if (payload.deleted_keys?.includes(mddAuditDetail?.cache?.key ?? "")) {
+        setMddAuditDetail(null);
+      }
+      setAnalyticsMessage(payload.message ?? `Purged ${payload.deleted ?? 0} MDD audit artifact(s).`);
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setMddCacheBusyKey(null);
     }
   }
 
@@ -615,6 +810,83 @@ export default function App() {
     }
   }
 
+  async function handleLiveValidationRefresh() {
+    setError(null);
+    try {
+      setLiveValidation(await fetchPolymarketLiveValidation());
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    }
+  }
+
+  async function handleLiveValidationReportsRefresh() {
+    setError(null);
+    setLiveValidationReportMessage("");
+    try {
+      setLiveValidationReports(await fetchPolymarketLiveValidationReports());
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    }
+  }
+
+  async function handleLiveValidationSnapshotStore() {
+    setError(null);
+    setLiveValidationReportMessage("");
+    setLiveValidationReportBusyKey("store-current");
+    try {
+      const payload = await storePolymarketLiveValidationReport({ source: "gui_snapshot", label: "GUI readiness snapshot" });
+      setLiveValidationReports(payload);
+      setLiveValidationReportMessage(payload.message ?? "Stored GUI readiness snapshot.");
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setLiveValidationReportBusyKey(null);
+    }
+  }
+
+  async function handleLiveValidationReportImport() {
+    const reportJson = liveValidationImport.trim();
+    if (!reportJson) {
+      setLiveValidationReportMessage("Paste a CLI JSON report before importing.");
+      return;
+    }
+    setError(null);
+    setLiveValidationReportMessage("");
+    setLiveValidationReportBusyKey("import-json");
+    try {
+      const payload = await storePolymarketLiveValidationReport({
+        source: "cli_import",
+        label: "CLI import",
+        report_json: reportJson
+      });
+      setLiveValidationReports(payload);
+      setLiveValidationImport("");
+      setLiveValidationReportMessage(payload.message ?? "Imported CLI validation report.");
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setLiveValidationReportBusyKey(null);
+    }
+  }
+
+  async function handleLiveValidationReportDelete(key: string) {
+    if (!key || !window.confirm("Delete this stored live validation report?")) {
+      return;
+    }
+    setError(null);
+    setLiveValidationReportMessage("");
+    setLiveValidationReportBusyKey(key);
+    try {
+      const payload = await deletePolymarketLiveValidationReport(key);
+      setLiveValidationReports(payload);
+      setLiveValidationReportMessage(payload.message ?? "Deleted live validation report.");
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setLiveValidationReportBusyKey(null);
+    }
+  }
+
   async function handlePaperAction(action: string, target?: { market_id: string; contract_id: string; id?: string }) {
     setError(null);
     setPaperMessage("");
@@ -758,8 +1030,18 @@ export default function App() {
             filters={leaderboardFilters}
             loading={analyticsLoading}
             message={analyticsMessage}
+            mddAuditDetail={mddAuditDetail}
+            mddCache={mddCache}
+            mddCacheBusyKey={mddCacheBusyKey}
+            mddForm={mddForm}
+            mddPayload={walletMdd}
+            onAuditDetailLoad={(cacheKey) => void handleAuditDetailLoad(cacheKey)}
+            onMddCachePurge={(request) => void handleMddCachePurge(request)}
+            onMddCacheRefresh={() => void handleMddCacheRefresh()}
             onFiltersChange={setLeaderboardFilters}
             onLeaderboardRefresh={(event) => void handleLeaderboardRefresh(event)}
+            onMddFormChange={setMddForm}
+            onMddLookup={(event) => void handleMddLookup(event)}
             onUserSearch={(event) => void handleUserSearch(event)}
             onUserSearchQueryChange={setUserSearchQuery}
             searchQuery={userSearchQuery}
@@ -773,10 +1055,21 @@ export default function App() {
             form={paperForm}
             livePreflight={livePreflight}
             liveSafety={liveSafety}
+            liveValidation={liveValidation}
+            liveValidationImport={liveValidationImport}
+            liveValidationReportBusyKey={liveValidationReportBusyKey}
+            liveValidationReportMessage={liveValidationReportMessage}
+            liveValidationReports={liveValidationReports}
             markets={markets}
             message={liveMessage}
             onFormChange={setPaperForm}
             onPreview={() => void handleLivePreflight()}
+            onValidationImport={() => void handleLiveValidationReportImport()}
+            onValidationImportChange={setLiveValidationImport}
+            onValidationReportDelete={(key) => void handleLiveValidationReportDelete(key)}
+            onValidationReportsRefresh={() => void handleLiveValidationReportsRefresh()}
+            onValidationRefresh={() => void handleLiveValidationRefresh()}
+            onValidationSnapshotStore={() => void handleLiveValidationSnapshotStore()}
             onSelectedMarketChange={(marketId) => void handleSelectedMarketChange(marketId)}
             onSettingsSave={(event) => void handleMarketSettingsSave(event)}
             selectedMarket={selectedMarket}
@@ -1128,8 +1421,18 @@ function PolymarketAnalyticsView({
   filters,
   loading,
   message,
+  mddAuditDetail,
+  mddCache,
+  mddCacheBusyKey,
+  mddForm,
+  mddPayload,
+  onAuditDetailLoad,
+  onMddCachePurge,
+  onMddCacheRefresh,
   onFiltersChange,
   onLeaderboardRefresh,
+  onMddFormChange,
+  onMddLookup,
   onUserSearch,
   onUserSearchQueryChange,
   searchQuery,
@@ -1139,8 +1442,18 @@ function PolymarketAnalyticsView({
   filters: PolymarketLeaderboardFilters;
   loading: boolean;
   message: string;
+  mddAuditDetail: PolymarketMddAuditExport | null;
+  mddCache: PolymarketMddCachePayload | null;
+  mddCacheBusyKey: string | null;
+  mddForm: PolymarketMddForm;
+  mddPayload: PolymarketMddPayload | null;
+  onAuditDetailLoad: (cacheKey: string) => void;
+  onMddCachePurge: (request: PolymarketMddCachePurgeRequest) => void;
+  onMddCacheRefresh: () => void;
   onFiltersChange: (filters: PolymarketLeaderboardFilters) => void;
   onLeaderboardRefresh: (event: FormEvent<HTMLFormElement>) => void;
+  onMddFormChange: (form: PolymarketMddForm) => void;
+  onMddLookup: (event: FormEvent<HTMLFormElement>) => void;
   onUserSearch: (event: FormEvent<HTMLFormElement>) => void;
   onUserSearchQueryChange: (value: string) => void;
   searchQuery: string;
@@ -1150,6 +1463,15 @@ function PolymarketAnalyticsView({
   const updateFilter = <K extends keyof PolymarketLeaderboardFilters>(field: K, value: PolymarketLeaderboardFilters[K]) => {
     onFiltersChange({ ...filters, [field]: value });
   };
+  const updateMddForm = <K extends keyof PolymarketMddForm>(field: K, value: PolymarketMddForm[K]) => {
+    onMddFormChange({ ...mddForm, [field]: value });
+  };
+  const auditPayload = mddAuditDetail?.payload ?? null;
+  const auditCacheKey = mddAuditDetail?.cache?.key ?? auditPayload?.audit_cache?.key ?? null;
+  const auditPoints = auditPayload?.points?.slice(0, 12) ?? [];
+  const walletMddCacheKey = mddPayload?.audit_cache?.key ?? null;
+  const cacheEntries = mddCache?.entries ?? [];
+  const cacheStatus = mddCache?.cache ?? null;
 
   return (
     <div className="content-grid">
@@ -1175,6 +1497,7 @@ function PolymarketAnalyticsView({
                   <th>Profile</th>
                   <th>Wallet</th>
                   <th>Public</th>
+                  <th>Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -1190,11 +1513,16 @@ function PolymarketAnalyticsView({
                         {profile.display_username_public ? "yes" : "hidden"}
                       </StatusPill>
                     </td>
+                    <td>
+                      <button className="icon-button compact" type="button" onClick={() => updateMddForm("wallet", profile.proxy_wallet)}>
+                        <Wallet size={14} /> Use
+                      </button>
+                    </td>
                   </tr>
                 ))}
                 {!searchResults.profiles.length ? (
                   <tr>
-                    <td colSpan={3} className="empty-cell">
+                    <td colSpan={4} className="empty-cell">
                       No matching profiles.
                     </td>
                   </tr>
@@ -1203,6 +1531,266 @@ function PolymarketAnalyticsView({
             </table>
           </div>
         ) : null}
+      </section>
+
+      <section className="panel span-2">
+        <div className="panel-title">
+          <Wallet size={18} />
+          <h2>Direct Wallet MDD</h2>
+        </div>
+        <form className="analytics-form direct-mdd-form" onSubmit={onMddLookup}>
+          <label>
+            <span>Wallet</span>
+            <input value={mddForm.wallet} onChange={(event) => updateMddForm("wallet", event.target.value)} placeholder="0x..." />
+          </label>
+          <label>
+            <span>MDD mode</span>
+            <select value={mddForm.mode} onChange={(event) => updateMddForm("mode", event.target.value as PolymarketMddForm["mode"])}>
+              <option value="fast">Fast public curve</option>
+              <option value="mark_replay">CLOB mark replay</option>
+            </select>
+          </label>
+          <label>
+            <span>Closed</span>
+            <input inputMode="numeric" min="1" max="1000" type="number" value={mddForm.closed_limit} onChange={(event) => updateMddForm("closed_limit", event.target.value)} />
+          </label>
+          <label>
+            <span>Activity</span>
+            <input inputMode="numeric" min="0" max="5000" type="number" value={mddForm.activity_limit} onChange={(event) => updateMddForm("activity_limit", event.target.value)} />
+          </label>
+          <label>
+            <span>Trades</span>
+            <input inputMode="numeric" min="0" max="5000" type="number" value={mddForm.trade_limit} onChange={(event) => updateMddForm("trade_limit", event.target.value)} />
+          </label>
+          <label>
+            <span>Open</span>
+            <input inputMode="numeric" min="0" max="1000" type="number" value={mddForm.open_limit} onChange={(event) => updateMddForm("open_limit", event.target.value)} />
+          </label>
+          <label>
+            <span>Points</span>
+            <input inputMode="numeric" min="1" max="1000" type="number" value={mddForm.max_points} onChange={(event) => updateMddForm("max_points", event.target.value)} />
+          </label>
+          <label>
+            <span>Equity base</span>
+            <input inputMode="decimal" value={mddForm.equity_base_usd} onChange={(event) => updateMddForm("equity_base_usd", event.target.value)} />
+          </label>
+          <label>
+            <span>Replay tokens</span>
+            <input
+              inputMode="numeric"
+              min="1"
+              max="20"
+              type="number"
+              value={mddForm.mark_replay_token_limit}
+              onChange={(event) => updateMddForm("mark_replay_token_limit", event.target.value)}
+            />
+          </label>
+          <label>
+            <span>Replay interval</span>
+            <select value={mddForm.mark_replay_interval} onChange={(event) => updateMddForm("mark_replay_interval", event.target.value)}>
+              <option value="1h">1h</option>
+              <option value="6h">6h</option>
+              <option value="1d">1d</option>
+              <option value="1w">1w</option>
+              <option value="all">All</option>
+              <option value="max">Max</option>
+            </select>
+          </label>
+          <label>
+            <span>Replay fidelity</span>
+            <input
+              inputMode="numeric"
+              min="1"
+              max="1440"
+              type="number"
+              value={mddForm.mark_replay_fidelity}
+              onChange={(event) => updateMddForm("mark_replay_fidelity", event.target.value)}
+            />
+          </label>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={mddForm.include_accounting_snapshot}
+              onChange={(event) => updateMddForm("include_accounting_snapshot", event.target.checked)}
+            />
+            <span>Accounting base</span>
+          </label>
+          <label className="check-row">
+            <input type="checkbox" checked={mddForm.persist_cache} onChange={(event) => updateMddForm("persist_cache", event.target.checked)} />
+            <span>Audit cache</span>
+          </label>
+          <button className="icon-button" type="submit" disabled={loading || !mddForm.wallet.trim()}>
+            <RefreshCw size={17} /> Compute
+          </button>
+        </form>
+        {mddPayload ? (
+          <>
+            <div className="metrics-grid four">
+              <Metric label="MDD USD" value={formatUsd(mddPayload.mdd_usd)} tone={mddPayload.mdd_available ? "warn" : "neutral"} />
+              <Metric label="MDD %" value={formatPercent(mddPayload.mdd_pct)} />
+              <Metric label="Peak" value={formatUsd(mddPayload.peak_value)} />
+              <Metric label="Trough" value={formatUsd(mddPayload.trough_value)} />
+            </div>
+            <div className="audit-summary">
+              <div>
+                <span>Method</span>
+                <strong>{mddPayload.mdd_method}</strong>
+              </div>
+              <div>
+                <span>Equity base</span>
+                <strong>{formatUsd(mddPayload.equity_base_usd)}</strong>
+              </div>
+              <div>
+                <span>Positions</span>
+                <strong>
+                  {formatAuditValue([`closed ${mddPayload.closed_positions ?? 0}`, `open ${mddPayload.open_positions ?? 0}`])}
+                </strong>
+              </div>
+              <div>
+                <span>Cache</span>
+                <strong>{walletMddCacheKey || "not stored"}</strong>
+              </div>
+            </div>
+            {mddPayload.rate_limit?.limited ? <div className="info-banner warn">Polymarket rate limit reached; retry after the upstream backoff window.</div> : null}
+            {walletMddCacheKey ? (
+              <div className="audit-actions panel-actions">
+                <button className="icon-button compact" type="button" onClick={() => onAuditDetailLoad(walletMddCacheKey)}>
+                  <Database size={14} /> Detail
+                </button>
+                <a className="icon-button compact" href={polymarketMddExportUrl(walletMddCacheKey, "json")}>
+                  <Download size={14} /> JSON
+                </a>
+                <a className="icon-button compact" href={polymarketMddExportUrl(walletMddCacheKey, "csv")}>
+                  <Download size={14} /> CSV
+                </a>
+              </div>
+            ) : null}
+          </>
+        ) : null}
+      </section>
+
+      <section className="panel span-2">
+        <div className="panel-header">
+          <div className="panel-title">
+            <Database size={18} />
+            <h2>MDD Audit Cache</h2>
+          </div>
+          <StatusPill tone={cacheStatus?.exists ? "good" : "neutral"}>{cacheStatus?.exists ? "on disk" : "empty"}</StatusPill>
+        </div>
+        <div className="metrics-grid four">
+          <Metric label="Entries" value={mddCache?.counts.entries ?? cacheStatus?.entries ?? 0} />
+          <Metric label="Active" value={mddCache?.counts.active_entries ?? cacheStatus?.active_entries ?? 0} tone="good" />
+          <Metric label="Expired" value={mddCache?.counts.expired_entries ?? cacheStatus?.expired_entries ?? 0} tone={(mddCache?.counts.expired_entries ?? 0) ? "warn" : "neutral"} />
+          <Metric label="Size" value={formatBytes(cacheStatus?.size_bytes)} />
+        </div>
+        <div className="audit-summary cache-health">
+          <div>
+            <span>Path</span>
+            <strong>{cacheStatus?.path ?? "-"}</strong>
+          </div>
+          <div>
+            <span>TTL</span>
+            <strong>{cacheStatus?.ttl_seconds ? `${cacheStatus.ttl_seconds}s` : "-"}</strong>
+          </div>
+          <div>
+            <span>Max entries</span>
+            <strong>{cacheStatus?.max_entries ?? "-"}</strong>
+          </div>
+          <div>
+            <span>Newest</span>
+            <strong>{formatUnknownTime(cacheStatus?.newest_stored_at)}</strong>
+          </div>
+        </div>
+        <div className="audit-actions panel-actions cache-actions">
+          <button className="icon-button compact" type="button" onClick={onMddCacheRefresh} disabled={loading}>
+            <RefreshCw size={14} /> Refresh
+          </button>
+          <button
+            className="icon-button compact"
+            type="button"
+            onClick={() => onMddCachePurge({ expired_only: true })}
+            disabled={mddCacheBusyKey === "__expired__"}
+          >
+            <Trash2 size={14} /> Purge expired
+          </button>
+          <button
+            className="icon-button compact danger"
+            type="button"
+            onClick={() => onMddCachePurge({ all: true })}
+            disabled={!cacheEntries.length || mddCacheBusyKey === "__all__"}
+          >
+            <Trash2 size={14} /> Clear all
+          </button>
+        </div>
+        <div className="table-wrap audit-points cache-table">
+          <table>
+            <thead>
+              <tr>
+                <th>Stored</th>
+                <th>Wallet</th>
+                <th className="numeric">MDD USD</th>
+                <th className="numeric">MDD %</th>
+                <th>Retention</th>
+                <th>Status</th>
+                <th>Key</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {cacheEntries.map((entry) => {
+                const cacheKey = entry.key ?? "";
+                return (
+                  <tr key={cacheKey || `${entry.wallet}-${entry.stored_at}`}>
+                    <td>{formatUnknownTime(entry.stored_at)}</td>
+                    <td>{entry.wallet || "-"}</td>
+                    <td className="numeric">{formatUsd(entry.mdd_usd)}</td>
+                    <td className="numeric">{formatPercent(entry.mdd_pct)}</td>
+                    <td>
+                      <strong>{entry.ttl_remaining_seconds === null || entry.ttl_remaining_seconds === undefined ? "-" : `${entry.ttl_remaining_seconds}s`}</strong>
+                      <small>age {entry.age_seconds === null || entry.age_seconds === undefined ? "-" : `${entry.age_seconds}s`}</small>
+                    </td>
+                    <td>
+                      <StatusPill tone={entry.expired ? "warn" : "good"}>{entry.expired ? "expired" : "active"}</StatusPill>
+                    </td>
+                    <td className="cache-key">{cacheKey || "-"}</td>
+                    <td>
+                      {cacheKey ? (
+                        <span className="audit-actions">
+                          <button className="icon-button compact" type="button" onClick={() => onAuditDetailLoad(cacheKey)}>
+                            <Database size={14} /> Detail
+                          </button>
+                          <a className="icon-button compact" href={polymarketMddExportUrl(cacheKey, "json")}>
+                            <Download size={14} /> JSON
+                          </a>
+                          <a className="icon-button compact" href={polymarketMddExportUrl(cacheKey, "csv")}>
+                            <Download size={14} /> CSV
+                          </a>
+                          <button
+                            className="icon-button compact danger"
+                            type="button"
+                            onClick={() => onMddCachePurge({ key: cacheKey })}
+                            disabled={mddCacheBusyKey === cacheKey}
+                          >
+                            <Trash2 size={14} /> Delete
+                          </button>
+                        </span>
+                      ) : (
+                        "-"
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+              {!cacheEntries.length ? (
+                <tr>
+                  <td colSpan={8} className="empty-cell">
+                    No cached MDD audit artifacts.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
       </section>
 
       <section className="panel span-2">
@@ -1217,6 +1805,15 @@ function PolymarketAnalyticsView({
               <option value="roi_pct">ROI %</option>
               <option value="pnl_usd">PnL USD</option>
               <option value="volume_usd">Volume USD</option>
+              <option value="mdd_pct">MDD %</option>
+              <option value="mdd_usd">MDD USD</option>
+            </select>
+          </label>
+          <label>
+            <span>Direction</span>
+            <select value={filters.direction} onChange={(event) => updateFilter("direction", event.target.value as PolymarketLeaderboardFilters["direction"])}>
+              <option value="DESC">High to low</option>
+              <option value="ASC">Low to high</option>
             </select>
           </label>
           <label>
@@ -1240,6 +1837,129 @@ function PolymarketAnalyticsView({
               value={filters.scan_limit}
               onChange={(event) => updateFilter("scan_limit", event.target.value)}
             />
+          </label>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={filters.compute_mdd}
+              onChange={(event) => updateFilter("compute_mdd", event.target.checked)}
+            />
+            <span>Compute MDD</span>
+          </label>
+          <label>
+            <span>MDD mode</span>
+            <select value={filters.mdd_mode} onChange={(event) => updateFilter("mdd_mode", event.target.value as PolymarketLeaderboardFilters["mdd_mode"])}>
+              <option value="fast">Fast public curve</option>
+              <option value="mark_replay">CLOB mark replay</option>
+            </select>
+          </label>
+          <label>
+            <span>MDD scan</span>
+            <input
+              inputMode="numeric"
+              min="1"
+              max="100"
+              type="number"
+              value={filters.mdd_scan_limit}
+              onChange={(event) => updateFilter("mdd_scan_limit", event.target.value)}
+            />
+          </label>
+          <label>
+            <span>MDD history</span>
+            <input
+              inputMode="numeric"
+              min="1"
+              max="1000"
+              type="number"
+              value={filters.mdd_history_limit}
+              onChange={(event) => updateFilter("mdd_history_limit", event.target.value)}
+            />
+          </label>
+          <label>
+            <span>MDD activity</span>
+            <input
+              inputMode="numeric"
+              min="0"
+              max="5000"
+              type="number"
+              value={filters.mdd_activity_limit}
+              onChange={(event) => updateFilter("mdd_activity_limit", event.target.value)}
+            />
+          </label>
+          <label>
+            <span>MDD trades</span>
+            <input
+              inputMode="numeric"
+              min="0"
+              max="5000"
+              type="number"
+              value={filters.mdd_trade_limit}
+              onChange={(event) => updateFilter("mdd_trade_limit", event.target.value)}
+            />
+          </label>
+          <label>
+            <span>MDD open</span>
+            <input
+              inputMode="numeric"
+              min="0"
+              max="1000"
+              type="number"
+              value={filters.mdd_open_limit}
+              onChange={(event) => updateFilter("mdd_open_limit", event.target.value)}
+            />
+          </label>
+          <label>
+            <span>Replay tokens</span>
+            <input
+              inputMode="numeric"
+              min="1"
+              max="20"
+              type="number"
+              value={filters.mdd_mark_replay_token_limit}
+              onChange={(event) => updateFilter("mdd_mark_replay_token_limit", event.target.value)}
+            />
+          </label>
+          <label>
+            <span>Replay fidelity</span>
+            <input
+              inputMode="numeric"
+              min="1"
+              max="1440"
+              type="number"
+              value={filters.mdd_mark_replay_fidelity}
+              onChange={(event) => updateFilter("mdd_mark_replay_fidelity", event.target.value)}
+            />
+          </label>
+          <label>
+            <span>Replay interval</span>
+            <select value={filters.mdd_mark_replay_interval} onChange={(event) => updateFilter("mdd_mark_replay_interval", event.target.value)}>
+              <option value="1h">1h</option>
+              <option value="6h">6h</option>
+              <option value="1d">1d</option>
+              <option value="1w">1w</option>
+              <option value="all">All</option>
+              <option value="max">Max</option>
+            </select>
+          </label>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={filters.mdd_include_accounting}
+              onChange={(event) => updateFilter("mdd_include_accounting", event.target.checked)}
+            />
+            <span>Accounting base</span>
+          </label>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={filters.mdd_persist_cache}
+              onChange={(event) => updateFilter("mdd_persist_cache", event.target.checked)}
+            />
+            <span>Audit cache</span>
+          </label>
+          <label>
+            <span>Equity base</span>
+            <input inputMode="decimal" value={filters.equity_base_usd} onChange={(event) => updateFilter("equity_base_usd", event.target.value)} />
           </label>
           <label>
             <span>Min PnL</span>
@@ -1293,9 +2013,10 @@ function PolymarketAnalyticsView({
               <Metric label="Returned" value={leaderboard.counts.returned} tone="good" />
               <Metric label="Filtered" value={leaderboard.counts.filtered} />
               <Metric label="Scanned" value={leaderboard.counts.scanned} />
-              <Metric label="Source sort" value={leaderboard.source_sort} />
+              <Metric label="MDD computed" value={leaderboard.counts.mdd_computed} />
             </div>
-            {!leaderboard.mdd_available ? <div className="info-banner warn">{leaderboard.mdd_note}</div> : null}
+            <div className={`info-banner ${leaderboard.mdd_available ? "" : "warn"}`}>{leaderboard.mdd_note}</div>
+            {leaderboard.rate_limit.limited ? <div className="info-banner warn">Polymarket rate limit reached; retry after the upstream backoff window.</div> : null}
             <div className="table-wrap">
               <table>
                 <thead>
@@ -1308,6 +2029,8 @@ function PolymarketAnalyticsView({
                     <th className="numeric">Trades</th>
                     <th className="numeric">MDD USD</th>
                     <th className="numeric">MDD %</th>
+                    <th>MDD source</th>
+                    <th>Audit</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1324,11 +2047,33 @@ function PolymarketAnalyticsView({
                       <td className="numeric">{row.trade_count || "-"}</td>
                       <td className="numeric">{row.mdd_available ? formatUsd(row.mdd_usd) : "-"}</td>
                       <td className="numeric">{row.mdd_available ? formatPercent(row.mdd_pct) : "-"}</td>
+                      <td>
+                        {row.mdd_available
+                          ? row.mdd_accounting_status ?? row.mdd_mark_replay_status ?? (row.mdd_method?.includes("mark") ? "mark replay" : "fast")
+                          : "-"}
+                      </td>
+                      <td>
+                        {row.mdd_audit_cache_key ? (
+                          <span className="audit-actions">
+                            <button className="icon-button compact" type="button" onClick={() => onAuditDetailLoad(row.mdd_audit_cache_key ?? "")}>
+                              <Database size={14} /> Detail
+                            </button>
+                            <a className="icon-button compact" href={polymarketMddExportUrl(row.mdd_audit_cache_key, "json")}>
+                              <Download size={14} /> JSON
+                            </a>
+                            <a className="icon-button compact" href={polymarketMddExportUrl(row.mdd_audit_cache_key, "csv")}>
+                              <Download size={14} /> CSV
+                            </a>
+                          </span>
+                        ) : (
+                          "-"
+                        )}
+                      </td>
                     </tr>
                   ))}
                   {!leaderboard.rows.length ? (
                     <tr>
-                      <td colSpan={8} className="empty-cell">
+                      <td colSpan={10} className="empty-cell">
                         No leaderboard rows matched the filters.
                       </td>
                     </tr>
@@ -1339,6 +2084,113 @@ function PolymarketAnalyticsView({
           </>
         ) : null}
       </section>
+
+      {auditPayload ? (
+        <section className="panel span-2">
+          <div className="panel-header">
+            <div className="panel-title">
+              <Database size={18} />
+              <h2>MDD Audit Detail</h2>
+            </div>
+            {auditCacheKey ? <StatusPill tone="good">cached</StatusPill> : <StatusPill>direct</StatusPill>}
+          </div>
+          <div className="metrics-grid four">
+            <Metric label="MDD USD" value={formatUsd(auditPayload.mdd_usd)} tone={auditPayload.mdd_available ? "warn" : "neutral"} />
+            <Metric label="MDD %" value={formatPercent(auditPayload.mdd_pct)} />
+            <Metric label="Equity base" value={formatUsd(auditPayload.equity_base_usd)} />
+            <Metric label="Points" value={auditPayload.points_total ?? auditPayload.points?.length ?? 0} />
+          </div>
+          <div className="audit-summary">
+            <div>
+              <span>Wallet</span>
+              <strong>{auditPayload.wallet || "-"}</strong>
+            </div>
+            <div>
+              <span>Method</span>
+              <strong>{auditPayload.mdd_method}</strong>
+            </div>
+            <div>
+              <span>Peak</span>
+              <strong>
+                {formatUsd(auditPayload.peak_value)} at {formatUnknownTime(auditPayload.peak_timestamp)}
+              </strong>
+            </div>
+            <div>
+              <span>Trough</span>
+              <strong>
+                {formatUsd(auditPayload.trough_value)} at {formatUnknownTime(auditPayload.trough_timestamp)}
+              </strong>
+            </div>
+            <div>
+              <span>Closed/open</span>
+              <strong>
+                {formatAuditValue([`closed ${auditPayload.closed_positions ?? 0}`, `open ${auditPayload.open_positions ?? 0}`])}
+              </strong>
+            </div>
+            <div>
+              <span>Activity/trades</span>
+              <strong>
+                {formatAuditValue([`activity ${auditPayload.activity_events ?? 0}`, `trades ${auditPayload.trade_events ?? 0}`])}
+              </strong>
+            </div>
+            <div>
+              <span>Cache key</span>
+              <strong>{auditCacheKey || "-"}</strong>
+            </div>
+            <div>
+              <span>Cache path</span>
+              <strong>{mddAuditDetail?.cache?.path || auditPayload.audit_cache?.path || "-"}</strong>
+            </div>
+          </div>
+          {auditCacheKey ? (
+            <div className="audit-actions panel-actions">
+              <a className="icon-button compact" href={polymarketMddExportUrl(auditCacheKey, "json")}>
+                <Download size={14} /> JSON
+              </a>
+              <a className="icon-button compact" href={polymarketMddExportUrl(auditCacheKey, "csv")}>
+                <Download size={14} /> CSV
+              </a>
+            </div>
+          ) : null}
+          <div className="table-wrap audit-points">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th className="numeric">Value</th>
+                  <th>Source</th>
+                </tr>
+              </thead>
+              <tbody>
+                {auditPoints.map((point, index) => (
+                  <tr key={`${point.timestamp ?? index}-${index}`}>
+                    <td>{formatUnknownTime(point.timestamp)}</td>
+                    <td className="numeric">{formatUnknownNumber(point.value, 4)}</td>
+                    <td>{point.source ?? point.kind ?? "-"}</td>
+                  </tr>
+                ))}
+                {!auditPoints.length ? (
+                  <tr>
+                    <td colSpan={3} className="empty-cell">
+                      No audit points in this payload.
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+          <div className="audit-detail-grid">
+            <div>
+              <span>Assumptions</span>
+              <strong>{formatAuditValue(auditPayload.assumptions)}</strong>
+            </div>
+            <div>
+              <span>Limitations</span>
+              <strong>{formatAuditValue(auditPayload.limitations)}</strong>
+            </div>
+          </div>
+        </section>
+      ) : null}
     </div>
   );
 }
@@ -1348,10 +2200,21 @@ function LiveSafetyView({
   form,
   livePreflight,
   liveSafety,
+  liveValidation,
+  liveValidationImport,
+  liveValidationReportBusyKey,
+  liveValidationReportMessage,
+  liveValidationReports,
   markets,
   message,
   onFormChange,
   onPreview,
+  onValidationImport,
+  onValidationImportChange,
+  onValidationReportDelete,
+  onValidationReportsRefresh,
+  onValidationRefresh,
+  onValidationSnapshotStore,
   onSelectedMarketChange,
   onSettingsSave,
   selectedMarket,
@@ -1361,10 +2224,21 @@ function LiveSafetyView({
   form: PaperOrderForm;
   livePreflight: LivePreflightPayload | null;
   liveSafety: LiveSafetyPayload | null;
+  liveValidation: PolymarketLiveValidationPayload | null;
+  liveValidationImport: string;
+  liveValidationReportBusyKey: string | null;
+  liveValidationReportMessage: string;
+  liveValidationReports: PolymarketLiveValidationReportsPayload | null;
   markets: MarketsPayload | null;
   message: string;
   onFormChange: (form: PaperOrderForm) => void;
   onPreview: () => void;
+  onValidationImport: () => void;
+  onValidationImportChange: (value: string) => void;
+  onValidationReportDelete: (key: string) => void;
+  onValidationReportsRefresh: () => void;
+  onValidationRefresh: () => void;
+  onValidationSnapshotStore: () => void;
   onSelectedMarketChange: (marketId: string) => void;
   onSettingsSave: (event: FormEvent<HTMLFormElement>) => void;
   selectedMarket: Market | null;
@@ -1447,6 +2321,20 @@ function LiveSafetyView({
         ) : null}
       </section>
 
+      <PolymarketLiveValidationPanel
+        busyKey={liveValidationReportBusyKey}
+        importText={liveValidationImport}
+        message={liveValidationReportMessage}
+        onDeleteReport={onValidationReportDelete}
+        onImport={onValidationImport}
+        onImportTextChange={onValidationImportChange}
+        onRefresh={onValidationRefresh}
+        onReportsRefresh={onValidationReportsRefresh}
+        onStoreSnapshot={onValidationSnapshotStore}
+        payload={liveValidation}
+        reports={liveValidationReports}
+      />
+
       <section className="panel full">
         <div className="panel-title">
           <Database size={18} />
@@ -1500,6 +2388,237 @@ function LiveSafetyView({
         {livePreflight ? <LivePreflightAudit payload={livePreflight} /> : null}
       </section>
     </div>
+  );
+}
+
+function PolymarketLiveValidationPanel({
+  busyKey,
+  importText,
+  message,
+  onDeleteReport,
+  onImport,
+  onImportTextChange,
+  payload,
+  reports,
+  onRefresh,
+  onReportsRefresh,
+  onStoreSnapshot
+}: {
+  busyKey: string | null;
+  importText: string;
+  message: string;
+  onDeleteReport: (key: string) => void;
+  onImport: () => void;
+  onImportTextChange: (value: string) => void;
+  payload: PolymarketLiveValidationPayload | null;
+  reports: PolymarketLiveValidationReportsPayload | null;
+  onRefresh: () => void;
+  onReportsRefresh: () => void;
+  onStoreSnapshot: () => void;
+}) {
+  const gates = payload?.stage_gates;
+  const authChecks = Object.entries(payload?.authenticated_read_checks ?? {});
+  const publicChecks = Object.entries(payload?.public_checks ?? {});
+  const commands = Object.entries(payload?.operator_commands ?? {});
+  const reportEntries = reports?.entries ?? [];
+  const comparison = reports?.comparison ?? null;
+  return (
+    <section className="panel full">
+      <div className="toolbar">
+        <div className="panel-title">
+          <Radio size={18} />
+          <h2>Polymarket Live Validation</h2>
+        </div>
+        <div className="button-row compact">
+          <button className="icon-button" onClick={onRefresh}>
+            <RefreshCw size={17} /> Refresh
+          </button>
+          <button className="icon-button" onClick={onStoreSnapshot} disabled={busyKey === "store-current"}>
+            <Save size={17} /> Store Snapshot
+          </button>
+        </div>
+      </div>
+      {payload ? (
+        <>
+          <div className="metrics-grid">
+            <Metric label="Report" value={formatTime(payload.generated_at)} />
+            <Metric label="Mode" value={payload.mode} />
+            <Metric
+              label="Credential readiness"
+              value={gates?.credential_readiness ?? "unknown"}
+              tone={validationTone(gates?.credential_readiness)}
+            />
+            <Metric
+              label="Credentialed reads"
+              value={gates?.credentialed_read_checks ?? "unknown"}
+              tone={validationTone(gates?.credentialed_read_checks)}
+            />
+            <Metric
+              label="Funded exposed"
+              value={payload.funded_execution_exposed ? "yes" : "no"}
+              tone={payload.funded_execution_exposed ? "warn" : "good"}
+            />
+            <Metric
+              label="Funded gate"
+              value={gates?.funded_live_order_check ?? "unknown"}
+              tone={validationTone(gates?.funded_live_order_check)}
+            />
+          </div>
+          {gates?.next_step ? <div className="info-banner warn">{gates.next_step}</div> : null}
+          <div className="diagnostic-grid">
+            <div>
+              <span>Public probes</span>
+              <strong>{gates?.public_live_checks ?? "unknown"}</strong>
+            </div>
+            <div>
+              <span>Bridge checks</span>
+              <strong>{gates?.bridge_address_checks ?? "unknown"}</strong>
+            </div>
+            <div>
+              <span>Authenticated read OK</span>
+              <strong>{gates?.credentialed_read_ok ? "yes" : "no"}</strong>
+            </div>
+            <div>
+              <span>Safe funded attempt</span>
+              <strong>{gates?.safe_to_attempt_funded_order ? "yes" : "no"}</strong>
+            </div>
+          </div>
+          <div className="split-grid">
+            <div className="audit-box">
+              <h3>Authenticated Checks</h3>
+              <div className="chip-row">
+                {authChecks.map(([name, item]) => (
+                  <span className={`chip ${item.status === "blocked" || item.status === "failed" ? "muted" : ""}`} key={name}>
+                    {name}: {item.status}
+                  </span>
+                ))}
+              </div>
+            </div>
+            <div className="audit-box">
+              <h3>Public Checks</h3>
+              <div className="chip-row">
+                {publicChecks.map(([name, item]) => (
+                  <span className={`chip ${item.status === "blocked" || item.status === "failed" ? "muted" : ""}`} key={name}>
+                    {name}: {item.status}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="audit-box">
+            <h3>CLI Audit Commands</h3>
+            <div className="diagnostic-grid">
+              {commands.map(([name, command]) => (
+                <div key={name}>
+                  <span>{name.replaceAll("_", " ")}</span>
+                  <strong>{command}</strong>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="audit-box">
+            <div className="toolbar">
+              <div className="panel-title">
+                <Database size={18} />
+                <h2>Validation Reports</h2>
+              </div>
+              <button className="icon-button" onClick={onReportsRefresh}>
+                <RefreshCw size={17} /> Refresh Reports
+              </button>
+            </div>
+            <div className="diagnostic-grid cache-health">
+              <div>
+                <span>Store</span>
+                <strong>{reports?.cache.path ?? "-"}</strong>
+              </div>
+              <div>
+                <span>Reports</span>
+                <strong>{reports?.counts.entries ?? 0}</strong>
+              </div>
+              <div>
+                <span>Newest</span>
+                <strong>{formatUnknownTime(reports?.cache.newest_stored_at)}</strong>
+              </div>
+              <div>
+                <span>Size</span>
+                <strong>{formatBytes(reports?.cache.size_bytes ?? 0)}</strong>
+              </div>
+            </div>
+            {message ? <div className="info-banner">{message}</div> : null}
+            <div className="report-import-form">
+              <label>
+                <span>CLI JSON report import</span>
+                <textarea
+                  value={importText}
+                  onChange={(event) => onImportTextChange(event.target.value)}
+                  placeholder='{"stage_gates": {...}}'
+                  rows={4}
+                />
+              </label>
+              <button className="icon-button" onClick={onImport} disabled={busyKey === "import-json"}>
+                <Upload size={17} /> Import JSON
+              </button>
+            </div>
+            {comparison ? (
+              <div className="audit-box">
+                <h3>Latest vs Previous</h3>
+                {comparison.changed ? (
+                  <div className="comparison-list">
+                    {comparison.changes.map((change) => (
+                      <div key={change.field}>
+                        <span>{change.field.replaceAll("_", " ")}</span>
+                        <strong>
+                          {formatAuditValue(change.previous)} {"->"} {formatAuditValue(change.latest)}
+                        </strong>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="empty-state compact">No stage-gate changes between the latest two reports.</div>
+                )}
+              </div>
+            ) : null}
+            <div className="report-list">
+              {reportEntries.length ? (
+                reportEntries.map((entry) => (
+                  <div className="report-row" key={entry.key ?? `${entry.source}-${entry.stored_at}`}>
+                    <div>
+                      <strong>{entry.label || entry.source}</strong>
+                      <span>
+                        {entry.source} | stored {formatUnknownTime(entry.stored_at)} | generated{" "}
+                        {formatUnknownTime(entry.summary?.generated_at)}
+                      </span>
+                    </div>
+                    <div className="chip-row">
+                      <span className={`chip ${entry.summary?.credential_readiness === "passed" ? "" : "muted"}`}>
+                        credentials: {entry.summary?.credential_readiness ?? "unknown"}
+                      </span>
+                      <span className={`chip ${entry.summary?.credentialed_read_checks === "passed" ? "" : "muted"}`}>
+                        reads: {entry.summary?.credentialed_read_checks ?? "unknown"}
+                      </span>
+                      <span className={`chip ${entry.summary?.funded_live_order_check === "passed" ? "" : "muted"}`}>
+                        funded: {entry.summary?.funded_live_order_check ?? "unknown"}
+                      </span>
+                    </div>
+                    <button
+                      className="icon-button"
+                      onClick={() => entry.key && onDeleteReport(entry.key)}
+                      disabled={!entry.key || busyKey === entry.key}
+                    >
+                      <Trash2 size={16} /> Delete
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <div className="empty-state compact">No stored validation reports yet.</div>
+              )}
+            </div>
+          </div>
+        </>
+      ) : (
+        <div className="empty-state">No live validation report loaded.</div>
+      )}
+    </section>
   );
 }
 

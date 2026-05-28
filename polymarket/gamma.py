@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
-import requests
+from typing import Any, Dict, List, Mapping, Optional
 
-from .constants import GAMMA_API
+from .endpoints import GAMMA_ENDPOINTS
+from .http_client import PolymarketError, as_dict, request_json
 
 
 @dataclass
@@ -19,6 +19,21 @@ class MarketOutcome:
     outcome: str
     token_id: str
     price: Optional[float] = None
+
+
+def _get_json(endpoint_name: str, *, path: Optional[str] = None, params: Optional[Mapping[str, Any]] = None, timeout: float = 15.0) -> Any:
+    return request_json(GAMMA_ENDPOINTS[endpoint_name], path=path, params=params, timeout=timeout)
+
+
+def _list_response(data: Any) -> List[Dict[str, Any]]:
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        for key in ("data", "events", "markets", "tags", "series", "comments", "teams"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    return []
 
 
 def public_search(
@@ -40,9 +55,91 @@ def public_search(
         "page": page,
         "optimized": str(optimized).lower(),
     }
-    r = requests.get(f"{GAMMA_API}/public-search", params=params, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
+    return as_dict(_get_json("public_search", params=params, timeout=timeout), endpoint_name="gamma.public-search")
+
+
+def list_events(
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    order: Optional[str] = None,
+    ascending: Optional[bool] = None,
+    timeout: float = 15.0,
+    **filters: Any,
+) -> List[Dict[str, Any]]:
+    params: Dict[str, Any] = {
+        "limit": max(0, min(int(limit), 500)),
+        "offset": max(0, int(offset)),
+        "order": order,
+        "ascending": ascending,
+    }
+    params.update(filters)
+    return _list_response(_get_json("events", params=params, timeout=timeout))
+
+
+def list_events_keyset(
+    *,
+    limit: int = 100,
+    after_cursor: Optional[str] = None,
+    order: Optional[str] = None,
+    ascending: Optional[bool] = None,
+    timeout: float = 15.0,
+    **filters: Any,
+) -> Dict[str, Any]:
+    params: Dict[str, Any] = {
+        "limit": max(1, min(int(limit), 500)),
+        "after_cursor": after_cursor,
+        "order": order,
+        "ascending": ascending,
+    }
+    params.update(filters)
+    return as_dict(_get_json("events_keyset", params=params, timeout=timeout), endpoint_name="gamma.events-keyset")
+
+
+def get_event_tags(event_id: str, timeout: float = 15.0) -> List[Dict[str, Any]]:
+    return _list_response(_get_json("event_tags", path=f"/events/{event_id}/tags", timeout=timeout))
+
+
+def list_markets(
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    order: Optional[str] = None,
+    ascending: Optional[bool] = None,
+    timeout: float = 15.0,
+    **filters: Any,
+) -> List[Dict[str, Any]]:
+    params: Dict[str, Any] = {
+        "limit": max(0, min(int(limit), 500)),
+        "offset": max(0, int(offset)),
+        "order": order,
+        "ascending": ascending,
+    }
+    params.update(filters)
+    return _list_response(_get_json("markets", params=params, timeout=timeout))
+
+
+def list_markets_keyset(
+    *,
+    limit: int = 100,
+    after_cursor: Optional[str] = None,
+    order: Optional[str] = None,
+    ascending: Optional[bool] = None,
+    timeout: float = 15.0,
+    **filters: Any,
+) -> Dict[str, Any]:
+    params: Dict[str, Any] = {
+        "limit": max(1, min(int(limit), 500)),
+        "after_cursor": after_cursor,
+        "order": order,
+        "ascending": ascending,
+    }
+    params.update(filters)
+    return as_dict(_get_json("markets_keyset", params=params, timeout=timeout), endpoint_name="gamma.markets-keyset")
+
+
+def get_market_tags(market_id: str, timeout: float = 15.0) -> List[Dict[str, Any]]:
+    return _list_response(_get_json("market_tags", path=f"/markets/{market_id}/tags", timeout=timeout))
 
 
 def search_profiles(q: str, limit: int = 10) -> List[ProfileResult]:
@@ -63,6 +160,11 @@ def search_profiles(q: str, limit: int = 10) -> List[ProfileResult]:
     return [x for x in out if x.proxy_wallet]
 
 
+def get_public_profile(address: str, timeout: float = 15.0) -> Dict[str, Any]:
+    data = _get_json("public_profile", params={"address": address}, timeout=timeout)
+    return data if isinstance(data, dict) else {}
+
+
 def get_market_by_slug(slug: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
     """Fetch a single market by slug."""
     slug = slug.strip().strip("/")
@@ -71,25 +173,21 @@ def get_market_by_slug(slug: str, timeout: float = 15.0) -> Optional[Dict[str, A
 
     # Strategy 1: /markets/slug/{slug}
     try:
-        r = requests.get(f"{GAMMA_API}/markets/slug/{slug}", timeout=timeout)
-        if r.status_code == 200:
-            return r.json()
-    except requests.RequestException:
+        data = _get_json("market_by_slug", path=f"/markets/slug/{slug}", timeout=timeout)
+        return data if isinstance(data, dict) else None
+    except PolymarketError:
         pass
 
     # Strategy 2: /markets?slug={slug}
     try:
-        r = requests.get(f"{GAMMA_API}/markets", params={"slug": slug}, timeout=timeout)
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list):
-                return data[0] if data else None
-            if isinstance(data, dict) and "data" in data:
-                # Some APIs return {data:[...]}
-                arr = data.get("data") or []
-                return arr[0] if arr else None
-            return data
-    except requests.RequestException:
+        data = _get_json("markets", params={"slug": slug}, timeout=timeout)
+        if isinstance(data, list):
+            return data[0] if data else None
+        if isinstance(data, dict) and "data" in data:
+            arr = data.get("data") or []
+            return arr[0] if arr else None
+        return data if isinstance(data, dict) else None
+    except PolymarketError:
         pass
 
     return None
@@ -101,10 +199,9 @@ def get_market_by_id(market_id: str, timeout: float = 15.0) -> Optional[Dict[str
     if not market_id:
         return None
     try:
-        r = requests.get(f"{GAMMA_API}/markets/{market_id}", timeout=timeout)
-        if r.status_code == 200:
-            return r.json()
-    except requests.RequestException:
+        data = _get_json("market_by_id", path=f"/markets/{market_id}", timeout=timeout)
+        return data if isinstance(data, dict) else None
+    except PolymarketError:
         pass
     return None
 
@@ -117,24 +214,21 @@ def get_event_by_slug(slug: str, timeout: float = 15.0) -> Optional[Dict[str, An
 
     # Strategy 1: /events/slug/{slug}
     try:
-        r = requests.get(f"{GAMMA_API}/events/slug/{slug}", timeout=timeout)
-        if r.status_code == 200:
-            return r.json()
-    except requests.RequestException:
+        data = _get_json("event_by_slug", path=f"/events/slug/{slug}", timeout=timeout)
+        return data if isinstance(data, dict) else None
+    except PolymarketError:
         pass
 
     # Strategy 2: /events?slug={slug}
     try:
-        r = requests.get(f"{GAMMA_API}/events", params={"slug": slug}, timeout=timeout)
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list):
-                return data[0] if data else None
-            if isinstance(data, dict) and "data" in data:
-                arr = data.get("data") or []
-                return arr[0] if arr else None
-            return data
-    except requests.RequestException:
+        data = _get_json("events", params={"slug": slug}, timeout=timeout)
+        if isinstance(data, list):
+            return data[0] if data else None
+        if isinstance(data, dict) and "data" in data:
+            arr = data.get("data") or []
+            return arr[0] if arr else None
+        return data if isinstance(data, dict) else None
+    except PolymarketError:
         pass
 
     return None
@@ -146,12 +240,203 @@ def get_event_by_id(event_id: str, timeout: float = 15.0) -> Optional[Dict[str, 
     if not event_id:
         return None
     try:
-        r = requests.get(f"{GAMMA_API}/events/{event_id}", timeout=timeout)
-        if r.status_code == 200:
-            return r.json()
-    except requests.RequestException:
+        data = _get_json("event_by_id", path=f"/events/{event_id}", timeout=timeout)
+        return data if isinstance(data, dict) else None
+    except PolymarketError:
         pass
     return None
+
+
+def list_tags(
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    order: Optional[str] = None,
+    ascending: Optional[bool] = None,
+    timeout: float = 15.0,
+    **filters: Any,
+) -> List[Dict[str, Any]]:
+    params: Dict[str, Any] = {
+        "limit": max(0, int(limit)),
+        "offset": max(0, int(offset)),
+        "order": order,
+        "ascending": ascending,
+    }
+    params.update(filters)
+    return _list_response(_get_json("tags", params=params, timeout=timeout))
+
+
+def get_tag_by_id(tag_id: str, timeout: float = 15.0) -> Dict[str, Any]:
+    data = _get_json("tag_by_id", path=f"/tags/{tag_id}", timeout=timeout)
+    return data if isinstance(data, dict) else {}
+
+
+def get_tag_by_slug(slug: str, timeout: float = 15.0) -> Dict[str, Any]:
+    data = _get_json("tag_by_slug", path=f"/tags/slug/{slug}", timeout=timeout)
+    return data if isinstance(data, dict) else {}
+
+
+def get_related_tag_relationships_by_id(
+    tag_id: str,
+    *,
+    omit_empty: Optional[bool] = None,
+    status: Optional[str] = None,
+    timeout: float = 15.0,
+) -> List[Dict[str, Any]]:
+    return _list_response(
+        _get_json(
+            "tag_relationships_by_id",
+            path=f"/tags/{tag_id}/related-tags",
+            params={"omit_empty": omit_empty, "status": status},
+            timeout=timeout,
+        )
+    )
+
+
+def get_related_tag_relationships_by_slug(
+    slug: str,
+    *,
+    omit_empty: Optional[bool] = None,
+    status: Optional[str] = None,
+    timeout: float = 15.0,
+) -> List[Dict[str, Any]]:
+    return _list_response(
+        _get_json(
+            "tag_relationships_by_slug",
+            path=f"/tags/slug/{slug}/related-tags",
+            params={"omit_empty": omit_empty, "status": status},
+            timeout=timeout,
+        )
+    )
+
+
+def get_tags_related_to_id(
+    tag_id: str,
+    *,
+    omit_empty: Optional[bool] = None,
+    status: Optional[str] = None,
+    timeout: float = 15.0,
+) -> List[Dict[str, Any]]:
+    return _list_response(
+        _get_json(
+            "tags_related_to_id",
+            path=f"/tags/{tag_id}/related-tags/tags",
+            params={"omit_empty": omit_empty, "status": status},
+            timeout=timeout,
+        )
+    )
+
+
+def get_tags_related_to_slug(
+    slug: str,
+    *,
+    omit_empty: Optional[bool] = None,
+    status: Optional[str] = None,
+    timeout: float = 15.0,
+) -> List[Dict[str, Any]]:
+    return _list_response(
+        _get_json(
+            "tags_related_to_slug",
+            path=f"/tags/slug/{slug}/related-tags/tags",
+            params={"omit_empty": omit_empty, "status": status},
+            timeout=timeout,
+        )
+    )
+
+
+def list_series(
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    order: Optional[str] = None,
+    ascending: Optional[bool] = None,
+    timeout: float = 15.0,
+    **filters: Any,
+) -> List[Dict[str, Any]]:
+    params: Dict[str, Any] = {
+        "limit": max(0, int(limit)),
+        "offset": max(0, int(offset)),
+        "order": order,
+        "ascending": ascending,
+    }
+    params.update(filters)
+    return _list_response(_get_json("series", params=params, timeout=timeout))
+
+
+def get_series_by_id(series_id: str, timeout: float = 15.0) -> Dict[str, Any]:
+    data = _get_json("series_by_id", path=f"/series/{series_id}", timeout=timeout)
+    return data if isinstance(data, dict) else {}
+
+
+def list_comments(
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    order: Optional[str] = None,
+    ascending: Optional[bool] = None,
+    timeout: float = 15.0,
+    **filters: Any,
+) -> List[Dict[str, Any]]:
+    params: Dict[str, Any] = {
+        "limit": max(0, int(limit)),
+        "offset": max(0, int(offset)),
+        "order": order,
+        "ascending": ascending,
+    }
+    params.update(filters)
+    return _list_response(_get_json("comments", params=params, timeout=timeout))
+
+
+def get_comment_by_id(comment_id: str, timeout: float = 15.0) -> Dict[str, Any]:
+    data = _get_json("comment_by_id", path=f"/comments/{comment_id}", timeout=timeout)
+    return data if isinstance(data, dict) else {}
+
+
+def get_comments_by_user_address(
+    user_address: str,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    order: Optional[str] = None,
+    ascending: Optional[bool] = None,
+    timeout: float = 15.0,
+) -> List[Dict[str, Any]]:
+    return _list_response(
+        _get_json(
+            "comments_by_user",
+            path=f"/comments/user_address/{user_address}",
+            params={"limit": max(0, int(limit)), "offset": max(0, int(offset)), "order": order, "ascending": ascending},
+            timeout=timeout,
+        )
+    )
+
+
+def get_sports_metadata(timeout: float = 15.0) -> List[Dict[str, Any]]:
+    return _list_response(_get_json("sports", timeout=timeout))
+
+
+def get_sports_market_types(timeout: float = 15.0) -> Dict[str, Any]:
+    data = _get_json("sports_market_types", timeout=timeout)
+    return data if isinstance(data, dict) else {"marketTypes": data}
+
+
+def list_teams(
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    order: Optional[str] = None,
+    ascending: Optional[bool] = None,
+    timeout: float = 15.0,
+    **filters: Any,
+) -> List[Dict[str, Any]]:
+    params: Dict[str, Any] = {
+        "limit": max(0, int(limit)),
+        "offset": max(0, int(offset)),
+        "order": order,
+        "ascending": ascending,
+    }
+    params.update(filters)
+    return _list_response(_get_json("teams", params=params, timeout=timeout))
 
 
 def parse_market_outcomes(market: Dict[str, Any]) -> List[MarketOutcome]:

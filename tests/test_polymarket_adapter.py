@@ -241,6 +241,53 @@ class PolymarketAdapterTests(unittest.TestCase):
         self.assertEqual(health["credential_sources"], [{"name": "PRIVATE_KEY", "source": "config:private_key"}])
         self.assertNotIn("super-secret", str(health))
 
+    def test_health_check_reports_redacted_clob_auth_readiness(self) -> None:
+        private_key = "0x" + "1" * 64
+        adapter = PolymarketAdapter(
+            {
+                "private_key": private_key,
+                "signature_type": 3,
+                "funder_address": "0x" + "2" * 40,
+            }
+        )
+
+        health = adapter.health_check()
+        readiness = health["clob_auth_readiness"]
+
+        self.assertTrue(readiness["ok"])
+        self.assertTrue(readiness["sdk_trading_ready"])
+        self.assertEqual(readiness["signature_type"]["name"], "POLY_1271")
+        self.assertEqual(readiness["private_key"]["redacted"], "***")
+        self.assertIn("0x2222", readiness["funder_address"]["redacted"])
+        self.assertNotIn(private_key, str(health))
+
+    def test_live_order_readiness_blocks_poly_1271_without_funder_before_client_init(self) -> None:
+        adapter = PolymarketAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "private_key": "0x" + "1" * 64,
+                "signature_type": 3,
+            }
+        )
+
+        with patch.object(adapter, "check_geoblock", return_value={"blocked": False}), patch(
+            "market_adapters.polymarket.PolymarketTrader"
+        ) as trader:
+            with self.assertRaises(MarketConfigurationError) as ctx:
+                adapter.place_live_order(
+                    PaperOrderRequest(
+                        market_id="polymarket",
+                        contract_id="token-yes",
+                        side="BUY",
+                        size=1.0,
+                        limit_price=0.5,
+                    )
+                )
+
+        self.assertIn("requires an explicit funder", str(ctx.exception))
+        trader.assert_not_called()
+
     def test_order_validation_rejects_bad_price(self) -> None:
         adapter = PolymarketAdapter()
 

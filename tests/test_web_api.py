@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import io
+import os
 import threading
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -22,7 +24,10 @@ from market_adapters.types import (
     PaperOrderResult,
     PriceSnapshot,
 )
+from polymarket.analytics_cache import POLYMARKET_MDD_AUDIT_KIND, store_analytics_artifact
 from polymarket.gamma import ProfileResult
+from polymarket.http_client import PolymarketRateLimitError
+from polymarket.mdd import MDD_METHOD_MARK_REPLAY, MDD_METHOD_V2
 from web_api import (
     _read_json_body,
     add_wallet_watch,
@@ -49,7 +54,14 @@ from web_api import (
     paper_quote_limit_payload,
     paper_quote_payload,
     paper_position_rows,
+    polymarket_clob_readiness_payload,
+    polymarket_live_validation_report_purge_payload,
+    polymarket_live_validation_report_store_payload,
+    polymarket_live_validation_reports_payload,
+    polymarket_live_validation_payload,
     polymarket_leaderboard_payload,
+    polymarket_mdd_export_payload,
+    polymarket_user_mdd_payload,
     polymarket_user_search_payload,
     position_refill_payload,
     poll_wallet_activity,
@@ -181,6 +193,14 @@ class FakeBodyHandler:
 
 
 class WebApiTests(unittest.TestCase):
+    @staticmethod
+    def _accounting_zip(equity_csv: str, positions_csv: str) -> bytes:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("equity.csv", equity_csv)
+            archive.writestr("positions.csv", positions_csv)
+        return buffer.getvalue()
+
     def _serve_api(self, config_path: Path, frontend_dir: Path):
         server = ReactGuiServer(
             ("127.0.0.1", 0),
@@ -726,17 +746,477 @@ class WebApiTests(unittest.TestCase):
         self.assertFalse(payload["mdd_available"])
         self.assertEqual(payload["source_sort"], "PNL")
 
-    def test_polymarket_leaderboard_payload_reports_unavailable_mdd_filter(self) -> None:
+    def test_polymarket_user_mdd_payload_computes_usd_and_percentage_drawdown(self) -> None:
+        with patch(
+            "web_api.data_api.get_closed_positions",
+            return_value=[
+                {"timestamp": 10, "realizedPnl": "100", "totalBought": "1000"},
+                {"timestamp": 20, "realizedPnl": "-40", "totalBought": "500"},
+            ],
+        ), patch(
+            "web_api.data_api.get_positions",
+            return_value=[{"totalPnl": "-10", "currentValue": "20", "initialValue": "100"}],
+        ), patch(
+            "web_api.data_api.get_activity",
+            return_value=[],
+        ), patch(
+            "web_api.data_api.get_trades",
+            return_value=[],
+        ):
+            payload = polymarket_user_mdd_payload(WALLET, closed_limit=10)
+
+        self.assertTrue(payload["mdd_available"])
+        self.assertEqual(payload["mdd_method"], MDD_METHOD_V2)
+        self.assertEqual(payload["closed_positions"], 2)
+        self.assertEqual(payload["open_positions"], 1)
+        self.assertAlmostEqual(payload["mdd_usd"], 50.0)
+        self.assertAlmostEqual(payload["mdd_pct"], 50.0 / 1700.0 * 100.0)
+        self.assertEqual(payload["peak_value"], 100.0)
+        self.assertEqual(payload["trough_value"], 50.0)
+        self.assertIn("assumptions", payload)
+        self.assertEqual(payload["trade_capital"]["events"], 0)
+
+    def test_polymarket_user_mdd_payload_uses_accounting_snapshot_equity_base_when_requested(self) -> None:
+        snapshot = self._accounting_zip(
+            "timestamp,equity,deposits,withdrawals\n10,1000,1000,0\n20,1200,0,0\n",
+            "asset,currentValue,realizedPnl\nasset-1,20,60\n",
+        )
+        with patch(
+            "web_api.data_api.get_closed_positions",
+            return_value=[
+                {"timestamp": 10, "realizedPnl": "100", "totalBought": "100"},
+                {"timestamp": 20, "realizedPnl": "-40", "totalBought": "100"},
+            ],
+        ), patch(
+            "web_api.data_api.get_positions",
+            return_value=[{"totalPnl": "0", "currentValue": "20", "initialValue": "50"}],
+        ), patch(
+            "web_api.data_api.get_activity",
+            return_value=[],
+        ), patch(
+            "web_api.data_api.get_trades",
+            return_value=[],
+        ), patch(
+            "polymarket.accounting.data_api.download_accounting_snapshot",
+            return_value=snapshot,
+        ) as mock_snapshot:
+            payload = polymarket_user_mdd_payload(WALLET, closed_limit=10, include_accounting_snapshot=True)
+
+        mock_snapshot.assert_called_once()
+        self.assertEqual(payload["equity_base_source"], "accounting_snapshot_max_equity")
+        self.assertEqual(payload["equity_base_usd"], 1200.0)
+        self.assertAlmostEqual(payload["mdd_usd"], 40.0)
+        self.assertAlmostEqual(payload["mdd_pct"], 40.0 / 1300.0 * 100.0)
+        self.assertEqual(payload["accounting_snapshot"]["status"], "ok")
+        self.assertTrue(payload["accounting_snapshot"]["reconciliation"]["mdd_pct_uses_accounting_base"])
+
+    def test_polymarket_user_mdd_payload_uses_trade_activity_for_public_capital_basis(self) -> None:
+        activity_pages = [
+            [
+                {
+                    "type": "TRADE",
+                    "side": "BUY",
+                    "timestamp": 5,
+                    "size": "200",
+                    "price": "0.50",
+                    "transactionHash": "0xbuy",
+                    "asset": "token-1",
+                },
+                {
+                    "type": "TRADE",
+                    "side": "SELL",
+                    "timestamp": 15,
+                    "usdcSize": "40",
+                    "transactionHash": "0xsell",
+                    "asset": "token-1",
+                },
+                {"type": "REWARD", "timestamp": 16, "usdcSize": "3"},
+            ],
+            [],
+        ]
+
+        def fake_activity(*_args, **kwargs):
+            return activity_pages[0] if kwargs["offset"] == 0 else activity_pages[1]
+
+        with patch(
+            "web_api.data_api.get_closed_positions",
+            return_value=[
+                {"timestamp": 10, "realizedPnl": "50", "totalBought": "25"},
+                {"timestamp": 20, "realizedPnl": "-20", "totalBought": "25"},
+            ],
+        ), patch(
+            "web_api.data_api.get_positions",
+            return_value=[],
+        ), patch(
+            "web_api.data_api.get_activity",
+            side_effect=fake_activity,
+        ), patch(
+            "web_api.data_api.get_trades",
+            return_value=[],
+        ):
+            payload = polymarket_user_mdd_payload(WALLET, closed_limit=10, activity_limit=1000, trade_limit=0)
+
+        self.assertEqual(payload["activity_events"], 3)
+        self.assertEqual(payload["trade_events"], 0)
+        self.assertEqual(payload["trade_capital"]["events"], 2)
+        self.assertAlmostEqual(payload["trade_capital"]["buy_notional_usd"], 100.0)
+        self.assertAlmostEqual(payload["trade_capital"]["sell_notional_usd"], 40.0)
+        self.assertAlmostEqual(payload["trade_capital"]["max_deployed_notional_usd"], 100.0)
+        self.assertAlmostEqual(payload["public_capital_basis_usd"], 100.0)
+        self.assertAlmostEqual(payload["mdd_usd"], 20.0)
+        self.assertAlmostEqual(payload["mdd_pct"], 20.0 / 150.0 * 100.0)
+
+    def test_polymarket_user_mdd_payload_mark_replay_uses_clob_price_history(self) -> None:
+        trade = {
+            "type": "TRADE",
+            "side": "BUY",
+            "timestamp": 10,
+            "size": "100",
+            "price": "0.50",
+            "transactionHash": "0xbuy",
+            "asset": "token-1",
+        }
+        history = {
+            "history": {
+                "token-1": [
+                    {"t": 10, "p": 0.50},
+                    {"t": 20, "p": 0.20},
+                    {"t": 30, "p": 0.80},
+                ]
+            }
+        }
+        with patch("web_api.data_api.get_closed_positions", return_value=[]), patch(
+            "web_api.data_api.get_positions",
+            return_value=[],
+        ), patch(
+            "web_api.data_api.get_activity",
+            return_value=[trade],
+        ), patch(
+            "web_api.data_api.get_trades",
+            return_value=[],
+        ), patch(
+            "polymarket.mdd.clob_rest.get_batch_price_history",
+            return_value=history,
+        ) as mock_history:
+            payload = polymarket_user_mdd_payload(
+                WALLET,
+                mode="mark_replay",
+                activity_limit=10,
+                trade_limit=0,
+                mark_replay_token_limit=20,
+                mark_replay_interval="1h",
+                mark_replay_fidelity=60,
+            )
+
+        mock_history.assert_called_once()
+        self.assertEqual(payload["mdd_method"], MDD_METHOD_MARK_REPLAY)
+        self.assertEqual(payload["mark_replay"]["status"], "ok")
+        self.assertEqual(payload["mark_replay"]["token_count"], 1)
+        self.assertEqual(payload["mark_replay"]["batch_cap"], 20)
+        self.assertAlmostEqual(payload["mdd_usd"], 30.0)
+        self.assertAlmostEqual(payload["mdd_pct"], 30.0 / 50.0 * 100.0)
+        self.assertEqual(payload["peak_value"], 0.0)
+        self.assertEqual(payload["trough_value"], -30.0)
+        self.assertEqual(payload["fallback_v2"]["mdd_method"], MDD_METHOD_V2)
+        self.assertGreaterEqual(payload["points_total"], 3)
+
+    def test_polymarket_user_mdd_payload_mark_replay_reports_unreconstructable_tokens(self) -> None:
+        trade_rows = [
+            {"side": "BUY", "timestamp": 10, "size": "10", "price": "0.40", "asset": f"token-{index}"}
+            for index in range(22)
+        ]
+        history = {"history": {"token-0": [{"t": 10, "p": 0.40}]}}
+        with patch("web_api.data_api.get_closed_positions", return_value=[]), patch(
+            "web_api.data_api.get_positions",
+            return_value=[],
+        ), patch(
+            "web_api.data_api.get_activity",
+            return_value=trade_rows,
+        ), patch(
+            "web_api.data_api.get_trades",
+            return_value=[],
+        ), patch(
+            "polymarket.mdd.clob_rest.get_batch_price_history",
+            return_value=history,
+        ):
+            payload = polymarket_user_mdd_payload(WALLET, mode="mark_replay", activity_limit=100, mark_replay_token_limit=20)
+
+        self.assertEqual(payload["mdd_method"], MDD_METHOD_MARK_REPLAY)
+        self.assertEqual(payload["mark_replay"]["status"], "partial")
+        self.assertEqual(payload["mark_replay"]["token_count"], 20)
+        self.assertIn("token-20", payload["mark_replay"]["clipped_token_ids"])
+        self.assertIn("token-1", payload["mark_replay"]["missing_history_tokens"])
+
+    def test_polymarket_leaderboard_payload_computes_and_sorts_mdd_filter(self) -> None:
+        leaderboard = [
+            {"rank": 1, "proxyWallet": WALLET, "pseudonym": "alpha", "pnl": "10", "volume": "100"},
+            {"rank": 2, "proxyWallet": WALLET_2, "pseudonym": "beta", "pnl": "20", "volume": "500"},
+        ]
+
+        def fake_mdd(wallet, **_kwargs):
+            value = 6.0 if wallet == WALLET else 12.0
+            return {
+                "mdd_usd": value * 10,
+                "mdd_pct": value,
+                "mdd_available": True,
+                "mdd_method": "test",
+                "mdd_pct_basis": "test",
+                "points": [{"value": 0}],
+                "closed_positions": 2,
+                "open_positions": 1,
+                "equity_base_usd": 1000,
+                "peak_value": 100,
+                "trough_value": 100 - value,
+                "peak_timestamp": 10,
+                "trough_timestamp": 20,
+            }
+
         with patch(
             "web_api.data_api.get_leaderboard",
-            return_value=[{"proxyWallet": "0xaaa", "pnl": "10", "volume": "100"}],
-        ):
-            payload = polymarket_leaderboard_payload({"min_mdd_pct": ["-10"], "limit": ["1"], "scan_limit": ["1"]})
+            return_value=leaderboard,
+        ), patch("web_api.polymarket_user_mdd_payload", side_effect=fake_mdd):
+            payload = polymarket_leaderboard_payload(
+                {
+                    "sort": ["mdd_pct"],
+                    "direction": ["DESC"],
+                    "limit": ["2"],
+                    "scan_limit": ["2"],
+                    "mdd_scan_limit": ["2"],
+                    "min_mdd_pct": ["5"],
+                }
+            )
 
-        self.assertEqual(payload["counts"]["returned"], 1)
-        self.assertFalse(payload["rows"][0]["mdd_available"])
-        self.assertTrue(payload["warnings"])
-        self.assertIn("drawdown", payload["mdd_note"].lower())
+        self.assertEqual(payload["counts"]["mdd_computed"], 2)
+        self.assertEqual(payload["counts"]["returned"], 2)
+        self.assertEqual(payload["rows"][0]["wallet"], WALLET_2)
+        self.assertAlmostEqual(payload["rows"][0]["mdd_pct"], 12.0)
+        self.assertTrue(payload["mdd_available"])
+
+    def test_polymarket_leaderboard_payload_persists_mdd_audit_cache_when_requested(self) -> None:
+        leaderboard = [{"rank": 1, "proxyWallet": WALLET, "pseudonym": "alpha", "pnl": "10", "volume": "100"}]
+
+        def fake_mdd(wallet, **_kwargs):
+            return {
+                "wallet": wallet,
+                "mdd_usd": 50.0,
+                "mdd_pct": 5.0,
+                "mdd_available": True,
+                "mdd_method": "test",
+                "mdd_pct_basis": "test",
+                "points": [{"timestamp": 10, "value": 100.0}],
+                "closed_positions": 2,
+                "open_positions": 1,
+                "equity_base_usd": 1000.0,
+                "peak_value": 100.0,
+                "trough_value": 50.0,
+                "peak_timestamp": 10,
+                "trough_timestamp": 20,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"POLYMARKET_ANALYTICS_CACHE_PATH": str(Path(tmp) / "analytics-cache.json")},
+        ), patch("web_api.data_api.get_leaderboard", return_value=leaderboard), patch(
+            "web_api.polymarket_user_mdd_payload", side_effect=fake_mdd
+        ):
+            payload = polymarket_leaderboard_payload(
+                {
+                    "compute_mdd": ["true"],
+                    "limit": ["1"],
+                    "scan_limit": ["1"],
+                    "mdd_scan_limit": ["1"],
+                    "mdd_persist_cache": ["true"],
+                }
+            )
+            cache_key = payload["rows"][0]["mdd_audit_cache_key"]
+            export = polymarket_mdd_export_payload(cache_key)
+
+        self.assertTrue(payload["analytics_cache"]["enabled"])
+        self.assertTrue(payload["rows"][0]["mdd_audit_cache_stored"])
+        self.assertEqual(export["payload"]["wallet"], WALLET)
+        self.assertEqual(export["cache"]["key"], cache_key)
+
+    def test_polymarket_leaderboard_payload_reports_rate_limit_without_more_mdd_calls(self) -> None:
+        leaderboard = [
+            {"rank": 1, "proxyWallet": WALLET, "pseudonym": "alpha", "pnl": "10", "volume": "100"},
+            {"rank": 2, "proxyWallet": WALLET_2, "pseudonym": "beta", "pnl": "20", "volume": "500"},
+        ]
+        exc = PolymarketRateLimitError(
+            "limited",
+            service="data",
+            method="GET",
+            url="https://data-api.polymarket.com/test",
+            status_code=429,
+        )
+        with patch("web_api.data_api.get_leaderboard", return_value=leaderboard), patch(
+            "web_api.polymarket_user_mdd_payload",
+            side_effect=exc,
+        ) as mock_mdd:
+            payload = polymarket_leaderboard_payload(
+                {"compute_mdd": ["true"], "limit": ["2"], "scan_limit": ["2"], "mdd_scan_limit": ["2"]}
+            )
+
+        mock_mdd.assert_called_once()
+        self.assertTrue(payload["rate_limit"]["limited"])
+        self.assertEqual(payload["rate_limit"]["events"][0]["status_code"], 429)
+        self.assertIn("rate-limited", payload["warnings"][0])
+
+    def test_polymarket_mdd_csv_export_route_serves_cached_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.json"
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            save_config(AppConfig(), config_path)
+            with patch.dict(os.environ, {"POLYMARKET_ANALYTICS_CACHE_PATH": str(root / "analytics-cache.json")}):
+                metadata = store_analytics_artifact(
+                    POLYMARKET_MDD_AUDIT_KIND,
+                    {"wallet": WALLET, "mode": "fast"},
+                    {
+                        "wallet": WALLET,
+                        "mdd_method": "test",
+                        "mdd_available": True,
+                        "mdd_usd": 10.0,
+                        "mdd_pct": 1.0,
+                        "equity_base_usd": 1000.0,
+                        "peak_value": 10.0,
+                        "trough_value": 0.0,
+                        "mdd_pct_basis": "test",
+                        "points": [{"timestamp": 1, "value": 10.0}],
+                    },
+                )
+                server, thread, base_url = self._serve_api(config_path, frontend_dir)
+                try:
+                    status, headers, body = self._request_raw(
+                        base_url,
+                        f"/api/polymarket/users/mdd/export.csv?key={metadata['key']}",
+                    )
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=5)
+
+        self.assertEqual(status, 200)
+        self.assertIn("text/csv", headers["Content-Type"])
+        self.assertIn(b"summary,", body)
+        self.assertIn(WALLET.encode("utf-8"), body)
+
+    def test_polymarket_direct_mdd_route_persists_cache_and_json_export(self) -> None:
+        def fake_mdd(wallet, **_kwargs):
+            return {
+                "wallet": wallet,
+                "mdd_method": "test",
+                "mdd_available": True,
+                "mdd_usd": 25.0,
+                "mdd_pct": 2.5,
+                "mdd_pct_basis": "test",
+                "points": [{"timestamp": 1, "value": 25.0}],
+                "closed_positions": 1,
+                "open_positions": 0,
+                "equity_base_usd": 1000.0,
+                "peak_value": 25.0,
+                "trough_value": 0.0,
+                "peak_timestamp": 1,
+                "trough_timestamp": 2,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.json"
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            save_config(AppConfig(), config_path)
+            with patch.dict(os.environ, {"POLYMARKET_ANALYTICS_CACHE_PATH": str(root / "analytics-cache.json")}), patch(
+                "web_api.polymarket_user_mdd_payload",
+                side_effect=fake_mdd,
+            ):
+                server, thread, base_url = self._serve_api(config_path, frontend_dir)
+                try:
+                    status, mdd = self._request_json(base_url, f"/api/polymarket/users/mdd?wallet={WALLET}&persist_cache=true")
+                    cache_key = mdd["audit_cache"]["key"]
+                    export_status, export = self._request_json(base_url, f"/api/polymarket/users/mdd/export.json?key={cache_key}")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=5)
+
+        self.assertEqual(status, 200)
+        self.assertTrue(mdd["audit_cache"]["stored"])
+        self.assertEqual(export_status, 200)
+        self.assertEqual(export["payload"]["wallet"], WALLET)
+        self.assertEqual(export["cache"]["key"], cache_key)
+
+    def test_polymarket_mdd_cache_routes_list_health_and_purge_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.json"
+            frontend_dir = root / "dist"
+            cache_path = root / "analytics-cache.json"
+            frontend_dir.mkdir()
+            save_config(AppConfig(), config_path)
+            with patch.dict(os.environ, {"POLYMARKET_ANALYTICS_CACHE_PATH": str(cache_path)}):
+                fresh = store_analytics_artifact(
+                    POLYMARKET_MDD_AUDIT_KIND,
+                    {"wallet": WALLET, "mode": "fast"},
+                    {
+                        "wallet": WALLET,
+                        "mdd_method": "test",
+                        "mdd_available": True,
+                        "mdd_usd": 10.0,
+                        "mdd_pct": 1.0,
+                        "equity_base_usd": 1000.0,
+                        "points": [{"timestamp": 1, "value": 10.0}],
+                    },
+                )
+                expired = store_analytics_artifact(
+                    POLYMARKET_MDD_AUDIT_KIND,
+                    {"wallet": WALLET_2, "mode": "fast"},
+                    {
+                        "wallet": WALLET_2,
+                        "mdd_method": "test",
+                        "mdd_available": True,
+                        "mdd_usd": 20.0,
+                        "mdd_pct": 2.0,
+                        "equity_base_usd": 1000.0,
+                        "points": [{"timestamp": 1, "value": 20.0}],
+                    },
+                )
+                cache = json.loads(cache_path.read_text(encoding="utf-8"))
+                cache["entries"][expired["key"]]["expires_at"] = 1
+                cache_path.write_text(json.dumps(cache), encoding="utf-8")
+
+                server, thread, base_url = self._serve_api(config_path, frontend_dir)
+                try:
+                    list_status, listing = self._request_json(base_url, "/api/polymarket/users/mdd/cache")
+                    health_status, health = self._request_json(base_url, "/api/polymarket/users/mdd/cache/health")
+                    purge_status, purge = self._request_json(
+                        base_url,
+                        "/api/polymarket/users/mdd/cache/purge",
+                        method="POST",
+                        payload={"expired_only": True},
+                    )
+                    delete_status, deleted = self._request_json(
+                        base_url,
+                        f"/api/polymarket/users/mdd/cache/{fresh['key']}",
+                        method="DELETE",
+                    )
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=5)
+
+        self.assertEqual(list_status, 200)
+        self.assertEqual(listing["counts"]["entries"], 2)
+        self.assertEqual(listing["counts"]["expired_entries"], 1)
+        self.assertEqual(health_status, 200)
+        self.assertEqual(health["cache"]["entries"], 2)
+        self.assertEqual(health["cache"]["expired_entries"], 1)
+        self.assertEqual(purge_status, 200)
+        self.assertIn(expired["key"], purge["deleted_keys"])
+        self.assertEqual(purge["counts"]["entries"], 1)
+        self.assertEqual(delete_status, 200)
+        self.assertIn(fresh["key"], deleted["deleted_keys"])
+        self.assertEqual(deleted["counts"]["entries"], 0)
 
     def test_polymarket_user_search_payload_returns_profile_rows(self) -> None:
         with patch(
@@ -943,8 +1423,133 @@ class WebApiTests(unittest.TestCase):
         self.assertFalse(payload["frontend_build_available"])
         self.assertIn("/api/state", payload["routes"]["GET"])
         self.assertIn("/api/live-safety", payload["routes"]["GET"])
+        self.assertIn("/api/polymarket/coverage", payload["routes"]["GET"])
+        self.assertIn("/api/polymarket/clob-readiness", payload["routes"]["GET"])
+        self.assertIn("/api/polymarket/live-validation", payload["routes"]["GET"])
+        self.assertIn("/api/polymarket/live-validation/reports", payload["routes"]["GET"])
+        self.assertIn("/api/polymarket/users/mdd/cache", payload["routes"]["GET"])
+        self.assertIn("/api/polymarket/users/mdd/cache/health", payload["routes"]["GET"])
+        self.assertIn("/api/polymarket/users/mdd/export.json", payload["routes"]["GET"])
+        self.assertIn("/api/polymarket/users/mdd/export.csv", payload["routes"]["GET"])
         self.assertIn("/api/config", payload["routes"]["PATCH"])
         self.assertIn("/api/live-safety/preflight", payload["routes"]["POST"])
+        self.assertIn("/api/polymarket/users/mdd/cache/purge", payload["routes"]["POST"])
+        self.assertIn("/api/polymarket/live-validation/reports", payload["routes"]["POST"])
+        self.assertIn("/api/polymarket/users/mdd/cache/{key}", payload["routes"]["DELETE"])
+        self.assertIn("/api/polymarket/live-validation/reports/{key}", payload["routes"]["DELETE"])
+
+    def test_polymarket_clob_readiness_payload_redacts_credentials(self) -> None:
+        cfg = AppConfig()
+        cfg.selected_market_id = "polymarket"
+        cfg.markets["polymarket"].settings.update(
+            {
+                "private_key": "0x" + "1" * 64,
+                "signature_type": 3,
+                "funder_address": "0x" + "2" * 40,
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+            }
+        )
+
+        payload = polymarket_clob_readiness_payload(cfg)
+
+        self.assertTrue(payload["selected"])
+        self.assertTrue(payload["readiness"]["ok"])
+        self.assertEqual(payload["readiness"]["private_key"]["redacted"], "***")
+        self.assertEqual(payload["readiness"]["signature_type"]["name"], "POLY_1271")
+        self.assertTrue(payload["live_safety"]["live_trading_enabled"])
+        self.assertNotIn("1" * 64, str(payload))
+
+    def test_polymarket_live_validation_payload_reports_stage_gates_without_live_actions(self) -> None:
+        cfg = AppConfig()
+        cfg.selected_market_id = "polymarket"
+        cfg.markets["polymarket"].enabled = True
+        cfg.markets["polymarket"].settings.update(
+            {
+                "private_key": "0x" + "1" * 64,
+                "signature_type": 3,
+                "funder_address": "0x" + "2" * 40,
+            }
+        )
+        env = {
+            "POLY_ADDRESS": "0xabc",
+            "POLY_API_KEY": "key",
+            "POLY_PASSPHRASE": "pass",
+            "POLY_SIGNATURE": "sig",
+            "POLY_TIMESTAMP": "1",
+            "POLY_API_SECRET": "ws-secret",
+        }
+
+        with patch.dict(os.environ, env, clear=True):
+            payload = polymarket_live_validation_payload(cfg)
+
+        self.assertEqual(payload["mode"], "local_readiness_only")
+        self.assertFalse(payload["funded_execution_exposed"])
+        self.assertFalse(payload["stage_gates"]["credentialed_read_ok"])
+        self.assertFalse(payload["stage_gates"]["safe_to_attempt_funded_order"])
+        self.assertEqual(payload["authenticated_read_checks"]["clob_l2_orders"]["status"], "skipped")
+        self.assertEqual(payload["authenticated_read_checks"]["user_websocket_auth_payload"]["status"], "skipped")
+        self.assertIn("authenticated read", payload["stage_gates"]["next_step"])
+        self.assertNotIn("1" * 64, str(payload))
+        self.assertNotIn("ws-secret", str(payload))
+
+    def test_polymarket_live_validation_reports_store_import_compare_and_redact(self) -> None:
+        cfg = AppConfig()
+        cfg.selected_market_id = "polymarket"
+        cfg.markets["polymarket"].enabled = True
+        cfg.markets["polymarket"].settings.update({"private_key": "0x" + "1" * 64})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "reports.json"
+            with patch.dict(os.environ, {"POLYMARKET_LIVE_VALIDATION_REPORTS_PATH": str(report_path)}, clear=False):
+                empty = polymarket_live_validation_reports_payload()
+                self.assertEqual(empty["counts"]["entries"], 0)
+
+                gui_payload = polymarket_live_validation_report_store_payload(cfg, {})
+                gui_key = gui_payload["stored"]["key"]
+                self.assertEqual(gui_payload["counts"]["entries"], 1)
+
+                cli_report = {
+                    "generated_at": 123.0,
+                    "market_id": "polymarket",
+                    "mode": "strict_cli",
+                    "selected": True,
+                    "enabled": True,
+                    "api_key": "very-secret-api-key",
+                    "private_key": "0x" + "9" * 64,
+                    "clob_auth_readiness": {"direct_l2_read_ready": True, "sdk_trading_ready": True},
+                    "stage_gates": {
+                        "public_live_checks": "passed",
+                        "credential_readiness": "passed",
+                        "credentialed_read_checks": "passed",
+                        "bridge_address_checks": "blocked",
+                        "funded_live_order_check": "blocked",
+                        "credentialed_read_ok": True,
+                        "safe_to_attempt_funded_order": False,
+                        "requires_explicit_live_approval": True,
+                        "next_step": "funded order/cancel remains CLI-only",
+                    },
+                    "funded_execution_exposed": False,
+                }
+
+                imported = polymarket_live_validation_report_store_payload(
+                    cfg,
+                    {"report_json": json.dumps(cli_report), "label": "strict CLI read"},
+                )
+
+                self.assertEqual(imported["counts"]["entries"], 2)
+                self.assertEqual(imported["stored"]["summary"]["credential_readiness"], "passed")
+                self.assertTrue(imported["stored"]["summary"]["credentialed_read_ok"])
+                self.assertIsNotNone(imported["comparison"])
+                self.assertTrue(report_path.exists())
+                disk = report_path.read_text(encoding="utf-8")
+                self.assertNotIn("very-secret-api-key", disk)
+                self.assertNotIn("9" * 64, disk)
+                self.assertIn("***", disk)
+
+                deleted = polymarket_live_validation_report_purge_payload({"key": gui_key})
+                self.assertEqual(deleted["deleted"], 1)
+                self.assertNotIn(gui_key, [entry["key"] for entry in deleted["entries"]])
 
     def test_api_error_payload_uses_structured_shape_and_redacts_detail_keys(self) -> None:
         payload = api_error_payload(

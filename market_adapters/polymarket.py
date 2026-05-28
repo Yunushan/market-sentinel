@@ -17,7 +17,9 @@ from .types import (
     PriceSnapshot,
 )
 from polymarket import clob_rest, gamma
+from polymarket.auth_readiness import build_clob_auth_readiness, parse_signature_type, validate_sdk_trading_readiness
 from polymarket.geoblock import check_geoblock
+from polymarket.http_client import PolymarketValidationError
 from polymarket.trader import PolymarketTrader, TraderConfig
 
 
@@ -28,19 +30,21 @@ class PolymarketAdapter(MarketAdapter):
         health = super().health_check()
         credential_sources = []
         for config_key, env_vars in (
-            ("private_key", ("PRIVATE_KEY",)),
-            ("funder_address", ("FUNDER_ADDRESS",)),
-            ("signature_type", ("SIGNATURE_TYPE",)),
+            ("private_key", ("PRIVATE_KEY", "POLYMARKET_PRIVATE_KEY")),
+            ("funder_address", ("FUNDER_ADDRESS", "POLYMARKET_FUNDER_ADDRESS", "DEPOSIT_WALLET_ADDRESS")),
+            ("signature_type", ("SIGNATURE_TYPE", "POLYMARKET_SIGNATURE_TYPE")),
         ):
             credential = self.resolve_credential(config_key, env_vars, label=env_vars[0])
             if credential:
                 credential_sources.append({"name": credential.name, "source": credential.source})
+        readiness = build_clob_auth_readiness(self.config)
         health.update(
             {
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "credential_sources": credential_sources,
                 "credential_requirement": "live_trading_only",
                 "geoblock_required_for_live": True,
+                "clob_auth_readiness": readiness,
             }
         )
         return health
@@ -209,24 +213,45 @@ class PolymarketAdapter(MarketAdapter):
 
         private_key = self.resolve_credential(
             "private_key",
-            ("PRIVATE_KEY",),
+            ("PRIVATE_KEY", "POLYMARKET_PRIVATE_KEY"),
             required=True,
             label="PRIVATE_KEY",
         )
 
-        funder_credential = self.resolve_credential("funder_address", ("FUNDER_ADDRESS",), label="FUNDER_ADDRESS")
+        funder_credential = self.resolve_credential(
+            "funder_address",
+            ("FUNDER_ADDRESS", "POLYMARKET_FUNDER_ADDRESS", "DEPOSIT_WALLET_ADDRESS"),
+            label="FUNDER_ADDRESS",
+        )
         funder = funder_credential.value.strip() if funder_credential else None
         try:
-            signature_type = int(str(self.config.get("signature_type") or os.getenv("SIGNATURE_TYPE") or "0").strip())
-        except (TypeError, ValueError) as exc:
-            raise MarketConfigurationError("Polymarket SIGNATURE_TYPE must be an integer.") from exc
-        trader = PolymarketTrader(
-            TraderConfig(
-                private_key=private_key.value,
-                funder_address=funder,
-                signature_type=signature_type,
+            signature_type = parse_signature_type(
+                self.config.get("signature_type")
+                or self.config.get("polymarket_signature_type")
+                or os.getenv("SIGNATURE_TYPE")
+                or os.getenv("POLYMARKET_SIGNATURE_TYPE")
+                or "0"
             )
-        )
+        except PolymarketValidationError as exc:
+            raise MarketConfigurationError(str(exc)) from exc
+        try:
+            validate_sdk_trading_readiness(
+                private_key=private_key.value,
+                signature_type=signature_type,
+                funder_address=funder,
+            )
+        except PolymarketValidationError as exc:
+            raise MarketConfigurationError(str(exc)) from exc
+        try:
+            trader = PolymarketTrader(
+                TraderConfig(
+                    private_key=private_key.value,
+                    funder_address=funder,
+                    signature_type=signature_type,
+                )
+            )
+        except PolymarketValidationError as exc:
+            raise MarketConfigurationError(str(exc)) from exc
         response = trader.place_limit_order(
             token_id=order.contract_id,
             side=order.side,

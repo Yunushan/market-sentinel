@@ -5,6 +5,7 @@ import compileall
 import importlib
 import importlib.metadata
 import json
+import shutil
 import subprocess
 import sys
 import unittest
@@ -23,6 +24,7 @@ PROJECT_NAME = "prediction-market-alert-and-copy-trade-gui"
 
 REQUIRED_IMPORTS = {
     "requests": "requests",
+    "truststore": "truststore",
     "websocket-client": "websocket",
     "python-dotenv": "dotenv",
     "py-clob-client": "py_clob_client",
@@ -69,6 +71,14 @@ def run_pip_check() -> None:
         output = (result.stdout + result.stderr).strip()
         raise SystemExit("pip check failed:\n" + output)
     print("[ok] pip check")
+
+
+def npm_command() -> str:
+    executable = "npm.cmd" if sys.platform == "win32" else "npm"
+    resolved = shutil.which(executable)
+    if not resolved:
+        raise SystemExit(f"{executable} was not found on PATH; install Node.js/npm before running frontend verification.")
+    return resolved
 
 
 def run_compile_check() -> None:
@@ -461,7 +471,7 @@ def run_frontend_build_check(strict: bool = False) -> None:
         return
 
     result = subprocess.run(
-        ["npm", "run", "build"],
+        [npm_command(), "run", "build"],
         cwd=frontend,
         capture_output=True,
         text=True,

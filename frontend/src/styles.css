@@ -19,7 +19,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -181,6 +182,14 @@ h2 {
   opacity: 0.55;
 }
 
+.icon-button.compact {
+  min-height: 28px;
+  padding: 5px 8px;
+  gap: 5px;
+  font-size: 12px;
+  text-decoration: none;
+}
+
 .secondary-button {
   border-color: #d7ded7;
   color: #46554d;
@@ -188,6 +197,12 @@ h2 {
 }
 
 .danger-button {
+  border-color: #dfb0a4;
+  color: #822b22;
+  background: #fff5f2;
+}
+
+.icon-button.danger {
   border-color: #dfb0a4;
   color: #822b22;
   background: #fff5f2;
@@ -358,7 +373,15 @@ h2 {
   grid-template-columns: repeat(4, minmax(140px, 1fr));
 }
 
+.analytics-form.direct-mdd-form {
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
+}
+
 .analytics-form.leaderboard-form button {
+  align-self: end;
+}
+
+.analytics-form.direct-mdd-form button {
   align-self: end;
 }
 
@@ -410,6 +433,79 @@ h2 {
   margin-top: 12px;
 }
 
+.audit-box h3 {
+  margin: 0;
+  color: #253931;
+  font-size: 14px;
+}
+
+.split-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.audit-summary,
+.audit-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.audit-summary > div,
+.audit-detail-grid > div {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #ded9cf;
+  border-radius: 8px;
+  background: #fbfaf7;
+}
+
+.audit-summary span,
+.audit-detail-grid span {
+  display: block;
+  color: #68726c;
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.audit-summary strong,
+.audit-detail-grid strong {
+  display: block;
+  overflow-wrap: anywhere;
+  color: #253931;
+  font-size: 13px;
+}
+
+.panel-actions {
+  margin-top: 12px;
+}
+
+.audit-points {
+  margin-top: 12px;
+}
+
+.cache-actions {
+  align-items: center;
+}
+
+.cache-health {
+  grid-template-columns: 2fr repeat(3, minmax(120px, 1fr));
+}
+
+.cache-table td {
+  vertical-align: top;
+}
+
+.cache-key {
+  max-width: 210px;
+  overflow-wrap: anywhere;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+}
+
 .row-actions {
   display: flex;
   flex-wrap: wrap;
@@ -424,6 +520,61 @@ h2 {
   color: #294038;
   background: #ffffff;
   font-size: 12px;
+}
+
+.report-import-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.report-import-form label {
+  display: grid;
+  gap: 7px;
+}
+
+.report-import-form span {
+  color: #68726c;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.comparison-list,
+.report-list {
+  display: grid;
+  gap: 8px;
+}
+
+.comparison-list > div,
+.report-row {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #e2ded2;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.comparison-list span,
+.report-row span {
+  display: block;
+  color: #68726c;
+  font-size: 12px;
+}
+
+.comparison-list strong,
+.report-row strong {
+  display: block;
+  overflow-wrap: anywhere;
+  color: #253931;
+  font-size: 13px;
+}
+
+.report-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.1fr) minmax(220px, 1.4fr) auto;
+  gap: 10px;
+  align-items: center;
 }
 
 .market-detail {
@@ -523,7 +674,8 @@ h2 {
 }
 
 input,
-select {
+select,
+textarea {
   width: 100%;
   min-height: 38px;
   border: 1px solid #c9c5bb;
@@ -532,8 +684,15 @@ select {
   background: #ffffff;
 }
 
-input {
+input,
+textarea {
   padding: 8px 10px;
+}
+
+textarea {
+  min-height: 112px;
+  resize: vertical;
+  line-height: 1.45;
 }
 
 .search-box input {
@@ -547,6 +706,12 @@ select {
 
 .table-wrap {
   overflow-x: auto;
+}
+
+.audit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 table {
@@ -694,6 +859,10 @@ td small,
   .metrics-grid.two {
     grid-template-columns: repeat(2, minmax(120px, 1fr));
   }
+
+  .split-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 620px) {
@@ -734,6 +903,13 @@ td small,
   .analytics-form,
   .analytics-form.user-search-form,
   .analytics-form.leaderboard-form,
+  .analytics-form.direct-mdd-form,
+  .audit-summary,
+  .cache-health,
+  .audit-detail-grid,
+  .report-import-form,
+  .report-row,
+  .split-grid,
   .safety-grid {
     grid-template-columns: 1fr;
   }

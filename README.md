@@ -31,8 +31,76 @@ A local multi-market prediction-market GUI app (Tkinter) for:
 - Load public leaderboard rows and rank them by PnL USD, volume USD, or computed ROI %
 - The default ROI view returns up to the top 100 rows from as many as 500 scanned public leaderboard rows
 - Min/max filters are available for PnL USD, volume USD, and ROI %
-- MDD USD/% fields are exposed as unavailable unless a trusted upstream drawdown/equity-curve source supplies them; the app does not fake drawdown values
-- The React Analytics tab exposes user search, leaderboard sorting, and filters through the local Python API
+- MDD USD/% v2 can be computed from a public-data historical equity curve: closed-position realized PnL, public activity/trade capital basis, and the current open-position snapshot
+- MDD v2 supports min/max filters, MDD sorting, pagination controls for closed positions/activity/trades/open positions, and an optional `equity_base_usd` override
+- Optional `mdd_mode=mark_replay` replays trade-derived token inventory against public CLOB batch price history for deeper sampled unrealized drawdown checks
+- Mark replay is capped to 20 asset ids per request, reports missing/clipped/unreconstructable rows, and falls back to MDD v2 when replay cannot be built
+- Optional accounting snapshot reconciliation parses the public ZIP of CSVs, uses max equity as the strongest available MDD percentage base, and reports position/cash-flow gaps
+- Optional audit caching stores bounded per-wallet MDD artifacts locally, reports retention/health metadata, supports targeted purge controls, and exposes JSON/CSV export links without rerunning expensive public API calls
+- Leaderboard and MDD payloads report Polymarket rate-limit/backoff metadata instead of hiding upstream 429 failures as generic errors
+- MDD payloads include assumptions and limitations because the public Data API does not expose a complete deposit/withdrawal ledger or historical unrealized mark replay
+- The React Analytics tab exposes user search, direct wallet MDD lookup/export, cached audit details, cache management, leaderboard sorting, and filters through the local Python API
+
+### Polymarket official API coverage
+- Official Polymarket docs checked on 2026-05-28: Gamma, Data, CLOB, Bridge, Relayer, and WebSocket surfaces are represented by local wrapper modules
+- `polymarket.gamma` covers events, markets, tags, related tags, series, comments, sports metadata, teams, public search, and public profiles
+- `polymarket.data_api` covers activity, positions, closed positions, trades, total value, traded markets, leaderboard, market positions, holders, open interest, live volume, accounting snapshot download, and builder analytics
+- `polymarket.analytics_cache` stores bounded local MDD audit artifacts, lists health/retention metadata, purges selected or expired artifacts, and formats JSON/CSV exports for cached public analytics payloads
+- `polymarket.clob_rest` covers public orderbook/pricing, price history, market parameters, CLOB market lists, rebates, public rewards, and builder trades
+- `polymarket.trader` and `polymarket.clob_auth` cover guarded authenticated order placement, order lookup/cancel flows, trades, order scoring, heartbeat, and authenticated rewards
+- `polymarket.bridge` covers supported assets, deposit addresses, quotes, status, and withdrawal-address creation
+- `polymarket.relayer` covers guarded relayer submit/query, nonce, relay payload, deployment check, recent transactions, and API key listing
+- `polymarket.ws_market`, `polymarket.ws_user`, and `polymarket.ws_sports` cover market, authenticated user, and sports WebSocket channels
+- `polymarket.endpoints` and `polymarket.http_client` centralize official endpoint metadata, auth tiers, documented batch caps, retry/rate-limit handling, typed Polymarket errors, and response normalization helpers used by the wrappers
+- `polymarket.auth_readiness` and `GET /api/polymarket/clob-readiness` report redacted CLOB v2 readiness for private key, signature type, funder/deposit wallet, L1 headers, and L2 read-only REST headers without deriving credentials or placing orders
+- `GET /api/polymarket/live-validation` reports the local Polymarket live-validation stage gates for public probes, credential readiness, authenticated reads, user WebSocket checks, bridge checks, and funded order/cancel status without running funded actions from the GUI/API
+- `polymarket.live_reports` and `GET/POST/DELETE /api/polymarket/live-validation/reports` persist redacted local live-validation snapshots, import CLI JSON reports, and compare the latest two stage-gate summaries without exposing funded execution in the GUI/API
+- `polymarket.mdd` builds historical MDD v2 payloads from public Data API closed positions, current positions, activity, and trades; it reports USD/% drawdown, capital-basis source, pagination limits, cache boundaries, assumptions, and limitations
+- `polymarket.mdd` also exposes an opt-in CLOB mark-replay mode using `/batch-prices-history`; the default API mode remains fast MDD v2 to avoid heavy price-history calls during normal scans
+- `polymarket.accounting` parses `/v1/accounting/snapshot` ZIP CSVs and can reconcile MDD payloads against equity, positions, deposits, withdrawals, and cash-flow gaps when explicitly requested
+- The GUI exposes the high-level workflows used by this app; the broader official API surface is available to backend code and summarized through `GET /api/polymarket/coverage`
+- Full live end-to-end validation of authenticated trading, user WebSocket, relayer, and funded wallet flows still requires real credentials, eligible region/KYC status, funded wallets, and explicit live-mode opt-in
+
+Polymarket coverage is intentionally reported by verification tier, not as a single "implemented" flag:
+
+| Tier | Meaning |
+| --- | --- |
+| `wrapper_available` | Local Python request helper exists for the documented surface. |
+| `app_workflow_available` | Tkinter/API/React exposes a user workflow for that surface. |
+| `offline_tested` | Unit tests cover request construction, parsing, and guardrails. |
+| `public_live_verified` | Safe non-credentialed live probe passed from this machine. |
+| `credential_live_verified` | Real credentialed read/stream verified. Currently blocked without credentials. |
+| `funded_live_verified` | Funded order/cancel or fund-movement flow verified. Currently blocked without explicit credentials and live-action approval. |
+
+Current truthful status: public Gamma/Data/CLOB/Bridge probes pass; endpoint contracts are hardened offline against documented paths, auth tiers, and batch caps; CLOB authentication readiness is validated locally and redacted in API payloads; authenticated CLOB, user WebSocket, Relayer, Bridge address/fund movement, and funded order/cancel verification are blocked until credentials and explicit live parameters are supplied.
+
+Authenticated CLOB readiness follows the official Polymarket split between L1/L2 authentication and local order signing:
+
+| Readiness item | Current behavior |
+| --- | --- |
+| SDK trading readiness | Requires a 0x-prefixed private key, supported signature type, official CLOB host, Polygon chain id 137, and a funder/deposit wallet when the signature type requires one. |
+| Direct L2 read readiness | Requires all explicit `POLY_ADDRESS`, `POLY_API_KEY`, `POLY_PASSPHRASE`, `POLY_SIGNATURE`, and `POLY_TIMESTAMP` headers. |
+| L1 REST readiness | Reports presence of `POLY_ADDRESS`, `POLY_SIGNATURE`, `POLY_TIMESTAMP`, and `POLY_NONCE`; it does not synthesize signatures. |
+| Redaction | Private keys and signed headers are never returned by readiness payloads; addresses are shortened. |
+| Live action boundary | Readiness never derives API credentials, submits orders, or moves funds. Funded checks remain behind `scripts/verify_polymarket_live.py` explicit flags. |
+
+The funded live order/cancel verifier is also disabled by default. Running
+`python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <PRICE> --size <SIZE> --allow-token-id <TOKEN>`
+returns a dry-run transcript. A real order/cancel verification requires all of the following: `--allow-funded-order`,
+`--cancel-immediately`, an allow-listed token id, `--confirm-live-order-cancel I_UNDERSTAND_THIS_PLACES_A_REAL_POLYMARKET_ORDER`,
+valid CLOB credentials, an eligible/funded account, a GTC order, size <= 5 shares, approximate notional <= 1 USDC, and a public
+orderbook check proving the requested price is maker-side before placement. The harness immediately cancels the returned order id
+and then fetches the order to verify it is no longer live.
+
+For live credential validation, use the verifier as a stage gate and keep the JSON report:
+
+```powershell
+python scripts/verify_polymarket_live.py --report-file live-report.json
+python scripts/verify_polymarket_live.py --require-authenticated-read-ok --include-user-websocket-connect --report-file live-auth-report.json
+python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <PRICE> --size <SIZE> --allow-token-id <TOKEN> --report-file live-dry-run-report.json
+```
+
+`--require-authenticated-read-ok` fails unless at least one non-destructive authenticated read/stream check succeeds. `--include-user-websocket-connect` opens the authenticated user WebSocket and sends the subscription payload; secrets are not returned in the report. Use `--skip-public-checks` or `--skip-authenticated-read-checks` only for local readiness/debug runs, not for a production live approval.
 
 ### 4) Copy trading (paper mode by default)
 - Follows a tracked wallet’s **BUY** trades (SELL optional, guarded)
@@ -181,7 +249,18 @@ Useful local API endpoints:
 - `DELETE /api/wallets/{wallet_id}` deletes a wallet watch from local config.
 - `POST /api/wallets/poll` polls enabled wallet watches once through the Polymarket Data API and updates dedupe state.
 - `GET /api/polymarket/users/search?q=...` searches public Polymarket profiles and returns proxy-wallet candidates.
-- `GET /api/polymarket/users/leaderboard` returns public leaderboard rows ranked by PnL USD, volume USD, or computed ROI %, with min/max filters for PnL, volume, ROI, and pass-through MDD fields when upstream data includes them.
+- `GET /api/polymarket/users/leaderboard` returns public leaderboard rows ranked by PnL USD, volume USD, computed ROI %, MDD USD, or MDD %, with min/max filters for PnL, volume, ROI, and MDD. MDD scans accept `mdd_mode`, `mdd_history_limit`, `mdd_activity_limit`, `mdd_trade_limit`, `mdd_open_limit`, `mdd_mark_replay_token_limit`, `mdd_mark_replay_interval`, `mdd_mark_replay_fidelity`, `mdd_include_accounting`, `mdd_persist_cache`, and `mdd_cache_ttl_seconds`; payloads include `analytics_cache` and `rate_limit` metadata.
+- `GET /api/polymarket/users/mdd?user=0x...` computes one wallet's MDD USD/% v2 from public closed positions, activity/trade capital basis, and the current open-position snapshot. It accepts `mode=fast` by default or `mode=mark_replay` for CLOB price-history inventory replay, plus `include_accounting_snapshot=true` for accounting ZIP reconciliation, `persist_cache=true`, `closed_limit`, `activity_limit`, `trade_limit`, `open_limit`, `include_open`, `max_points`, `equity_base_usd`, `mark_replay_token_limit`, `mark_replay_interval`, `mark_replay_fidelity`, and `cache_ttl_seconds`.
+- `GET /api/polymarket/users/mdd/cache` lists cached MDD audit artifacts with wallet, MDD, age, TTL, expiry, size, and cache path metadata.
+- `GET /api/polymarket/users/mdd/cache/health` returns cache path, size, entry counts, active/expired counts, TTL, and retention bounds for MDD audit artifacts.
+- `POST /api/polymarket/users/mdd/cache/purge` purges selected keys, expired artifacts, or all MDD audit artifacts from the local analytics cache.
+- `DELETE /api/polymarket/users/mdd/cache/{key}` purges one cached MDD audit artifact by cache key.
+- `GET /api/polymarket/users/mdd/export.json?key=...` and `GET /api/polymarket/users/mdd/export.csv?key=...` return cached per-wallet MDD audit artifacts created by `persist_cache=true` or `mdd_persist_cache=true`.
+- `GET /api/polymarket/coverage` returns the official Polymarket API coverage manifest and live-validation requirements.
+- `GET /api/polymarket/live-validation` returns the current local Polymarket live-validation stage-gate report for the React Live Safety view.
+- `GET /api/polymarket/live-validation/reports` lists stored redacted live-validation report snapshots and the latest-vs-previous stage-gate comparison.
+- `POST /api/polymarket/live-validation/reports` stores the current GUI readiness snapshot or imports a CLI JSON report from `report_json`.
+- `DELETE /api/polymarket/live-validation/reports/{key}` deletes one stored live-validation report snapshot.
 - `GET /api/copy` returns copy-trading settings, tracked-wallet status, and live gate state.
 - `PATCH /api/copy` updates simulation-first copy settings, including multiple followed wallets, bounded copy percentage (`0..100`), and conflict-guard settings.
 - `POST /api/copy/preview` previews copy-trade sizing and guarded live preflight without placing orders.
@@ -315,7 +394,7 @@ In-app checks:
 - **Copy Trading -> Check Geoblock** verifies whether live trading should be blocked for the current location.
 - **Markets** displays selected-adapter health and edits live safety gates without touching credentials.
 - Disabled markets remain visible but adapter-backed actions are blocked until enabled in **Markets** or **Live Safety**.
-- **Live Safety** displays selected-market live gate status, blockers, max caps, acknowledgement, and redacted preflight audits.
+- **Live Safety** displays selected-market live gate status, blockers, max caps, acknowledgement, redacted preflight audits, the Polymarket live-validation stage-gate report, and local redacted report history/import/compare controls.
 - **Alerts** creates, edits, toggles, deletes, and refreshes market-scoped price alerts.
 - **Alerts** exposes last trade, midpoint, best bid, and best ask source selection for each alert.
 - **Alerts -> Refresh Prices** polls adapter-backed current price state and updates trigger status without placing orders.
@@ -323,8 +402,10 @@ In-app checks:
 - **Wallets & Copy** shows recent wallet activity with the copy-trading simulation or skip reason for each item.
 - **Wallets & Copy** edits followed wallets, copy percentage, max USDC, slippage, live mode, SELL-copy permission, and the same-token conflict guard.
 - **Wallets & Copy -> Preview** runs the live-copy preflight gate for a sample activity and does not place an order.
-- **Analytics** searches public Polymarket profiles and loads leaderboard rows by ROI %, PnL USD, or volume USD.
-- **Analytics** shows MDD USD/% as unavailable unless the upstream leaderboard row includes drawdown data.
+- **Analytics** searches public Polymarket profiles and loads leaderboard rows by ROI %, PnL USD, volume USD, MDD USD, or MDD %.
+- **Analytics** computes MDD USD/% on demand from closed-position realized PnL plus current open-position PnL.
+- **Analytics** can compute a single wallet's MDD directly, use a profile-search wallet as input, and inspect cached audit detail without rerunning the public API calls.
+- **Analytics** can persist MDD audit artifacts, inspect cache health/retention, purge selected/expired/all cache entries, and download artifacts as JSON or CSV.
 - **Paper Trading -> Refresh Quote** previews the selected contract's current adapter quote/orderbook without placing an order.
 - **Paper Trading -> Use Quote Limit** fills the limit field from best ask for BUY/BACK and best bid for SELL/LAY where available.
 - **Paper Trading** keeps a local paper exposure summary above the order-history table.

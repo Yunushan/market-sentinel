@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import os
 import posixpath
 import time
 from http import HTTPStatus
@@ -26,7 +27,48 @@ from market_adapters.types import (
     PriceSnapshot,
 )
 from polymarket import data_api, gamma
+from polymarket.analytics_cache import (
+    DEFAULT_ANALYTICS_CACHE_MAX_ENTRIES,
+    DEFAULT_ANALYTICS_CACHE_TTL_SECONDS,
+    POLYMARKET_MDD_AUDIT_KIND,
+    analytics_cache_health,
+    analytics_cache_summary,
+    list_analytics_artifacts,
+    load_analytics_artifact,
+    mdd_payload_to_csv,
+    purge_analytics_artifacts,
+    store_analytics_artifact,
+)
+from polymarket.auth_readiness import build_clob_auth_readiness
+from polymarket.coverage import polymarket_official_api_coverage
+from polymarket.http_client import PolymarketHTTPError, PolymarketRateLimitError
+from polymarket.live_verification import (
+    ABSOLUTE_MAX_VERIFY_NOTIONAL,
+    ABSOLUTE_MAX_VERIFY_SIZE,
+    CONFIRM_LIVE_ORDER_CANCEL,
+    build_live_validation_stage_gates,
+)
+from polymarket.live_reports import (
+    list_live_validation_reports,
+    purge_live_validation_reports,
+    store_live_validation_report,
+)
+from polymarket.mdd import (
+    DEFAULT_CACHE_TTL_SECONDS as POLYMARKET_MDD_CACHE_TTL_SECONDS,
+    MDD_MARK_REPLAY_ASSUMPTIONS,
+    MDD_MARK_REPLAY_LIMITATIONS,
+    MDD_ACCOUNTING_ASSUMPTIONS,
+    MDD_ACCOUNTING_LIMITATIONS,
+    MDD_METHOD_MARK_REPLAY,
+    MDD_METHOD_V2,
+    MDD_PCT_BASIS_V2,
+    MDD_V2_ASSUMPTIONS,
+    MDD_V2_LIMITATIONS,
+    polymarket_user_mdd_payload_mark_replay,
+    polymarket_user_mdd_payload_v2,
+)
 from polymarket.util import normalize_wallet
+from polymarket.ws_user import build_user_subscription
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -54,6 +96,15 @@ API_ROUTES = {
         "/api/paper/positions",
         "/api/polymarket/users/search",
         "/api/polymarket/users/leaderboard",
+        "/api/polymarket/users/mdd",
+        "/api/polymarket/users/mdd/cache",
+        "/api/polymarket/users/mdd/cache/health",
+        "/api/polymarket/users/mdd/export.json",
+        "/api/polymarket/users/mdd/export.csv",
+        "/api/polymarket/coverage",
+        "/api/polymarket/clob-readiness",
+        "/api/polymarket/live-validation",
+        "/api/polymarket/live-validation/reports",
     ],
     "PATCH": [
         "/api/config",
@@ -81,10 +132,14 @@ API_ROUTES = {
         "/api/paper/marks/refresh-selected",
         "/api/paper/marks/clear",
         "/api/paper/marks/clear-selected",
+        "/api/polymarket/users/mdd/cache/purge",
+        "/api/polymarket/live-validation/reports",
     ],
     "DELETE": [
         "/api/alerts/{alert_id}",
         "/api/wallets/{wallet_id}",
+        "/api/polymarket/users/mdd/cache/{key}",
+        "/api/polymarket/live-validation/reports/{key}",
     ],
 }
 SENSITIVE_SETTING_FRAGMENTS = (
@@ -97,6 +152,9 @@ SENSITIVE_SETTING_FRAGMENTS = (
     "cookie",
     "session",
 )
+POLYMARKET_L2_HEADERS = ("POLY_ADDRESS", "POLY_API_KEY", "POLY_PASSPHRASE", "POLY_SIGNATURE", "POLY_TIMESTAMP")
+POLYMARKET_RELAYER_HEADERS = ("RELAYER_API_KEY", "RELAYER_API_KEY_ADDRESS")
+POLYMARKET_USER_WS_KEYS = ("POLY_API_KEY", "POLY_API_SECRET", "POLY_SECRET", "POLY_PASSPHRASE")
 LIVE_SETTING_KEYS = {
     "live_trading_enabled",
     "live_trading_confirmed",
@@ -197,6 +255,17 @@ def _query_float(params: Mapping[str, List[str]], key: str) -> Optional[float]:
     if key not in params:
         return None
     return _safe_float(_query_value(params, key), None)
+
+
+def _query_bool(params: Mapping[str, List[str]], key: str, default: bool = False) -> bool:
+    if key not in params:
+        return default
+    value = _query_value(params, key).lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def activity_key(item: Mapping[str, Any]) -> str:
@@ -752,6 +821,8 @@ def app_state_payload(
         "wallets": wallets_payload(cfg, wallet_polling, recent_wallet_activity),
         "copy": copy_payload(cfg, registry),
         "live_safety": live_safety_payload(cfg, registry),
+        "polymarket_live_validation": polymarket_live_validation_payload(cfg),
+        "polymarket_live_validation_reports": polymarket_live_validation_reports_payload(),
         "paper": paper_payload(cfg, paper_marks),
     }
 
@@ -1107,6 +1178,8 @@ LEADERBOARD_SORTS = {
     "roi_pct": "PNL",
     "pnl_usd": "PNL",
     "volume_usd": "VOL",
+    "mdd_usd": "PNL",
+    "mdd_pct": "PNL",
 }
 
 
@@ -1177,6 +1250,278 @@ def normalize_polymarket_leaderboard_row(raw: Mapping[str, Any], fallback_rank: 
     }
 
 
+def _position_total_pnl(row: Mapping[str, Any]) -> Optional[float]:
+    total = _safe_float(_leaderboard_lookup(row, "totalPnl", "total_pnl"), None)
+    if total is not None:
+        return total
+    values = [
+        _safe_float(_leaderboard_lookup(row, "cashPnl", "cash_pnl"), None),
+        _safe_float(_leaderboard_lookup(row, "realizedPnl", "realized_pnl"), None),
+    ]
+    present = [value for value in values if value is not None]
+    return sum(present) if present else None
+
+
+def _position_capital(row: Mapping[str, Any]) -> float:
+    value = _safe_float(
+        _leaderboard_lookup(row, "totalBought", "total_bought", "initialValue", "initial_value", "currentValue", "current_value"),
+        0.0,
+    )
+    return max(float(value or 0.0), 0.0)
+
+
+def _fetch_user_positions_all(wallet: str, limit: int = 500) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    offset = 0
+    clean_limit = max(0, min(int(limit), 1000))
+    while len(rows) < clean_limit:
+        page_limit = min(500, clean_limit - len(rows))
+        page = data_api.get_positions(wallet, limit=page_limit, offset=offset)
+        if not page:
+            break
+        rows.extend(page)
+        if len(page) < page_limit:
+            break
+        offset += len(page)
+    return rows
+
+
+def _fetch_user_closed_positions_all(wallet: str, limit: int = 500) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    offset = 0
+    clean_limit = max(0, min(int(limit), 1000))
+    while len(rows) < clean_limit:
+        page_limit = min(50, clean_limit - len(rows))
+        page = data_api.get_closed_positions(
+            wallet,
+            limit=page_limit,
+            offset=offset,
+            sort_by="TIMESTAMP",
+            sort_direction="ASC",
+        )
+        if not page:
+            break
+        rows.extend(page)
+        if len(page) < page_limit:
+            break
+        offset += len(page)
+    return rows
+
+
+def _max_drawdown(points: List[Dict[str, Any]], equity_base_usd: Optional[float]) -> Dict[str, Any]:
+    if not points:
+        return {
+            "mdd_usd": 0.0,
+            "mdd_pct": 0.0 if equity_base_usd and equity_base_usd > 0 else None,
+            "peak_value": 0.0,
+            "trough_value": 0.0,
+            "peak_timestamp": None,
+            "trough_timestamp": None,
+        }
+    peak_value = float(points[0]["value"])
+    peak_ts = points[0].get("timestamp")
+    trough_value = peak_value
+    trough_ts = peak_ts
+    max_dd = 0.0
+    max_dd_pct: Optional[float] = 0.0 if equity_base_usd and equity_base_usd > 0 else None
+    max_peak = peak_value
+    max_peak_ts = peak_ts
+    for point in points:
+        value = float(point["value"])
+        timestamp = point.get("timestamp")
+        if value > peak_value:
+            peak_value = value
+            peak_ts = timestamp
+        drawdown = max(0.0, peak_value - value)
+        denominator = (float(equity_base_usd) + peak_value) if equity_base_usd and equity_base_usd > 0 else None
+        drawdown_pct = (drawdown / denominator * 100.0) if denominator and denominator > 0 else None
+        if drawdown > max_dd:
+            max_dd = drawdown
+            max_dd_pct = drawdown_pct
+            max_peak = peak_value
+            max_peak_ts = peak_ts
+            trough_value = value
+            trough_ts = timestamp
+    return {
+        "mdd_usd": max_dd,
+        "mdd_pct": max_dd_pct,
+        "peak_value": max_peak,
+        "trough_value": trough_value,
+        "peak_timestamp": max_peak_ts,
+        "trough_timestamp": trough_ts,
+    }
+
+
+def polymarket_user_mdd_payload(
+    wallet: str,
+    *,
+    mode: str = "fast",
+    closed_limit: int = 500,
+    open_limit: int = 500,
+    activity_limit: int = 1000,
+    trade_limit: int = 1000,
+    include_open: bool = True,
+    equity_base_usd: Optional[float] = None,
+    max_points: int = 50,
+    cache_ttl_seconds: int = 0,
+    mark_replay_token_limit: int = 10,
+    mark_replay_point_limit: int = 5000,
+    mark_replay_interval: Optional[str] = "1h",
+    mark_replay_fidelity: Optional[int] = 60,
+    mark_replay_start_ts: Optional[int] = None,
+    mark_replay_end_ts: Optional[int] = None,
+    include_accounting_snapshot: bool = False,
+    accounting_timeout: float = 30.0,
+) -> Dict[str, Any]:
+    clean_mode = str(mode or "fast").strip().lower()
+    if clean_mode in {"mark_replay", "mark-replay", "clob_mark_replay", "price_history"}:
+        return polymarket_user_mdd_payload_mark_replay(
+            wallet,
+            closed_limit=closed_limit,
+            open_limit=open_limit,
+            activity_limit=activity_limit,
+            trade_limit=trade_limit,
+            include_open=include_open,
+            equity_base_usd=equity_base_usd,
+            max_points=max_points,
+            cache_ttl_seconds=cache_ttl_seconds,
+            mark_replay_token_limit=mark_replay_token_limit,
+            mark_replay_point_limit=mark_replay_point_limit,
+            mark_replay_interval=mark_replay_interval,
+            mark_replay_fidelity=mark_replay_fidelity,
+            mark_replay_start_ts=mark_replay_start_ts,
+            mark_replay_end_ts=mark_replay_end_ts,
+            include_accounting_snapshot=include_accounting_snapshot,
+            accounting_timeout=accounting_timeout,
+        )
+    return polymarket_user_mdd_payload_v2(
+        wallet,
+        closed_limit=closed_limit,
+        open_limit=open_limit,
+        activity_limit=activity_limit,
+        trade_limit=trade_limit,
+        include_open=include_open,
+        equity_base_usd=equity_base_usd,
+        max_points=max_points,
+        cache_ttl_seconds=cache_ttl_seconds,
+        include_accounting_snapshot=include_accounting_snapshot,
+        accounting_timeout=accounting_timeout,
+    )
+
+
+def polymarket_rate_limit_status(exc: Optional[BaseException] = None) -> Dict[str, Any]:
+    if exc is None:
+        return {"limited": False, "backoff_status": "not_limited", "events": []}
+    event: Dict[str, Any] = {
+        "message": str(exc),
+        "retry_after_seconds": None,
+    }
+    if isinstance(exc, PolymarketHTTPError):
+        event.update(
+            {
+                "service": exc.service,
+                "method": exc.method,
+                "status_code": exc.status_code,
+                "url": exc.url,
+            }
+        )
+    return {"limited": True, "backoff_status": "retry_later", "events": [event]}
+
+
+def polymarket_mdd_audit_params(wallet: str, options: Mapping[str, Any]) -> Dict[str, Any]:
+    params = dict(options)
+    params["wallet"] = normalize_wallet(wallet)
+    params["artifact"] = POLYMARKET_MDD_AUDIT_KIND
+    return params
+
+
+def attach_polymarket_mdd_audit_cache(
+    payload: Dict[str, Any],
+    params: Mapping[str, Any],
+    *,
+    enabled: bool,
+) -> Dict[str, Any]:
+    payload["rate_limit"] = polymarket_rate_limit_status()
+    if not enabled:
+        metadata = analytics_cache_summary(enabled=False)
+        metadata.update({"stored": False, "key": None, "kind": POLYMARKET_MDD_AUDIT_KIND})
+        payload["audit_cache"] = metadata
+        return metadata
+
+    artifact_payload = dict(payload)
+    artifact_payload.pop("audit_cache", None)
+    artifact_payload.pop("rate_limit", None)
+    try:
+        metadata = store_analytics_artifact(
+            POLYMARKET_MDD_AUDIT_KIND,
+            params,
+            artifact_payload,
+            ttl_seconds=DEFAULT_ANALYTICS_CACHE_TTL_SECONDS,
+            max_entries=DEFAULT_ANALYTICS_CACHE_MAX_ENTRIES,
+        )
+    except Exception as exc:
+        metadata = analytics_cache_summary(enabled=True)
+        metadata.update({"stored": False, "key": None, "kind": POLYMARKET_MDD_AUDIT_KIND, "error": str(exc)})
+        warnings = payload.setdefault("warnings", [])
+        if isinstance(warnings, list):
+            warnings.append(f"MDD audit cache write failed: {exc}")
+    payload["audit_cache"] = metadata
+    return metadata
+
+
+def polymarket_mdd_export_payload(cache_key: str) -> Dict[str, Any]:
+    loaded = load_analytics_artifact(cache_key, kind=POLYMARKET_MDD_AUDIT_KIND, allow_expired=True)
+    if loaded is None:
+        raise ValueError("Unknown MDD audit cache key.")
+    payload, metadata = loaded
+    return {"cache": metadata, "payload": payload, "export": {"format": "json", "source": POLYMARKET_MDD_AUDIT_KIND}}
+
+
+def polymarket_mdd_export_csv(cache_key: str) -> Dict[str, Any]:
+    export = polymarket_mdd_export_payload(cache_key)
+    payload = export["payload"]
+    wallet = str(payload.get("wallet") or "wallet").replace("/", "_").replace("\\", "_")
+    key = str(export["cache"].get("key") or "audit")
+    return {
+        "cache": export["cache"],
+        "filename": f"polymarket-mdd-{wallet}-{key[:8]}.csv",
+        "csv": mdd_payload_to_csv(payload),
+    }
+
+
+def polymarket_mdd_cache_payload(*, include_expired: bool = True) -> Dict[str, Any]:
+    return list_analytics_artifacts(
+        kind=POLYMARKET_MDD_AUDIT_KIND,
+        include_expired=include_expired,
+        include_payload=False,
+    )
+
+
+def polymarket_mdd_cache_health_payload() -> Dict[str, Any]:
+    return {
+        "source": POLYMARKET_MDD_AUDIT_KIND,
+        "cache": analytics_cache_health(kind=POLYMARKET_MDD_AUDIT_KIND),
+    }
+
+
+def polymarket_mdd_cache_purge_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    raw_keys = payload.get("keys")
+    keys: List[str] = []
+    if isinstance(raw_keys, list):
+        keys.extend(str(key or "").strip() for key in raw_keys if str(key or "").strip())
+    single_key = str(payload.get("key") or "").strip()
+    if single_key:
+        keys.append(single_key)
+    result = purge_analytics_artifacts(
+        keys=keys,
+        kind=POLYMARKET_MDD_AUDIT_KIND,
+        expired_only=bool(payload.get("expired_only")),
+        all_entries=bool(payload.get("all") or payload.get("all_entries")),
+    )
+    result["source"] = POLYMARKET_MDD_AUDIT_KIND
+    return result
+
+
 def polymarket_user_search_payload(query: str, limit: int = 10) -> Dict[str, Any]:
     clean_query = str(query or "").strip()
     clean_limit = _clamp_int(limit, 10, 1, 50)
@@ -1199,6 +1544,199 @@ def polymarket_user_search_payload(query: str, limit: int = 10) -> Dict[str, Any
     }
 
 
+def polymarket_clob_readiness_payload(cfg: AppConfig) -> Dict[str, Any]:
+    market_cfg = cfg.markets.get("polymarket")
+    settings = dict(market_cfg.settings) if market_cfg else {}
+    enabled = bool(market_cfg and market_cfg.enabled)
+    return {
+        "market_id": "polymarket",
+        "selected": str(cfg.selected_market_id or "").strip().lower() == "polymarket",
+        "enabled": enabled,
+        "live_safety": market_safety_payload(settings, enabled),
+        "readiness": build_clob_auth_readiness(settings),
+    }
+
+
+def _validation_item(status: str, detail: str, **extra: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"status": status, "detail": detail}
+    payload.update(extra)
+    return payload
+
+
+def _env_presence(names: Tuple[str, ...]) -> Dict[str, bool]:
+    return {name: bool(os.getenv(name)) for name in names}
+
+
+def _all_env_present(names: Tuple[str, ...]) -> bool:
+    return all(os.getenv(name) for name in names)
+
+
+def polymarket_live_validation_payload(cfg: AppConfig) -> Dict[str, Any]:
+    market_cfg = cfg.markets.get("polymarket")
+    settings = dict(market_cfg.settings) if market_cfg else {}
+    readiness = build_clob_auth_readiness(settings)
+    direct_l2_ready = bool(readiness.get("direct_l2_read_ready"))
+    sdk_ready = bool(readiness.get("sdk_trading_ready"))
+    relayer_ready = _all_env_present(POLYMARKET_RELAYER_HEADERS)
+    user_ws_auth = {
+        "apiKey": os.getenv("POLY_API_KEY", ""),
+        "secret": os.getenv("POLY_API_SECRET") or os.getenv("POLY_SECRET", ""),
+        "passphrase": os.getenv("POLY_PASSPHRASE", ""),
+    }
+    try:
+        build_user_subscription(user_ws_auth)
+        user_ws_payload = _validation_item(
+            "skipped",
+            "User WebSocket auth payload can be built; GUI/API does not open the authenticated stream.",
+            next_step="Run scripts/verify_polymarket_live.py --include-user-websocket-connect for a real stream probe.",
+        )
+    except ValueError as exc:
+        user_ws_payload = _validation_item("blocked", str(exc))
+
+    report: Dict[str, Any] = {
+        "generated_at": time.time(),
+        "market_id": "polymarket",
+        "mode": "local_readiness_only",
+        "selected": str(cfg.selected_market_id or "").strip().lower() == "polymarket",
+        "enabled": bool(market_cfg and market_cfg.enabled),
+        "credential_presence": {
+            "clob_l2_headers": _env_presence(POLYMARKET_L2_HEADERS),
+            "py_clob_client": _env_presence(
+                (
+                    "POLYMARKET_PRIVATE_KEY",
+                    "PRIVATE_KEY",
+                    "POLYMARKET_FUNDER_ADDRESS",
+                    "FUNDER_ADDRESS",
+                    "POLYMARKET_SIGNATURE_TYPE",
+                    "SIGNATURE_TYPE",
+                )
+            ),
+            "relayer_headers": _env_presence(POLYMARKET_RELAYER_HEADERS),
+            "user_ws": _env_presence(POLYMARKET_USER_WS_KEYS),
+        },
+        "clob_auth_readiness": readiness,
+        "public_checks": {
+            "clob_time": _validation_item("skipped", "GUI/API report does not run public network probes."),
+            "gamma_markets": _validation_item("skipped", "GUI/API report does not run public network probes."),
+            "data_leaderboard": _validation_item("skipped", "GUI/API report does not run public network probes."),
+            "bridge_supported_assets": _validation_item("skipped", "GUI/API report does not run public network probes."),
+        },
+        "authenticated_read_checks": {
+            "clob_l2_orders": _validation_item(
+                "skipped" if direct_l2_ready else "blocked",
+                "Explicit L2 headers are present; run the CLI for a non-destructive order-list read."
+                if direct_l2_ready
+                else "Missing explicit L2 headers for CLOB order-list reads.",
+                missing=readiness.get("l2_headers", {}).get("missing", []),
+            ),
+            "py_clob_client_credentials": _validation_item(
+                "skipped" if sdk_ready else "blocked",
+                "SDK trading credentials are locally ready; GUI/API does not derive API credentials."
+                if sdk_ready
+                else "SDK trading credentials are not locally ready.",
+                blockers=readiness.get("blockers", []),
+            ),
+            "relayer_recent_transactions": _validation_item(
+                "skipped" if relayer_ready else "blocked",
+                "Relayer headers are present; run the CLI for a non-destructive recent-transactions read."
+                if relayer_ready
+                else "Missing relayer API key headers.",
+                missing=[name for name, present in _env_presence(POLYMARKET_RELAYER_HEADERS).items() if not present],
+            ),
+            "user_websocket_auth_payload": user_ws_payload,
+            "user_websocket_connect": _validation_item(
+                "skipped",
+                "GUI/API does not open authenticated WebSocket sessions.",
+                next_step="Run scripts/verify_polymarket_live.py --include-user-websocket-connect.",
+            ),
+        },
+        "bridge_address_checks": {
+            "deposit_address_creation": _validation_item(
+                "blocked",
+                "Not exposed in GUI/API. Use the CLI with explicit bridge address flags if this check is required.",
+            ),
+            "withdrawal_address_creation": _validation_item(
+                "blocked",
+                "Not exposed in GUI/API. Use the CLI with explicit withdrawal arguments if this check is required.",
+            ),
+        },
+        "funded_live_order_check": _validation_item(
+            "blocked",
+            "Funded order/cancel verification is not exposed in the GUI/API.",
+            live_action=False,
+        ),
+        "live_order_cancel_harness": {
+            "default_mode": "dry_run_transcript",
+            "execute_flag": "--allow-funded-order",
+            "confirmation_required": CONFIRM_LIVE_ORDER_CANCEL,
+            "hard_max_size": ABSOLUTE_MAX_VERIFY_SIZE,
+            "hard_max_notional": ABSOLUTE_MAX_VERIFY_NOTIONAL,
+        },
+        "operator_commands": {
+            "public_and_readiness": "python scripts/verify_polymarket_live.py --report-file live-report.json",
+            "credentialed_read": "python scripts/verify_polymarket_live.py --require-authenticated-read-ok --include-user-websocket-connect --report-file live-auth-report.json",
+            "dry_run_order_cancel": "python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <PRICE> --size <SIZE> --allow-token-id <TOKEN> --report-file live-dry-run-report.json",
+        },
+        "funded_execution_exposed": False,
+        "notes": [
+            "This endpoint is a local readiness view only.",
+            "Credentialed reads, user WebSocket connections, and funded order/cancel checks remain CLI-only.",
+            "No funded action may run without credentials, safe parameters, and explicit user approval.",
+        ],
+    }
+    report["stage_gates"] = build_live_validation_stage_gates(report)
+    return sanitize_audit_value(report)
+
+
+def polymarket_live_validation_reports_payload(*, include_payload: bool = False) -> Dict[str, Any]:
+    return list_live_validation_reports(include_payload=include_payload)
+
+
+def polymarket_live_validation_report_store_payload(cfg: AppConfig, payload: Mapping[str, Any]) -> Dict[str, Any]:
+    label = str(payload.get("label") or "").strip()
+    source = str(payload.get("source") or "").strip()
+    report: Mapping[str, Any]
+
+    if "report_json" in payload and str(payload.get("report_json") or "").strip():
+        try:
+            parsed = json.loads(str(payload.get("report_json") or ""))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"report_json must be valid JSON: {exc.msg}") from exc
+        if not isinstance(parsed, Mapping):
+            raise ValueError("report_json must decode to an object.")
+        report = parsed
+        source = source or "cli_import"
+        label = label or "CLI import"
+    elif isinstance(payload.get("report"), Mapping):
+        report = payload["report"]  # type: ignore[assignment]
+        source = source or "cli_import"
+        label = label or "Imported report"
+    else:
+        report = polymarket_live_validation_payload(cfg)
+        source = source or "gui_snapshot"
+        label = label or "GUI readiness snapshot"
+
+    stored = store_live_validation_report(report, source=source, label=label)
+    inventory = polymarket_live_validation_reports_payload()
+    inventory.update(
+        {
+            "stored": stored,
+            "message": f"Stored live validation report {stored.get('key')}.",
+        }
+    )
+    return inventory
+
+
+def polymarket_live_validation_report_purge_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    keys: List[str] = []
+    if payload.get("key"):
+        keys.append(str(payload.get("key")))
+    raw_keys = payload.get("keys")
+    if isinstance(raw_keys, list):
+        keys.extend(str(key) for key in raw_keys)
+    return purge_live_validation_reports(keys=keys, all_entries=bool(payload.get("all") or payload.get("all_entries")))
+
+
 def _number_in_range(value: Optional[float], minimum: Optional[float], maximum: Optional[float]) -> bool:
     if value is None:
         return minimum is None and maximum is None
@@ -1218,9 +1756,36 @@ def polymarket_leaderboard_payload(params: Optional[Mapping[str, List[str]]] = N
     if direction not in {"ASC", "DESC"}:
         direction = "DESC"
     period = _query_value(query, "period", "all") or "all"
+    category = _query_value(query, "category", "OVERALL") or "OVERALL"
     limit = _clamp_int(_query_value(query, "limit", "100"), 100, 1, 100)
     default_scan = 500 if sort == "roi_pct" else max(100, limit)
     scan_limit = _clamp_int(_query_value(query, "scan_limit", str(default_scan)), default_scan, limit, 500)
+    mdd_history_limit = _clamp_int(_query_value(query, "mdd_history_limit", "500"), 500, 1, 1000)
+    mdd_activity_limit = _clamp_int(_query_value(query, "mdd_activity_limit", "1000"), 1000, 0, 5000)
+    mdd_trade_limit = _clamp_int(_query_value(query, "mdd_trade_limit", "1000"), 1000, 0, 5000)
+    mdd_open_limit = _clamp_int(_query_value(query, "mdd_open_limit", "500"), 500, 0, 1000)
+    mdd_scan_limit = _clamp_int(_query_value(query, "mdd_scan_limit", str(min(scan_limit, 100))), min(scan_limit, 100), 1, 100)
+    raw_mdd_mode = _query_value(query, "mdd_mode", "fast").lower()
+    mdd_mode = "mark_replay" if raw_mdd_mode in {"mark_replay", "mark-replay", "clob_mark_replay", "price_history"} else "fast"
+    mdd_mark_replay_token_limit = _clamp_int(_query_value(query, "mdd_mark_replay_token_limit", "10"), 10, 1, 20)
+    mdd_mark_replay_point_limit = _clamp_int(_query_value(query, "mdd_mark_replay_point_limit", "5000"), 5000, 1, 10000)
+    mdd_mark_replay_fidelity = _clamp_int(_query_value(query, "mdd_mark_replay_fidelity", "60"), 60, 1, 1440)
+    mdd_mark_replay_interval = _query_value(query, "mdd_mark_replay_interval", "1h") or "1h"
+    if mdd_mark_replay_interval not in {"max", "all", "1m", "1w", "1d", "6h", "1h"}:
+        mdd_mark_replay_interval = "1h"
+    mdd_mark_replay_start_ts = _query_float(query, "mdd_mark_replay_start_ts")
+    mdd_mark_replay_end_ts = _query_float(query, "mdd_mark_replay_end_ts")
+    mdd_include_accounting = _query_bool(query, "mdd_include_accounting", False)
+    mdd_accounting_timeout = _clamp_int(_query_value(query, "mdd_accounting_timeout", "30"), 30, 1, 60)
+    mdd_persist_cache = _query_bool(query, "mdd_persist_cache", False)
+    mdd_cache_ttl_seconds = _clamp_int(
+        _query_value(query, "mdd_cache_ttl_seconds", str(POLYMARKET_MDD_CACHE_TTL_SECONDS)),
+        POLYMARKET_MDD_CACHE_TTL_SECONDS,
+        0,
+        300,
+    )
+    compute_mdd = _query_bool(query, "compute_mdd", False)
+    equity_base_usd = _query_float(query, "equity_base_usd")
 
     min_pnl = _query_float(query, "min_pnl_usd")
     max_pnl = _query_float(query, "max_pnl_usd")
@@ -1232,6 +1797,9 @@ def polymarket_leaderboard_payload(params: Optional[Mapping[str, List[str]]] = N
     max_mdd_usd = _query_float(query, "max_mdd_usd")
     min_mdd_pct = _query_float(query, "min_mdd_pct")
     max_mdd_pct = _query_float(query, "max_mdd_pct")
+    mdd_requested = compute_mdd or mdd_mode == "mark_replay" or sort in {"mdd_usd", "mdd_pct"} or any(
+        value is not None for value in (min_mdd_usd, max_mdd_usd, min_mdd_pct, max_mdd_pct)
+    )
 
     remote_sort = LEADERBOARD_SORTS[sort]
     raw_rows: List[Dict[str, Any]] = []
@@ -1244,6 +1812,7 @@ def polymarket_leaderboard_payload(params: Optional[Mapping[str, List[str]]] = N
             sort_by=remote_sort,
             sort_direction=direction,
             period=period,
+            category=category,
         )
         if not page:
             break
@@ -1252,16 +1821,10 @@ def polymarket_leaderboard_payload(params: Optional[Mapping[str, List[str]]] = N
             break
         offset += len(page)
 
-    rows = [normalize_polymarket_leaderboard_row(row, index + 1) for index, row in enumerate(raw_rows)]
-    mdd_filter_requested = any(
-        value is not None for value in (min_mdd_usd, max_mdd_usd, min_mdd_pct, max_mdd_pct)
-    )
-    mdd_values_available = any(row["mdd_available"] for row in rows)
     warnings: List[str] = []
-    if mdd_filter_requested and not mdd_values_available:
-        warnings.append("MDD filters were not applied because the public leaderboard does not include drawdown fields.")
-
-    filtered: List[Dict[str, Any]] = []
+    rate_limit_events: List[Dict[str, Any]] = []
+    rows = [normalize_polymarket_leaderboard_row(row, index + 1) for index, row in enumerate(raw_rows)]
+    prefiltered: List[Dict[str, Any]] = []
     for row in rows:
         if not _number_in_range(row["pnl_usd"], min_pnl, max_pnl):
             continue
@@ -1269,7 +1832,84 @@ def polymarket_leaderboard_payload(params: Optional[Mapping[str, List[str]]] = N
             continue
         if not _number_in_range(row["roi_pct"], min_roi, max_roi):
             continue
-        if mdd_values_available:
+        prefiltered.append(row)
+
+    computed_mdd = 0
+    if mdd_requested:
+        for row in prefiltered[:mdd_scan_limit]:
+            wallet = normalize_wallet(row.get("wallet") or "")
+            if not wallet:
+                continue
+            mdd_options = {
+                "mode": mdd_mode,
+                "closed_limit": mdd_history_limit,
+                "open_limit": mdd_open_limit,
+                "activity_limit": mdd_activity_limit,
+                "trade_limit": mdd_trade_limit,
+                "include_open": True,
+                "equity_base_usd": equity_base_usd,
+                "cache_ttl_seconds": mdd_cache_ttl_seconds,
+                "mark_replay_token_limit": mdd_mark_replay_token_limit,
+                "mark_replay_point_limit": mdd_mark_replay_point_limit,
+                "mark_replay_interval": mdd_mark_replay_interval,
+                "mark_replay_fidelity": mdd_mark_replay_fidelity,
+                "mark_replay_start_ts": int(mdd_mark_replay_start_ts) if mdd_mark_replay_start_ts is not None else None,
+                "mark_replay_end_ts": int(mdd_mark_replay_end_ts) if mdd_mark_replay_end_ts is not None else None,
+                "include_accounting_snapshot": mdd_include_accounting,
+                "accounting_timeout": mdd_accounting_timeout,
+            }
+            try:
+                mdd = polymarket_user_mdd_payload(wallet, **mdd_options)
+            except PolymarketRateLimitError as exc:
+                status = polymarket_rate_limit_status(exc)
+                rate_limit_events.extend(status["events"])
+                warnings.append(f"MDD rate-limited for {wallet}; retry after the upstream backoff window.")
+                break
+            except Exception as exc:
+                warnings.append(f"MDD unavailable for {wallet}: {exc}")
+                continue
+            audit_cache = attach_polymarket_mdd_audit_cache(
+                mdd,
+                polymarket_mdd_audit_params(wallet, mdd_options),
+                enabled=mdd_persist_cache,
+            )
+            row.update(
+                {
+                    "mdd_usd": mdd["mdd_usd"],
+                    "mdd_pct": mdd["mdd_pct"],
+                    "mdd_available": True,
+                    "mdd_method": mdd["mdd_method"],
+                    "mdd_pct_basis": mdd["mdd_pct_basis"],
+                    "mdd_points": len(mdd["points"]),
+                    "mdd_closed_positions": mdd["closed_positions"],
+                    "mdd_open_positions": mdd["open_positions"],
+                    "mdd_activity_events": mdd.get("activity_events", 0),
+                    "mdd_trade_events": mdd.get("trade_events", 0),
+                    "mdd_equity_base_usd": mdd["equity_base_usd"],
+                    "mdd_equity_base_source": mdd.get("equity_base_source"),
+                    "mdd_public_capital_basis_usd": mdd.get("public_capital_basis_usd"),
+                    "mdd_peak_value": mdd["peak_value"],
+                    "mdd_trough_value": mdd["trough_value"],
+                    "mdd_peak_timestamp": mdd["peak_timestamp"],
+                    "mdd_trough_timestamp": mdd["trough_timestamp"],
+                    "mdd_mark_replay_status": (mdd.get("mark_replay") or {}).get("status"),
+                    "mdd_mark_replay_tokens": (mdd.get("mark_replay") or {}).get("token_count"),
+                    "mdd_accounting_status": (mdd.get("accounting_snapshot") or {}).get("status"),
+                    "mdd_accounting_equity_base_usd": ((mdd.get("accounting_snapshot") or {}).get("equity") or {}).get("base_equity_usd"),
+                    "mdd_accounting_cash_flow_gap_usd": (
+                        (((mdd.get("accounting_snapshot") or {}).get("equity") or {}).get("cash_flows") or {}).get("cash_flow_gap_usd")
+                    ),
+                    "mdd_audit_cache_key": audit_cache.get("key"),
+                    "mdd_audit_cache_stored": audit_cache.get("stored", False),
+                }
+            )
+            computed_mdd += 1
+
+    filtered: List[Dict[str, Any]] = []
+    for row in prefiltered:
+        if mdd_requested:
+            if not row["mdd_available"]:
+                continue
             if not _number_in_range(row["mdd_usd"], min_mdd_usd, max_mdd_usd):
                 continue
             if not _number_in_range(row["mdd_pct"], min_mdd_pct, max_mdd_pct):
@@ -1282,26 +1922,63 @@ def polymarket_leaderboard_payload(params: Optional[Mapping[str, List[str]]] = N
         filtered.sort(key=lambda row: row["roi_pct"] if row["roi_pct"] is not None else missing_numeric, reverse=reverse)
     elif sort == "volume_usd":
         filtered.sort(key=lambda row: row["volume_usd"] if row["volume_usd"] is not None else missing_numeric, reverse=reverse)
+    elif sort == "mdd_usd":
+        filtered.sort(key=lambda row: row["mdd_usd"] if row["mdd_usd"] is not None else missing_numeric, reverse=reverse)
+    elif sort == "mdd_pct":
+        filtered.sort(key=lambda row: row["mdd_pct"] if row["mdd_pct"] is not None else missing_numeric, reverse=reverse)
     else:
         filtered.sort(key=lambda row: row["pnl_usd"] if row["pnl_usd"] is not None else missing_numeric, reverse=reverse)
 
+    mdd_values_available = any(row["mdd_available"] for row in filtered)
     return {
         "rows": filtered[:limit],
         "counts": {
             "returned": len(filtered[:limit]),
             "filtered": len(filtered),
             "scanned": len(rows),
+            "mdd_computed": computed_mdd,
         },
         "sort": sort,
         "direction": direction,
         "period": period,
+        "category": category,
         "limit": limit,
         "scan_limit": scan_limit,
+        "mdd_scan_limit": mdd_scan_limit,
+        "mdd_history_limit": mdd_history_limit,
+        "mdd_activity_limit": mdd_activity_limit,
+        "mdd_trade_limit": mdd_trade_limit,
+        "mdd_open_limit": mdd_open_limit,
+        "mdd_mode": mdd_mode,
+        "mdd_mark_replay_token_limit": mdd_mark_replay_token_limit,
+        "mdd_mark_replay_point_limit": mdd_mark_replay_point_limit,
+        "mdd_mark_replay_interval": mdd_mark_replay_interval,
+        "mdd_mark_replay_fidelity": mdd_mark_replay_fidelity,
+        "mdd_include_accounting": mdd_include_accounting,
+        "mdd_accounting_timeout": mdd_accounting_timeout,
+        "mdd_persist_cache": mdd_persist_cache,
+        "mdd_cache_ttl_seconds": mdd_cache_ttl_seconds,
+        "analytics_cache": analytics_cache_summary(enabled=mdd_persist_cache),
+        "rate_limit": {
+            "limited": bool(rate_limit_events),
+            "backoff_status": "retry_later" if rate_limit_events else "not_limited",
+            "events": rate_limit_events,
+        },
         "source": "polymarket_data_api_leaderboard",
         "source_sort": remote_sort,
-        "ranking_scope": "computed_from_scanned_public_leaderboard_rows",
+        "ranking_scope": "computed_from_scanned_public_leaderboard_rows_with_optional_public_data_mdd_v2",
         "mdd_available": mdd_values_available,
-        "mdd_note": "True maximum drawdown requires an equity-curve history source; public leaderboard rows normally do not include it.",
+        "mdd_method": MDD_METHOD_MARK_REPLAY if mdd_mode == "mark_replay" else MDD_METHOD_V2,
+        "mdd_pct_basis": MDD_PCT_BASIS_V2,
+        "mdd_note": (
+            "MDD mark replay is opt-in and uses CLOB price history for trade-derived token inventory; rows without reconstructable marks fall back to v2."
+            if mdd_mode == "mark_replay"
+            else "MDD v2 uses public closed-position realized PnL, public trade/activity capital basis, and the current open-position snapshot; complete account-equity MDD still requires cash-flow ledger and historical mark replay."
+        ),
+        "mdd_assumptions": list(MDD_MARK_REPLAY_ASSUMPTIONS if mdd_mode == "mark_replay" else MDD_V2_ASSUMPTIONS)
+        + (list(MDD_ACCOUNTING_ASSUMPTIONS) if mdd_include_accounting else []),
+        "mdd_limitations": list(MDD_MARK_REPLAY_LIMITATIONS if mdd_mode == "mark_replay" else MDD_V2_LIMITATIONS)
+        + (list(MDD_ACCOUNTING_LIMITATIONS) if mdd_include_accounting else []),
         "warnings": warnings,
     }
 
@@ -2154,7 +2831,85 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             if path == "/api/polymarket/users/leaderboard":
                 self._send_json(HTTPStatus.OK, polymarket_leaderboard_payload(query_params))
                 return
+            if path == "/api/polymarket/users/mdd/cache/health":
+                self._send_json(HTTPStatus.OK, polymarket_mdd_cache_health_payload())
+                return
+            if path == "/api/polymarket/users/mdd/cache":
+                self._send_json(
+                    HTTPStatus.OK,
+                    polymarket_mdd_cache_payload(include_expired=_query_bool(query_params, "include_expired", True)),
+                )
+                return
+            if path == "/api/polymarket/users/mdd/export.json":
+                self._send_json(HTTPStatus.OK, polymarket_mdd_export_payload(_query_value(query_params, "key")))
+                return
+            if path == "/api/polymarket/users/mdd/export.csv":
+                export = polymarket_mdd_export_csv(_query_value(query_params, "key"))
+                self._send_text(
+                    HTTPStatus.OK,
+                    export["csv"],
+                    content_type="text/csv; charset=utf-8",
+                    filename=export["filename"],
+                )
+                return
+            if path == "/api/polymarket/users/mdd":
+                wallet = _query_value(query_params, "user") or _query_value(query_params, "wallet")
+                mdd_options = {
+                    "mode": _query_value(query_params, "mode", _query_value(query_params, "mdd_mode", "fast")),
+                    "closed_limit": _clamp_int(_query_value(query_params, "closed_limit", "500"), 500, 1, 1000),
+                    "open_limit": _clamp_int(_query_value(query_params, "open_limit", "500"), 500, 0, 1000),
+                    "activity_limit": _clamp_int(_query_value(query_params, "activity_limit", "1000"), 1000, 0, 5000),
+                    "trade_limit": _clamp_int(_query_value(query_params, "trade_limit", "1000"), 1000, 0, 5000),
+                    "include_open": _query_bool(query_params, "include_open", True),
+                    "equity_base_usd": _query_float(query_params, "equity_base_usd"),
+                    "max_points": _clamp_int(_query_value(query_params, "max_points", "50"), 50, 1, 1000),
+                    "cache_ttl_seconds": _clamp_int(_query_value(query_params, "cache_ttl_seconds", "0"), 0, 0, 300),
+                    "mark_replay_token_limit": _clamp_int(_query_value(query_params, "mark_replay_token_limit", "10"), 10, 1, 20),
+                    "mark_replay_point_limit": _clamp_int(_query_value(query_params, "mark_replay_point_limit", "5000"), 5000, 1, 10000),
+                    "mark_replay_interval": _query_value(query_params, "mark_replay_interval", "1h") or "1h",
+                    "mark_replay_fidelity": _clamp_int(_query_value(query_params, "mark_replay_fidelity", "60"), 60, 1, 1440),
+                    "mark_replay_start_ts": _safe_int(_query_value(query_params, "mark_replay_start_ts"), None)
+                    if _query_value(query_params, "mark_replay_start_ts")
+                    else None,
+                    "mark_replay_end_ts": _safe_int(_query_value(query_params, "mark_replay_end_ts"), None)
+                    if _query_value(query_params, "mark_replay_end_ts")
+                    else None,
+                    "include_accounting_snapshot": _query_bool(query_params, "include_accounting_snapshot", False),
+                    "accounting_timeout": float(_clamp_int(_query_value(query_params, "accounting_timeout", "30"), 30, 1, 60)),
+                }
+                payload = polymarket_user_mdd_payload(wallet, **mdd_options)
+                attach_polymarket_mdd_audit_cache(
+                    payload,
+                    polymarket_mdd_audit_params(wallet, mdd_options),
+                    enabled=_query_bool(query_params, "persist_cache", _query_bool(query_params, "mdd_persist_cache", False)),
+                )
+                self._send_json(HTTPStatus.OK, payload)
+                return
+            if path == "/api/polymarket/coverage":
+                self._send_json(HTTPStatus.OK, polymarket_official_api_coverage())
+                return
+            if path == "/api/polymarket/clob-readiness":
+                self._send_json(HTTPStatus.OK, polymarket_clob_readiness_payload(cfg))
+                return
+            if path == "/api/polymarket/live-validation/reports":
+                self._send_json(
+                    HTTPStatus.OK,
+                    polymarket_live_validation_reports_payload(
+                        include_payload=_query_bool(query_params, "include_payload", False)
+                    ),
+                )
+                return
+            if path == "/api/polymarket/live-validation":
+                self._send_json(HTTPStatus.OK, polymarket_live_validation_payload(cfg))
+                return
             self._send_error(HTTPStatus.NOT_FOUND, "not_found", "Unknown API route.")
+        except PolymarketRateLimitError as exc:
+            self._send_error(
+                HTTPStatus.TOO_MANY_REQUESTS,
+                "polymarket_rate_limited",
+                "Polymarket API rate limit was reached; retry after the upstream backoff window.",
+                {"rate_limit": polymarket_rate_limit_status(exc)},
+            )
         except ValueError as exc:
             self._send_error(HTTPStatus.BAD_REQUEST, "validation_error", str(exc))
         except Exception as exc:
@@ -2181,6 +2936,20 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 apply_market_patch(cfg, market_id, payload)
                 self._save_config(cfg)
                 self._send_json(HTTPStatus.OK, markets_payload(cfg, self.app_server.adapter_registry))
+                return
+            if method == "POST" and path == "/api/polymarket/users/mdd/cache/purge":
+                self._send_json(HTTPStatus.OK, polymarket_mdd_cache_purge_payload(payload))
+                return
+            if method == "DELETE" and path.startswith("/api/polymarket/users/mdd/cache/"):
+                cache_key = unquote(path.rsplit("/", 1)[-1])
+                self._send_json(HTTPStatus.OK, polymarket_mdd_cache_purge_payload({"key": cache_key}))
+                return
+            if method == "POST" and path == "/api/polymarket/live-validation/reports":
+                self._send_json(HTTPStatus.OK, polymarket_live_validation_report_store_payload(cfg, payload))
+                return
+            if method == "DELETE" and path.startswith("/api/polymarket/live-validation/reports/"):
+                report_key = unquote(path.rsplit("/", 1)[-1])
+                self._send_json(HTTPStatus.OK, polymarket_live_validation_report_purge_payload({"key": report_key}))
                 return
             if method == "POST" and path == "/api/alerts":
                 alert = alert_from_payload(cfg, self.app_server.adapter_registry, payload)
@@ -2485,6 +3254,21 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self._send_cors_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(data)
+        self.wfile.flush()
+        self.close_connection = True
+
+    def _send_text(self, status: int, text: str, *, content_type: str, filename: Optional[str] = None) -> None:
+        data = str(text).encode("utf-8")
+        self.send_response(status)
+        self._send_cors_headers()
+        self.send_header("Content-Type", content_type)
+        if filename:
+            safe_name = str(filename).replace('"', "")
+            self.send_header("Content-Disposition", f'attachment; filename="{safe_name}"')
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Connection", "close")
         self.end_headers()

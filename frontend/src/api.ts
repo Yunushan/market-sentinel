@@ -20,6 +20,14 @@ import type {
   PaperQuotePayload,
   PolymarketLeaderboardFilters,
   PolymarketLeaderboardPayload,
+  PolymarketLiveValidationReportStoreRequest,
+  PolymarketLiveValidationReportsPayload,
+  PolymarketLiveValidationPayload,
+  PolymarketMddAuditExport,
+  PolymarketMddCachePayload,
+  PolymarketMddCachePurgeRequest,
+  PolymarketMddForm,
+  PolymarketMddPayload,
   PolymarketUserSearchPayload,
   WalletForm,
   WalletPollResponse,
@@ -101,6 +109,30 @@ export function fetchCopy(): Promise<CopyPayload> {
 
 export function fetchLiveSafety(): Promise<LiveSafetyPayload> {
   return request<LiveSafetyPayload>("/api/live-safety");
+}
+
+export function fetchPolymarketLiveValidation(): Promise<PolymarketLiveValidationPayload> {
+  return request<PolymarketLiveValidationPayload>("/api/polymarket/live-validation");
+}
+
+export function fetchPolymarketLiveValidationReports(includePayload = false): Promise<PolymarketLiveValidationReportsPayload> {
+  const params = new URLSearchParams({ include_payload: String(includePayload) });
+  return request<PolymarketLiveValidationReportsPayload>(`/api/polymarket/live-validation/reports?${params.toString()}`);
+}
+
+export function storePolymarketLiveValidationReport(
+  payload: PolymarketLiveValidationReportStoreRequest
+): Promise<PolymarketLiveValidationReportsPayload> {
+  return request<PolymarketLiveValidationReportsPayload>("/api/polymarket/live-validation/reports", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function deletePolymarketLiveValidationReport(key: string): Promise<PolymarketLiveValidationReportsPayload> {
+  return request<PolymarketLiveValidationReportsPayload>(`/api/polymarket/live-validation/reports/${encodeURIComponent(key)}`, {
+    method: "DELETE"
+  });
 }
 
 export function updateMarket(marketId: string, patch: MarketPatch): Promise<MarketsPayload> {
@@ -194,10 +226,46 @@ export function fetchPolymarketLeaderboard(filters: PolymarketLeaderboardFilters
   const params = new URLSearchParams();
   Object.entries(filters).forEach(([key, value]) => {
     if (value !== "") {
-      params.set(key, value);
+      params.set(key, String(value));
     }
   });
   return request<PolymarketLeaderboardPayload>(`/api/polymarket/users/leaderboard?${params.toString()}`);
+}
+
+export function fetchPolymarketMdd(form: PolymarketMddForm): Promise<PolymarketMddPayload> {
+  const params = new URLSearchParams();
+  Object.entries(form).forEach(([key, value]) => {
+    if (value !== "") {
+      params.set(key, String(value));
+    }
+  });
+  return request<PolymarketMddPayload>(`/api/polymarket/users/mdd?${params.toString()}`);
+}
+
+export function fetchPolymarketMddAudit(key: string): Promise<PolymarketMddAuditExport> {
+  const params = new URLSearchParams({ key });
+  return request<PolymarketMddAuditExport>(`/api/polymarket/users/mdd/export.json?${params.toString()}`);
+}
+
+export function fetchPolymarketMddCache(includeExpired = true): Promise<PolymarketMddCachePayload> {
+  const params = new URLSearchParams({ include_expired: String(includeExpired) });
+  return request<PolymarketMddCachePayload>(`/api/polymarket/users/mdd/cache?${params.toString()}`);
+}
+
+export function fetchPolymarketMddCacheHealth(): Promise<{ source: string; cache: PolymarketMddCachePayload["cache"] }> {
+  return request<{ source: string; cache: PolymarketMddCachePayload["cache"] }>("/api/polymarket/users/mdd/cache/health");
+}
+
+export function purgePolymarketMddCache(payload: PolymarketMddCachePurgeRequest): Promise<PolymarketMddCachePayload> {
+  return request<PolymarketMddCachePayload>("/api/polymarket/users/mdd/cache/purge", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function polymarketMddExportUrl(key: string, format: "json" | "csv"): string {
+  const params = new URLSearchParams({ key });
+  return `${apiBase}/api/polymarket/users/mdd/export.${format}?${params.toString()}`;
 }
 
 export function updateCopySettings(form: CopyForm): Promise<CopyPayload> {

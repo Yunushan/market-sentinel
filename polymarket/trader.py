@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional, Sequence
 
+from .auth_readiness import validate_sdk_trading_readiness
 from .constants import CLOB_API
 
 try:
@@ -40,6 +41,13 @@ class PolymarketTrader:
         if ClobClient is None:
             raise RuntimeError("py-clob-client is not installed. Install requirements.txt first.")
         self.cfg = cfg
+        self.auth_readiness = validate_sdk_trading_readiness(
+            private_key=self.cfg.private_key,
+            signature_type=self.cfg.signature_type,
+            funder_address=self.cfg.funder_address,
+            chain_id=self.cfg.chain_id,
+            host=self.cfg.host,
+        )
         self.client = self._init_client()
 
     def _init_client(self):
@@ -108,3 +116,58 @@ class PolymarketTrader:
         signed = self.client.create_market_order(mo)
         order_type = getattr(OrderType, tif, None) or OrderType.FOK
         return self.client.post_order(signed, order_type)
+
+    def _call_client(self, method_names: Sequence[str], *args: Any, **kwargs: Any) -> Any:
+        last_error: Optional[Exception] = None
+        for method_name in method_names:
+            fn = getattr(self.client, method_name, None)
+            if not callable(fn):
+                continue
+            try:
+                return fn(*args, **kwargs)
+            except TypeError as exc:
+                last_error = exc
+                continue
+        names = ", ".join(method_names)
+        if last_error is not None:
+            raise RuntimeError(f"Polymarket client method signature mismatch for: {names}") from last_error
+        raise RuntimeError(f"Polymarket client does not expose any of: {names}")
+
+    def get_order(self, order_id: str) -> Dict[str, Any]:
+        return self._call_client(("get_order", "get_order_by_id"), order_id)
+
+    def get_orders(self, **filters: Any) -> Any:
+        return self._call_client(("get_orders",), **filters)
+
+    def cancel_order(self, order_id: str) -> Dict[str, Any]:
+        return self._call_client(("cancel", "cancel_order"), order_id)
+
+    def cancel_orders(self, order_ids: Iterable[str]) -> Dict[str, Any]:
+        ids = [str(order_id) for order_id in order_ids if str(order_id)]
+        return self._call_client(("cancel_orders", "cancel_multiple_orders"), ids)
+
+    def cancel_all_orders(self) -> Dict[str, Any]:
+        return self._call_client(("cancel_all", "cancel_all_orders"))
+
+    def cancel_market_orders(self, condition_id: str) -> Dict[str, Any]:
+        return self._call_client(("cancel_market_orders",), condition_id)
+
+    def place_multiple_orders(self, signed_orders: Iterable[Any], tif: str = "FOK") -> Dict[str, Any]:
+        if OrderType is None:
+            raise RuntimeError("py-clob-client missing order types.")
+        order_type = getattr(OrderType, tif, None) or OrderType.FOK
+        return self._call_client(("post_orders", "post_multiple_orders"), list(signed_orders), order_type)
+
+    def get_trades(self, **filters: Any) -> Any:
+        return self._call_client(("get_trades",), **filters)
+
+    def get_order_scoring_status(self, order_id: str) -> Any:
+        return self._call_client(("get_order_scoring_status", "get_order_status"), order_id)
+
+    def send_heartbeat(self) -> Any:
+        return self._call_client(("send_heartbeat", "heartbeat"))
+
+    def get_builder_trades(self, builder_code: str, **filters: Any) -> Any:
+        params: Dict[str, Any] = {"builder_code": builder_code}
+        params.update(filters)
+        return self._call_client(("get_builder_trades",), **params)

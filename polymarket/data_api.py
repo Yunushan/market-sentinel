@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
-import requests
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
-from .constants import DATA_API
+from .endpoints import DATA_ENDPOINTS
+from .http_client import comma_join, request_bytes, request_json
+
+
+def _get_json(endpoint_name: str, *, params: Optional[Mapping[str, Any]] = None, timeout: float = 15.0) -> Any:
+    return request_json(DATA_ENDPOINTS[endpoint_name], params=params, timeout=timeout)
 
 
 def _list_payload(data: Any, keys: List[str]) -> List[Dict[str, Any]]:
@@ -27,18 +31,26 @@ def get_activity(
     market: Optional[List[str]] = None,  # condition IDs
     start: Optional[int] = None,
     end: Optional[int] = None,
+    sort_by: str = "TIMESTAMP",
+    sort_direction: str = "DESC",
     timeout: float = 15.0,
 ) -> List[Dict[str, Any]]:
     """
     Data API: /activity
     Returns trades and activity history for a specified wallet.
     """
+    clean_sort = str(sort_by or "TIMESTAMP").strip().upper()
+    if clean_sort not in {"TIMESTAMP", "TOKENS", "CASH"}:
+        clean_sort = "TIMESTAMP"
+    clean_direction = str(sort_direction or "DESC").strip().upper()
+    if clean_direction not in {"ASC", "DESC"}:
+        clean_direction = "DESC"
     params: Dict[str, Any] = {
         "user": user,
         "limit": max(0, min(int(limit), 500)),
         "offset": max(0, min(int(offset), 10000)),
-        "sortDirection": "DESC",
-        "sortBy": "TIMESTAMP",
+        "sortDirection": clean_direction,
+        "sortBy": clean_sort,
     }
     if types:
         # The docs use enum list; requests will encode repeated params if list passed.
@@ -52,9 +64,7 @@ def get_activity(
     if end is not None:
         params["end"] = int(end)
 
-    r = requests.get(f"{DATA_API}/activity", params=params, timeout=timeout)
-    r.raise_for_status()
-    data = r.json()
+    data = _get_json("activity", params=params, timeout=timeout)
     return data if isinstance(data, list) else []
 
 
@@ -70,9 +80,33 @@ def get_positions(
         "limit": max(0, min(int(limit), 500)),
         "offset": max(0, min(int(offset), 10000)),
     }
-    r = requests.get(f"{DATA_API}/positions", params=params, timeout=timeout)
-    r.raise_for_status()
-    data = r.json()
+    data = _get_json("positions", params=params, timeout=timeout)
+    return data if isinstance(data, list) else []
+
+
+def get_closed_positions(
+    user: str,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    sort_by: str = "TIMESTAMP",
+    sort_direction: str = "ASC",
+    timeout: float = 15.0,
+) -> List[Dict[str, Any]]:
+    clean_sort = str(sort_by or "TIMESTAMP").strip().upper()
+    if clean_sort not in {"REALIZEDPNL", "TITLE", "PRICE", "AVGPRICE", "TIMESTAMP"}:
+        clean_sort = "TIMESTAMP"
+    clean_direction = str(sort_direction or "ASC").strip().upper()
+    if clean_direction not in {"ASC", "DESC"}:
+        clean_direction = "ASC"
+    params = {
+        "user": user,
+        "limit": max(0, min(int(limit), 50)),
+        "offset": max(0, min(int(offset), 100000)),
+        "sortBy": clean_sort,
+        "sortDirection": clean_direction,
+    }
+    data = _get_json("closed_positions", params=params, timeout=timeout)
     return data if isinstance(data, list) else []
 
 
@@ -88,9 +122,7 @@ def get_trades(
         "limit": max(0, min(int(limit), 500)),
         "offset": max(0, min(int(offset), 10000)),
     }
-    r = requests.get(f"{DATA_API}/trades", params=params, timeout=timeout)
-    r.raise_for_status()
-    data = r.json()
+    data = _get_json("trades", params=params, timeout=timeout)
     return data if isinstance(data, list) else []
 
 
@@ -101,6 +133,7 @@ def get_leaderboard(
     sort_by: str = "PNL",
     sort_direction: str = "DESC",
     period: str = "all",
+    category: str = "OVERALL",
     timeout: float = 15.0,
 ) -> List[Dict[str, Any]]:
     """
@@ -113,14 +146,116 @@ def get_leaderboard(
     clean_direction = str(sort_direction or "DESC").strip().upper()
     if clean_direction not in {"ASC", "DESC"}:
         clean_direction = "DESC"
-    clean_period = str(period or "all").strip().lower()
+    clean_period = str(period or "ALL").strip().upper()
+    if clean_period not in {"DAY", "WEEK", "MONTH", "ALL"}:
+        clean_period = "ALL"
+    clean_category = str(category or "OVERALL").strip().upper()
+    if clean_category not in {"OVERALL", "POLITICS", "SPORTS", "CRYPTO", "CULTURE", "MENTIONS", "WEATHER", "ECONOMICS", "TECH", "FINANCE"}:
+        clean_category = "OVERALL"
     params = {
         "limit": max(1, min(int(limit), 50)),
-        "offset": max(0, min(int(offset), 10000)),
-        "sortBy": clean_sort,
-        "sortDirection": clean_direction,
-        "period": clean_period,
+        "offset": max(0, min(int(offset), 1000)),
+        "orderBy": clean_sort,
+        "timePeriod": clean_period,
+        "category": clean_category,
     }
-    r = requests.get(f"{DATA_API}/v1/leaderboard", params=params, timeout=timeout)
-    r.raise_for_status()
-    return _list_payload(r.json(), ["data", "leaderboard", "users", "results"])
+    return _list_payload(_get_json("leaderboard", params=params, timeout=timeout), ["data", "leaderboard", "users", "results"])
+
+
+def get_total_value(
+    user: str,
+    *,
+    market: Optional[Iterable[str]] = None,
+    timeout: float = 15.0,
+) -> List[Dict[str, Any]]:
+    data = _get_json("value", params={"user": user, "market": comma_join(market)}, timeout=timeout)
+    return data if isinstance(data, list) else []
+
+
+def get_total_markets_traded(user: str, *, timeout: float = 15.0) -> Dict[str, Any]:
+    data = _get_json("traded", params={"user": user}, timeout=timeout)
+    return data if isinstance(data, dict) else {}
+
+
+def get_market_positions(
+    market: str,
+    *,
+    user: Optional[str] = None,
+    status: str = "ALL",
+    sort_by: str = "TOTAL_PNL",
+    sort_direction: str = "DESC",
+    limit: int = 50,
+    offset: int = 0,
+    timeout: float = 15.0,
+) -> List[Dict[str, Any]]:
+    data = _get_json(
+        "market_positions",
+        params={
+            "market": market,
+            "user": user,
+            "status": status,
+            "sortBy": sort_by,
+            "sortDirection": sort_direction,
+            "limit": max(0, min(int(limit), 500)),
+            "offset": max(0, min(int(offset), 10000)),
+        },
+        timeout=timeout,
+    )
+    return data if isinstance(data, list) else []
+
+
+def get_top_holders(
+    markets: Iterable[str],
+    *,
+    limit: int = 20,
+    min_balance: int = 1,
+    timeout: float = 15.0,
+) -> List[Dict[str, Any]]:
+    data = _get_json(
+        "holders",
+        params={
+            "market": comma_join(markets),
+            "limit": max(0, min(int(limit), 20)),
+            "minBalance": max(0, min(int(min_balance), 999999)),
+        },
+        timeout=timeout,
+    )
+    return data if isinstance(data, list) else []
+
+
+def get_open_interest(markets: Optional[Iterable[str]] = None, *, timeout: float = 15.0) -> List[Dict[str, Any]]:
+    data = _get_json("oi", params={"market": comma_join(markets)}, timeout=timeout)
+    return data if isinstance(data, list) else []
+
+
+def get_live_volume(event_id: int, *, timeout: float = 15.0) -> List[Dict[str, Any]]:
+    data = _get_json("live_volume", params={"id": int(event_id)}, timeout=timeout)
+    return data if isinstance(data, list) else []
+
+
+def download_accounting_snapshot(user: str, *, timeout: float = 30.0) -> bytes:
+    return request_bytes(DATA_ENDPOINTS["accounting_snapshot"], params={"user": user}, timeout=timeout)
+
+
+def get_builder_leaderboard(
+    *,
+    time_period: str = "DAY",
+    limit: int = 25,
+    offset: int = 0,
+    timeout: float = 15.0,
+) -> List[Dict[str, Any]]:
+    data = _get_json(
+        "builder_leaderboard",
+        params={
+            "timePeriod": str(time_period or "DAY").upper(),
+            "limit": max(0, min(int(limit), 50)),
+            "offset": max(0, min(int(offset), 1000)),
+        },
+        timeout=timeout,
+    )
+    return data if isinstance(data, list) else []
+
+
+def get_builder_volume(*, time_period: str = "DAY", timeout: float = 15.0) -> List[Dict[str, Any]]:
+    data = _get_json("builder_volume", params={"timePeriod": str(time_period or "DAY").upper()}, timeout=timeout)
+    return data if isinstance(data, list) else []

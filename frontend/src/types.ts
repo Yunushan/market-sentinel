@@ -236,12 +236,30 @@ export interface PolymarketUserSearchPayload {
   source: string;
 }
 
-export type PolymarketLeaderboardSort = "roi_pct" | "pnl_usd" | "volume_usd";
+export type PolymarketLeaderboardSort = "roi_pct" | "pnl_usd" | "volume_usd" | "mdd_usd" | "mdd_pct";
+export type PolymarketMddMode = "fast" | "mark_replay";
 
 export interface PolymarketLeaderboardFilters {
   sort: PolymarketLeaderboardSort;
+  direction: "ASC" | "DESC";
   limit: string;
   scan_limit: string;
+  compute_mdd: boolean;
+  mdd_scan_limit: string;
+  mdd_history_limit: string;
+  mdd_activity_limit: string;
+  mdd_trade_limit: string;
+  mdd_open_limit: string;
+  mdd_mode: PolymarketMddMode;
+  mdd_mark_replay_token_limit: string;
+  mdd_mark_replay_point_limit: string;
+  mdd_mark_replay_interval: string;
+  mdd_mark_replay_fidelity: string;
+  mdd_include_accounting: boolean;
+  mdd_accounting_timeout: string;
+  mdd_persist_cache: boolean;
+  mdd_cache_ttl_seconds: string;
+  equity_base_usd: string;
   min_pnl_usd: string;
   max_pnl_usd: string;
   min_volume_usd: string;
@@ -267,7 +285,177 @@ export interface PolymarketLeaderboardRow {
   mdd_usd: number | null;
   mdd_pct: number | null;
   mdd_available: boolean;
+  mdd_method?: string;
+  mdd_pct_basis?: string;
+  mdd_points?: number;
+  mdd_closed_positions?: number;
+  mdd_open_positions?: number;
+  mdd_activity_events?: number;
+  mdd_trade_events?: number;
+  mdd_equity_base_usd?: number | null;
+  mdd_equity_base_source?: string;
+  mdd_public_capital_basis_usd?: number | null;
+  mdd_peak_value?: number | null;
+  mdd_trough_value?: number | null;
+  mdd_peak_timestamp?: number | null;
+  mdd_trough_timestamp?: number | null;
+  mdd_mark_replay_status?: string | null;
+  mdd_mark_replay_tokens?: number | null;
+  mdd_accounting_status?: string | null;
+  mdd_accounting_equity_base_usd?: number | null;
+  mdd_accounting_cash_flow_gap_usd?: number | null;
+  mdd_audit_cache_key?: string | null;
+  mdd_audit_cache_stored?: boolean;
   raw: Record<string, unknown>;
+}
+
+export interface PolymarketRateLimitStatus {
+  limited: boolean;
+  backoff_status: string;
+  events: Array<Record<string, unknown>>;
+}
+
+export interface PolymarketAnalyticsCacheStatus {
+  enabled: boolean;
+  path: string;
+  exists: boolean;
+  entries: number;
+  max_entries: number;
+  ttl_seconds: number;
+  size_bytes: number;
+}
+
+export interface PolymarketMddCacheMetadata {
+  key?: string | null;
+  kind?: string | null;
+  stored?: boolean;
+  enabled?: boolean;
+  hit?: boolean;
+  expired?: boolean;
+  path?: string;
+  stored_at?: number | null;
+  expires_at?: number | null;
+  entries?: number;
+  max_entries?: number;
+  ttl_seconds?: number;
+  size_bytes?: number;
+  exists?: boolean;
+  error?: string;
+}
+
+export interface PolymarketMddPoint {
+  timestamp?: number | string | null;
+  value?: number | string | null;
+  source?: string | null;
+  kind?: string | null;
+  [key: string]: unknown;
+}
+
+export interface PolymarketMddPayload {
+  wallet?: string | null;
+  mdd_usd: number | null;
+  mdd_pct: number | null;
+  mdd_available: boolean;
+  mdd_method: string;
+  mdd_pct_basis: string;
+  points: PolymarketMddPoint[];
+  points_total?: number;
+  closed_positions?: number;
+  open_positions?: number;
+  activity_events?: number;
+  trade_events?: number;
+  equity_base_usd?: number | null;
+  equity_base_source?: string | null;
+  public_capital_basis_usd?: number | null;
+  peak_value?: number | null;
+  trough_value?: number | null;
+  peak_timestamp?: number | null;
+  trough_timestamp?: number | null;
+  assumptions?: string[];
+  limitations?: string[];
+  warnings?: string[];
+  audit_cache?: PolymarketMddCacheMetadata;
+  rate_limit?: PolymarketRateLimitStatus;
+  accounting_snapshot?: Record<string, unknown>;
+  mark_replay?: Record<string, unknown>;
+  fallback_v2?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface PolymarketMddForm {
+  wallet: string;
+  mode: PolymarketMddMode;
+  closed_limit: string;
+  activity_limit: string;
+  trade_limit: string;
+  open_limit: string;
+  max_points: string;
+  equity_base_usd: string;
+  mark_replay_token_limit: string;
+  mark_replay_interval: string;
+  mark_replay_fidelity: string;
+  include_accounting_snapshot: boolean;
+  persist_cache: boolean;
+}
+
+export interface PolymarketMddAuditExport {
+  cache: PolymarketMddCacheMetadata;
+  payload: PolymarketMddPayload;
+  export: {
+    format: string;
+    source: string;
+  };
+}
+
+export interface PolymarketMddCacheEntry extends PolymarketMddCacheMetadata {
+  params?: Record<string, unknown>;
+  wallet?: string | null;
+  mdd_method?: string | null;
+  mdd_available?: boolean;
+  mdd_usd?: number | null;
+  mdd_pct?: number | null;
+  equity_base_usd?: number | null;
+  peak_value?: number | null;
+  trough_value?: number | null;
+  peak_timestamp?: number | null;
+  trough_timestamp?: number | null;
+  points_total?: number;
+  payload_bytes?: number;
+  ttl_remaining_seconds?: number | null;
+  age_seconds?: number | null;
+}
+
+export interface PolymarketMddCachePayload {
+  source: string;
+  cache: PolymarketAnalyticsCacheStatus & {
+    active_entries?: number;
+    expired_entries?: number;
+    newest_stored_at?: number | null;
+    oldest_stored_at?: number | null;
+    created_at?: number | null;
+    updated_at?: number | null;
+    kind?: string | null;
+    kinds?: string[];
+    version?: number;
+  };
+  entries: PolymarketMddCacheEntry[];
+  counts: {
+    entries: number;
+    active_entries: number;
+    expired_entries: number;
+  };
+  deleted?: number;
+  deleted_keys?: string[];
+  missing_keys?: string[];
+  requested?: number;
+  message?: string;
+}
+
+export interface PolymarketMddCachePurgeRequest {
+  key?: string;
+  keys?: string[];
+  expired_only?: boolean;
+  all?: boolean;
 }
 
 export interface PolymarketLeaderboardPayload {
@@ -276,17 +464,39 @@ export interface PolymarketLeaderboardPayload {
     returned: number;
     filtered: number;
     scanned: number;
+    mdd_computed: number;
   };
   sort: PolymarketLeaderboardSort;
   direction: "ASC" | "DESC";
   period: string;
+  category: string;
   limit: number;
   scan_limit: number;
+  mdd_scan_limit: number;
+  mdd_history_limit: number;
+  mdd_activity_limit: number;
+  mdd_trade_limit: number;
+  mdd_open_limit: number;
+  mdd_mode: PolymarketMddMode;
+  mdd_mark_replay_token_limit: number;
+  mdd_mark_replay_point_limit: number;
+  mdd_mark_replay_interval: string;
+  mdd_mark_replay_fidelity: number;
+  mdd_include_accounting: boolean;
+  mdd_accounting_timeout: number;
+  mdd_persist_cache: boolean;
+  mdd_cache_ttl_seconds: number;
+  analytics_cache: PolymarketAnalyticsCacheStatus;
+  rate_limit: PolymarketRateLimitStatus;
   source: string;
   source_sort: string;
   ranking_scope: string;
   mdd_available: boolean;
+  mdd_method: string;
+  mdd_pct_basis: string;
   mdd_note: string;
+  mdd_assumptions: string[];
+  mdd_limitations: string[];
   warnings: string[];
 }
 
@@ -382,6 +592,128 @@ export interface LivePreflightPayload {
   message: string;
   error?: string;
   live_safety: LiveSafetyPayload;
+}
+
+export interface PolymarketValidationItem {
+  status: string;
+  detail: string;
+  missing?: string[];
+  blockers?: string[];
+  next_step?: string;
+  live_action?: boolean;
+  [key: string]: unknown;
+}
+
+export interface PolymarketLiveValidationPayload {
+  generated_at: number;
+  market_id: string;
+  mode: string;
+  selected: boolean;
+  enabled: boolean;
+  credential_presence: Record<string, Record<string, boolean>>;
+  clob_auth_readiness: Record<string, unknown>;
+  public_checks: Record<string, PolymarketValidationItem>;
+  authenticated_read_checks: Record<string, PolymarketValidationItem>;
+  bridge_address_checks: Record<string, PolymarketValidationItem>;
+  funded_live_order_check: PolymarketValidationItem;
+  live_order_cancel_harness: Record<string, unknown>;
+  operator_commands: Record<string, string>;
+  funded_execution_exposed: boolean;
+  notes: string[];
+  stage_gates: {
+    public_live_checks: string;
+    credential_readiness: string;
+    credentialed_read_checks: string;
+    bridge_address_checks: string;
+    funded_live_order_check: string;
+    credentialed_read_ok: boolean;
+    safe_to_attempt_funded_order: boolean;
+    requires_explicit_live_approval: boolean;
+    next_step: string;
+    [key: string]: unknown;
+  };
+}
+
+export interface PolymarketLiveValidationReportSummary {
+  generated_at?: number | null;
+  market_id?: string | null;
+  mode?: string | null;
+  selected?: boolean;
+  enabled?: boolean;
+  public_live_checks?: string | null;
+  credential_readiness?: string | null;
+  credentialed_read_checks?: string | null;
+  bridge_address_checks?: string | null;
+  funded_live_order_check?: string | null;
+  credentialed_read_ok?: boolean;
+  safe_to_attempt_funded_order?: boolean;
+  requires_explicit_live_approval?: boolean;
+  next_step?: string | null;
+  funded_execution_exposed?: boolean;
+  direct_l2_read_ready?: boolean;
+  sdk_trading_ready?: boolean;
+  [key: string]: unknown;
+}
+
+export interface PolymarketLiveValidationReportEntry {
+  key?: string | null;
+  kind?: string | null;
+  source: string;
+  label: string;
+  stored_at?: number | null;
+  stored_at_ns?: number | null;
+  age_seconds?: number | null;
+  path?: string;
+  payload_bytes?: number | null;
+  summary?: PolymarketLiveValidationReportSummary;
+  payload?: PolymarketLiveValidationPayload | Record<string, unknown>;
+}
+
+export interface PolymarketLiveValidationReportsPayload {
+  source: string;
+  cache: {
+    path: string;
+    exists: boolean;
+    entries: number;
+    max_entries: number;
+    size_bytes: number;
+    version: number;
+    created_at?: number | null;
+    updated_at?: number | null;
+    newest_stored_at?: number | null;
+    oldest_stored_at?: number | null;
+  };
+  entries: PolymarketLiveValidationReportEntry[];
+  counts: {
+    entries: number;
+  };
+  comparison?: {
+    latest_key?: string | null;
+    previous_key?: string | null;
+    changed: boolean;
+    changes: Array<{
+      field: string;
+      previous: unknown;
+      latest: unknown;
+    }>;
+  } | null;
+  stored?: PolymarketLiveValidationReportEntry & {
+    stored?: boolean;
+    entries?: number;
+    max_entries?: number;
+  };
+  deleted?: number;
+  deleted_keys?: string[];
+  missing_keys?: string[];
+  requested?: number;
+  message?: string;
+}
+
+export interface PolymarketLiveValidationReportStoreRequest {
+  label?: string;
+  source?: string;
+  report_json?: string;
+  report?: Record<string, unknown>;
 }
 
 export interface ConfigPayload {
@@ -535,5 +867,7 @@ export interface AppStatePayload {
   wallets: WalletsPayload;
   copy: CopyPayload;
   live_safety: LiveSafetyPayload;
+  polymarket_live_validation: PolymarketLiveValidationPayload;
+  polymarket_live_validation_reports: PolymarketLiveValidationReportsPayload;
   paper: PaperPayload;
 }
