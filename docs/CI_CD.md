@@ -109,7 +109,7 @@ Once `frontend/package-lock.json` exists, CI automatically prefers `npm ci` for 
 
 ## Windows Release Packages
 
-Windows artifacts are produced by `scripts/build_windows_release.py` on the `windows-latest` GitHub Actions runner.
+Windows artifacts are produced by `scripts/build_windows_release.py` on the `windows-latest` GitHub Actions runner. The release workflow pins WiX Toolset `6.0.2` for MSI packaging so the build is deterministic and does not silently accept newer WiX EULA prompts in CI.
 
 The portable zip contains:
 
