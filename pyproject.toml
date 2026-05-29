@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "prediction-market-alert-and-copy-trade-gui"
-version = "0.1.0"
+version = "1.0.0"
 description = "Local Tkinter GUI for multi-market prediction-market alerts, wallet tracking, and guarded copy trading."
 readme = "README.md"
 requires-python = ">=3.10,<3.15"
