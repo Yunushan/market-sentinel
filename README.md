@@ -53,8 +53,9 @@ A local multi-market prediction-market GUI app (Tkinter) for:
 - `polymarket.ws_market`, `polymarket.ws_user`, and `polymarket.ws_sports` cover market, authenticated user, and sports WebSocket channels
 - `polymarket.endpoints` and `polymarket.http_client` centralize official endpoint metadata, auth tiers, documented batch caps, retry/rate-limit handling, typed Polymarket errors, and response normalization helpers used by the wrappers
 - `polymarket.auth_readiness` and `GET /api/polymarket/clob-readiness` report redacted CLOB v2 readiness for private key, signature type, funder/deposit wallet, L1 headers, and L2 read-only REST headers without deriving credentials or placing orders
+- `polymarket.credential_runbook` and `scripts/verify_polymarket_credentials.py` build a local no-network credential runbook with redacted environment inventory, exact operator commands, and no funded-action path
 - `GET /api/polymarket/live-validation` reports the local Polymarket live-validation stage gates for public probes, credential readiness, authenticated reads, user WebSocket checks, bridge checks, and funded order/cancel status without running funded actions from the GUI/API
-- `polymarket.live_reports` and `GET/POST/DELETE /api/polymarket/live-validation/reports` persist redacted local live-validation snapshots, import CLI JSON reports, and compare the latest two stage-gate summaries without exposing funded execution in the GUI/API
+- `polymarket.live_reports` and `GET/POST/DELETE /api/polymarket/live-validation/reports` persist redacted local live-validation snapshots, import/export CLI JSON reports, open stored reports by key, and compare the latest two stage-gate summaries without exposing funded execution in the GUI/API
 - `polymarket.mdd` builds historical MDD v2 payloads from public Data API closed positions, current positions, activity, and trades; it reports USD/% drawdown, capital-basis source, pagination limits, cache boundaries, assumptions, and limitations
 - `polymarket.mdd` also exposes an opt-in CLOB mark-replay mode using `/batch-prices-history`; the default API mode remains fast MDD v2 to avoid heavy price-history calls during normal scans
 - `polymarket.accounting` parses `/v1/accounting/snapshot` ZIP CSVs and can reconcile MDD payloads against equity, positions, deposits, withdrawals, and cash-flow gaps when explicitly requested
@@ -72,7 +73,63 @@ Polymarket coverage is intentionally reported by verification tier, not as a sin
 | `credential_live_verified` | Real credentialed read/stream verified. Currently blocked without credentials. |
 | `funded_live_verified` | Funded order/cancel or fund-movement flow verified. Currently blocked without explicit credentials and live-action approval. |
 
-Current truthful status: public Gamma/Data/CLOB/Bridge probes pass; endpoint contracts are hardened offline against documented paths, auth tiers, and batch caps; CLOB authentication readiness is validated locally and redacted in API payloads; authenticated CLOB, user WebSocket, Relayer, Bridge address/fund movement, and funded order/cancel verification are blocked until credentials and explicit live parameters are supplied.
+Current truthful status: public Gamma/Data/CLOB/Bridge probes pass; endpoint contracts are hardened offline against documented paths, auth tiers, and batch caps; CLOB authentication readiness and the credential runbook are validated locally with redacted payloads; authenticated CLOB, user WebSocket, Relayer, Bridge address/fund movement, and funded order/cancel verification are blocked until credentials and explicit live parameters are supplied.
+
+Stored live-validation reports include a promotion guard before they can support production verification claims:
+
+| Promotion tier | Required evidence |
+| --- | --- |
+| `credential_live_verified` | An actual `ok` non-destructive authenticated CLOB L2 order-list read, relayer authenticated read, or authenticated user WebSocket connection in `authenticated_read_checks`. A stage-gate boolean or credential runbook is not enough. |
+| `funded_live_verified` | An `ok` funded order/cancel result with `live_action=true`, an order id, placed/cancel/post-cancel audit sections, and `post_cancel_verified=true`. Dry-run transcripts and `ready_to_execute` reports do not promote this tier. |
+
+Reports with local-only modes such as GUI readiness snapshots, credential runbooks, or browser smoke fixtures are always blocked from promotion even if they contain simulated successful fields.
+
+Imported live-validation reports are schema-checked before storage. Accepted modes are `strict_cli`, `local_readiness_only`, `credential_runbook_no_funded_actions`, `browser_smoke`, and `browser_smoke_seed`. Live-stage reports must include an object `stage_gates`; credential runbook reports must include `env_inventory`, `readiness`, `funded_execution_exposed=false`, and no network-call mode. Malformed `POST /api/polymarket/live-validation/reports` imports return HTTP 400 with `live_validation_report_schema_error` and structured `schema_validation` errors/warnings instead of writing a bad report. Stored reports also include a stable SHA-256 redacted payload hash plus source-file provenance when available. Duplicate imports skip storage by default while recording a duplicate audit event; operators can explicitly set `allow_duplicate=true` through the API/UI or `--allow-duplicate` in the replay CLI to preserve a second full audit entry. The React Live Safety report import panel shows the accepted-mode reference plus schema diagnostics from the last import/store/open action, and opened/exported reports preserve the same metadata. See `docs/POLYMARKET_LIVE_REPORT_SCHEMA.md` for the accepted shapes and deterministic valid/invalid fixture reports.
+
+Existing report files can be replayed offline before import. The replay CLI validates one or more JSON reports, prints schema diagnostics plus guarded credential/funded promotion summaries, and never performs network or funded actions:
+
+```powershell
+python scripts/replay_polymarket_live_reports.py live-report.json live-auth-report.json
+python scripts/replay_polymarket_live_reports.py --json live-report.json
+python scripts/replay_polymarket_live_reports.py --import --label-prefix replay live-auth-report.json
+python scripts/replay_polymarket_live_reports.py --import --allow-duplicate live-auth-report.json
+```
+
+`--import` stores only schema-valid reports through the redacted local report store; invalid files are reported and skipped. Duplicate redacted payload hashes are skipped by default with an audit event, unless `--allow-duplicate` is supplied. See `docs/POLYMARKET_LIVE_REPORT_REPLAY.md` for options and verification behavior.
+
+Stored reports can also be exported as operator review bundles without exposing the raw report payload:
+
+```powershell
+curl http://127.0.0.1:8765/api/polymarket/live-validation/reports/<REPORT_KEY>/review.json
+curl http://127.0.0.1:8765/api/polymarket/live-validation/reports/<REPORT_KEY>/review.md
+```
+
+The bundle combines schema status, redacted payload hash/provenance, duplicate history, guarded promotion evidence/blockers, source CLI commands, and coverage-tier mapping. It is evidence for human review only and keeps `static_coverage_mutated=false`; it does not promote credentialed or funded production verification by itself. See `docs/POLYMARKET_LIVE_REPORT_REVIEW_BUNDLE.md`.
+
+Promotion decisions are recorded in a separate no-secrets ledger. Each decision requires
+the report key, redacted payload hash, target tier, `accepted`/`rejected` decision,
+reviewer note, and current review-bundle hash. Payload-hash or review-hash mismatches
+fail closed, and blocked credential/funded tiers cannot be accepted without qualifying
+review-bundle evidence:
+
+```powershell
+python scripts/review_polymarket_live_decisions.py --report-key <REPORT_KEY> --print-review-input
+python scripts/review_polymarket_live_decisions.py --export-ledger --markdown
+python scripts/review_polymarket_live_decisions.py --export-proposal --markdown
+```
+
+The ledger exports at `/api/polymarket/live-validation/decisions/export.json` and
+`/api/polymarket/live-validation/decisions/export.md` keep `static_coverage_mutated=false`
+and do not mutate coverage by themselves. See `docs/POLYMARKET_LIVE_REPORT_DECISION_LEDGER.md`.
+Accepted decisions can also be exported as a no-automerge coverage/docs promotion
+proposal at `/api/polymarket/live-validation/promotion-proposal/export.json` and
+`/api/polymarket/live-validation/promotion-proposal/export.md`. The proposal detects
+stale payload/review-bundle hashes, keeps `static_coverage_mutated=false`, and is only
+input for a later human-authored patch. The React Live Safety tab includes a read-only
+Promotion Proposal Preview with target-tier filtering, review gates, accepted/stale
+counts, candidate/change tables, optional no-secrets proposal snapshot archive
+controls, stale snapshot warnings, and no apply action. See
+`docs/POLYMARKET_LIVE_REPORT_PROMOTION_PROPOSAL.md`.
 
 Authenticated CLOB readiness follows the official Polymarket split between L1/L2 authentication and local order signing:
 
@@ -83,6 +140,26 @@ Authenticated CLOB readiness follows the official Polymarket split between L1/L2
 | L1 REST readiness | Reports presence of `POLY_ADDRESS`, `POLY_SIGNATURE`, `POLY_TIMESTAMP`, and `POLY_NONCE`; it does not synthesize signatures. |
 | Redaction | Private keys and signed headers are never returned by readiness payloads; addresses are shortened. |
 | Live action boundary | Readiness never derives API credentials, submits orders, or moves funds. Funded checks remain behind `scripts/verify_polymarket_live.py` explicit flags. |
+
+The credential runbook is the first local step before any credentialed live validation. It performs no network calls and only inventories whether required environment variables are present:
+
+| Runbook group | Variables |
+| --- | --- |
+| SDK trading credentials | `POLYMARKET_PRIVATE_KEY` or `PRIVATE_KEY`; optional `POLYMARKET_SIGNATURE_TYPE` or `SIGNATURE_TYPE`; `POLYMARKET_FUNDER_ADDRESS`, `FUNDER_ADDRESS`, or `DEPOSIT_WALLET_ADDRESS` when the signature type requires a funder/deposit wallet. |
+| Direct CLOB L2 reads | `POLY_ADDRESS`, `POLY_API_KEY`, `POLY_PASSPHRASE`, `POLY_SIGNATURE`, and `POLY_TIMESTAMP`. |
+| CLOB L1 REST headers | `POLY_ADDRESS`, `POLY_SIGNATURE`, `POLY_TIMESTAMP`, and `POLY_NONCE`. |
+| User WebSocket | `POLY_API_KEY`, `POLY_API_SECRET` or `POLY_SECRET`, and `POLY_PASSPHRASE`. |
+| Relayer | `RELAYER_API_KEY` and `RELAYER_API_KEY_ADDRESS`. |
+| Builder API | `POLY_BUILDER_API_KEY`, `POLY_BUILDER_TIMESTAMP`, `POLY_BUILDER_PASSPHRASE`, and `POLY_BUILDER_SIGNATURE`. |
+
+Use it to create a redacted inventory report:
+
+```powershell
+python scripts/verify_polymarket_credentials.py --json --report-file polymarket-credential-runbook.json
+python scripts/verify_polymarket_credentials.py --require-authenticated-read-ready
+```
+
+`--require-authenticated-read-ready` exits non-zero until at least one non-destructive authenticated read/stream candidate is locally ready. The runbook output includes exact follow-up commands for public readiness, credentialed reads, user WebSocket probing, dry-run order/cancel transcripts, and the separate funded order/cancel command. The funded command still requires explicit live flags, allow-listed token id, hard caps, maker-side orderbook preflight, and the exact confirmation text; the runbook itself cannot execute it.
 
 The funded live order/cancel verifier is also disabled by default. Running
 `python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <PRICE> --size <SIZE> --allow-token-id <TOKEN>`
@@ -259,7 +336,24 @@ Useful local API endpoints:
 - `GET /api/polymarket/coverage` returns the official Polymarket API coverage manifest and live-validation requirements.
 - `GET /api/polymarket/live-validation` returns the current local Polymarket live-validation stage-gate report for the React Live Safety view.
 - `GET /api/polymarket/live-validation/reports` lists stored redacted live-validation report snapshots and the latest-vs-previous stage-gate comparison.
+- `GET /api/polymarket/live-validation/reports/{key}` opens one stored redacted live-validation report with metadata and payload.
+- `GET /api/polymarket/live-validation/reports/{key}/export.json` downloads one stored redacted live-validation report as a JSON audit file.
+- `GET /api/polymarket/live-validation/reports/{key}/review.json` downloads one sanitized promotion review bundle.
+- `GET /api/polymarket/live-validation/reports/{key}/review.md` downloads the same review bundle as Markdown.
+- `GET /api/polymarket/live-validation/decisions` lists the no-secrets promotion decision ledger.
+- `GET /api/polymarket/live-validation/decisions/export.json` downloads the decision ledger as JSON.
+- `GET /api/polymarket/live-validation/decisions/export.md` downloads the decision ledger as Markdown.
+- `GET /api/polymarket/live-validation/promotion-proposal` builds a no-automerge coverage/docs proposal from accepted decisions.
+- `GET /api/polymarket/live-validation/promotion-proposal/export.json` downloads the proposal as JSON.
+- `GET /api/polymarket/live-validation/promotion-proposal/export.md` downloads the proposal as Markdown.
+- `GET /api/polymarket/live-validation/promotion-proposal/snapshots` lists stored no-secrets proposal snapshots.
+- `POST /api/polymarket/live-validation/promotion-proposal/snapshots` stores the current proposal as a bounded local snapshot.
+- `GET /api/polymarket/live-validation/promotion-proposal/snapshots/{key}` opens one proposal snapshot with current-hash staleness metadata.
+- `GET /api/polymarket/live-validation/promotion-proposal/snapshots/{key}/export.json` downloads one proposal snapshot as JSON.
+- `GET /api/polymarket/live-validation/promotion-proposal/snapshots/{key}/export.md` downloads one proposal snapshot as Markdown.
+- `DELETE /api/polymarket/live-validation/promotion-proposal/snapshots/{key}` deletes one proposal snapshot.
 - `POST /api/polymarket/live-validation/reports` stores the current GUI readiness snapshot or imports a CLI JSON report from `report_json`.
+- `POST /api/polymarket/live-validation/decisions` records a review-bundle decision after validating report key, payload hash, target tier, decision, reviewer note, and review-bundle hash.
 - `DELETE /api/polymarket/live-validation/reports/{key}` deletes one stored live-validation report snapshot.
 - `GET /api/copy` returns copy-trading settings, tracked-wallet status, and live gate state.
 - `PATCH /api/copy` updates simulation-first copy settings, including multiple followed wallets, bounded copy percentage (`0..100`), and conflict-guard settings.
@@ -352,6 +446,7 @@ This runs:
 - Windows launch UX checks
 - Tkinter fallback smoke checks
 - frontend build readiness checks; the build is skipped unless `frontend/node_modules` exists
+- optional Live Safety report-history browser smoke checks when `--frontend-live-smoke` is supplied
 - offline unit tests for config/storage, API wrapper parsing, alert crossing, copy-trade percentage sizing, and wallet activity de-duplication
 
 Pytest is included in `requirements.txt`; run the pytest suite directly with:
@@ -376,6 +471,13 @@ Strict final frontend verification:
 python verify.py --frontend-build
 ```
 
+Strict frontend verification plus Live Safety report-history browser smoke:
+```bash
+python verify.py --frontend-build --frontend-live-smoke
+```
+
+The browser smoke uses temporary config/report files, seeds a redacted local Polymarket validation report, checks the built React Live Safety route with a local Chromium/Edge headless browser, and exercises stored report open/export routes without credentials or funded actions. If a browser is not auto-detected, set `PREDICTION_MARKET_BROWSER_PATH` or run the direct script with `--browser-path`.
+
 If `frontend/node_modules` is missing, the normal verifier records frontend build readiness and skips the build. The strict command above fails until `npm install` or `build_web_gui.bat` has completed successfully.
 
 ## CI/CD and Releases
@@ -394,7 +496,7 @@ In-app checks:
 - **Copy Trading -> Check Geoblock** verifies whether live trading should be blocked for the current location.
 - **Markets** displays selected-adapter health and edits live safety gates without touching credentials.
 - Disabled markets remain visible but adapter-backed actions are blocked until enabled in **Markets** or **Live Safety**.
-- **Live Safety** displays selected-market live gate status, blockers, max caps, acknowledgement, redacted preflight audits, the Polymarket live-validation stage-gate report, and local redacted report history/import/compare controls.
+- **Live Safety** displays selected-market live gate status, blockers, max caps, acknowledgement, redacted preflight audits, the Polymarket live-validation stage-gate report, and local redacted report history/import/open/export/compare controls.
 - **Alerts** creates, edits, toggles, deletes, and refreshes market-scoped price alerts.
 - **Alerts** exposes last trade, midpoint, best bid, and best ask source selection for each alert.
 - **Alerts -> Refresh Prices** polls adapter-backed current price state and updates trigger status without placing orders.

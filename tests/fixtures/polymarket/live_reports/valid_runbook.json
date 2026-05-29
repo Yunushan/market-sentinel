@@ -1,0 +1,21 @@
+{
+  "env_inventory": {
+    "direct_l2_read_headers": {
+      "status": "blocked"
+    },
+    "user_websocket_auth": {
+      "status": "blocked"
+    }
+  },
+  "funded_execution_exposed": false,
+  "generated_at": 1780000003.0,
+  "mode": "credential_runbook_no_funded_actions",
+  "network_calls": "none",
+  "readiness": {
+    "non_destructive_auth_ready": false
+  },
+  "safety_boundaries": [
+    "This runbook performs no network calls.",
+    "This runbook never signs, places, cancels, or submits funded actions."
+  ]
+}

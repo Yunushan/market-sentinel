@@ -1,0 +1,20 @@
+{
+  "funded_execution_exposed": false,
+  "generated_at": 1780000004.0,
+  "market_id": "polymarket",
+  "mode": "browser_smoke_seed",
+  "notes": [
+    "Seeded browser-smoke report; no credentials or funded actions are used."
+  ],
+  "stage_gates": {
+    "bridge_address_checks": "blocked",
+    "credential_readiness": "blocked",
+    "credentialed_read_checks": "blocked",
+    "credentialed_read_ok": false,
+    "funded_live_order_check": "blocked",
+    "next_step": "browser smoke uses seeded local reports only",
+    "public_live_checks": "passed",
+    "requires_explicit_live_approval": true,
+    "safe_to_attempt_funded_order": false
+  }
+}

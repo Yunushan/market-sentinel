@@ -9,6 +9,7 @@ import {
   Database,
   Download,
   Edit3,
+  Eye,
   Power,
   Radio,
   RefreshCw,
@@ -24,6 +25,8 @@ import {
   XCircle
 } from "lucide-react";
 import {
+  ApiRequestError,
+  apiSchemaValidation,
   createAlert,
   createWallet,
   clearPaperMarks,
@@ -31,16 +34,32 @@ import {
   clearPaperHistory,
   deleteAlert,
   deletePolymarketLiveValidationReport,
+  deletePolymarketLiveValidationPromotionProposalSnapshot,
   deleteWallet,
   fillPaperQuoteLimit,
   fetchLiveSafety,
   fetchPolymarketLeaderboard,
+  fetchPolymarketLiveValidationDecisions,
   fetchPolymarketLiveValidation,
+  fetchPolymarketLiveValidationPromotionProposal,
+  fetchPolymarketLiveValidationPromotionProposalSnapshot,
+  fetchPolymarketLiveValidationPromotionProposalSnapshots,
+  fetchPolymarketLiveValidationReport,
+  fetchPolymarketLiveValidationReportReview,
   fetchPolymarketLiveValidationReports,
   fetchPolymarketMdd,
   fetchPolymarketMddAudit,
   fetchPolymarketMddCache,
   fetchState,
+  polymarketLiveValidationReportExportUrl,
+  polymarketLiveValidationDecisionLedgerJsonUrl,
+  polymarketLiveValidationDecisionLedgerMarkdownUrl,
+  polymarketLiveValidationPromotionProposalJsonUrl,
+  polymarketLiveValidationPromotionProposalMarkdownUrl,
+  polymarketLiveValidationPromotionProposalSnapshotJsonUrl,
+  polymarketLiveValidationPromotionProposalSnapshotMarkdownUrl,
+  polymarketLiveValidationReportReviewJsonUrl,
+  polymarketLiveValidationReportReviewMarkdownUrl,
   polymarketMddExportUrl,
   pollWallets,
   previewLivePreflight,
@@ -55,6 +74,8 @@ import {
   searchPolymarketUsers,
   submitPaperOrder,
   storePolymarketLiveValidationReport,
+  storePolymarketLiveValidationDecision,
+  storePolymarketLiveValidationPromotionProposalSnapshot,
   updateAlert,
   updateCopySettings,
   updateConfig,
@@ -83,6 +104,12 @@ import type {
   PolymarketLeaderboardFilters,
   PolymarketLeaderboardPayload,
   PolymarketLeaderboardSort,
+  PolymarketLiveValidationDecisionLedgerPayload,
+  PolymarketLiveValidationPromotionProposalPayload,
+  PolymarketLiveValidationPromotionProposalSnapshotPayload,
+  PolymarketLiveValidationPromotionProposalSnapshotsPayload,
+  PolymarketLiveValidationReportPayload,
+  PolymarketLiveValidationReportSchemaValidation,
   PolymarketLiveValidationReportsPayload,
   PolymarketLiveValidationPayload,
   PolymarketMddAuditExport,
@@ -102,6 +129,13 @@ import "./styles.css";
 
 type Tab = "overview" | "markets" | "analytics" | "live" | "alerts" | "wallets" | "paper" | "settings";
 const TABS: Tab[] = ["overview", "markets", "analytics", "live", "alerts", "wallets", "paper", "settings"];
+
+interface LiveValidationDecisionForm {
+  target_tier: string;
+  decision: "accepted" | "rejected";
+  reviewer: string;
+  reviewer_note: string;
+}
 
 function isTab(value: string | null): value is Tab {
   return TABS.includes(value as Tab);
@@ -171,6 +205,29 @@ function formatBytes(value: number | null | undefined): string {
   return `${(value / (1024 * 1024)).toLocaleString(undefined, { maximumFractionDigits: 1 })} MB`;
 }
 
+function formatHash(value: string | null | undefined): string {
+  const clean = String(value ?? "").trim();
+  if (!clean) {
+    return "-";
+  }
+  return clean.length > 16 ? `${clean.slice(0, 12)}...${clean.slice(-6)}` : clean;
+}
+
+function proposalValue(row: Record<string, unknown> | undefined, key: string): string {
+  const value = row?.[key];
+  if (value === null || value === undefined || value === "") {
+    return "-";
+  }
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 function formatAuditValue(value: unknown): string {
   if (Array.isArray(value)) {
     return value.length ? value.map((item) => String(item)).join(", ") : "-";
@@ -218,6 +275,29 @@ function validationTone(status: string | undefined): "good" | "warn" | "neutral"
     return "warn";
   }
   return "neutral";
+}
+
+function schemaValidationTone(validation: PolymarketLiveValidationReportSchemaValidation | null | undefined): "good" | "warn" | "neutral" {
+  if (!validation) {
+    return "neutral";
+  }
+  if (!validation.ok || validation.errors.length) {
+    return "warn";
+  }
+  return validation.warnings.length ? "warn" : "good";
+}
+
+function schemaValidationLabel(validation: PolymarketLiveValidationReportSchemaValidation | null | undefined): string {
+  if (!validation) {
+    return "schema: unknown";
+  }
+  if (!validation.ok || validation.errors.length) {
+    return `schema: rejected (${validation.errors.length})`;
+  }
+  if (validation.warnings.length) {
+    return `schema: accepted with ${validation.warnings.length} warning(s)`;
+  }
+  return "schema: accepted";
 }
 
 function emptyAlertForm(marketId = "polymarket"): AlertForm {
@@ -371,9 +451,27 @@ export default function App() {
   const [copyPreview, setCopyPreview] = useState<CopyTradePreview | null>(null);
   const [liveSafety, setLiveSafety] = useState<LiveSafetyPayload | null>(null);
   const [liveValidation, setLiveValidation] = useState<PolymarketLiveValidationPayload | null>(null);
+  const [liveValidationReportDetail, setLiveValidationReportDetail] = useState<PolymarketLiveValidationReportPayload | null>(null);
   const [liveValidationReports, setLiveValidationReports] = useState<PolymarketLiveValidationReportsPayload | null>(null);
+  const [liveValidationDecisions, setLiveValidationDecisions] = useState<PolymarketLiveValidationDecisionLedgerPayload | null>(null);
+  const [liveValidationPromotionProposal, setLiveValidationPromotionProposal] =
+    useState<PolymarketLiveValidationPromotionProposalPayload | null>(null);
+  const [liveValidationPromotionProposalTargetTier, setLiveValidationPromotionProposalTargetTier] = useState("");
+  const [liveValidationPromotionProposalSnapshots, setLiveValidationPromotionProposalSnapshots] =
+    useState<PolymarketLiveValidationPromotionProposalSnapshotsPayload | null>(null);
+  const [liveValidationPromotionProposalSnapshotDetail, setLiveValidationPromotionProposalSnapshotDetail] =
+    useState<PolymarketLiveValidationPromotionProposalSnapshotPayload | null>(null);
+  const [liveValidationDecisionForm, setLiveValidationDecisionForm] = useState<LiveValidationDecisionForm>({
+    target_tier: "credential_live_verified",
+    decision: "rejected",
+    reviewer: "operator",
+    reviewer_note: ""
+  });
   const [liveValidationImport, setLiveValidationImport] = useState("");
+  const [liveValidationAllowDuplicate, setLiveValidationAllowDuplicate] = useState(false);
   const [liveValidationReportMessage, setLiveValidationReportMessage] = useState("");
+  const [liveValidationReportSchemaValidation, setLiveValidationReportSchemaValidation] =
+    useState<PolymarketLiveValidationReportSchemaValidation | null>(null);
   const [liveValidationReportBusyKey, setLiveValidationReportBusyKey] = useState<string | null>(null);
   const [livePreflight, setLivePreflight] = useState<LivePreflightPayload | null>(null);
   const [liveMessage, setLiveMessage] = useState("");
@@ -418,6 +516,7 @@ export default function App() {
       setLiveSafety(state.live_safety);
       setLiveValidation(state.polymarket_live_validation);
       setLiveValidationReports(state.polymarket_live_validation_reports);
+      setLiveValidationReportSchemaValidation(state.polymarket_live_validation_reports.entries[0]?.schema_validation ?? null);
       setPaper(state.paper);
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
@@ -823,9 +922,148 @@ export default function App() {
     setError(null);
     setLiveValidationReportMessage("");
     try {
-      setLiveValidationReports(await fetchPolymarketLiveValidationReports());
+      const payload = await fetchPolymarketLiveValidationReports();
+      setLiveValidationReports(payload);
+      setLiveValidationReportSchemaValidation(payload.entries[0]?.schema_validation ?? null);
+      if (liveValidationPromotionProposal) {
+        setLiveValidationPromotionProposal(
+          await fetchPolymarketLiveValidationPromotionProposal(liveValidationPromotionProposalTargetTier)
+        );
+      }
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
+    }
+  }
+
+  async function handleLiveValidationPromotionProposalRefresh(
+    targetTier = liveValidationPromotionProposalTargetTier,
+    announce = true
+  ) {
+    setError(null);
+    setLiveValidationReportMessage("");
+    setLiveValidationReportBusyKey("promotion-proposal");
+    try {
+      const proposal = await fetchPolymarketLiveValidationPromotionProposal(targetTier);
+      setLiveValidationPromotionProposal(proposal);
+      if (announce) {
+        setLiveValidationReportMessage(
+          `Loaded promotion proposal: ${proposal.counts.accepted_candidates} accepted, ${proposal.counts.stale_decisions} stale.`
+        );
+      }
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setLiveValidationReportBusyKey(null);
+    }
+  }
+
+  async function handleLiveValidationPromotionProposalTargetChange(value: string) {
+    setLiveValidationPromotionProposalTargetTier(value);
+    await handleLiveValidationPromotionProposalRefresh(value, true);
+  }
+
+  async function handleLiveValidationPromotionProposalSnapshotsRefresh(announce = true) {
+    setError(null);
+    if (announce) {
+      setLiveValidationReportMessage("");
+    }
+    setLiveValidationReportBusyKey("promotion-proposal-snapshots");
+    try {
+      const snapshots = await fetchPolymarketLiveValidationPromotionProposalSnapshots();
+      setLiveValidationPromotionProposalSnapshots(snapshots);
+      if (announce) {
+        setLiveValidationReportMessage(
+          `Loaded ${snapshots.counts.entries} proposal snapshot(s), ${snapshots.counts.stale} stale.`
+        );
+      }
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setLiveValidationReportBusyKey(null);
+    }
+  }
+
+  async function handleLiveValidationPromotionProposalSnapshotStore() {
+    setError(null);
+    setLiveValidationReportMessage("");
+    setLiveValidationReportBusyKey("promotion-proposal-snapshot-store");
+    try {
+      const snapshots = await storePolymarketLiveValidationPromotionProposalSnapshot({
+        target_tier: liveValidationPromotionProposalTargetTier,
+        source: "react_preview"
+      });
+      setLiveValidationPromotionProposalSnapshots(snapshots);
+      const storedKey = snapshots.stored?.key ?? "";
+      if (storedKey) {
+        setLiveValidationPromotionProposalSnapshotDetail(
+          await fetchPolymarketLiveValidationPromotionProposalSnapshot(storedKey)
+        );
+      }
+      setLiveValidationReportMessage(snapshots.message ?? "Stored promotion proposal snapshot.");
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setLiveValidationReportBusyKey(null);
+    }
+  }
+
+  async function handleLiveValidationPromotionProposalSnapshotOpen(key: string) {
+    if (!key) {
+      return;
+    }
+    setError(null);
+    setLiveValidationReportMessage("");
+    setLiveValidationReportBusyKey(key);
+    try {
+      const snapshot = await fetchPolymarketLiveValidationPromotionProposalSnapshot(key);
+      setLiveValidationPromotionProposalSnapshotDetail(snapshot);
+      setLiveValidationReportMessage(`Opened proposal snapshot ${key}.`);
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setLiveValidationReportBusyKey(null);
+    }
+  }
+
+  async function handleLiveValidationPromotionProposalSnapshotDelete(key: string) {
+    if (!key || !window.confirm("Delete this promotion proposal snapshot?")) {
+      return;
+    }
+    setError(null);
+    setLiveValidationReportMessage("");
+    setLiveValidationReportBusyKey(key);
+    try {
+      const snapshots = await deletePolymarketLiveValidationPromotionProposalSnapshot(key);
+      setLiveValidationPromotionProposalSnapshots(snapshots);
+      if (liveValidationPromotionProposalSnapshotDetail?.entry.key === key) {
+        setLiveValidationPromotionProposalSnapshotDetail(null);
+      }
+      setLiveValidationReportMessage(snapshots.message ?? "Deleted promotion proposal snapshot.");
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setLiveValidationReportBusyKey(null);
+    }
+  }
+
+  async function handleLiveValidationReportOpen(key: string) {
+    if (!key) {
+      return;
+    }
+    setError(null);
+    setLiveValidationReportMessage("");
+    setLiveValidationReportBusyKey(key);
+    try {
+      const payload = await fetchPolymarketLiveValidationReport(key);
+      setLiveValidationReportDetail(payload);
+      const ledger = await fetchPolymarketLiveValidationDecisions(key);
+      setLiveValidationDecisions(ledger);
+      setLiveValidationReportSchemaValidation(payload.entry.schema_validation ?? null);
+      setLiveValidationReportMessage(`Opened report ${key}.`);
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setLiveValidationReportBusyKey(null);
     }
   }
 
@@ -836,6 +1074,7 @@ export default function App() {
     try {
       const payload = await storePolymarketLiveValidationReport({ source: "gui_snapshot", label: "GUI readiness snapshot" });
       setLiveValidationReports(payload);
+      setLiveValidationReportSchemaValidation(payload.stored?.schema_validation ?? null);
       setLiveValidationReportMessage(payload.message ?? "Stored GUI readiness snapshot.");
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
@@ -857,12 +1096,23 @@ export default function App() {
       const payload = await storePolymarketLiveValidationReport({
         source: "cli_import",
         label: "CLI import",
-        report_json: reportJson
+        report_json: reportJson,
+        allow_duplicate: liveValidationAllowDuplicate,
+        skip_duplicate: !liveValidationAllowDuplicate
       });
       setLiveValidationReports(payload);
+      setLiveValidationReportSchemaValidation(payload.stored?.schema_validation ?? null);
       setLiveValidationImport("");
       setLiveValidationReportMessage(payload.message ?? "Imported CLI validation report.");
     } catch (exc) {
+      if (exc instanceof ApiRequestError) {
+        const validation = apiSchemaValidation(exc.details);
+        if (validation) {
+          setLiveValidationReportSchemaValidation(validation);
+          setLiveValidationReportMessage(exc.message);
+          return;
+        }
+      }
       setError(exc instanceof Error ? exc.message : String(exc));
     } finally {
       setLiveValidationReportBusyKey(null);
@@ -879,7 +1129,51 @@ export default function App() {
     try {
       const payload = await deletePolymarketLiveValidationReport(key);
       setLiveValidationReports(payload);
+      if (liveValidationReportDetail?.entry.key === key) {
+        setLiveValidationReportDetail(null);
+      }
+      setLiveValidationReportSchemaValidation(payload.entries[0]?.schema_validation ?? null);
       setLiveValidationReportMessage(payload.message ?? "Deleted live validation report.");
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setLiveValidationReportBusyKey(null);
+    }
+  }
+
+  async function handleLiveValidationDecisionSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const reportKey = liveValidationReportDetail?.entry.key ?? "";
+    if (!reportKey) {
+      setLiveValidationReportMessage("Open a report before recording a promotion decision.");
+      return;
+    }
+    if (!liveValidationDecisionForm.reviewer_note.trim()) {
+      setLiveValidationReportMessage("Reviewer note is required for a promotion decision.");
+      return;
+    }
+    setError(null);
+    setLiveValidationReportMessage("");
+    setLiveValidationReportBusyKey("decision-ledger");
+    try {
+      const review = await fetchPolymarketLiveValidationReportReview(reportKey);
+      const payloadHash = review.bundle.report.payload_hash ?? liveValidationReportDetail?.entry.payload_hash ?? "";
+      const reviewBundleHash = String(review.bundle.review_bundle_hash ?? "");
+      const ledger = await storePolymarketLiveValidationDecision({
+        report_key: reportKey,
+        payload_hash: payloadHash,
+        target_tier: liveValidationDecisionForm.target_tier,
+        decision: liveValidationDecisionForm.decision,
+        reviewer: liveValidationDecisionForm.reviewer,
+        reviewer_note: liveValidationDecisionForm.reviewer_note,
+        review_bundle_hash: reviewBundleHash
+      });
+      setLiveValidationDecisions(ledger);
+      setLiveValidationPromotionProposal(
+        await fetchPolymarketLiveValidationPromotionProposal(liveValidationPromotionProposalTargetTier)
+      );
+      setLiveValidationDecisionForm((current) => ({ ...current, reviewer_note: "" }));
+      setLiveValidationReportMessage(ledger.message ?? "Recorded promotion decision.");
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
     } finally {
@@ -1056,17 +1350,36 @@ export default function App() {
             livePreflight={livePreflight}
             liveSafety={liveSafety}
             liveValidation={liveValidation}
+            liveValidationAllowDuplicate={liveValidationAllowDuplicate}
+            liveValidationDecisionForm={liveValidationDecisionForm}
+            liveValidationDecisions={liveValidationDecisions}
             liveValidationImport={liveValidationImport}
+            liveValidationPromotionProposal={liveValidationPromotionProposal}
+            liveValidationPromotionProposalSnapshotDetail={liveValidationPromotionProposalSnapshotDetail}
+            liveValidationPromotionProposalSnapshots={liveValidationPromotionProposalSnapshots}
+            liveValidationPromotionProposalTargetTier={liveValidationPromotionProposalTargetTier}
+            liveValidationReportDetail={liveValidationReportDetail}
             liveValidationReportBusyKey={liveValidationReportBusyKey}
             liveValidationReportMessage={liveValidationReportMessage}
+            liveValidationReportSchemaValidation={liveValidationReportSchemaValidation}
             liveValidationReports={liveValidationReports}
             markets={markets}
             message={liveMessage}
             onFormChange={setPaperForm}
             onPreview={() => void handleLivePreflight()}
             onValidationImport={() => void handleLiveValidationReportImport()}
+            onValidationAllowDuplicateChange={setLiveValidationAllowDuplicate}
+            onValidationDecisionChange={setLiveValidationDecisionForm}
+            onValidationDecisionSubmit={(event) => void handleLiveValidationDecisionSubmit(event)}
             onValidationImportChange={setLiveValidationImport}
+            onValidationProposalRefresh={() => void handleLiveValidationPromotionProposalRefresh()}
+            onValidationProposalSnapshotDelete={(key) => void handleLiveValidationPromotionProposalSnapshotDelete(key)}
+            onValidationProposalSnapshotOpen={(key) => void handleLiveValidationPromotionProposalSnapshotOpen(key)}
+            onValidationProposalSnapshotsRefresh={() => void handleLiveValidationPromotionProposalSnapshotsRefresh()}
+            onValidationProposalSnapshotStore={() => void handleLiveValidationPromotionProposalSnapshotStore()}
+            onValidationProposalTargetChange={(value) => void handleLiveValidationPromotionProposalTargetChange(value)}
             onValidationReportDelete={(key) => void handleLiveValidationReportDelete(key)}
+            onValidationReportOpen={(key) => void handleLiveValidationReportOpen(key)}
             onValidationReportsRefresh={() => void handleLiveValidationReportsRefresh()}
             onValidationRefresh={() => void handleLiveValidationRefresh()}
             onValidationSnapshotStore={() => void handleLiveValidationSnapshotStore()}
@@ -2201,17 +2514,36 @@ function LiveSafetyView({
   livePreflight,
   liveSafety,
   liveValidation,
+  liveValidationAllowDuplicate,
+  liveValidationDecisionForm,
+  liveValidationDecisions,
   liveValidationImport,
+  liveValidationPromotionProposal,
+  liveValidationPromotionProposalSnapshotDetail,
+  liveValidationPromotionProposalSnapshots,
+  liveValidationPromotionProposalTargetTier,
+  liveValidationReportDetail,
   liveValidationReportBusyKey,
   liveValidationReportMessage,
+  liveValidationReportSchemaValidation,
   liveValidationReports,
   markets,
   message,
   onFormChange,
   onPreview,
   onValidationImport,
+  onValidationAllowDuplicateChange,
+  onValidationDecisionChange,
+  onValidationDecisionSubmit,
   onValidationImportChange,
+  onValidationProposalRefresh,
+  onValidationProposalSnapshotDelete,
+  onValidationProposalSnapshotOpen,
+  onValidationProposalSnapshotsRefresh,
+  onValidationProposalSnapshotStore,
+  onValidationProposalTargetChange,
   onValidationReportDelete,
+  onValidationReportOpen,
   onValidationReportsRefresh,
   onValidationRefresh,
   onValidationSnapshotStore,
@@ -2225,17 +2557,36 @@ function LiveSafetyView({
   livePreflight: LivePreflightPayload | null;
   liveSafety: LiveSafetyPayload | null;
   liveValidation: PolymarketLiveValidationPayload | null;
+  liveValidationAllowDuplicate: boolean;
+  liveValidationDecisionForm: LiveValidationDecisionForm;
+  liveValidationDecisions: PolymarketLiveValidationDecisionLedgerPayload | null;
   liveValidationImport: string;
+  liveValidationPromotionProposal: PolymarketLiveValidationPromotionProposalPayload | null;
+  liveValidationPromotionProposalSnapshotDetail: PolymarketLiveValidationPromotionProposalSnapshotPayload | null;
+  liveValidationPromotionProposalSnapshots: PolymarketLiveValidationPromotionProposalSnapshotsPayload | null;
+  liveValidationPromotionProposalTargetTier: string;
+  liveValidationReportDetail: PolymarketLiveValidationReportPayload | null;
   liveValidationReportBusyKey: string | null;
   liveValidationReportMessage: string;
+  liveValidationReportSchemaValidation: PolymarketLiveValidationReportSchemaValidation | null;
   liveValidationReports: PolymarketLiveValidationReportsPayload | null;
   markets: MarketsPayload | null;
   message: string;
   onFormChange: (form: PaperOrderForm) => void;
   onPreview: () => void;
   onValidationImport: () => void;
+  onValidationAllowDuplicateChange: (value: boolean) => void;
+  onValidationDecisionChange: (value: LiveValidationDecisionForm) => void;
+  onValidationDecisionSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onValidationImportChange: (value: string) => void;
+  onValidationProposalRefresh: () => void;
+  onValidationProposalSnapshotDelete: (key: string) => void;
+  onValidationProposalSnapshotOpen: (key: string) => void;
+  onValidationProposalSnapshotsRefresh: () => void;
+  onValidationProposalSnapshotStore: () => void;
+  onValidationProposalTargetChange: (value: string) => void;
   onValidationReportDelete: (key: string) => void;
+  onValidationReportOpen: (key: string) => void;
   onValidationReportsRefresh: () => void;
   onValidationRefresh: () => void;
   onValidationSnapshotStore: () => void;
@@ -2322,16 +2673,35 @@ function LiveSafetyView({
       </section>
 
       <PolymarketLiveValidationPanel
+        allowDuplicate={liveValidationAllowDuplicate}
         busyKey={liveValidationReportBusyKey}
+        decisionForm={liveValidationDecisionForm}
+        decisions={liveValidationDecisions}
         importText={liveValidationImport}
         message={liveValidationReportMessage}
         onDeleteReport={onValidationReportDelete}
         onImport={onValidationImport}
+        onAllowDuplicateChange={onValidationAllowDuplicateChange}
+        onDecisionChange={onValidationDecisionChange}
+        onDecisionSubmit={onValidationDecisionSubmit}
         onImportTextChange={onValidationImportChange}
+        onProposalRefresh={onValidationProposalRefresh}
+        onProposalSnapshotDelete={onValidationProposalSnapshotDelete}
+        onProposalSnapshotOpen={onValidationProposalSnapshotOpen}
+        onProposalSnapshotsRefresh={onValidationProposalSnapshotsRefresh}
+        onProposalSnapshotStore={onValidationProposalSnapshotStore}
+        onProposalTargetChange={onValidationProposalTargetChange}
+        onOpenReport={onValidationReportOpen}
         onRefresh={onValidationRefresh}
         onReportsRefresh={onValidationReportsRefresh}
         onStoreSnapshot={onValidationSnapshotStore}
         payload={liveValidation}
+        proposal={liveValidationPromotionProposal}
+        proposalSnapshotDetail={liveValidationPromotionProposalSnapshotDetail}
+        proposalSnapshots={liveValidationPromotionProposalSnapshots}
+        proposalTargetTier={liveValidationPromotionProposalTargetTier}
+        reportDetail={liveValidationReportDetail}
+        schemaValidation={liveValidationReportSchemaValidation}
         reports={liveValidationReports}
       />
 
@@ -2392,25 +2762,63 @@ function LiveSafetyView({
 }
 
 function PolymarketLiveValidationPanel({
+  allowDuplicate,
   busyKey,
+  decisionForm,
+  decisions,
   importText,
   message,
+  onAllowDuplicateChange,
+  onDecisionChange,
+  onDecisionSubmit,
   onDeleteReport,
   onImport,
   onImportTextChange,
+  onProposalRefresh,
+  onProposalSnapshotDelete,
+  onProposalSnapshotOpen,
+  onProposalSnapshotsRefresh,
+  onProposalSnapshotStore,
+  onProposalTargetChange,
+  onOpenReport,
   payload,
+  proposal,
+  proposalSnapshotDetail,
+  proposalSnapshots,
+  proposalTargetTier,
+  reportDetail,
+  schemaValidation,
   reports,
   onRefresh,
   onReportsRefresh,
   onStoreSnapshot
 }: {
+  allowDuplicate: boolean;
   busyKey: string | null;
+  decisionForm: LiveValidationDecisionForm;
+  decisions: PolymarketLiveValidationDecisionLedgerPayload | null;
   importText: string;
   message: string;
+  onAllowDuplicateChange: (value: boolean) => void;
+  onDecisionChange: (value: LiveValidationDecisionForm) => void;
+  onDecisionSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onDeleteReport: (key: string) => void;
   onImport: () => void;
   onImportTextChange: (value: string) => void;
+  onProposalRefresh: () => void;
+  onProposalSnapshotDelete: (key: string) => void;
+  onProposalSnapshotOpen: (key: string) => void;
+  onProposalSnapshotsRefresh: () => void;
+  onProposalSnapshotStore: () => void;
+  onProposalTargetChange: (value: string) => void;
+  onOpenReport: (key: string) => void;
   payload: PolymarketLiveValidationPayload | null;
+  proposal: PolymarketLiveValidationPromotionProposalPayload | null;
+  proposalSnapshotDetail: PolymarketLiveValidationPromotionProposalSnapshotPayload | null;
+  proposalSnapshots: PolymarketLiveValidationPromotionProposalSnapshotsPayload | null;
+  proposalTargetTier: string;
+  reportDetail: PolymarketLiveValidationReportPayload | null;
+  schemaValidation: PolymarketLiveValidationReportSchemaValidation | null;
   reports: PolymarketLiveValidationReportsPayload | null;
   onRefresh: () => void;
   onReportsRefresh: () => void;
@@ -2422,6 +2830,7 @@ function PolymarketLiveValidationPanel({
   const commands = Object.entries(payload?.operator_commands ?? {});
   const reportEntries = reports?.entries ?? [];
   const comparison = reports?.comparison ?? null;
+  const importSchemaValidation = schemaValidation ?? reports?.stored?.schema_validation ?? reportEntries[0]?.schema_validation ?? null;
   return (
     <section className="panel full">
       <div className="toolbar">
@@ -2536,6 +2945,14 @@ function PolymarketLiveValidationPanel({
                 <strong>{reports?.counts.entries ?? 0}</strong>
               </div>
               <div>
+                <span>Payload hashes</span>
+                <strong>{reports?.counts.payload_hashes ?? 0}</strong>
+              </div>
+              <div>
+                <span>Duplicate skips</span>
+                <strong>{reports?.counts.duplicate_imports ?? 0}</strong>
+              </div>
+              <div>
                 <span>Newest</span>
                 <strong>{formatUnknownTime(reports?.cache.newest_stored_at)}</strong>
               </div>
@@ -2544,7 +2961,11 @@ function PolymarketLiveValidationPanel({
                 <strong>{formatBytes(reports?.cache.size_bytes ?? 0)}</strong>
               </div>
             </div>
-            {message ? <div className="info-banner">{message}</div> : null}
+            {message ? (
+              <div className={`info-banner ${importSchemaValidation && !importSchemaValidation.ok ? "warn" : ""}`}>{message}</div>
+            ) : null}
+            <LiveReportSchemaReference validation={importSchemaValidation} />
+            <LiveReportSchemaDiagnostics title="Schema Diagnostics" validation={importSchemaValidation} />
             <div className="report-import-form">
               <label>
                 <span>CLI JSON report import</span>
@@ -2555,10 +2976,45 @@ function PolymarketLiveValidationPanel({
                   rows={4}
                 />
               </label>
+              <label className="check-row">
+                <input
+                  type="checkbox"
+                  checked={allowDuplicate}
+                  onChange={(event) => onAllowDuplicateChange(event.target.checked)}
+                />
+                <span>Allow duplicate import</span>
+              </label>
               <button className="icon-button" onClick={onImport} disabled={busyKey === "import-json"}>
                 <Upload size={17} /> Import JSON
               </button>
             </div>
+            <div className="toolbar compact ledger-toolbar">
+              <div className="panel-title">
+                <Database size={16} />
+                <h3>Promotion Decision Ledger</h3>
+              </div>
+              <div className="button-row compact">
+                <a className="icon-button compact" href={polymarketLiveValidationDecisionLedgerJsonUrl()} download>
+                  <Download size={14} /> Ledger JSON
+                </a>
+                <a className="icon-button compact" href={polymarketLiveValidationDecisionLedgerMarkdownUrl()} download>
+                  <Download size={14} /> Ledger Markdown
+                </a>
+              </div>
+            </div>
+            <PromotionProposalPreview
+              busyKey={busyKey}
+              proposal={proposal}
+              proposalSnapshotDetail={proposalSnapshotDetail}
+              proposalSnapshots={proposalSnapshots}
+              targetTier={proposalTargetTier}
+              onRefresh={onProposalRefresh}
+              onSnapshotDelete={onProposalSnapshotDelete}
+              onSnapshotOpen={onProposalSnapshotOpen}
+              onSnapshotsRefresh={onProposalSnapshotsRefresh}
+              onSnapshotStore={onProposalSnapshotStore}
+              onTargetTierChange={onProposalTargetChange}
+            />
             {comparison ? (
               <div className="audit-box">
                 <h3>Latest vs Previous</h3>
@@ -2576,6 +3032,176 @@ function PolymarketLiveValidationPanel({
                 ) : (
                   <div className="empty-state compact">No stage-gate changes between the latest two reports.</div>
                 )}
+              </div>
+            ) : null}
+            {reportDetail ? (
+              <div className="audit-box">
+                <h3>Opened Report</h3>
+                <div className="diagnostic-grid">
+                  <div>
+                    <span>Key</span>
+                    <strong>{reportDetail.entry.key ?? "-"}</strong>
+                  </div>
+                  <div>
+                    <span>Source</span>
+                    <strong>{reportDetail.entry.source}</strong>
+                  </div>
+                  <div>
+                    <span>Generated</span>
+                    <strong>{formatUnknownTime(reportDetail.entry.summary?.generated_at)}</strong>
+                  </div>
+                  <div>
+                    <span>Payload</span>
+                    <strong>{formatBytes(reportDetail.entry.payload_bytes ?? 0)}</strong>
+                  </div>
+                  <div>
+                    <span>Payload hash</span>
+                    <strong title={reportDetail.entry.payload_hash ?? ""}>{formatHash(reportDetail.entry.payload_hash)}</strong>
+                  </div>
+                  <div>
+                    <span>Source file</span>
+                    <strong>{reportDetail.entry.provenance?.source_file_name ?? "-"}</strong>
+                  </div>
+                  <div>
+                    <span>Duplicate of</span>
+                    <strong>{formatHash(reportDetail.entry.duplicate_of ?? null)}</strong>
+                  </div>
+                  <div>
+                    <span>Credential readiness</span>
+                    <strong>{reportDetail.entry.summary?.credential_readiness ?? "unknown"}</strong>
+                  </div>
+                  <div>
+                    <span>Credentialed reads</span>
+                    <strong>{reportDetail.entry.summary?.credentialed_read_checks ?? "unknown"}</strong>
+                  </div>
+                  <div>
+                    <span>Bridge</span>
+                    <strong>{reportDetail.entry.summary?.bridge_address_checks ?? "unknown"}</strong>
+                  </div>
+                  <div>
+                    <span>Funded gate</span>
+                    <strong>{reportDetail.entry.summary?.funded_live_order_check ?? "unknown"}</strong>
+                  </div>
+                  <div>
+                    <span>Credential tier</span>
+                    <strong>{reportDetail.entry.summary?.credential_live_verified ?? "blocked"}</strong>
+                  </div>
+                  <div>
+                    <span>Funded tier</span>
+                    <strong>{reportDetail.entry.summary?.funded_live_verified ?? "blocked"}</strong>
+                  </div>
+                </div>
+                <LiveReportSchemaDiagnostics
+                  title="Opened Report Schema Diagnostics"
+                  validation={reportDetail.entry.schema_validation ?? null}
+                />
+                {reportDetail.entry.summary?.verification_promotion?.blocked_reasons?.length ? (
+                  <div className="info-banner warn">
+                    {reportDetail.entry.summary.verification_promotion.blocked_reasons.join(" ")}
+                  </div>
+                ) : null}
+                <div className="button-row">
+                  <a
+                    className="icon-button"
+                    href={reportDetail.entry.key ? polymarketLiveValidationReportExportUrl(reportDetail.entry.key) : "#"}
+                    download={reportDetail.export.filename}
+                  >
+                    <Download size={17} /> Download JSON
+                  </a>
+                  <a
+                    className="icon-button"
+                    href={reportDetail.entry.key ? polymarketLiveValidationReportReviewJsonUrl(reportDetail.entry.key) : "#"}
+                    download
+                  >
+                    <Download size={17} /> Review JSON
+                  </a>
+                  <a
+                    className="icon-button"
+                    href={reportDetail.entry.key ? polymarketLiveValidationReportReviewMarkdownUrl(reportDetail.entry.key) : "#"}
+                    download
+                  >
+                    <Download size={17} /> Review Markdown
+                  </a>
+                </div>
+                <form className="decision-form" onSubmit={onDecisionSubmit}>
+                  <div className="panel-header compact">
+                    <h3>Promotion Decision Ledger</h3>
+                    <StatusPill tone="neutral">{decisions?.counts.entries ?? reportDetail.decisions?.length ?? 0} decisions</StatusPill>
+                  </div>
+                  <div className="decision-grid">
+                    <label>
+                      <span>Target tier</span>
+                      <select
+                        value={decisionForm.target_tier}
+                        onChange={(event) => onDecisionChange({ ...decisionForm, target_tier: event.target.value })}
+                      >
+                        <option value="credential_live_verified">credential_live_verified</option>
+                        <option value="funded_live_verified">funded_live_verified</option>
+                        <option value="public_live_verified">public_live_verified</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Decision</span>
+                      <select
+                        value={decisionForm.decision}
+                        onChange={(event) =>
+                          onDecisionChange({ ...decisionForm, decision: event.target.value as "accepted" | "rejected" })
+                        }
+                      >
+                        <option value="rejected">rejected</option>
+                        <option value="accepted">accepted</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Reviewer</span>
+                      <input
+                        value={decisionForm.reviewer}
+                        onChange={(event) => onDecisionChange({ ...decisionForm, reviewer: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <span>Reviewer note</span>
+                      <input
+                        value={decisionForm.reviewer_note}
+                        onChange={(event) => onDecisionChange({ ...decisionForm, reviewer_note: event.target.value })}
+                        placeholder="Required decision rationale"
+                      />
+                    </label>
+                  </div>
+                  <div className="button-row">
+                    <button className="icon-button" type="submit" disabled={busyKey === "decision-ledger"}>
+                      <Save size={17} /> Record Decision
+                    </button>
+                    <a className="icon-button" href={polymarketLiveValidationDecisionLedgerJsonUrl()} download>
+                      <Download size={17} /> Ledger JSON
+                    </a>
+                    <a className="icon-button" href={polymarketLiveValidationDecisionLedgerMarkdownUrl()} download>
+                      <Download size={17} /> Ledger Markdown
+                    </a>
+                    <a className="icon-button" href={polymarketLiveValidationPromotionProposalJsonUrl()} download>
+                      <Download size={17} /> Proposal JSON
+                    </a>
+                    <a className="icon-button" href={polymarketLiveValidationPromotionProposalMarkdownUrl()} download>
+                      <Download size={17} /> Proposal Markdown
+                    </a>
+                  </div>
+                  {(decisions?.entries ?? reportDetail.decisions ?? []).length ? (
+                    <div className="decision-list">
+                      {(decisions?.entries ?? reportDetail.decisions ?? []).slice(0, 5).map((item) => (
+                        <div className="decision-row" key={item.key ?? `${item.target_tier}-${item.created_at}`}>
+                          <strong>
+                            {item.decision} {item.target_tier}
+                          </strong>
+                          <span>
+                            {item.reviewer} | {formatUnknownTime(item.created_at)} | hash {formatHash(item.review_bundle_hash)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="empty-state compact">No promotion decisions recorded for this report.</div>
+                  )}
+                </form>
               </div>
             ) : null}
             <div className="report-list">
@@ -2599,14 +3225,53 @@ function PolymarketLiveValidationPanel({
                       <span className={`chip ${entry.summary?.funded_live_order_check === "passed" ? "" : "muted"}`}>
                         funded: {entry.summary?.funded_live_order_check ?? "unknown"}
                       </span>
+                      <span className={`chip ${entry.summary?.credential_live_verified === "yes" ? "" : "muted"}`}>
+                        credential tier: {entry.summary?.credential_live_verified ?? "blocked"}
+                      </span>
+                      <span className={`chip ${entry.summary?.funded_live_verified === "yes" ? "" : "muted"}`}>
+                        funded tier: {entry.summary?.funded_live_verified ?? "blocked"}
+                      </span>
+                      <span className={`chip ${schemaValidationTone(entry.schema_validation) === "good" ? "" : "muted"}`}>
+                        {schemaValidationLabel(entry.schema_validation)}
+                      </span>
+                      <span className="chip muted" title={entry.payload_hash ?? ""}>
+                        hash: {formatHash(entry.payload_hash)}
+                      </span>
+                      {entry.provenance?.source_file_name ? (
+                        <span className="chip muted">source file: {entry.provenance.source_file_name}</span>
+                      ) : null}
+                      {entry.duplicate ? (
+                        <span className="chip muted">
+                          duplicate{entry.duplicate_import_count ? ` skips: ${entry.duplicate_import_count}` : ""}
+                        </span>
+                      ) : null}
                     </div>
-                    <button
-                      className="icon-button"
-                      onClick={() => entry.key && onDeleteReport(entry.key)}
-                      disabled={!entry.key || busyKey === entry.key}
-                    >
-                      <Trash2 size={16} /> Delete
-                    </button>
+                    <div className="row-actions">
+                      <button
+                        className="icon-button compact"
+                        onClick={() => entry.key && onOpenReport(entry.key)}
+                        disabled={!entry.key || busyKey === entry.key}
+                      >
+                        <Eye size={14} /> Open
+                      </button>
+                      {entry.key ? (
+                        <a className="icon-button compact" href={polymarketLiveValidationReportExportUrl(entry.key)} download>
+                          <Download size={14} /> JSON
+                        </a>
+                      ) : null}
+                      {entry.key ? (
+                        <a className="icon-button compact" href={polymarketLiveValidationReportReviewMarkdownUrl(entry.key)} download>
+                          <Download size={14} /> Review
+                        </a>
+                      ) : null}
+                      <button
+                        className="icon-button compact danger"
+                        onClick={() => entry.key && onDeleteReport(entry.key)}
+                        disabled={!entry.key || busyKey === entry.key}
+                      >
+                        <Trash2 size={14} /> Delete
+                      </button>
+                    </div>
                   </div>
                 ))
               ) : (
@@ -2619,6 +3284,411 @@ function PolymarketLiveValidationPanel({
         <div className="empty-state">No live validation report loaded.</div>
       )}
     </section>
+  );
+}
+
+function PromotionProposalPreview({
+  busyKey,
+  proposal,
+  proposalSnapshotDetail,
+  proposalSnapshots,
+  targetTier,
+  onRefresh,
+  onSnapshotDelete,
+  onSnapshotOpen,
+  onSnapshotsRefresh,
+  onSnapshotStore,
+  onTargetTierChange
+}: {
+  busyKey: string | null;
+  proposal: PolymarketLiveValidationPromotionProposalPayload | null;
+  proposalSnapshotDetail: PolymarketLiveValidationPromotionProposalSnapshotPayload | null;
+  proposalSnapshots: PolymarketLiveValidationPromotionProposalSnapshotsPayload | null;
+  targetTier: string;
+  onRefresh: () => void;
+  onSnapshotDelete: (key: string) => void;
+  onSnapshotOpen: (key: string) => void;
+  onSnapshotsRefresh: () => void;
+  onSnapshotStore: () => void;
+  onTargetTierChange: (value: string) => void;
+}) {
+  const gates = proposal?.review_gates ?? [];
+  const accepted = proposal?.accepted_decisions ?? [];
+  const stale = proposal?.stale_decisions ?? [];
+  const ignored = proposal?.ignored_decisions ?? [];
+  const changes = proposal?.proposed_changes ?? [];
+  return (
+    <div className="proposal-preview audit-box">
+      <div className="panel-header compact">
+        <div>
+          <h3>Promotion Proposal Preview</h3>
+          <p>Read-only manual patch proposal from accepted ledger decisions.</p>
+        </div>
+        <div className="button-row compact">
+          <select value={targetTier} onChange={(event) => onTargetTierChange(event.target.value)}>
+            <option value="">all target tiers</option>
+            <option value="credential_live_verified">credential_live_verified</option>
+            <option value="funded_live_verified">funded_live_verified</option>
+            <option value="public_live_verified">public_live_verified</option>
+          </select>
+          <button className="icon-button compact" onClick={onRefresh} disabled={busyKey === "promotion-proposal"}>
+            <RefreshCw size={14} /> Refresh Proposal
+          </button>
+          <button
+            className="icon-button compact"
+            onClick={onSnapshotStore}
+            disabled={busyKey === "promotion-proposal-snapshot-store"}
+          >
+            <Save size={14} /> Save Snapshot
+          </button>
+          <button
+            className="icon-button compact"
+            onClick={onSnapshotsRefresh}
+            disabled={busyKey === "promotion-proposal-snapshots"}
+          >
+            <RefreshCw size={14} /> Refresh Archive
+          </button>
+          <a className="icon-button compact" href={polymarketLiveValidationPromotionProposalJsonUrl(targetTier)} download>
+            <Download size={14} /> Proposal JSON
+          </a>
+          <a className="icon-button compact" href={polymarketLiveValidationPromotionProposalMarkdownUrl(targetTier)} download>
+            <Download size={14} /> Proposal Markdown
+          </a>
+        </div>
+      </div>
+      <div className="info-banner warn">
+        Manual review required. This preview has no apply action, keeps automerge disabled, and does not mutate static coverage.
+      </div>
+      <div className="metrics-grid proposal-metrics">
+        <Metric label="Accepted" value={proposal?.counts.accepted_candidates ?? 0} tone={proposal?.counts.accepted_candidates ? "good" : "neutral"} />
+        <Metric label="Stale" value={proposal?.counts.stale_decisions ?? 0} tone={proposal?.counts.stale_decisions ? "warn" : "good"} />
+        <Metric label="Ignored" value={proposal?.counts.ignored_decisions ?? 0} />
+        <Metric label="Changes" value={proposal?.counts.proposed_changes ?? 0} />
+        <Metric label="Automerge" value={proposal?.automerge_enabled ? "enabled" : "disabled"} tone={proposal?.automerge_enabled ? "warn" : "good"} />
+        <Metric label="Static mutation" value={proposal?.static_coverage_mutated ? "yes" : "no"} tone={proposal?.static_coverage_mutated ? "warn" : "good"} />
+      </div>
+      {proposal ? (
+        <div className="proposal-sections">
+          <div>
+            <h4>Review Gates</h4>
+            <div className="proposal-gates">
+              {gates.length ? (
+                gates.map((gate, index) => (
+                  <div className="proposal-gate-row" key={`${proposalValue(gate, "gate")}-${index}`}>
+                    <strong>{proposalValue(gate, "gate")}</strong>
+                    <span>{proposalValue(gate, "status")}</span>
+                    <p>{proposalValue(gate, "description")}</p>
+                  </div>
+                ))
+              ) : (
+                <div className="empty-state compact">No review gates returned.</div>
+              )}
+            </div>
+          </div>
+          <ProposalRows
+            title="Accepted Candidates"
+            rows={accepted}
+            emptyText="No accepted decisions are ready for a proposal."
+            columns={[
+              ["target_tier", "Tier"],
+              ["reviewer", "Reviewer"],
+              ["current_review_bundle_hash", "Current hash"],
+              ["proposal_effect", "Effect"]
+            ]}
+          />
+          <ProposalRows
+            title="Stale Decisions"
+            rows={stale}
+            emptyText="No stale decisions detected."
+            columns={[
+              ["target_tier", "Tier"],
+              ["stale_reasons", "Reasons"],
+              ["expected_review_bundle_hash", "Expected hash"],
+              ["current_review_bundle_hash", "Current hash"]
+            ]}
+          />
+          <ProposalRows
+            title="Proposed Manual Changes"
+            rows={changes}
+            emptyText="No manual changes proposed."
+            columns={[
+              ["path", "File"],
+              ["target_tier", "Tier"],
+              ["action", "Action"],
+              ["evidence", "Evidence"]
+            ]}
+          />
+          {ignored.length ? (
+            <ProposalRows
+              title="Ignored Decisions"
+              rows={ignored}
+              emptyText="No ignored decisions."
+              columns={[
+                ["target_tier", "Tier"],
+                ["decision", "Decision"],
+                ["reason", "Reason"],
+                ["report_key", "Report"]
+              ]}
+            />
+          ) : null}
+          <ProposalSnapshotArchive
+            busyKey={busyKey}
+            detail={proposalSnapshotDetail}
+            snapshots={proposalSnapshots}
+            onDelete={onSnapshotDelete}
+            onOpen={onSnapshotOpen}
+          />
+        </div>
+      ) : (
+        <>
+          <div className="empty-state compact">Refresh Proposal loads the current no-automerge preview.</div>
+          <ProposalSnapshotArchive
+            busyKey={busyKey}
+            detail={proposalSnapshotDetail}
+            snapshots={proposalSnapshots}
+            onDelete={onSnapshotDelete}
+            onOpen={onSnapshotOpen}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
+function ProposalSnapshotArchive({
+  busyKey,
+  detail,
+  snapshots,
+  onDelete,
+  onOpen
+}: {
+  busyKey: string | null;
+  detail: PolymarketLiveValidationPromotionProposalSnapshotPayload | null;
+  snapshots: PolymarketLiveValidationPromotionProposalSnapshotsPayload | null;
+  onDelete: (key: string) => void;
+  onOpen: (key: string) => void;
+}) {
+  const rows = snapshots?.entries ?? [];
+  return (
+    <div className="proposal-snapshot-archive">
+      <div className="panel-header compact">
+        <div>
+          <h4>Proposal Snapshot Archive</h4>
+          <p>Stored no-secrets proposal evidence for later review.</p>
+        </div>
+        <div className="chip-row">
+          <span className="chip">snapshots: {snapshots?.counts.entries ?? 0}</span>
+          <span className={`chip ${(snapshots?.counts.stale ?? 0) ? "" : "muted"}`}>stale: {snapshots?.counts.stale ?? 0}</span>
+        </div>
+      </div>
+      <div className="proposal-table-wrap">
+        <table className="proposal-table snapshot-table">
+          <thead>
+            <tr>
+              <th>Stored</th>
+              <th>Status</th>
+              <th>Label</th>
+              <th>Hash</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length ? (
+              rows.slice(0, 8).map((row) => (
+                <tr key={row.key ?? `${row.proposal_hash}-${row.stored_at}`}>
+                  <td>{formatUnknownTime(row.stored_at)}</td>
+                  <td>
+                    <StatusPill tone={row.stale ? "warn" : "good"}>{row.snapshot_status}</StatusPill>
+                  </td>
+                  <td title={row.label}>{row.label || "-"}</td>
+                  <td title={row.proposal_hash}>{formatHash(row.proposal_hash)}</td>
+                  <td>
+                    <div className="row-actions">
+                      <button
+                        className="icon-button compact"
+                        onClick={() => row.key && onOpen(row.key)}
+                        disabled={!row.key || busyKey === row.key}
+                      >
+                        <Eye size={14} /> Open
+                      </button>
+                      {row.key ? (
+                        <a className="icon-button compact" href={polymarketLiveValidationPromotionProposalSnapshotJsonUrl(row.key)} download>
+                          <Download size={14} /> JSON
+                        </a>
+                      ) : null}
+                      {row.key ? (
+                        <a className="icon-button compact" href={polymarketLiveValidationPromotionProposalSnapshotMarkdownUrl(row.key)} download>
+                          <Download size={14} /> Markdown
+                        </a>
+                      ) : null}
+                      <button
+                        className="icon-button compact danger"
+                        onClick={() => row.key && onDelete(row.key)}
+                        disabled={!row.key || busyKey === row.key}
+                      >
+                        <Trash2 size={14} /> Delete
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td colSpan={5} className="empty-cell">
+                  No proposal snapshots stored yet.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      {detail ? (
+        <div className={`info-banner ${detail.entry.stale ? "warn" : ""}`}>
+          Opened snapshot {formatHash(detail.entry.key)} is {detail.entry.snapshot_status}; reasons:{" "}
+          {detail.entry.stale_reasons.length ? detail.entry.stale_reasons.join(", ") : "none"}.
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ProposalRows({
+  title,
+  rows,
+  columns,
+  emptyText
+}: {
+  title: string;
+  rows: Array<Record<string, unknown>>;
+  columns: Array<[string, string]>;
+  emptyText: string;
+}) {
+  return (
+    <div>
+      <h4>{title}</h4>
+      <div className="proposal-table-wrap">
+        <table className="proposal-table">
+          <thead>
+            <tr>
+              {columns.map(([, label]) => (
+                <th key={label}>{label}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length ? (
+              rows.slice(0, 8).map((row, index) => (
+                <tr key={`${proposalValue(row, "decision_key")}-${proposalValue(row, "path")}-${index}`}>
+                  {columns.map(([key]) => (
+                    <td key={key} title={proposalValue(row, key)}>
+                      {key.includes("hash") ? formatHash(proposalValue(row, key)) : proposalValue(row, key)}
+                    </td>
+                  ))}
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td colSpan={columns.length} className="empty-cell">
+                  {emptyText}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function LiveReportSchemaReference({
+  validation
+}: {
+  validation: PolymarketLiveValidationReportSchemaValidation | null;
+}) {
+  const modes =
+    validation?.accepted_modes.length
+      ? validation.accepted_modes
+      : ["strict_cli", "local_readiness_only", "credential_runbook_no_funded_actions", "browser_smoke", "browser_smoke_seed"];
+  return (
+    <div className="schema-reference">
+      <div>
+        <span>Accepted modes</span>
+        <strong>{modes.join(", ")}</strong>
+      </div>
+      <div>
+        <span>Live-stage required</span>
+        <strong>mode + stage_gates object</strong>
+      </div>
+      <div>
+        <span>Runbook required</span>
+        <strong>env_inventory + readiness + funded_execution_exposed=false + network_calls=none</strong>
+      </div>
+    </div>
+  );
+}
+
+function LiveReportSchemaDiagnostics({
+  title,
+  validation
+}: {
+  title: string;
+  validation: PolymarketLiveValidationReportSchemaValidation | null;
+}) {
+  if (!validation) {
+    return null;
+  }
+  const problems = validation.errors.length || validation.warnings.length;
+  return (
+    <div className="schema-diagnostics">
+      <div className="panel-header compact">
+        <h3>{title}</h3>
+        <StatusPill tone={schemaValidationTone(validation)}>{schemaValidationLabel(validation)}</StatusPill>
+      </div>
+      <div className="diagnostic-grid compact">
+        <div>
+          <span>Schema version</span>
+          <strong>{validation.schema_version}</strong>
+        </div>
+        <div>
+          <span>Mode</span>
+          <strong>{validation.mode ?? "missing"}</strong>
+        </div>
+        <div>
+          <span>Report type</span>
+          <strong>{validation.report_type ?? "unknown"}</strong>
+        </div>
+        <div>
+          <span>Accepted modes</span>
+          <strong>{validation.accepted_modes.join(", ")}</strong>
+        </div>
+      </div>
+      {problems ? (
+        <div className="schema-message-grid">
+          {validation.errors.length ? (
+            <div className="schema-message-list error-list">
+              <span>Schema errors</span>
+              <ul>
+                {validation.errors.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {validation.warnings.length ? (
+            <div className="schema-message-list warning-list">
+              <span>Schema warnings</span>
+              <ul>
+                {validation.warnings.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <div className="empty-state compact">No schema errors or warnings.</div>
+      )}
+    </div>
   );
 }
 

@@ -1,0 +1,7 @@
+{
+  "generated_at": 1780000100.0,
+  "stage_gates": {
+    "credentialed_read_ok": true,
+    "safe_to_attempt_funded_order": false
+  }
+}

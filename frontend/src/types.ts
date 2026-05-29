@@ -652,7 +652,33 @@ export interface PolymarketLiveValidationReportSummary {
   funded_execution_exposed?: boolean;
   direct_l2_read_ready?: boolean;
   sdk_trading_ready?: boolean;
+  verification_promotion?: {
+    credential_live_verified?: string;
+    funded_live_verified?: string;
+    can_promote_credential_live_verified?: boolean;
+    can_promote_funded_live_verified?: boolean;
+    credential_evidence?: Array<Record<string, unknown>>;
+    funded_evidence?: Array<Record<string, unknown>>;
+    blocked_reasons?: string[];
+    accepted_credential_checks?: string[];
+    accepted_funded_audit_fields?: string[];
+    [key: string]: unknown;
+  };
+  credential_live_verified?: string;
+  funded_live_verified?: string;
+  can_promote_credential_live_verified?: boolean;
+  can_promote_funded_live_verified?: boolean;
   [key: string]: unknown;
+}
+
+export interface PolymarketLiveValidationReportSchemaValidation {
+  schema_version: number;
+  ok: boolean;
+  mode?: string | null;
+  report_type?: string | null;
+  errors: string[];
+  warnings: string[];
+  accepted_modes: string[];
 }
 
 export interface PolymarketLiveValidationReportEntry {
@@ -665,6 +691,24 @@ export interface PolymarketLiveValidationReportEntry {
   age_seconds?: number | null;
   path?: string;
   payload_bytes?: number | null;
+  payload_hash?: string | null;
+  provenance?: {
+    payload_hash?: string | null;
+    redacted_payload_hash?: string | null;
+    source_file?: string | null;
+    source_file_name?: string | null;
+    duplicate_policy?: string | null;
+    duplicate_of?: string | null;
+    [key: string]: unknown;
+  };
+  duplicate?: boolean;
+  duplicate_key?: string | null;
+  duplicate_of?: string | null;
+  duplicate_policy?: string | null;
+  duplicate_payload_count?: number;
+  duplicate_import_count?: number;
+  last_duplicate_import?: Record<string, unknown>;
+  schema_validation?: PolymarketLiveValidationReportSchemaValidation;
   summary?: PolymarketLiveValidationReportSummary;
   payload?: PolymarketLiveValidationPayload | Record<string, unknown>;
 }
@@ -682,10 +726,16 @@ export interface PolymarketLiveValidationReportsPayload {
     updated_at?: number | null;
     newest_stored_at?: number | null;
     oldest_stored_at?: number | null;
+    payload_hashes?: number;
+    duplicate_payloads?: number;
+    duplicate_imports?: number;
   };
   entries: PolymarketLiveValidationReportEntry[];
   counts: {
     entries: number;
+    payload_hashes?: number;
+    duplicate_payloads?: number;
+    duplicate_imports?: number;
   };
   comparison?: {
     latest_key?: string | null;
@@ -701,6 +751,9 @@ export interface PolymarketLiveValidationReportsPayload {
     stored?: boolean;
     entries?: number;
     max_entries?: number;
+    duplicate?: boolean;
+    duplicate_key?: string | null;
+    duplicate_audit_event?: Record<string, unknown>;
   };
   deleted?: number;
   deleted_keys?: string[];
@@ -709,9 +762,223 @@ export interface PolymarketLiveValidationReportsPayload {
   message?: string;
 }
 
+export interface PolymarketLiveValidationReportPayload {
+  source: string;
+  entry: PolymarketLiveValidationReportEntry & {
+    payload: PolymarketLiveValidationPayload | Record<string, unknown>;
+  };
+  decisions?: PolymarketLiveValidationDecisionEntry[];
+  export: {
+    format: string;
+    filename: string;
+  };
+}
+
+export interface PolymarketLiveValidationReportReviewBundle {
+  source: string;
+  kind: string;
+  bundle_version: number;
+  review_bundle_hash?: string;
+  generated_at: number;
+  funded_execution_exposed: boolean;
+  static_coverage_mutated: boolean;
+  report: {
+    key?: string | null;
+    label?: string | null;
+    source?: string | null;
+    stored_at?: number | null;
+    payload_hash?: string | null;
+    provenance?: Record<string, unknown>;
+    summary?: Record<string, unknown>;
+  };
+  schema_validation: PolymarketLiveValidationReportSchemaValidation;
+  duplicate_history: Record<string, unknown>;
+  promotion_review: Record<string, unknown>;
+  operator_commands: Record<string, string>;
+  coverage_tier_mapping: Record<string, unknown>;
+  review_notes: string[];
+}
+
+export interface PolymarketLiveValidationReportReviewPayload {
+  source: string;
+  bundle: PolymarketLiveValidationReportReviewBundle;
+  export: {
+    json_filename: string;
+    markdown_filename: string;
+  };
+}
+
+export interface PolymarketLiveValidationDecisionEntry {
+  key?: string | null;
+  kind?: string | null;
+  created_at?: number | null;
+  created_at_ns?: number | null;
+  report_key: string;
+  payload_hash: string;
+  target_tier: string;
+  decision: "accepted" | "rejected" | string;
+  reviewer: string;
+  reviewer_note: string;
+  review_bundle_hash: string;
+  review_bundle_hash_verified: boolean;
+  static_coverage_mutated: boolean;
+  funded_execution_exposed: boolean;
+  promotion_effect: string;
+  report_label?: string;
+  report_source?: string;
+  coverage_tier_decision?: Record<string, unknown>;
+}
+
+export interface PolymarketLiveValidationDecisionLedgerPayload {
+  source: string;
+  kind: string;
+  cache: {
+    path: string;
+    exists: boolean;
+    entries: number;
+    size_bytes: number;
+    version: number;
+    created_at?: number | null;
+    updated_at?: number | null;
+  };
+  entries: PolymarketLiveValidationDecisionEntry[];
+  counts: {
+    entries: number;
+    accepted: number;
+    rejected: number;
+    by_decision: Record<string, number>;
+    by_tier: Record<string, number>;
+  };
+  static_coverage_mutated: boolean;
+  funded_execution_exposed: boolean;
+  stored?: PolymarketLiveValidationDecisionEntry & {
+    stored?: boolean;
+    entries?: number;
+  };
+  message?: string;
+}
+
+export interface PolymarketLiveValidationDecisionStoreRequest {
+  report_key: string;
+  payload_hash: string;
+  target_tier: string;
+  decision: "accepted" | "rejected";
+  reviewer_note: string;
+  review_bundle_hash: string;
+  reviewer?: string;
+}
+
+export interface PolymarketLiveValidationPromotionProposalPayload {
+  source: string;
+  kind: string;
+  proposal_version: number;
+  generated_at: number;
+  proposal_hash?: string;
+  target_tier_filter?: string | null;
+  human_review_required: boolean;
+  automerge_enabled: boolean;
+  apply_by_default: boolean;
+  static_coverage_mutated: boolean;
+  funded_execution_exposed: boolean;
+  review_gates: Array<Record<string, unknown>>;
+  accepted_decisions: Array<Record<string, unknown>>;
+  stale_decisions: Array<Record<string, unknown>>;
+  ignored_decisions: Array<Record<string, unknown>>;
+  proposed_changes: Array<Record<string, unknown>>;
+  patch_proposal: Record<string, unknown>;
+  counts: {
+    ledger_entries: number;
+    accepted_candidates: number;
+    stale_decisions: number;
+    ignored_decisions: number;
+    proposed_changes: number;
+  };
+  notes: string[];
+}
+
+export interface PolymarketLiveValidationPromotionProposalSnapshotEntry {
+  key?: string | null;
+  kind?: string | null;
+  stored_at?: number | null;
+  stored_at_ns?: number | null;
+  age_seconds?: number | null;
+  source: string;
+  label: string;
+  proposal_hash: string;
+  current_proposal_hash?: string;
+  proposal_generated_at?: number | null;
+  proposal_version?: number | null;
+  target_tier_filter?: string | null;
+  counts: Record<string, unknown>;
+  human_review_required: boolean;
+  automerge_enabled: boolean;
+  apply_by_default: boolean;
+  static_coverage_mutated: boolean;
+  funded_execution_exposed: boolean;
+  snapshot_status: "current" | "stale" | string;
+  stale: boolean;
+  stale_reasons: string[];
+  path?: string;
+  provenance?: Record<string, unknown>;
+}
+
+export interface PolymarketLiveValidationPromotionProposalSnapshotsPayload {
+  source: string;
+  kind: string;
+  cache: {
+    path: string;
+    exists: boolean;
+    entries: number;
+    max_entries: number;
+    size_bytes: number;
+    version: number;
+    created_at?: number | null;
+    updated_at?: number | null;
+  };
+  entries: PolymarketLiveValidationPromotionProposalSnapshotEntry[];
+  counts: {
+    entries: number;
+    current: number;
+    stale: number;
+  };
+  static_coverage_mutated: boolean;
+  funded_execution_exposed: boolean;
+  stored?: PolymarketLiveValidationPromotionProposalSnapshotEntry & {
+    stored?: boolean;
+    entries?: number;
+  };
+  deleted?: number;
+  deleted_keys?: string[];
+  missing_keys?: string[];
+  requested?: number;
+  message?: string;
+}
+
+export interface PolymarketLiveValidationPromotionProposalSnapshotPayload {
+  source: string;
+  kind: string;
+  entry: PolymarketLiveValidationPromotionProposalSnapshotEntry;
+  proposal: PolymarketLiveValidationPromotionProposalPayload | Record<string, unknown>;
+  export: {
+    json_filename: string;
+    markdown_filename: string;
+  };
+  static_coverage_mutated: boolean;
+  funded_execution_exposed: boolean;
+}
+
+export interface PolymarketLiveValidationPromotionProposalSnapshotStoreRequest {
+  target_tier?: string;
+  label?: string;
+  source?: string;
+}
+
 export interface PolymarketLiveValidationReportStoreRequest {
   label?: string;
   source?: string;
+  source_file?: string;
+  allow_duplicate?: boolean;
+  skip_duplicate?: boolean;
   report_json?: string;
   report?: Record<string, unknown>;
 }

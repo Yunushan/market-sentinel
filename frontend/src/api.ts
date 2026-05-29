@@ -20,6 +20,15 @@ import type {
   PaperQuotePayload,
   PolymarketLeaderboardFilters,
   PolymarketLeaderboardPayload,
+  PolymarketLiveValidationDecisionLedgerPayload,
+  PolymarketLiveValidationDecisionStoreRequest,
+  PolymarketLiveValidationPromotionProposalPayload,
+  PolymarketLiveValidationPromotionProposalSnapshotPayload,
+  PolymarketLiveValidationPromotionProposalSnapshotStoreRequest,
+  PolymarketLiveValidationPromotionProposalSnapshotsPayload,
+  PolymarketLiveValidationReportPayload,
+  PolymarketLiveValidationReportReviewPayload,
+  PolymarketLiveValidationReportSchemaValidation,
   PolymarketLiveValidationReportStoreRequest,
   PolymarketLiveValidationReportsPayload,
   PolymarketLiveValidationPayload,
@@ -53,6 +62,43 @@ type ApiErrorBody = {
   };
 };
 
+export class ApiRequestError extends Error {
+  code?: string;
+  status?: number;
+  details?: unknown;
+
+  constructor(message: string, code?: string, status?: number, details?: unknown) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.code = code;
+    this.status = status;
+    this.details = details;
+  }
+}
+
+export function apiSchemaValidation(details: unknown): PolymarketLiveValidationReportSchemaValidation | null {
+  if (!details || typeof details !== "object" || !("schema_validation" in details)) {
+    return null;
+  }
+  const value = (details as { schema_validation?: unknown }).schema_validation;
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const validation = value as Partial<PolymarketLiveValidationReportSchemaValidation>;
+  if (typeof validation.ok !== "boolean") {
+    return null;
+  }
+  return {
+    schema_version: Number(validation.schema_version ?? 1),
+    ok: validation.ok,
+    mode: typeof validation.mode === "string" || validation.mode === null ? validation.mode : null,
+    report_type: typeof validation.report_type === "string" || validation.report_type === null ? validation.report_type : null,
+    errors: Array.isArray(validation.errors) ? validation.errors.map(String) : [],
+    warnings: Array.isArray(validation.warnings) ? validation.warnings.map(String) : [],
+    accepted_modes: Array.isArray(validation.accepted_modes) ? validation.accepted_modes.map(String) : []
+  };
+}
+
 const vitePorts = new Set(["5173", "4173"]);
 const defaultApiBase = vitePorts.has(window.location.port) ? "http://127.0.0.1:8765" : "";
 const apiBase = (import.meta.env.VITE_API_BASE_URL ?? defaultApiBase).replace(/\/$/, "");
@@ -69,8 +115,10 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (!response.ok) {
     const error = payload.error;
     const message = typeof error === "string" ? error : error?.message;
-    const code = typeof error === "object" && error?.code ? `${error.code}: ` : "";
-    throw new Error(`${code}${message ?? `Request failed: ${response.status}`}`);
+    const code = typeof error === "object" ? error?.code : undefined;
+    const status = typeof error === "object" ? error?.status : response.status;
+    const details = typeof error === "object" ? error?.details : undefined;
+    throw new ApiRequestError(`${code ? `${code}: ` : ""}${message ?? `Request failed: ${response.status}`}`, code, status, details);
   }
   return payload;
 }
@@ -120,6 +168,16 @@ export function fetchPolymarketLiveValidationReports(includePayload = false): Pr
   return request<PolymarketLiveValidationReportsPayload>(`/api/polymarket/live-validation/reports?${params.toString()}`);
 }
 
+export function fetchPolymarketLiveValidationReport(key: string): Promise<PolymarketLiveValidationReportPayload> {
+  return request<PolymarketLiveValidationReportPayload>(`/api/polymarket/live-validation/reports/${encodeURIComponent(key)}`);
+}
+
+export function fetchPolymarketLiveValidationReportReview(key: string): Promise<PolymarketLiveValidationReportReviewPayload> {
+  return request<PolymarketLiveValidationReportReviewPayload>(
+    `/api/polymarket/live-validation/reports/${encodeURIComponent(key)}/review.json`
+  );
+}
+
 export function storePolymarketLiveValidationReport(
   payload: PolymarketLiveValidationReportStoreRequest
 ): Promise<PolymarketLiveValidationReportsPayload> {
@@ -129,10 +187,126 @@ export function storePolymarketLiveValidationReport(
   });
 }
 
+export function fetchPolymarketLiveValidationDecisions(reportKey = ""): Promise<PolymarketLiveValidationDecisionLedgerPayload> {
+  const params = new URLSearchParams();
+  if (reportKey) {
+    params.set("report_key", reportKey);
+  }
+  const query = params.toString();
+  return request<PolymarketLiveValidationDecisionLedgerPayload>(
+    `/api/polymarket/live-validation/decisions${query ? `?${query}` : ""}`
+  );
+}
+
+export function fetchPolymarketLiveValidationPromotionProposal(
+  targetTier = ""
+): Promise<PolymarketLiveValidationPromotionProposalPayload> {
+  const params = new URLSearchParams();
+  if (targetTier) {
+    params.set("target_tier", targetTier);
+  }
+  const query = params.toString();
+  return request<PolymarketLiveValidationPromotionProposalPayload>(
+    `/api/polymarket/live-validation/promotion-proposal${query ? `?${query}` : ""}`
+  );
+}
+
+export function fetchPolymarketLiveValidationPromotionProposalSnapshots(): Promise<PolymarketLiveValidationPromotionProposalSnapshotsPayload> {
+  return request<PolymarketLiveValidationPromotionProposalSnapshotsPayload>(
+    "/api/polymarket/live-validation/promotion-proposal/snapshots"
+  );
+}
+
+export function fetchPolymarketLiveValidationPromotionProposalSnapshot(
+  key: string
+): Promise<PolymarketLiveValidationPromotionProposalSnapshotPayload> {
+  return request<PolymarketLiveValidationPromotionProposalSnapshotPayload>(
+    `/api/polymarket/live-validation/promotion-proposal/snapshots/${encodeURIComponent(key)}`
+  );
+}
+
+export function storePolymarketLiveValidationPromotionProposalSnapshot(
+  payload: PolymarketLiveValidationPromotionProposalSnapshotStoreRequest
+): Promise<PolymarketLiveValidationPromotionProposalSnapshotsPayload> {
+  return request<PolymarketLiveValidationPromotionProposalSnapshotsPayload>(
+    "/api/polymarket/live-validation/promotion-proposal/snapshots",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }
+  );
+}
+
+export function storePolymarketLiveValidationDecision(
+  payload: PolymarketLiveValidationDecisionStoreRequest
+): Promise<PolymarketLiveValidationDecisionLedgerPayload> {
+  return request<PolymarketLiveValidationDecisionLedgerPayload>("/api/polymarket/live-validation/decisions", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
 export function deletePolymarketLiveValidationReport(key: string): Promise<PolymarketLiveValidationReportsPayload> {
   return request<PolymarketLiveValidationReportsPayload>(`/api/polymarket/live-validation/reports/${encodeURIComponent(key)}`, {
     method: "DELETE"
   });
+}
+
+export function deletePolymarketLiveValidationPromotionProposalSnapshot(
+  key: string
+): Promise<PolymarketLiveValidationPromotionProposalSnapshotsPayload> {
+  return request<PolymarketLiveValidationPromotionProposalSnapshotsPayload>(
+    `/api/polymarket/live-validation/promotion-proposal/snapshots/${encodeURIComponent(key)}`,
+    {
+      method: "DELETE"
+    }
+  );
+}
+
+export function polymarketLiveValidationReportExportUrl(key: string): string {
+  return `${apiBase}/api/polymarket/live-validation/reports/${encodeURIComponent(key)}/export.json`;
+}
+
+export function polymarketLiveValidationReportReviewJsonUrl(key: string): string {
+  return `${apiBase}/api/polymarket/live-validation/reports/${encodeURIComponent(key)}/review.json`;
+}
+
+export function polymarketLiveValidationReportReviewMarkdownUrl(key: string): string {
+  return `${apiBase}/api/polymarket/live-validation/reports/${encodeURIComponent(key)}/review.md`;
+}
+
+export function polymarketLiveValidationDecisionLedgerJsonUrl(): string {
+  return `${apiBase}/api/polymarket/live-validation/decisions/export.json`;
+}
+
+export function polymarketLiveValidationDecisionLedgerMarkdownUrl(): string {
+  return `${apiBase}/api/polymarket/live-validation/decisions/export.md`;
+}
+
+export function polymarketLiveValidationPromotionProposalJsonUrl(targetTier = ""): string {
+  const params = new URLSearchParams();
+  if (targetTier) {
+    params.set("target_tier", targetTier);
+  }
+  const query = params.toString();
+  return `${apiBase}/api/polymarket/live-validation/promotion-proposal/export.json${query ? `?${query}` : ""}`;
+}
+
+export function polymarketLiveValidationPromotionProposalMarkdownUrl(targetTier = ""): string {
+  const params = new URLSearchParams();
+  if (targetTier) {
+    params.set("target_tier", targetTier);
+  }
+  const query = params.toString();
+  return `${apiBase}/api/polymarket/live-validation/promotion-proposal/export.md${query ? `?${query}` : ""}`;
+}
+
+export function polymarketLiveValidationPromotionProposalSnapshotJsonUrl(key: string): string {
+  return `${apiBase}/api/polymarket/live-validation/promotion-proposal/snapshots/${encodeURIComponent(key)}/export.json`;
+}
+
+export function polymarketLiveValidationPromotionProposalSnapshotMarkdownUrl(key: string): string {
+  return `${apiBase}/api/polymarket/live-validation/promotion-proposal/snapshots/${encodeURIComponent(key)}/export.md`;
 }
 
 export function updateMarket(marketId: string, patch: MarketPatch): Promise<MarketsPayload> {

@@ -55,7 +55,15 @@ from web_api import (
     paper_quote_payload,
     paper_position_rows,
     polymarket_clob_readiness_payload,
+    polymarket_live_validation_decision_store_payload,
+    polymarket_live_validation_decisions_payload,
+    polymarket_live_validation_promotion_proposal_payload,
+    polymarket_live_validation_promotion_proposal_snapshot_payload,
+    polymarket_live_validation_promotion_proposal_snapshot_store_payload,
+    polymarket_live_validation_promotion_proposal_snapshots_payload,
+    polymarket_live_validation_report_payload,
     polymarket_live_validation_report_purge_payload,
+    polymarket_live_validation_report_review_payload,
     polymarket_live_validation_report_store_payload,
     polymarket_live_validation_reports_payload,
     polymarket_live_validation_payload,
@@ -77,6 +85,8 @@ from web_api import (
 
 WALLET = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 WALLET_2 = "0xcccccccccccccccccccccccccccccccccccccccc"
+ROOT = Path(__file__).resolve().parent.parent
+LIVE_REPORT_FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "polymarket" / "live_reports"
 
 
 class FakePaperAdapter(MarketAdapter):
@@ -1427,6 +1437,8 @@ class WebApiTests(unittest.TestCase):
         self.assertIn("/api/polymarket/clob-readiness", payload["routes"]["GET"])
         self.assertIn("/api/polymarket/live-validation", payload["routes"]["GET"])
         self.assertIn("/api/polymarket/live-validation/reports", payload["routes"]["GET"])
+        self.assertIn("/api/polymarket/live-validation/reports/{key}", payload["routes"]["GET"])
+        self.assertIn("/api/polymarket/live-validation/reports/{key}/export.json", payload["routes"]["GET"])
         self.assertIn("/api/polymarket/users/mdd/cache", payload["routes"]["GET"])
         self.assertIn("/api/polymarket/users/mdd/cache/health", payload["routes"]["GET"])
         self.assertIn("/api/polymarket/users/mdd/export.json", payload["routes"]["GET"])
@@ -1485,6 +1497,9 @@ class WebApiTests(unittest.TestCase):
 
         self.assertEqual(payload["mode"], "local_readiness_only")
         self.assertFalse(payload["funded_execution_exposed"])
+        self.assertEqual(payload["credential_runbook"]["mode"], "credential_runbook_no_funded_actions")
+        self.assertFalse(payload["credential_runbook"]["funded_execution_exposed"])
+        self.assertIn("credentialed_read_no_funded_actions", payload["credential_runbook"]["operator_commands"])
         self.assertFalse(payload["stage_gates"]["credentialed_read_ok"])
         self.assertFalse(payload["stage_gates"]["safe_to_attempt_funded_order"])
         self.assertEqual(payload["authenticated_read_checks"]["clob_l2_orders"]["status"], "skipped")
@@ -1538,18 +1553,433 @@ class WebApiTests(unittest.TestCase):
                 )
 
                 self.assertEqual(imported["counts"]["entries"], 2)
+                self.assertTrue(imported["stored"]["schema_validation"]["ok"])
+                self.assertEqual(imported["stored"]["schema_validation"]["mode"], "strict_cli")
+                self.assertIn("authenticated_read_checks is missing.", imported["stored"]["schema_validation"]["warnings"])
                 self.assertEqual(imported["stored"]["summary"]["credential_readiness"], "passed")
                 self.assertTrue(imported["stored"]["summary"]["credentialed_read_ok"])
+                self.assertEqual(imported["stored"]["summary"]["credential_live_verified"], "blocked")
+                self.assertFalse(imported["stored"]["summary"]["can_promote_credential_live_verified"])
+                self.assertIn(
+                    "no accepted authenticated-read evidence",
+                    " ".join(imported["stored"]["summary"]["verification_promotion"]["blocked_reasons"]),
+                )
                 self.assertIsNotNone(imported["comparison"])
                 self.assertTrue(report_path.exists())
                 disk = report_path.read_text(encoding="utf-8")
                 self.assertNotIn("very-secret-api-key", disk)
                 self.assertNotIn("9" * 64, disk)
                 self.assertIn("***", disk)
+                opened = polymarket_live_validation_report_payload(imported["stored"]["key"])
+                self.assertIsNotNone(opened)
+                self.assertEqual(opened["entry"]["payload"]["api_key"], "***")
+                self.assertTrue(opened["export"]["filename"].endswith(".json"))
 
                 deleted = polymarket_live_validation_report_purge_payload({"key": gui_key})
                 self.assertEqual(deleted["deleted"], 1)
                 self.assertNotIn(gui_key, [entry["key"] for entry in deleted["entries"]])
+
+    def test_polymarket_live_validation_report_api_skips_and_allows_duplicates(self) -> None:
+        cfg = AppConfig()
+        report = json.loads((LIVE_REPORT_FIXTURE_ROOT / "valid_dry_run.json").read_text(encoding="utf-8"))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "reports.json"
+            with patch.dict(os.environ, {"POLYMARKET_LIVE_VALIDATION_REPORTS_PATH": str(report_path)}, clear=False):
+                first = polymarket_live_validation_report_store_payload(
+                    cfg,
+                    {
+                        "report_json": json.dumps(report),
+                        "label": "dry run",
+                        "source": "cli_import",
+                        "source_file": "valid_dry_run.json",
+                    },
+                )
+                self.assertEqual(first["counts"]["entries"], 1)
+                self.assertTrue(first["stored"]["stored"])
+                self.assertEqual(len(first["stored"]["payload_hash"]), 64)
+                self.assertEqual(first["stored"]["provenance"]["source_file_name"], "valid_dry_run.json")
+
+                skipped = polymarket_live_validation_report_store_payload(
+                    cfg,
+                    {
+                        "report_json": json.dumps(report),
+                        "label": "dry run replay",
+                        "source": "cli_import",
+                        "source_file": "valid_dry_run-copy.json",
+                    },
+                )
+                self.assertEqual(skipped["counts"]["entries"], 1)
+                self.assertFalse(skipped["stored"]["stored"])
+                self.assertTrue(skipped["stored"]["duplicate"])
+                self.assertEqual(skipped["stored"]["duplicate_key"], first["stored"]["key"])
+                self.assertIn("Skipped duplicate", skipped["message"])
+                self.assertEqual(skipped["counts"]["duplicate_imports"], 1)
+
+                allowed = polymarket_live_validation_report_store_payload(
+                    cfg,
+                    {
+                        "report_json": json.dumps(report),
+                        "label": "dry run duplicate evidence",
+                        "source": "cli_import",
+                        "source_file": "valid_dry_run-allowed.json",
+                        "allow_duplicate": True,
+                    },
+                )
+                self.assertEqual(allowed["counts"]["entries"], 2)
+                self.assertTrue(allowed["stored"]["stored"])
+                self.assertTrue(allowed["stored"]["duplicate"])
+                self.assertEqual(allowed["stored"]["duplicate_of"], first["stored"]["key"])
+                self.assertIn("Stored duplicate", allowed["message"])
+
+    def test_polymarket_live_validation_report_routes_open_export_and_delete(self) -> None:
+        report = {
+            "generated_at": 123.0,
+            "market_id": "polymarket",
+            "mode": "strict_cli",
+            "api_key": "route-secret",
+            "stage_gates": {
+                "public_live_checks": "passed",
+                "credential_readiness": "passed",
+                "credentialed_read_checks": "blocked",
+                "bridge_address_checks": "blocked",
+                "funded_live_order_check": "blocked",
+                "credentialed_read_ok": False,
+                "safe_to_attempt_funded_order": False,
+                "requires_explicit_live_approval": True,
+                "next_step": "authenticated read required",
+            },
+            "funded_execution_exposed": False,
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            frontend_dir = Path(tmpdir) / "dist"
+            report_path = Path(tmpdir) / "live-reports.json"
+            decision_path = Path(tmpdir) / "live-decisions.json"
+            snapshot_path = Path(tmpdir) / "live-proposal-snapshots.json"
+            with patch.dict(
+                os.environ,
+                {
+                    "POLYMARKET_LIVE_VALIDATION_REPORTS_PATH": str(report_path),
+                    "POLYMARKET_LIVE_VALIDATION_DECISIONS_PATH": str(decision_path),
+                    "POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_PATH": str(snapshot_path),
+                },
+                clear=False,
+            ):
+                server, thread, base_url = self._serve_api(config_path, frontend_dir)
+                try:
+                    status, stored = self._request_json(
+                        base_url,
+                        "/api/polymarket/live-validation/reports",
+                        method="POST",
+                        payload={"report_json": json.dumps(report), "label": "route report"},
+                    )
+                    self.assertEqual(status, 200)
+                    report_key = stored["stored"]["key"]
+
+                    status, listing = self._request_json(base_url, "/api/polymarket/live-validation/reports")
+                    self.assertEqual(status, 200)
+                    self.assertEqual(listing["counts"]["entries"], 1)
+
+                    status, opened = self._request_json(
+                        base_url,
+                        f"/api/polymarket/live-validation/reports/{report_key}",
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(opened["entry"]["payload"]["api_key"], "***")
+                    self.assertEqual(opened["entry"]["summary"]["credential_readiness"], "passed")
+                    self.assertEqual(opened["entry"]["summary"]["credential_live_verified"], "blocked")
+                    self.assertTrue(opened["entry"]["schema_validation"]["ok"])
+                    self.assertEqual(opened["entry"]["schema_validation"]["mode"], "strict_cli")
+
+                    status, headers, body = self._request_raw(
+                        base_url,
+                        f"/api/polymarket/live-validation/reports/{report_key}/export.json",
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertIn("attachment", headers.get("Content-Disposition", ""))
+                    exported = json.loads(body.decode("utf-8"))
+                    self.assertEqual(exported["entry"]["payload"]["api_key"], "***")
+                    self.assertTrue(exported["entry"]["schema_validation"]["ok"])
+                    self.assertEqual(exported["entry"]["schema_validation"]["mode"], "strict_cli")
+                    self.assertNotIn("route-secret", body.decode("utf-8"))
+
+                    direct_review = polymarket_live_validation_report_review_payload(report_key)
+                    self.assertIsNotNone(direct_review)
+                    self.assertEqual(direct_review["bundle"]["report"]["key"], report_key)
+                    self.assertFalse(direct_review["bundle"]["static_coverage_mutated"])
+
+                    status, headers, body = self._request_raw(
+                        base_url,
+                        f"/api/polymarket/live-validation/reports/{report_key}/review.json",
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertIn("attachment", headers.get("Content-Disposition", ""))
+                    review_json = json.loads(body.decode("utf-8"))
+                    self.assertEqual(review_json["bundle"]["source"], "polymarket_live_validation_report_review_bundle")
+                    self.assertEqual(review_json["bundle"]["report"]["key"], report_key)
+                    self.assertEqual(review_json["bundle"]["promotion_review"]["credential_live_verified"], "blocked")
+                    self.assertFalse(review_json["bundle"]["coverage_tier_mapping"]["static_coverage_mutated"])
+                    self.assertNotIn("route-secret", body.decode("utf-8"))
+
+                    decision_request = {
+                        "report_key": report_key,
+                        "payload_hash": review_json["bundle"]["report"]["payload_hash"],
+                        "target_tier": "credential_live_verified",
+                        "decision": "rejected",
+                        "reviewer": "route-test",
+                        "reviewer_note": "Route report has no accepted credential evidence.",
+                        "review_bundle_hash": review_json["bundle"]["review_bundle_hash"],
+                    }
+                    direct_decision = polymarket_live_validation_decision_store_payload(decision_request)
+                    self.assertEqual(direct_decision["counts"]["entries"], 1)
+                    self.assertFalse(direct_decision["stored"]["static_coverage_mutated"])
+
+                    status, decision = self._request_json(
+                        base_url,
+                        "/api/polymarket/live-validation/decisions",
+                        method="POST",
+                        payload={**decision_request, "reviewer_note": "Second rejected route decision."},
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(decision["counts"]["entries"], 2)
+                    self.assertEqual(decision["stored"]["decision"], "rejected")
+                    self.assertTrue(decision["stored"]["review_bundle_hash_verified"])
+                    self.assertFalse(decision["stored"]["static_coverage_mutated"])
+
+                    status, ledger = self._request_json(
+                        base_url,
+                        f"/api/polymarket/live-validation/decisions?report_key={report_key}",
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(ledger["counts"]["entries"], 2)
+                    self.assertEqual(polymarket_live_validation_decisions_payload()["counts"]["entries"], 2)
+
+                    status, headers, body = self._request_raw(
+                        base_url,
+                        "/api/polymarket/live-validation/decisions/export.json",
+                    )
+                    self.assertEqual(status, 200)
+                    ledger_export = json.loads(body.decode("utf-8"))
+                    self.assertEqual(ledger_export["counts"]["entries"], 2)
+                    self.assertNotIn("route-secret", body.decode("utf-8"))
+
+                    status, headers, body = self._request_raw(
+                        base_url,
+                        "/api/polymarket/live-validation/decisions/export.md",
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertIn("Promotion Decision Ledger", body.decode("utf-8"))
+                    self.assertNotIn("route-secret", body.decode("utf-8"))
+
+                    direct_proposal = polymarket_live_validation_promotion_proposal_payload()
+                    self.assertEqual(direct_proposal["counts"]["ledger_entries"], 2)
+                    self.assertEqual(direct_proposal["counts"]["accepted_candidates"], 0)
+                    self.assertFalse(direct_proposal["automerge_enabled"])
+                    self.assertFalse(direct_proposal["static_coverage_mutated"])
+
+                    status, proposal = self._request_json(
+                        base_url,
+                        "/api/polymarket/live-validation/promotion-proposal",
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(proposal["counts"]["ignored_decisions"], 2)
+                    self.assertTrue(proposal["human_review_required"])
+                    self.assertFalse(proposal["apply_by_default"])
+
+                    status, headers, body = self._request_raw(
+                        base_url,
+                        "/api/polymarket/live-validation/promotion-proposal/export.json",
+                    )
+                    self.assertEqual(status, 200)
+                    proposal_export = json.loads(body.decode("utf-8"))
+                    self.assertEqual(proposal_export["source"], "polymarket_live_validation_coverage_promotion_proposal")
+                    self.assertNotIn("route-secret", body.decode("utf-8"))
+
+                    status, headers, body = self._request_raw(
+                        base_url,
+                        "/api/polymarket/live-validation/promotion-proposal/export.md",
+                    )
+                    self.assertEqual(status, 200)
+                    proposal_markdown = body.decode("utf-8")
+                    self.assertIn("Coverage Promotion Proposal", proposal_markdown)
+                    self.assertIn("Automerge enabled: false", proposal_markdown)
+                    self.assertNotIn("route-secret", proposal_markdown)
+
+                    direct_snapshot = polymarket_live_validation_promotion_proposal_snapshot_store_payload(
+                        {"target_tier": "credential_live_verified", "source": "route-test"}
+                    )
+                    self.assertEqual(direct_snapshot["counts"]["entries"], 1)
+                    self.assertFalse(direct_snapshot["stored"]["static_coverage_mutated"])
+                    self.assertEqual(polymarket_live_validation_promotion_proposal_snapshots_payload()["counts"]["entries"], 1)
+
+                    status, snapshots = self._request_json(
+                        base_url,
+                        "/api/polymarket/live-validation/promotion-proposal/snapshots",
+                        method="POST",
+                        payload={"target_tier": "credential_live_verified", "source": "route-test"},
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(snapshots["counts"]["entries"], 2)
+                    snapshot_key = snapshots["stored"]["key"]
+
+                    direct_opened = polymarket_live_validation_promotion_proposal_snapshot_payload(snapshot_key)
+                    self.assertIsNotNone(direct_opened)
+                    self.assertEqual(direct_opened["entry"]["key"], snapshot_key)
+                    self.assertFalse(direct_opened["entry"]["static_coverage_mutated"])
+
+                    status, opened_snapshot = self._request_json(
+                        base_url,
+                        f"/api/polymarket/live-validation/promotion-proposal/snapshots/{snapshot_key}",
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertIn(opened_snapshot["entry"]["snapshot_status"], {"current", "stale"})
+                    self.assertNotIn("route-secret", json.dumps(opened_snapshot, sort_keys=True))
+
+                    status, headers, body = self._request_raw(
+                        base_url,
+                        f"/api/polymarket/live-validation/promotion-proposal/snapshots/{snapshot_key}/export.json",
+                    )
+                    self.assertEqual(status, 200)
+                    snapshot_export = json.loads(body.decode("utf-8"))
+                    self.assertEqual(snapshot_export["entry"]["key"], snapshot_key)
+                    self.assertNotIn("route-secret", body.decode("utf-8"))
+
+                    status, headers, body = self._request_raw(
+                        base_url,
+                        f"/api/polymarket/live-validation/promotion-proposal/snapshots/{snapshot_key}/export.md",
+                    )
+                    self.assertEqual(status, 200)
+                    snapshot_markdown = body.decode("utf-8")
+                    self.assertIn("Promotion Proposal Snapshot", snapshot_markdown)
+                    self.assertNotIn("route-secret", snapshot_markdown)
+
+                    status, deleted_snapshot = self._request_json(
+                        base_url,
+                        f"/api/polymarket/live-validation/promotion-proposal/snapshots/{snapshot_key}",
+                        method="DELETE",
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(deleted_snapshot["deleted"], 1)
+
+                    status, headers, body = self._request_raw(
+                        base_url,
+                        f"/api/polymarket/live-validation/reports/{report_key}/review.md",
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertIn("text/markdown", headers.get("Content-Type", ""))
+                    review_markdown = body.decode("utf-8")
+                    self.assertIn("Polymarket Live Validation Review Bundle", review_markdown)
+                    self.assertIn("Static coverage mutated: false", review_markdown)
+                    self.assertIn("Coverage Tier Mapping", review_markdown)
+                    self.assertNotIn("route-secret", review_markdown)
+
+                    status, deleted = self._request_json(
+                        base_url,
+                        f"/api/polymarket/live-validation/reports/{report_key}",
+                        method="DELETE",
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(deleted["deleted"], 1)
+
+                    status, missing = self._request_json(
+                        base_url,
+                        f"/api/polymarket/live-validation/reports/{report_key}",
+                    )
+                    self.assertEqual(status, 404)
+                    self.assertEqual(missing["error"]["code"], "not_found")
+                finally:
+                    server.shutdown()
+                    thread.join(timeout=5)
+
+    def test_polymarket_live_validation_report_route_returns_schema_error_without_storing(self) -> None:
+        invalid = json.loads((LIVE_REPORT_FIXTURE_ROOT / "invalid_missing_mode.json").read_text(encoding="utf-8"))
+        valid = json.loads((LIVE_REPORT_FIXTURE_ROOT / "valid_dry_run.json").read_text(encoding="utf-8"))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            frontend_dir = Path(tmpdir) / "dist"
+            report_path = Path(tmpdir) / "live-reports.json"
+            with patch.dict(os.environ, {"POLYMARKET_LIVE_VALIDATION_REPORTS_PATH": str(report_path)}, clear=False):
+                server, thread, base_url = self._serve_api(config_path, frontend_dir)
+                try:
+                    status, failed = self._request_json(
+                        base_url,
+                        "/api/polymarket/live-validation/reports",
+                        method="POST",
+                        payload={"report_json": json.dumps(invalid), "label": "bad fixture"},
+                    )
+                    self.assertEqual(status, 400)
+                    self.assertEqual(failed["error"]["code"], "live_validation_report_schema_error")
+                    validation = failed["error"]["details"]["schema_validation"]
+                    self.assertFalse(validation["ok"])
+                    self.assertIn("Live validation report requires", " ".join(validation["errors"]))
+                    self.assertIn("strict_cli", validation["accepted_modes"])
+
+                    status, listing = self._request_json(base_url, "/api/polymarket/live-validation/reports")
+                    self.assertEqual(status, 200)
+                    self.assertEqual(listing["counts"]["entries"], 0)
+
+                    status, stored = self._request_json(
+                        base_url,
+                        "/api/polymarket/live-validation/reports",
+                        method="POST",
+                        payload={"report_json": json.dumps(valid), "label": "valid dry-run fixture"},
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertTrue(stored["stored"]["schema_validation"]["ok"])
+                    self.assertEqual(stored["stored"]["schema_validation"]["mode"], "strict_cli")
+                finally:
+                    server.shutdown()
+                    thread.join(timeout=5)
+
+    def test_polymarket_coverage_route_includes_guarded_report_promotion_inventory(self) -> None:
+        report = {
+            "generated_at": 123.0,
+            "market_id": "polymarket",
+            "mode": "strict_cli",
+            "authenticated_read_checks": {
+                "user_websocket_connect": {"status": "ok", "detail": "connected", "sample_type": "dict"}
+            },
+            "funded_live_order_check": {"status": "dry_run", "live_action": False},
+            "stage_gates": {
+                "credentialed_read_ok": True,
+                "credentialed_read_checks": "ok",
+                "funded_live_order_check": "dry_run",
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            frontend_dir = Path(tmpdir) / "dist"
+            report_path = Path(tmpdir) / "live-reports.json"
+            with patch.dict(os.environ, {"POLYMARKET_LIVE_VALIDATION_REPORTS_PATH": str(report_path)}, clear=False):
+                server, thread, base_url = self._serve_api(config_path, frontend_dir)
+                try:
+                    status, _stored = self._request_json(
+                        base_url,
+                        "/api/polymarket/live-validation/reports",
+                        method="POST",
+                        payload={"report_json": json.dumps(report), "label": "credentialed read"},
+                    )
+                    self.assertEqual(status, 200)
+
+                    status, coverage = self._request_json(base_url, "/api/polymarket/coverage")
+                    self.assertEqual(status, 200)
+                    promotion = coverage["stored_live_validation_report_promotion"]
+                    self.assertFalse(promotion["static_coverage_mutated"])
+                    self.assertEqual(promotion["credential_live_verified"], "yes")
+                    self.assertEqual(promotion["funded_live_verified"], "blocked")
+                    self.assertEqual(promotion["counts"]["credential_candidates"], 1)
+                    authenticated_category = [
+                        item for item in coverage["categories"] if item["name"] == "CLOB authenticated trading and account data"
+                    ][0]
+                    self.assertEqual(authenticated_category["coverage_levels"]["credential_live_verified"], "blocked")
+                    self.assertEqual(authenticated_category["coverage_levels"]["funded_live_verified"], "blocked")
+                finally:
+                    server.shutdown()
+                    thread.join(timeout=5)
 
     def test_api_error_payload_uses_structured_shape_and_redacts_detail_keys(self) -> None:
         payload = api_error_payload(

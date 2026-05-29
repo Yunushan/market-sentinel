@@ -41,6 +41,7 @@ from polymarket.analytics_cache import (
 )
 from polymarket.auth_readiness import build_clob_auth_readiness
 from polymarket.coverage import polymarket_official_api_coverage
+from polymarket.credential_runbook import build_polymarket_credential_runbook
 from polymarket.http_client import PolymarketHTTPError, PolymarketRateLimitError
 from polymarket.live_verification import (
     ABSOLUTE_MAX_VERIFY_NOTIONAL,
@@ -49,10 +50,28 @@ from polymarket.live_verification import (
     build_live_validation_stage_gates,
 )
 from polymarket.live_reports import (
+    list_live_validation_report_decisions,
+    list_live_validation_coverage_promotion_proposal_snapshots,
+    load_live_validation_coverage_promotion_proposal_snapshot,
+    live_validation_coverage_promotion_proposal,
+    live_validation_coverage_promotion_proposal_export_filename,
+    live_validation_coverage_promotion_proposal_markdown,
+    live_validation_promotion_proposal_snapshot_export_filename,
+    live_validation_promotion_proposal_snapshot_markdown,
+    live_validation_report_review_bundle,
+    live_validation_report_review_export_filename,
+    live_validation_report_review_markdown,
+    live_validation_report_decisions_markdown,
+    live_validation_report_promotion_inventory,
     list_live_validation_reports,
+    load_live_validation_report,
+    purge_live_validation_coverage_promotion_proposal_snapshots,
     purge_live_validation_reports,
+    record_live_validation_report_decision,
+    store_live_validation_coverage_promotion_proposal_snapshot,
     store_live_validation_report,
 )
+from polymarket.live_report_schema import LiveValidationReportSchemaError, parse_live_validation_report_json
 from polymarket.mdd import (
     DEFAULT_CACHE_TTL_SECONDS as POLYMARKET_MDD_CACHE_TTL_SECONDS,
     MDD_MARK_REPLAY_ASSUMPTIONS,
@@ -105,6 +124,20 @@ API_ROUTES = {
         "/api/polymarket/clob-readiness",
         "/api/polymarket/live-validation",
         "/api/polymarket/live-validation/reports",
+        "/api/polymarket/live-validation/reports/{key}",
+        "/api/polymarket/live-validation/reports/{key}/export.json",
+        "/api/polymarket/live-validation/reports/{key}/review.json",
+        "/api/polymarket/live-validation/reports/{key}/review.md",
+        "/api/polymarket/live-validation/decisions",
+        "/api/polymarket/live-validation/decisions/export.json",
+        "/api/polymarket/live-validation/decisions/export.md",
+        "/api/polymarket/live-validation/promotion-proposal",
+        "/api/polymarket/live-validation/promotion-proposal/export.json",
+        "/api/polymarket/live-validation/promotion-proposal/export.md",
+        "/api/polymarket/live-validation/promotion-proposal/snapshots",
+        "/api/polymarket/live-validation/promotion-proposal/snapshots/{key}",
+        "/api/polymarket/live-validation/promotion-proposal/snapshots/{key}/export.json",
+        "/api/polymarket/live-validation/promotion-proposal/snapshots/{key}/export.md",
     ],
     "PATCH": [
         "/api/config",
@@ -134,12 +167,15 @@ API_ROUTES = {
         "/api/paper/marks/clear-selected",
         "/api/polymarket/users/mdd/cache/purge",
         "/api/polymarket/live-validation/reports",
+        "/api/polymarket/live-validation/decisions",
+        "/api/polymarket/live-validation/promotion-proposal/snapshots",
     ],
     "DELETE": [
         "/api/alerts/{alert_id}",
         "/api/wallets/{wallet_id}",
         "/api/polymarket/users/mdd/cache/{key}",
         "/api/polymarket/live-validation/reports/{key}",
+        "/api/polymarket/live-validation/promotion-proposal/snapshots/{key}",
     ],
 }
 SENSITIVE_SETTING_FRAGMENTS = (
@@ -1615,6 +1651,7 @@ def polymarket_live_validation_payload(cfg: AppConfig) -> Dict[str, Any]:
             "user_ws": _env_presence(POLYMARKET_USER_WS_KEYS),
         },
         "clob_auth_readiness": readiness,
+        "credential_runbook": build_polymarket_credential_runbook(settings),
         "public_checks": {
             "clob_time": _validation_item("skipped", "GUI/API report does not run public network probes."),
             "gamma_markets": _validation_item("skipped", "GUI/API report does not run public network probes."),
@@ -1692,19 +1729,129 @@ def polymarket_live_validation_reports_payload(*, include_payload: bool = False)
     return list_live_validation_reports(include_payload=include_payload)
 
 
+def polymarket_live_validation_report_payload(key: str) -> Optional[Dict[str, Any]]:
+    entry = load_live_validation_report(key)
+    if entry is None:
+        return None
+    return {
+        "source": "polymarket_live_validation_report",
+        "entry": entry,
+        "decisions": list_live_validation_report_decisions(report_key=key).get("entries", []),
+        "export": {
+            "format": "json",
+            "filename": polymarket_live_validation_report_export_filename(key),
+        },
+    }
+
+
+def polymarket_live_validation_report_export_filename(key: str) -> str:
+    clean_key = "".join(char for char in str(key or "") if char.isalnum() or char in {"-", "_"})[:80]
+    return f"polymarket-live-validation-{clean_key or 'report'}.json"
+
+
+def polymarket_live_validation_report_review_payload(key: str) -> Optional[Dict[str, Any]]:
+    bundle = live_validation_report_review_bundle(key)
+    if bundle is None:
+        return None
+    return {
+        "source": "polymarket_live_validation_report_review_bundle",
+        "bundle": bundle,
+        "export": {
+            "json_filename": live_validation_report_review_export_filename(key, "json"),
+            "markdown_filename": live_validation_report_review_export_filename(key, "md"),
+        },
+    }
+
+
+def polymarket_live_validation_decisions_payload(params: Optional[Mapping[str, List[str]]] = None) -> Dict[str, Any]:
+    report_key = _query_value(params or {}, "report_key", "")
+    return list_live_validation_report_decisions(report_key=report_key or "")
+
+
+def polymarket_live_validation_promotion_proposal_payload(
+    params: Optional[Mapping[str, List[str]]] = None,
+) -> Dict[str, Any]:
+    target_tier = _query_value(params or {}, "target_tier", "")
+    return live_validation_coverage_promotion_proposal(target_tier=target_tier or "")
+
+
+def polymarket_live_validation_promotion_proposal_snapshots_payload() -> Dict[str, Any]:
+    return list_live_validation_coverage_promotion_proposal_snapshots()
+
+
+def polymarket_live_validation_promotion_proposal_snapshot_payload(key: str) -> Optional[Dict[str, Any]]:
+    return load_live_validation_coverage_promotion_proposal_snapshot(key)
+
+
+def polymarket_live_validation_promotion_proposal_snapshot_store_payload(
+    payload: Mapping[str, Any],
+) -> Dict[str, Any]:
+    target_tier = str(payload.get("target_tier") or "")
+    label = str(payload.get("label") or "")
+    source = str(payload.get("source") or "react_preview")
+    proposal = live_validation_coverage_promotion_proposal(target_tier=target_tier)
+    stored = store_live_validation_coverage_promotion_proposal_snapshot(
+        proposal=proposal,
+        target_tier=target_tier,
+        label=label,
+        source=source,
+    )
+    inventory = polymarket_live_validation_promotion_proposal_snapshots_payload()
+    inventory.update(
+        {
+            "stored": stored,
+            "message": f"Stored promotion proposal snapshot {stored.get('key')}.",
+        }
+    )
+    return inventory
+
+
+def polymarket_live_validation_promotion_proposal_snapshot_purge_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    keys: List[str] = []
+    if payload.get("key"):
+        keys.append(str(payload.get("key")))
+    raw_keys = payload.get("keys")
+    if isinstance(raw_keys, list):
+        keys.extend(str(key) for key in raw_keys)
+    return purge_live_validation_coverage_promotion_proposal_snapshots(
+        keys=keys,
+        all_entries=bool(payload.get("all") or payload.get("all_entries")),
+    )
+
+
+def polymarket_live_validation_decision_store_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    stored = record_live_validation_report_decision(
+        report_key=str(payload.get("report_key") or ""),
+        payload_hash=str(payload.get("payload_hash") or ""),
+        target_tier=str(payload.get("target_tier") or ""),
+        decision=str(payload.get("decision") or ""),
+        reviewer_note=str(payload.get("reviewer_note") or ""),
+        review_bundle_hash=str(payload.get("review_bundle_hash") or ""),
+        reviewer=str(payload.get("reviewer") or ""),
+    )
+    ledger = polymarket_live_validation_decisions_payload()
+    ledger.update(
+        {
+            "stored": stored,
+            "message": (
+                f"Recorded {stored.get('decision')} decision for {stored.get('target_tier')} "
+                f"on report {stored.get('report_key')}."
+            ),
+        }
+    )
+    return ledger
+
+
 def polymarket_live_validation_report_store_payload(cfg: AppConfig, payload: Mapping[str, Any]) -> Dict[str, Any]:
     label = str(payload.get("label") or "").strip()
     source = str(payload.get("source") or "").strip()
+    source_file = payload.get("source_file") if str(payload.get("source_file") or "").strip() else None
+    allow_duplicate = bool(payload.get("allow_duplicate"))
+    skip_duplicate = bool(payload.get("skip_duplicate", True)) and not allow_duplicate
     report: Mapping[str, Any]
 
     if "report_json" in payload and str(payload.get("report_json") or "").strip():
-        try:
-            parsed = json.loads(str(payload.get("report_json") or ""))
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"report_json must be valid JSON: {exc.msg}") from exc
-        if not isinstance(parsed, Mapping):
-            raise ValueError("report_json must decode to an object.")
-        report = parsed
+        report = parse_live_validation_report_json(str(payload.get("report_json") or ""))
         source = source or "cli_import"
         label = label or "CLI import"
     elif isinstance(payload.get("report"), Mapping):
@@ -1716,12 +1863,25 @@ def polymarket_live_validation_report_store_payload(cfg: AppConfig, payload: Map
         source = source or "gui_snapshot"
         label = label or "GUI readiness snapshot"
 
-    stored = store_live_validation_report(report, source=source, label=label)
+    stored = store_live_validation_report(
+        report,
+        source=source,
+        label=label,
+        source_file=source_file,
+        allow_duplicate=allow_duplicate,
+        skip_duplicate=skip_duplicate,
+    )
     inventory = polymarket_live_validation_reports_payload()
+    if stored.get("duplicate") and not stored.get("stored"):
+        message = f"Skipped duplicate live validation report {stored.get('duplicate_key') or stored.get('key')}."
+    elif stored.get("duplicate"):
+        message = f"Stored duplicate live validation report {stored.get('key')}."
+    else:
+        message = f"Stored live validation report {stored.get('key')}."
     inventory.update(
         {
             "stored": stored,
-            "message": f"Stored live validation report {stored.get('key')}.",
+            "message": message,
         }
     )
     return inventory
@@ -2886,7 +3046,9 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, payload)
                 return
             if path == "/api/polymarket/coverage":
-                self._send_json(HTTPStatus.OK, polymarket_official_api_coverage())
+                coverage = polymarket_official_api_coverage()
+                coverage["stored_live_validation_report_promotion"] = live_validation_report_promotion_inventory()
+                self._send_json(HTTPStatus.OK, coverage)
                 return
             if path == "/api/polymarket/clob-readiness":
                 self._send_json(HTTPStatus.OK, polymarket_clob_readiness_payload(cfg))
@@ -2899,6 +3061,137 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                     ),
                 )
                 return
+            if path == "/api/polymarket/live-validation/decisions":
+                self._send_json(HTTPStatus.OK, polymarket_live_validation_decisions_payload(query_params))
+                return
+            if path == "/api/polymarket/live-validation/decisions/export.json":
+                ledger = polymarket_live_validation_decisions_payload(query_params)
+                self._send_text(
+                    HTTPStatus.OK,
+                    json.dumps(ledger, indent=2, sort_keys=True),
+                    content_type="application/json; charset=utf-8",
+                    filename="polymarket-live-validation-decision-ledger.json",
+                )
+                return
+            if path == "/api/polymarket/live-validation/decisions/export.md":
+                ledger = polymarket_live_validation_decisions_payload(query_params)
+                self._send_text(
+                    HTTPStatus.OK,
+                    live_validation_report_decisions_markdown(ledger),
+                    content_type="text/markdown; charset=utf-8",
+                    filename="polymarket-live-validation-decision-ledger.md",
+                )
+                return
+            if path == "/api/polymarket/live-validation/promotion-proposal":
+                self._send_json(HTTPStatus.OK, polymarket_live_validation_promotion_proposal_payload(query_params))
+                return
+            if path == "/api/polymarket/live-validation/promotion-proposal/export.json":
+                proposal = polymarket_live_validation_promotion_proposal_payload(query_params)
+                self._send_text(
+                    HTTPStatus.OK,
+                    json.dumps(proposal, indent=2, sort_keys=True),
+                    content_type="application/json; charset=utf-8",
+                    filename=live_validation_coverage_promotion_proposal_export_filename("json"),
+                )
+                return
+            if path == "/api/polymarket/live-validation/promotion-proposal/export.md":
+                proposal = polymarket_live_validation_promotion_proposal_payload(query_params)
+                self._send_text(
+                    HTTPStatus.OK,
+                    live_validation_coverage_promotion_proposal_markdown(proposal),
+                    content_type="text/markdown; charset=utf-8",
+                    filename=live_validation_coverage_promotion_proposal_export_filename("md"),
+                )
+                return
+            if path == "/api/polymarket/live-validation/promotion-proposal/snapshots":
+                self._send_json(HTTPStatus.OK, polymarket_live_validation_promotion_proposal_snapshots_payload())
+                return
+            if path.startswith("/api/polymarket/live-validation/promotion-proposal/snapshots/"):
+                suffix = path[len("/api/polymarket/live-validation/promotion-proposal/snapshots/") :]
+                export_json = suffix.endswith("/export.json")
+                export_markdown = suffix.endswith("/export.md")
+                if export_json:
+                    raw_key = suffix[: -len("/export.json")]
+                elif export_markdown:
+                    raw_key = suffix[: -len("/export.md")]
+                else:
+                    raw_key = suffix
+                snapshot_key = unquote(raw_key.strip("/"))
+                if not snapshot_key or "/" in snapshot_key:
+                    self._send_error(HTTPStatus.NOT_FOUND, "not_found", "Unknown promotion proposal snapshot.")
+                    return
+                snapshot = polymarket_live_validation_promotion_proposal_snapshot_payload(snapshot_key)
+                if snapshot is None:
+                    self._send_error(HTTPStatus.NOT_FOUND, "not_found", "Unknown promotion proposal snapshot.")
+                    return
+                if export_json:
+                    self._send_text(
+                        HTTPStatus.OK,
+                        json.dumps(snapshot, indent=2, sort_keys=True),
+                        content_type="application/json; charset=utf-8",
+                        filename=live_validation_promotion_proposal_snapshot_export_filename(snapshot_key, "json"),
+                    )
+                elif export_markdown:
+                    self._send_text(
+                        HTTPStatus.OK,
+                        live_validation_promotion_proposal_snapshot_markdown(snapshot),
+                        content_type="text/markdown; charset=utf-8",
+                        filename=live_validation_promotion_proposal_snapshot_export_filename(snapshot_key, "md"),
+                    )
+                else:
+                    self._send_json(HTTPStatus.OK, snapshot)
+                return
+            if path.startswith("/api/polymarket/live-validation/reports/"):
+                suffix = path[len("/api/polymarket/live-validation/reports/") :]
+                export_json = suffix.endswith("/export.json")
+                review_json = suffix.endswith("/review.json")
+                review_markdown = suffix.endswith("/review.md")
+                if export_json:
+                    raw_key = suffix[: -len("/export.json")]
+                elif review_json:
+                    raw_key = suffix[: -len("/review.json")]
+                elif review_markdown:
+                    raw_key = suffix[: -len("/review.md")]
+                else:
+                    raw_key = suffix
+                report_key = unquote(raw_key.strip("/"))
+                if not report_key or "/" in report_key:
+                    self._send_error(HTTPStatus.NOT_FOUND, "not_found", "Unknown live validation report.")
+                    return
+                if review_json or review_markdown:
+                    review = polymarket_live_validation_report_review_payload(report_key)
+                    if review is None:
+                        self._send_error(HTTPStatus.NOT_FOUND, "not_found", "Unknown live validation report.")
+                        return
+                    if review_json:
+                        self._send_text(
+                            HTTPStatus.OK,
+                            json.dumps(review, indent=2, sort_keys=True),
+                            content_type="application/json; charset=utf-8",
+                            filename=str(review["export"]["json_filename"]),
+                        )
+                    else:
+                        self._send_text(
+                            HTTPStatus.OK,
+                            live_validation_report_review_markdown(review["bundle"]),
+                            content_type="text/markdown; charset=utf-8",
+                            filename=str(review["export"]["markdown_filename"]),
+                        )
+                    return
+                report = polymarket_live_validation_report_payload(report_key)
+                if report is None:
+                    self._send_error(HTTPStatus.NOT_FOUND, "not_found", "Unknown live validation report.")
+                    return
+                if export_json:
+                    self._send_text(
+                        HTTPStatus.OK,
+                        json.dumps(report, indent=2, sort_keys=True),
+                        content_type="application/json; charset=utf-8",
+                        filename=str(report["export"]["filename"]),
+                    )
+                else:
+                    self._send_json(HTTPStatus.OK, report)
+                return
             if path == "/api/polymarket/live-validation":
                 self._send_json(HTTPStatus.OK, polymarket_live_validation_payload(cfg))
                 return
@@ -2909,6 +3202,13 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 "polymarket_rate_limited",
                 "Polymarket API rate limit was reached; retry after the upstream backoff window.",
                 {"rate_limit": polymarket_rate_limit_status(exc)},
+            )
+        except LiveValidationReportSchemaError as exc:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "live_validation_report_schema_error",
+                "Live validation report failed schema validation.",
+                {"schema_validation": exc.validation},
             )
         except ValueError as exc:
             self._send_error(HTTPStatus.BAD_REQUEST, "validation_error", str(exc))
@@ -2946,6 +3246,19 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 return
             if method == "POST" and path == "/api/polymarket/live-validation/reports":
                 self._send_json(HTTPStatus.OK, polymarket_live_validation_report_store_payload(cfg, payload))
+                return
+            if method == "POST" and path == "/api/polymarket/live-validation/decisions":
+                self._send_json(HTTPStatus.OK, polymarket_live_validation_decision_store_payload(payload))
+                return
+            if method == "POST" and path == "/api/polymarket/live-validation/promotion-proposal/snapshots":
+                self._send_json(HTTPStatus.OK, polymarket_live_validation_promotion_proposal_snapshot_store_payload(payload))
+                return
+            if method == "DELETE" and path.startswith("/api/polymarket/live-validation/promotion-proposal/snapshots/"):
+                snapshot_key = unquote(path.rsplit("/", 1)[-1])
+                self._send_json(
+                    HTTPStatus.OK,
+                    polymarket_live_validation_promotion_proposal_snapshot_purge_payload({"key": snapshot_key}),
+                )
                 return
             if method == "DELETE" and path.startswith("/api/polymarket/live-validation/reports/"):
                 report_key = unquote(path.rsplit("/", 1)[-1])
@@ -3197,6 +3510,14 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 "unsupported_feature",
                 str(exc),
                 {"market_id": exc.market_id, "feature": exc.feature},
+            )
+            return
+        except LiveValidationReportSchemaError as exc:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "live_validation_report_schema_error",
+                "Live validation report failed schema validation.",
+                {"schema_validation": exc.validation},
             )
             return
         except ValueError as exc:

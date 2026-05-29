@@ -8,6 +8,7 @@ import json
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -302,6 +303,376 @@ def run_fixture_check() -> None:
     print(f"[ok] offline fixtures ({len(fixture_paths)} files)")
 
 
+def run_polymarket_live_report_schema_check() -> None:
+    from polymarket.live_report_schema import validate_live_validation_report
+
+    fixture_root = ROOT / "tests" / "fixtures" / "polymarket" / "live_reports"
+    valid_fixtures = {
+        "valid_credentialed_read.json",
+        "valid_funded_audit.json",
+        "valid_dry_run.json",
+        "valid_runbook.json",
+        "valid_browser_smoke.json",
+    }
+    invalid_fixtures = {"invalid_missing_mode.json", "invalid_bad_stage_gates.json"}
+    missing = sorted(name for name in valid_fixtures | invalid_fixtures if not (fixture_root / name).exists())
+    if missing:
+        raise SystemExit("Missing Polymarket live report schema fixtures: " + ", ".join(missing))
+
+    failures: list[str] = []
+    for name in sorted(valid_fixtures):
+        report = json.loads((fixture_root / name).read_text(encoding="utf-8"))
+        validation = validate_live_validation_report(report)
+        if not validation["ok"]:
+            failures.append(f"{name} should validate but failed: {validation['errors']}")
+    for name in sorted(invalid_fixtures):
+        report = json.loads((fixture_root / name).read_text(encoding="utf-8"))
+        validation = validate_live_validation_report(report)
+        if validation["ok"]:
+            failures.append(f"{name} should fail schema validation.")
+    if failures:
+        raise SystemExit("Polymarket live report schema fixture check failed:\n" + "\n".join(failures))
+    print("[ok] Polymarket live report schema fixtures")
+
+
+def run_polymarket_live_report_replay_check() -> None:
+    from polymarket.live_report_replay import replay_live_validation_report_paths
+
+    fixture_root = ROOT / "tests" / "fixtures" / "polymarket" / "live_reports"
+    script = ROOT / "scripts" / "replay_polymarket_live_reports.py"
+    if not script.exists():
+        raise SystemExit("Polymarket live report replay script is missing.")
+    valid = [
+        fixture_root / "valid_credentialed_read.json",
+        fixture_root / "valid_dry_run.json",
+    ]
+    invalid = [fixture_root / "invalid_missing_mode.json"]
+    dry_run = replay_live_validation_report_paths(valid + invalid)
+    if dry_run.get("ok"):
+        raise SystemExit("Polymarket live report replay dry-run should fail when invalid fixtures are included.")
+    if dry_run.get("counts", {}).get("valid") != 2 or dry_run.get("counts", {}).get("invalid") != 1:
+        raise SystemExit("Polymarket live report replay dry-run returned unexpected fixture counts.")
+    if dry_run.get("counts", {}).get("imported") != 0:
+        raise SystemExit("Polymarket live report replay dry-run must not import reports.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store_path = Path(tmp) / "reports.json"
+        imported = replay_live_validation_report_paths(valid, import_reports=True, store_path=store_path)
+        if not imported.get("ok"):
+            raise SystemExit("Polymarket live report replay import failed for valid fixtures.")
+        if imported.get("counts", {}).get("imported") != len(valid):
+            raise SystemExit("Polymarket live report replay import did not store all valid fixtures.")
+        if not store_path.exists():
+            raise SystemExit("Polymarket live report replay import did not create the report store.")
+        duplicate_store_path = Path(tmp) / "duplicate-reports.json"
+        duplicate_import = replay_live_validation_report_paths(
+            [valid[0], valid[0]],
+            import_reports=True,
+            store_path=duplicate_store_path,
+        )
+        duplicate_counts = duplicate_import.get("counts", {})
+        if duplicate_counts.get("imported") != 1 or duplicate_counts.get("skipped_duplicates") != 1:
+            raise SystemExit("Polymarket live report replay did not skip duplicate imports by default.")
+        allowed_store_path = Path(tmp) / "allowed-duplicate-reports.json"
+        allowed_duplicate_import = replay_live_validation_report_paths(
+            [valid[0], valid[0]],
+            import_reports=True,
+            store_path=allowed_store_path,
+            allow_duplicate=True,
+        )
+        allowed_counts = allowed_duplicate_import.get("counts", {})
+        if allowed_counts.get("imported") != 2 or allowed_counts.get("skipped_duplicates") != 0:
+            raise SystemExit("Polymarket live report replay did not allow explicit duplicate imports.")
+    print("[ok] Polymarket live report replay")
+
+
+def run_polymarket_live_report_review_bundle_check() -> None:
+    from polymarket.live_reports import (
+        live_validation_report_review_bundle,
+        live_validation_report_review_markdown,
+        store_live_validation_report,
+    )
+
+    fixture_root = ROOT / "tests" / "fixtures" / "polymarket" / "live_reports"
+    report = json.loads((fixture_root / "valid_dry_run.json").read_text(encoding="utf-8"))
+    report["api_key"] = "verify-review-secret"
+    report["operator_commands"] = {
+        "safe_live_probe": "python scripts/verify_polymarket_live.py --timeout 8",
+        "credentialed_read": "python scripts/verify_polymarket_live.py --require-authenticated-read-ok --report-file live-report.json",
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        store_path = Path(tmp) / "reports.json"
+        stored = store_live_validation_report(
+            report,
+            source="verify",
+            label="review bundle",
+            path=store_path,
+            source_file="valid_dry_run.json",
+        )
+        store_live_validation_report(
+            report,
+            source="verify",
+            label="review bundle duplicate",
+            path=store_path,
+            source_file="valid_dry_run-copy.json",
+        )
+        bundle = live_validation_report_review_bundle(stored["key"], path=store_path)
+        if bundle is None:
+            raise SystemExit("Polymarket live report review bundle was not generated.")
+        bundle_text = json.dumps(bundle, sort_keys=True)
+        markdown = live_validation_report_review_markdown(bundle)
+        if "verify-review-secret" in bundle_text or "verify-review-secret" in markdown:
+            raise SystemExit("Polymarket live report review bundle leaked a seeded secret.")
+        if bundle.get("static_coverage_mutated") is not False:
+            raise SystemExit("Polymarket live report review bundle must not mutate static coverage.")
+        if bundle.get("funded_execution_exposed") is not False:
+            raise SystemExit("Polymarket live report review bundle must not expose funded execution.")
+        if bundle.get("duplicate_history", {}).get("duplicate_import_count") != 1:
+            raise SystemExit("Polymarket live report review bundle did not include duplicate history.")
+        if not bundle.get("operator_commands", {}).get("credentialed_read"):
+            raise SystemExit("Polymarket live report review bundle did not include source CLI commands.")
+        levels = bundle.get("coverage_tier_mapping", {}).get("levels", {})
+        if not levels.get("credential_live_verified") or not levels.get("funded_live_verified"):
+            raise SystemExit("Polymarket live report review bundle did not include coverage tier mapping.")
+        if "Static coverage mutated: false" not in markdown:
+            raise SystemExit("Polymarket live report review markdown did not include the static coverage guard.")
+    print("[ok] Polymarket live report review bundle")
+
+
+def run_polymarket_live_report_decision_ledger_check() -> None:
+    from polymarket.live_reports import (
+        list_live_validation_report_decisions,
+        live_validation_report_review_bundle,
+        record_live_validation_report_decision,
+        store_live_validation_report,
+    )
+
+    fixture_root = ROOT / "tests" / "fixtures" / "polymarket" / "live_reports"
+    report = json.loads((fixture_root / "valid_credentialed_read.json").read_text(encoding="utf-8"))
+    report["api_key"] = "verify-decision-secret"
+    with tempfile.TemporaryDirectory() as tmp:
+        report_path = Path(tmp) / "reports.json"
+        decision_path = Path(tmp) / "decisions.json"
+        stored = store_live_validation_report(
+            report,
+            source="verify",
+            label="decision ledger",
+            path=report_path,
+            source_file="valid_credentialed_read.json",
+        )
+        bundle = live_validation_report_review_bundle(stored["key"], path=report_path)
+        if bundle is None:
+            raise SystemExit("Polymarket decision ledger check could not build review bundle.")
+        review_hash = str(bundle.get("review_bundle_hash") or "")
+        if not review_hash:
+            raise SystemExit("Polymarket decision ledger check did not receive a review bundle hash.")
+        accepted = record_live_validation_report_decision(
+            report_key=stored["key"],
+            payload_hash=stored["payload_hash"],
+            target_tier="credential_live_verified",
+            decision="accepted",
+            reviewer_note="Credential evidence accepted for ledger test.",
+            review_bundle_hash=review_hash,
+            reviewer="verify",
+            report_store_path=report_path,
+            decision_path=decision_path,
+        )
+        if accepted.get("static_coverage_mutated") is not False:
+            raise SystemExit("Polymarket decision ledger mutated static coverage.")
+        try:
+            record_live_validation_report_decision(
+                report_key=stored["key"],
+                payload_hash=stored["payload_hash"],
+                target_tier="credential_live_verified",
+                decision="accepted",
+                reviewer_note="tamper",
+                review_bundle_hash="tampered",
+                reviewer="verify",
+                report_store_path=report_path,
+                decision_path=decision_path,
+            )
+        except ValueError as exc:
+            if "review_bundle_hash mismatch" not in str(exc):
+                raise SystemExit("Polymarket decision ledger returned the wrong tamper error.")
+        else:
+            raise SystemExit("Polymarket decision ledger accepted a tampered review hash.")
+        ledger = list_live_validation_report_decisions(path=decision_path)
+        ledger_text = json.dumps(ledger, sort_keys=True)
+        if ledger.get("counts", {}).get("entries") != 1:
+            raise SystemExit("Polymarket decision ledger did not retain the accepted decision.")
+        if "verify-decision-secret" in ledger_text:
+            raise SystemExit("Polymarket decision ledger leaked a seeded secret.")
+    print("[ok] Polymarket live report decision ledger")
+
+
+def run_polymarket_live_report_promotion_proposal_check() -> None:
+    from polymarket.live_reports import (
+        live_validation_coverage_promotion_proposal,
+        live_validation_coverage_promotion_proposal_markdown,
+        live_validation_report_review_bundle,
+        record_live_validation_report_decision,
+        store_live_validation_report,
+    )
+
+    fixture_root = ROOT / "tests" / "fixtures" / "polymarket" / "live_reports"
+    report = json.loads((fixture_root / "valid_credentialed_read.json").read_text(encoding="utf-8"))
+    report["api_key"] = "verify-proposal-secret"
+    with tempfile.TemporaryDirectory() as tmp:
+        report_path = Path(tmp) / "reports.json"
+        decision_path = Path(tmp) / "decisions.json"
+        stored = store_live_validation_report(
+            report,
+            source="verify",
+            label="promotion proposal",
+            path=report_path,
+            source_file="valid_credentialed_read.json",
+        )
+        bundle = live_validation_report_review_bundle(stored["key"], path=report_path)
+        if bundle is None:
+            raise SystemExit("Polymarket promotion proposal check could not build review bundle.")
+        record_live_validation_report_decision(
+            report_key=stored["key"],
+            payload_hash=stored["payload_hash"],
+            target_tier="credential_live_verified",
+            decision="accepted",
+            reviewer_note="Credential evidence accepted for proposal verifier.",
+            review_bundle_hash=str(bundle.get("review_bundle_hash") or ""),
+            reviewer="verify",
+            report_store_path=report_path,
+            decision_path=decision_path,
+        )
+        proposal = live_validation_coverage_promotion_proposal(
+            report_store_path=report_path,
+            decision_path=decision_path,
+        )
+        if proposal.get("static_coverage_mutated") is not False or proposal.get("automerge_enabled") is not False:
+            raise SystemExit("Polymarket promotion proposal exposed an unsafe mutation/automerge flag.")
+        if proposal.get("counts", {}).get("accepted_candidates") != 1:
+            raise SystemExit("Polymarket promotion proposal did not retain the accepted decision candidate.")
+        if proposal.get("counts", {}).get("proposed_changes", 0) < 1:
+            raise SystemExit("Polymarket promotion proposal did not emit manual proposed changes.")
+        proposal_text = json.dumps(proposal, sort_keys=True)
+        markdown = live_validation_coverage_promotion_proposal_markdown(proposal)
+        if "verify-proposal-secret" in proposal_text or "verify-proposal-secret" in markdown:
+            raise SystemExit("Polymarket promotion proposal leaked a seeded secret.")
+        if "Automerge enabled: false" not in markdown:
+            raise SystemExit("Polymarket promotion proposal markdown did not include the automerge guard.")
+
+        store = json.loads(report_path.read_text(encoding="utf-8"))
+        store["reports"][stored["key"]]["payload_hash"] = "stale-payload-hash"
+        report_path.write_text(json.dumps(store), encoding="utf-8")
+        stale = live_validation_coverage_promotion_proposal(
+            report_store_path=report_path,
+            decision_path=decision_path,
+        )
+        if stale.get("counts", {}).get("stale_decisions") != 1:
+            raise SystemExit("Polymarket promotion proposal did not detect a stale decision.")
+    print("[ok] Polymarket live report promotion proposal")
+
+
+def run_polymarket_live_report_promotion_proposal_snapshot_check() -> None:
+    from polymarket.live_reports import (
+        list_live_validation_coverage_promotion_proposal_snapshots,
+        live_validation_coverage_promotion_proposal,
+        live_validation_promotion_proposal_snapshot_markdown,
+        live_validation_report_review_bundle,
+        load_live_validation_coverage_promotion_proposal_snapshot,
+        record_live_validation_report_decision,
+        store_live_validation_coverage_promotion_proposal_snapshot,
+        store_live_validation_report,
+    )
+
+    fixture_root = ROOT / "tests" / "fixtures" / "polymarket" / "live_reports"
+    report = json.loads((fixture_root / "valid_credentialed_read.json").read_text(encoding="utf-8"))
+    report["api_key"] = "verify-snapshot-secret"
+    with tempfile.TemporaryDirectory() as tmp:
+        temp = Path(tmp)
+        report_path = temp / "reports.json"
+        decision_path = temp / "decisions.json"
+        snapshot_path = temp / "snapshots.json"
+        stored = store_live_validation_report(
+            report,
+            source="verify",
+            label="proposal snapshot",
+            path=report_path,
+            source_file="valid_credentialed_read.json",
+        )
+        bundle = live_validation_report_review_bundle(stored["key"], path=report_path)
+        if bundle is None:
+            raise SystemExit("Polymarket promotion proposal snapshot check could not build review bundle.")
+        record_live_validation_report_decision(
+            report_key=stored["key"],
+            payload_hash=stored["payload_hash"],
+            target_tier="credential_live_verified",
+            decision="accepted",
+            reviewer_note="Credential evidence accepted for snapshot verifier.",
+            review_bundle_hash=str(bundle.get("review_bundle_hash") or ""),
+            reviewer="verify",
+            report_store_path=report_path,
+            decision_path=decision_path,
+        )
+        proposal = live_validation_coverage_promotion_proposal(
+            report_store_path=report_path,
+            decision_path=decision_path,
+            target_tier="credential_live_verified",
+        )
+        snapshot = store_live_validation_coverage_promotion_proposal_snapshot(
+            proposal=proposal,
+            report_store_path=report_path,
+            decision_path=decision_path,
+            target_tier="credential_live_verified",
+            path=snapshot_path,
+            source="verify",
+        )
+        if snapshot.get("static_coverage_mutated") is not False or snapshot.get("snapshot_status") != "current":
+            raise SystemExit("Polymarket promotion proposal snapshot was not stored as a current no-mutation snapshot.")
+        opened = load_live_validation_coverage_promotion_proposal_snapshot(
+            str(snapshot.get("key") or ""),
+            path=snapshot_path,
+            report_store_path=report_path,
+            decision_path=decision_path,
+        )
+        if opened is None:
+            raise SystemExit("Polymarket promotion proposal snapshot could not be opened.")
+        snapshot_text = json.dumps(opened, sort_keys=True)
+        markdown = live_validation_promotion_proposal_snapshot_markdown(opened)
+        if "verify-snapshot-secret" in snapshot_text or "verify-snapshot-secret" in markdown:
+            raise SystemExit("Polymarket promotion proposal snapshot leaked a seeded secret.")
+        if "Promotion Proposal Snapshot" not in markdown or "Static coverage mutated: false" not in markdown:
+            raise SystemExit("Polymarket promotion proposal snapshot markdown is missing safety metadata.")
+
+        duplicate = store_live_validation_report(
+            report,
+            source="verify",
+            label="proposal snapshot changed",
+            path=report_path,
+            source_file="valid_credentialed_read.json",
+            allow_duplicate=True,
+        )
+        changed_bundle = live_validation_report_review_bundle(duplicate["key"], path=report_path)
+        if changed_bundle is None:
+            raise SystemExit("Polymarket promotion proposal snapshot check could not build changed review bundle.")
+        record_live_validation_report_decision(
+            report_key=duplicate["key"],
+            payload_hash=duplicate["payload_hash"],
+            target_tier="credential_live_verified",
+            decision="accepted",
+            reviewer_note="Changed evidence accepted for snapshot verifier.",
+            review_bundle_hash=str(changed_bundle.get("review_bundle_hash") or ""),
+            reviewer="verify",
+            report_store_path=report_path,
+            decision_path=decision_path,
+        )
+        listing = list_live_validation_coverage_promotion_proposal_snapshots(
+            path=snapshot_path,
+            report_store_path=report_path,
+            decision_path=decision_path,
+        )
+        if listing.get("counts", {}).get("stale") != 1:
+            raise SystemExit("Polymarket promotion proposal snapshot did not detect stale proposal hash.")
+    print("[ok] Polymarket live report promotion proposal snapshots")
+
+
 def run_gui_integration_check() -> None:
     from app import market_choice_label, market_id_from_choice
     from core.models import AppConfig
@@ -482,6 +853,41 @@ def run_frontend_build_check(strict: bool = False) -> None:
     print("[ok] frontend build")
 
 
+def run_frontend_live_smoke_check() -> None:
+    script = ROOT / "scripts" / "verify_live_validation_report_smoke.py"
+    if not script.exists():
+        raise SystemExit("Live Safety report-history smoke script is missing.")
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    output = (result.stdout + result.stderr).strip()
+    if result.returncode != 0:
+        raise SystemExit("Live Safety report-history browser smoke failed:\n" + output)
+    print(output or "[ok] Live Safety report-history browser smoke")
+
+
+def run_polymarket_credential_runbook_check() -> None:
+    from polymarket.credential_runbook import build_polymarket_credential_runbook
+
+    script = ROOT / "scripts" / "verify_polymarket_credentials.py"
+    if not script.exists():
+        raise SystemExit("Polymarket credential runbook script is missing.")
+    runbook = build_polymarket_credential_runbook(environ={})
+    if runbook.get("mode") != "credential_runbook_no_funded_actions":
+        raise SystemExit("Polymarket credential runbook reports an unexpected mode.")
+    if runbook.get("funded_execution_exposed") is not False:
+        raise SystemExit("Polymarket credential runbook must not expose funded execution.")
+    commands = runbook.get("operator_commands") or {}
+    if "verify_polymarket_credentials.py --json" not in str(commands.get("credential_inventory", "")):
+        raise SystemExit("Polymarket credential runbook is missing the inventory command.")
+    if "--require-authenticated-read-ok" not in str(commands.get("credentialed_read_no_funded_actions", "")):
+        raise SystemExit("Polymarket credential runbook is missing the credentialed-read command.")
+    print("[ok] Polymarket credential runbook")
+
+
 def run_unit_tests() -> None:
     suite = unittest.defaultTestLoader.discover(str(ROOT / "tests"))
     test_count = suite.countTestCases()
@@ -505,6 +911,11 @@ def main() -> None:
         action="store_true",
         help="Fail unless frontend dependencies exist and `npm run build` succeeds.",
     )
+    parser.add_argument(
+        "--frontend-live-smoke",
+        action="store_true",
+        help="Run a temporary-server/headless-browser smoke test for Live Safety report-history controls.",
+    )
     args = parser.parse_args()
 
     check_python_version()
@@ -518,11 +929,20 @@ def main() -> None:
     run_readme_matrix_check()
     run_blockers_doc_check()
     run_fixture_check()
+    run_polymarket_live_report_schema_check()
+    run_polymarket_live_report_replay_check()
+    run_polymarket_live_report_review_bundle_check()
+    run_polymarket_live_report_decision_ledger_check()
+    run_polymarket_live_report_promotion_proposal_check()
+    run_polymarket_live_report_promotion_proposal_snapshot_check()
     run_gui_integration_check()
     run_launch_ux_check()
     run_ci_cd_workflow_check()
+    run_polymarket_credential_runbook_check()
     run_tkinter_smoke_check()
     run_frontend_build_check(strict=args.frontend_build)
+    if args.frontend_live_smoke:
+        run_frontend_live_smoke_check()
     run_unit_tests()
 
 

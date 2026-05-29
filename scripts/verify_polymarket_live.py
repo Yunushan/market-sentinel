@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable
 
@@ -18,6 +19,7 @@ except Exception:  # pragma: no cover
 
 from polymarket import bridge, clob_auth, clob_rest, data_api, gamma, relayer
 from polymarket.auth_readiness import build_clob_auth_readiness
+from polymarket.credential_runbook import build_polymarket_credential_runbook
 from polymarket.live_verification import (
     ABSOLUTE_MAX_VERIFY_NOTIONAL,
     ABSOLUTE_MAX_VERIFY_SIZE,
@@ -306,6 +308,9 @@ def main() -> int:
     )
     report = {
         "ok": True,
+        "generated_at": time.time(),
+        "mode": "strict_cli",
+        "market_id": "polymarket",
         "credential_presence": {
             "clob_l2_headers": _present(L2_HEADERS),
             "py_clob_client": _present(("POLYMARKET_PRIVATE_KEY", "PRIVATE_KEY", "POLYMARKET_FUNDER_ADDRESS", "FUNDER_ADDRESS", "POLYMARKET_SIGNATURE_TYPE", "SIGNATURE_TYPE")),
@@ -314,6 +319,7 @@ def main() -> int:
             "user_ws": _present(("POLY_API_KEY", "POLY_API_SECRET", "POLY_SECRET", "POLY_PASSPHRASE")),
         },
         "clob_auth_readiness": build_clob_auth_readiness(),
+        "credential_runbook": build_polymarket_credential_runbook(),
         "live_order_cancel_harness": {
             "default_mode": "dry_run_transcript",
             "execute_flag": "--allow-funded-order",

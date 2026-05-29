@@ -1,0 +1,33 @@
+{
+  "authenticated_read_checks": {
+    "clob_l2_orders": {
+      "detail": "Authenticated CLOB order list responded.",
+      "sample_type": "dict",
+      "status": "ok"
+    }
+  },
+  "funded_execution_exposed": false,
+  "funded_live_order_check": {
+    "live_action": false,
+    "status": "dry_run",
+    "transcript": [
+      "Validate token, side, price, size, TIF, caps, and allow-list.",
+      "Place one GTC limit order through official py-clob-client.",
+      "Immediately cancel the returned order id."
+    ]
+  },
+  "generated_at": 1780000002.0,
+  "market_id": "polymarket",
+  "mode": "strict_cli",
+  "stage_gates": {
+    "bridge_address_checks": "blocked",
+    "credential_readiness": "ok",
+    "credentialed_read_checks": "ok",
+    "credentialed_read_ok": true,
+    "funded_live_order_check": "dry_run",
+    "next_step": "Review the dry-run transcript; real order/cancel still requires explicit funded flags and confirmation.",
+    "public_live_checks": "ok",
+    "requires_explicit_live_approval": true,
+    "safe_to_attempt_funded_order": false
+  }
+}

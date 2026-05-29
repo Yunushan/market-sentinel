@@ -1,0 +1,43 @@
+{
+  "authenticated_read_checks": {
+    "user_websocket_connect": {
+      "detail": "Authenticated user WebSocket connected and subscription payload was sent.",
+      "sample_type": "dict",
+      "status": "ok"
+    }
+  },
+  "funded_execution_exposed": false,
+  "funded_live_order_check": {
+    "audit": {
+      "cancel": {
+        "canceled": [
+          "order-1"
+        ]
+      },
+      "order_id": "order-1",
+      "placed": {
+        "status": "live"
+      },
+      "post_cancel_order": {
+        "status": "ORDER_STATUS_CANCELED"
+      },
+      "post_cancel_verified": true
+    },
+    "live_action": true,
+    "status": "ok"
+  },
+  "generated_at": 1780000001.0,
+  "market_id": "polymarket",
+  "mode": "strict_cli",
+  "stage_gates": {
+    "bridge_address_checks": "blocked",
+    "credential_readiness": "ok",
+    "credentialed_read_checks": "ok",
+    "credentialed_read_ok": true,
+    "funded_live_order_check": "ok",
+    "next_step": "Funded order/cancel verification completed and post-cancel verification passed.",
+    "public_live_checks": "ok",
+    "requires_explicit_live_approval": true,
+    "safe_to_attempt_funded_order": false
+  }
+}

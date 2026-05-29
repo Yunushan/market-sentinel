@@ -71,9 +71,10 @@ POLYMARKET_OFFICIAL_API_COVERAGE: Dict[str, Any] = {
     },
     "live_credential_validation": {
         "date": "2026-05-28",
-        "module": "scripts.verify_polymarket_live, polymarket.live_verification, polymarket.ws_user",
+        "module": "scripts.verify_polymarket_live, scripts.verify_polymarket_credentials, polymarket.credential_runbook, polymarket.live_reports, polymarket.live_verification, polymarket.ws_user",
         "command": "python scripts/verify_polymarket_live.py --require-authenticated-read-ok --include-user-websocket-connect --report-file live-report.json",
         "stages": [
+            "local no-network credential runbook and redacted environment inventory",
             "public non-credentialed endpoint probes",
             "redacted local CLOB credential readiness",
             "non-destructive authenticated CLOB/relayer/user-WebSocket reads",
@@ -81,7 +82,24 @@ POLYMARKET_OFFICIAL_API_COVERAGE: Dict[str, Any] = {
             "funded live order/cancel only after explicit flags and confirmation text",
         ],
         "default_mode": "no_funded_actions",
-        "report_fields": ["credential_presence", "clob_auth_readiness", "stage_gates"],
+        "runbook_command": "python scripts/verify_polymarket_credentials.py --json --report-file polymarket-credential-runbook.json",
+        "promotion_guard": {
+            "module": "polymarket.live_reports.live_validation_report_promotion",
+            "credential_live_verified_requires": [
+                "ok clob_l2_orders authenticated read",
+                "ok relayer_recent_transactions authenticated read",
+                "or ok user_websocket_connect authenticated stream",
+            ],
+            "funded_live_verified_requires": [
+                "funded_live_order_check.status == ok",
+                "funded_live_order_check.live_action == true",
+                "audit order id",
+                "placed/cancel/post_cancel_order audit sections",
+                "audit.post_cancel_verified == true",
+            ],
+            "local_only_modes_blocked": ["local_readiness_only", "credential_runbook_no_funded_actions", "browser_smoke", "browser_smoke_seed"],
+        },
+        "report_fields": ["credential_presence", "clob_auth_readiness", "credential_runbook", "stage_gates", "verification_promotion"],
     },
     "historical_mdd_v2": {
         "date": "2026-05-28",
@@ -224,6 +242,8 @@ POLYMARKET_OFFICIAL_API_COVERAGE: Dict[str, Any] = {
             },
             "coverage": [
                 "CLOB v2 readiness validation for private key, signature type, funder/deposit wallet, L1 headers, and L2 headers",
+                "local no-network credential runbook for redacted environment inventory and exact operator commands",
+                "stored report promotion guard that prevents stage-gate-only, dry-run, runbook, or browser-smoke reports from claiming production credential/funded verification tiers",
                 "disabled-by-default live order/cancel verification harness with dry-run transcript, token allow-list, hard caps, maker-side orderbook preflight, immediate cancel, and post-cancel verification",
                 "official py-clob-client order placement, market orders, and multi-order posting",
                 "guarded REST wrappers for get/cancel orders, order lists, trades, order scoring, heartbeat",
