@@ -505,5 +505,6 @@
   },
   "selected_market_id": "polymarket",
   "theme": "light",
+  "ui_design": "aurora_2026",
   "wallets": []
 }

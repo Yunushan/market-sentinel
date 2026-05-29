@@ -1246,17 +1246,20 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["counts"]["profiles"], 1)
         self.assertEqual(payload["profiles"][0]["proxy_wallet"], WALLET)
 
-    def test_apply_config_patch_validates_selected_market_and_theme(self) -> None:
+    def test_apply_config_patch_validates_selected_market_theme_and_ui_design(self) -> None:
         cfg = AppConfig()
 
-        apply_config_patch(cfg, {"selected_market_id": "kalshi", "theme": "dark"})
+        apply_config_patch(cfg, {"selected_market_id": "kalshi", "theme": "dark", "ui_design": "graphite_2026"})
 
         self.assertEqual(cfg.selected_market_id, "kalshi")
         self.assertEqual(cfg.theme, "dark")
+        self.assertEqual(cfg.ui_design, "graphite_2026")
         with self.assertRaises(ValueError):
             apply_config_patch(cfg, {"selected_market_id": "missing"})
         with self.assertRaises(ValueError):
             apply_config_patch(cfg, {"theme": "blue"})
+        with self.assertRaises(ValueError):
+            apply_config_patch(cfg, {"ui_design": "missing"})
 
     def test_apply_market_patch_updates_enabled_and_settings(self) -> None:
         cfg = AppConfig()

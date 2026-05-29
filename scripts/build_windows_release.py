@@ -177,6 +177,8 @@ def copy_release_payload(package_dir: Path, frontend_dist: Path, version: str) -
     copy_file(ROOT / "LICENSE", package_dir / "LICENSE")
     copy_file(ROOT / ".env.example", package_dir / ".env.example")
     copy_file(ROOT / "data" / "config.example.json", package_dir / "data" / "config.example.json")
+    copy_file(ROOT / "assets" / "polymarket.ico", package_dir / "assets" / "polymarket.ico")
+    copy_file(ROOT / "polymarket.png", package_dir / "assets" / "polymarket.png")
 
     frontend_target = package_dir / "frontend" / "dist"
     if frontend_target.exists():

@@ -116,6 +116,7 @@ The portable zip contains:
 - `prediction-market-alert-and-copy-trade-gui.exe`
 - `start_tkinter_gui.bat`
 - `start_web_gui.bat`
+- bundled app icons in `assets\`
 - bundled `frontend/dist` React assets
 - `README.md`, `README_WINDOWS.txt`, `LICENSE`, `.env.example`, and `data/config.example.json`
 

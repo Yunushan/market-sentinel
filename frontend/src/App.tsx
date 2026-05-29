@@ -120,6 +120,7 @@ import type {
   PolymarketUserSearchPayload,
   PriceAlert,
   Theme,
+  UiDesign,
   WalletActivity,
   WalletForm,
   WalletsPayload,
@@ -626,6 +627,16 @@ export default function App() {
     setError(null);
     try {
       const payload = await updateConfig({ theme });
+      setConfig(payload);
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    }
+  }
+
+  async function handleUiDesignChange(uiDesign: UiDesign) {
+    setError(null);
+    try {
+      const payload = await updateConfig({ ui_design: uiDesign });
       setConfig(payload);
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
@@ -1445,6 +1456,7 @@ export default function App() {
             markets={markets}
             onSelectedMarketChange={(marketId) => void handleSelectedMarketChange(marketId)}
             onThemeChange={(theme) => void handleThemeChange(theme)}
+            onUiDesignChange={(uiDesign) => void handleUiDesignChange(uiDesign)}
           />
         ) : null}
       </section>
@@ -1507,6 +1519,7 @@ function OverviewView({
           <Metric label="API" value={health?.status ?? (loading ? "loading" : "offline")} tone={health?.status === "ok" ? "good" : "warn"} />
           <Metric label="Selected" value={config?.selected_market_id ?? "-"} />
           <Metric label="Theme" value={config?.theme ?? "-"} />
+          <Metric label="Design" value={config?.ui_design ?? "-"} />
           <Metric label="API version" value={health?.api_version ?? "-"} />
           <Metric label="Mode" value={health?.mode ?? "parallel"} />
         </div>
@@ -4536,13 +4549,15 @@ function SettingsView({
   health,
   markets,
   onSelectedMarketChange,
-  onThemeChange
+  onThemeChange,
+  onUiDesignChange
 }: {
   config: ConfigPayload | null;
   health: HealthPayload | null;
   markets: MarketsPayload | null;
   onSelectedMarketChange: (marketId: string) => void;
   onThemeChange: (theme: Theme) => void;
+  onUiDesignChange: (uiDesign: UiDesign) => void;
 }) {
   return (
     <section className="panel full">
@@ -4562,6 +4577,14 @@ function SettingsView({
           <select value={config?.theme ?? "light"} onChange={(event) => onThemeChange(event.target.value as Theme)}>
             <option value="light">Light</option>
             <option value="dark">Dark</option>
+          </select>
+        </label>
+        <label>
+          <span>Tkinter design</span>
+          <select value={config?.ui_design ?? "aurora_2026"} onChange={(event) => onUiDesignChange(event.target.value as UiDesign)}>
+            <option value="classic">Classic</option>
+            <option value="aurora_2026">Aurora 2026</option>
+            <option value="graphite_2026">Graphite 2026</option>
           </select>
         </label>
         <label>

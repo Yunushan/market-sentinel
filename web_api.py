@@ -9,10 +9,10 @@ import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple, cast
 from urllib.parse import parse_qs, unquote, urlparse
 
-from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, WalletWatch
+from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, UIDesign, WalletWatch
 from core.storage import DEFAULT_CONFIG_PATH, load_config, save_config
 from market_adapters import build_default_registry
 from market_adapters.registry import AdapterRegistry
@@ -810,6 +810,7 @@ def config_payload(cfg: AppConfig) -> Dict[str, Any]:
     return {
         "selected_market_id": cfg.selected_market_id,
         "theme": cfg.theme,
+        "ui_design": getattr(cfg, "ui_design", "aurora_2026"),
         "alerts": [alert.to_dict() for alert in cfg.alerts],
         "wallets": [wallet.to_dict() for wallet in cfg.wallets],
         "copytrading": cfg.copytrading.to_dict(),
@@ -874,6 +875,11 @@ def apply_config_patch(cfg: AppConfig, payload: Dict[str, Any]) -> AppConfig:
         if theme not in {"light", "dark"}:
             raise ValueError("theme must be light or dark.")
         cfg.theme = "dark" if theme == "dark" else "light"
+    if "ui_design" in payload:
+        ui_design = str(payload["ui_design"] or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if ui_design not in {"classic", "aurora_2026", "graphite_2026"}:
+            raise ValueError("ui_design must be classic, aurora_2026, or graphite_2026.")
+        cfg.ui_design = cast(UIDesign, ui_design)
     return cfg
 
 

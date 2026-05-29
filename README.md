@@ -278,6 +278,13 @@ python app.py
 
 On Windows you can also double-click `run_gui.bat`. It uses `.venv` when it is healthy and falls back to the Python launcher.
 
+The Tkinter app keeps the classic interface available and adds selectable UI designs from the top command bar:
+- `Classic` preserves the older compact desktop styling.
+- `Aurora 2026` is the default modern light/dark command-center design.
+- `Graphite 2026` is a denser modern design with stronger contrast.
+
+The Windows app and release packages include the same ICO/PNG icon assets for the title bar, taskbar, portable zip, and MSI install layout.
+
 ### 5) Optional React/TypeScript GUI
 The existing Tkinter app remains available through `run_gui.bat` or `python app.py`. The React GUI is a parallel local interface backed by a stdlib Python API; it does not replace the Python GUI.
 
@@ -311,7 +318,7 @@ Then open `http://127.0.0.1:8765`.
 Useful local API endpoints:
 - `GET /api/state` returns the initial React GUI snapshot: health, config, markets, alerts, wallets, copy, live safety, and paper state.
 - `GET /api/health` returns API version, route metadata, React dev/build/prod commands, build availability, and confirms the Tkinter fallback remains `run_gui.bat` or `python app.py`.
-- `PATCH /api/config` updates shared local config fields such as selected market and theme.
+- `PATCH /api/config` updates shared local config fields such as selected market, theme, and Tkinter UI design.
 - `GET /api/markets` returns market capabilities, health, status text, credential source diagnostics without secret values, and live-safety settings.
 - `PATCH /api/markets/{market_id}` toggles a market and persists live-safety settings such as enablement, acknowledgement, kill switch, max size, and max notional.
 - `GET /api/alerts` returns alert rows enriched with adapter-backed status and current in-memory price state.

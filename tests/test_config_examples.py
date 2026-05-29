@@ -29,6 +29,7 @@ class ConfigExampleTests(unittest.TestCase):
         self.assertEqual(set(data["markets"]), set(MARKET_IDS))
         self.assertEqual(set(cfg.markets), set(MARKET_IDS))
         self.assertEqual(cfg.selected_market_id, "polymarket")
+        self.assertEqual(cfg.ui_design, "aurora_2026")
         self.assertTrue(cfg.markets["polymarket"].enabled)
         self.assertFalse(cfg.copytrading.enabled)
         self.assertFalse(cfg.copytrading.live)

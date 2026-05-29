@@ -63,6 +63,7 @@ class CoreModelTests(unittest.TestCase):
             ),
             selected_market_id="kalshi",
             theme="dark",
+            ui_design="graphite_2026",
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -71,6 +72,7 @@ class CoreModelTests(unittest.TestCase):
             loaded = load_config(path)
 
         self.assertEqual(loaded.theme, "dark")
+        self.assertEqual(loaded.ui_design, "graphite_2026")
         self.assertEqual(loaded.selected_market_id, "kalshi")
         self.assertEqual(len(loaded.alerts), 1)
         self.assertEqual(loaded.alerts[0].threshold, 0.55)
@@ -141,6 +143,7 @@ class CoreModelTests(unittest.TestCase):
         self.assertEqual(loaded.alerts, [])
         self.assertEqual(loaded.wallets, [])
         self.assertEqual(loaded.theme, "light")
+        self.assertEqual(loaded.ui_design, "aurora_2026")
         self.assertEqual(loaded.selected_market_id, "polymarket")
         self.assertEqual(set(loaded.markets), set(MARKET_IDS))
 
@@ -166,6 +169,7 @@ class CoreModelTests(unittest.TestCase):
             leftovers = list(Path(temp_dir).glob(".config.json.*.tmp"))
 
         self.assertEqual(loaded.theme, "dark")
+        self.assertEqual(loaded.ui_design, "aurora_2026")
         self.assertEqual(loaded.selected_market_id, "kalshi")
         self.assertEqual(leftovers, [])
 

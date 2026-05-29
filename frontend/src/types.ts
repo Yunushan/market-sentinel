@@ -1,4 +1,5 @@
 export type Theme = "light" | "dark";
+export type UiDesign = "classic" | "aurora_2026" | "graphite_2026";
 
 export interface MarketCapabilities {
   market_discovery: boolean;
@@ -986,6 +987,7 @@ export interface PolymarketLiveValidationReportStoreRequest {
 export interface ConfigPayload {
   selected_market_id: string;
   theme: Theme;
+  ui_design: UiDesign;
   alerts: unknown[];
   wallets: unknown[];
   copytrading: {

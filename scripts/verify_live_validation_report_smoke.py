@@ -82,6 +82,10 @@ REQUIRED_DOM_FRAGMENTS = (
 )
 
 
+class BrowserStartupError(RuntimeError):
+    pass
+
+
 class SmokeReactGuiHandler(ReactGuiHandler):
     def log_message(self, format: str, *args: Any) -> None:
         return
@@ -90,6 +94,23 @@ class SmokeReactGuiHandler(ReactGuiHandler):
 class SmokeReactGuiServer(ReactGuiServer):
     def handle_error(self, request: Any, client_address: Any) -> None:
         return
+
+
+def close_browser_debug_endpoint(port: int | None, browser_ws_path: str) -> None:
+    if port is None or not browser_ws_path:
+        return
+    ws = None
+    try:
+        ws = websocket.create_connection(f"ws://127.0.0.1:{port}{browser_ws_path}", timeout=2)
+        ws.send(json.dumps({"id": 1, "method": "Browser.close"}))
+    except Exception:
+        pass
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
 
 
 def request_json(base_url: str, path: str, *, method: str = "GET", payload: Dict[str, Any] | None = None) -> Tuple[int, Dict[str, Any]]:
@@ -141,30 +162,49 @@ def find_browser(explicit_path: str = "") -> str:
     )
 
 
-def browser_dom_check(browser_path: str, url: str, profile_dir: Path, *, timeout_seconds: int) -> Dict[str, Any]:
+def _browser_dom_check_once(
+    browser_path: str,
+    url: str,
+    profile_dir: Path,
+    *,
+    headless_arg: str,
+    timeout_seconds: int,
+) -> Dict[str, Any]:
     command = [
         browser_path,
-        "--headless=new",
+        headless_arg,
+        "--disable-background-networking",
+        "--disable-component-extensions-with-background-pages",
+        "--disable-default-apps",
+        "--disable-extensions",
         "--disable-gpu",
+        "--disable-sync",
+        "--no-default-browser-check",
         "--no-first-run",
         "--remote-debugging-port=0",
         "--remote-allow-origins=*",
+        "--window-size=1280,900",
         f"--user-data-dir={profile_dir}",
         url,
     ]
     process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    browser_port: int | None = None
+    browser_ws_path = ""
     try:
         deadline = time.monotonic() + max(5, int(timeout_seconds))
         port_file = profile_dir / "DevToolsActivePort"
         while time.monotonic() < deadline and not port_file.exists():
-            if process.poll() is not None:
-                raise SystemExit(f"Headless browser exited early with code {process.returncode}.")
             time.sleep(0.1)
         if not port_file.exists():
-            raise SystemExit("Headless browser did not expose a debugging port.")
+            exit_code = process.poll()
+            if exit_code is None:
+                raise BrowserStartupError(f"{headless_arg} did not expose a debugging port.")
+            raise BrowserStartupError(f"{headless_arg} exited before exposing DevTools with code {exit_code}.")
 
         port_lines = port_file.read_text(encoding="utf-8").splitlines()
         port = int(port_lines[0])
+        browser_port = port
+        browser_ws_path = port_lines[1] if len(port_lines) > 1 else ""
         page_ws_url = ""
         while time.monotonic() < deadline and not page_ws_url:
             try:
@@ -184,7 +224,7 @@ def browser_dom_check(browser_path: str, url: str, profile_dir: Path, *, timeout
             if not page_ws_url:
                 time.sleep(0.1)
         if not page_ws_url:
-            raise SystemExit("Headless browser did not expose a page debugging target.")
+            raise BrowserStartupError(f"{headless_arg} did not expose a page debugging target.")
 
         ws = websocket.create_connection(page_ws_url, timeout=5)
         try:
@@ -249,12 +289,34 @@ def browser_dom_check(browser_path: str, url: str, profile_dir: Path, *, timeout
             except Exception:
                 pass
     finally:
-        process.terminate()
+        close_browser_debug_endpoint(browser_port, browser_ws_path)
+        if process.poll() is None:
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+
+
+def browser_dom_check(browser_path: str, url: str, profile_dir: Path, *, timeout_seconds: int) -> Dict[str, Any]:
+    errors = []
+    for headless_arg, suffix in (("--headless=new", ""), ("--headless", "-legacy")):
+        attempt_profile_dir = profile_dir if not suffix else profile_dir.with_name(f"{profile_dir.name}{suffix}")
         try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
+            return _browser_dom_check_once(
+                browser_path,
+                url,
+                attempt_profile_dir,
+                headless_arg=headless_arg,
+                timeout_seconds=timeout_seconds,
+            )
+        except BrowserStartupError as exc:
+            errors.append(str(exc))
+    raise SystemExit("Headless browser failed to start for DOM smoke: " + " ".join(errors))
 
 
 def start_server(host: str, port: int, config_path: Path, frontend_dir: Path) -> Tuple[ReactGuiServer, threading.Thread, str]:
@@ -270,7 +332,7 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
         raise SystemExit(f"React build is missing at {frontend_dir}; run npm run build or python verify.py --frontend-build first.")
 
     browser_path = find_browser(args.browser_path)
-    with tempfile.TemporaryDirectory(prefix="polymarket-live-smoke-") as tmpdir:
+    with tempfile.TemporaryDirectory(prefix="polymarket-live-smoke-", ignore_cleanup_errors=True) as tmpdir:
         temp_root = Path(tmpdir)
         config_path = temp_root / "config.json"
         report_path = temp_root / "live-validation-reports.json"

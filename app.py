@@ -88,6 +88,15 @@ def market_id_from_choice(choice: str) -> str:
     return str(choice or "").strip().lower()
 
 
+UI_DESIGN_LABELS = {
+    "classic": "Classic",
+    "aurora_2026": "Aurora 2026",
+    "graphite_2026": "Graphite 2026",
+}
+
+UI_DESIGN_BY_LABEL = {label.lower(): key for key, label in UI_DESIGN_LABELS.items()}
+
+
 def bool_from_setting(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
@@ -307,9 +316,12 @@ class AdapterPricePoller:
 
 class App(tk.Tk):
     def __init__(self):
+        set_windows_app_id("prediction-market-alert-and-copy-trade-gui")
         super().__init__()
         self.title("prediction-market-alert-and-copy-trade-gui")
-        self.geometry("1050x700")
+        self.geometry("1180x780")
+        self.minsize(1050, 700)
+        self._icon_images: List[tk.PhotoImage] = []
         self._load_icon_image()
         self._apply_window_icon(self)
 
@@ -317,15 +329,15 @@ class App(tk.Tk):
 
         self.cfg: AppConfig = load_config()
         self.cfg.theme = self._normalize_theme(self.cfg.theme)
+        self.cfg.ui_design = self._normalize_ui_design(getattr(self.cfg, "ui_design", "aurora_2026"))
         self.adapter_registry = build_default_registry()
         self.polymarket_adapter = self._create_polymarket_adapter()
         self.ui_queue: "queue.Queue[tuple]" = queue.Queue()
         self.style = ttk.Style(self)
         self._themes = self._build_theme_palettes()
-        self._palette = self._themes[self.cfg.theme]
+        self._palette = self._palette_for(self.cfg.theme, self.cfg.ui_design)
         self._requirements = self._load_requirements()
         self._dep_check_running = False
-        self._icon_images: List[tk.PhotoImage] = []
 
         # price state by token_id
         self.price_state: Dict[str, Dict[str, Optional[float]]] = {}
@@ -352,7 +364,7 @@ class App(tk.Tk):
 
         # UI
         self._build_ui()
-        self._apply_theme(self.cfg.theme)
+        self._apply_theme(self.cfg.theme, self.cfg.ui_design)
         self._apply_window_icon(self)
 
         # Kick off queue processing
@@ -522,13 +534,23 @@ class App(tk.Tk):
         self.ui_queue.put(("log", f"[market] {msg}"))
 
     def _build_ui(self):
-        topbar = ttk.Frame(self)
-        topbar.pack(fill="x", padx=10, pady=(10, 0))
+        topbar = ttk.Frame(self, style="CommandBar.TFrame", padding=(14, 12))
+        topbar.pack(fill="x", padx=12, pady=(12, 0))
 
-        ttk.Label(topbar, text="Market:").pack(side="left")
+        header = ttk.Frame(topbar, style="CommandBar.TFrame")
+        header.pack(fill="x")
+        brand = ttk.Frame(header, style="CommandBar.TFrame")
+        brand.pack(side="left", fill="x", expand=True)
+        ttk.Label(brand, text="Prediction Market Command Center", style="AppTitle.TLabel").pack(anchor="w")
+        ttk.Label(brand, text="Alerts, safety, paper trading, wallet tracking, and guarded copy execution", style="AppSubtitle.TLabel").pack(anchor="w")
+
+        mode_bar = ttk.Frame(topbar, style="CommandBar.TFrame")
+        mode_bar.pack(fill="x", pady=(10, 0))
+
+        ttk.Label(mode_bar, text="Market:").pack(side="left")
         self.market_var = tk.StringVar(value=self._market_label_for_id(self.cfg.selected_market_id))
         self.market_combo = ttk.Combobox(
-            topbar,
+            mode_bar,
             textvariable=self.market_var,
             values=self._market_choices(),
             state="readonly",
@@ -537,17 +559,29 @@ class App(tk.Tk):
         self.market_combo.pack(side="left", padx=(6, 18))
         self.market_combo.bind("<<ComboboxSelected>>", lambda e: self._on_market_change())
 
-        ttk.Label(topbar, text="Theme:").pack(side="left")
+        ttk.Label(mode_bar, text="Theme:").pack(side="left")
         self.theme_var = tk.StringVar(value=self._theme_label(self.cfg.theme))
         self.theme_combo = ttk.Combobox(
-            topbar,
+            mode_bar,
             textvariable=self.theme_var,
             values=["Light", "Dark"],
             state="readonly",
             width=8,
         )
-        self.theme_combo.pack(side="left", padx=(6, 0))
+        self.theme_combo.pack(side="left", padx=(6, 18))
         self.theme_combo.bind("<<ComboboxSelected>>", lambda e: self._on_theme_change())
+
+        ttk.Label(mode_bar, text="Design:").pack(side="left")
+        self.ui_design_var = tk.StringVar(value=self._ui_design_label(self.cfg.ui_design))
+        self.ui_design_combo = ttk.Combobox(
+            mode_bar,
+            textvariable=self.ui_design_var,
+            values=list(UI_DESIGN_LABELS.values()),
+            state="readonly",
+            width=14,
+        )
+        self.ui_design_combo.pack(side="left", padx=(6, 0))
+        self.ui_design_combo.bind("<<ComboboxSelected>>", lambda e: self._on_ui_design_change())
 
         self.market_status_var = tk.StringVar(value=self._selected_market_status_text())
         ttk.Label(
@@ -593,45 +627,180 @@ class App(tk.Tk):
     # ------------------ Theme ------------------
 
     def _build_theme_palettes(self) -> Dict[str, Dict[str, str]]:
+        classic_light = {
+            "bg": "#f6f4ef",
+            "surface": "#f6f4ef",
+            "surface_alt": "#e9e5dd",
+            "fg": "#1f1f1f",
+            "heading": "#161616",
+            "muted": "#6b6b6b",
+            "accent": "#2b6e6d",
+            "accent_hover": "#245a59",
+            "field_bg": "#ffffff",
+            "field_fg": "#1f1f1f",
+            "border": "#c9c3b8",
+            "tab_bg": "#e9e5dd",
+            "tab_active_bg": "#f6f4ef",
+            "select_bg": "#dfe8e6",
+            "select_fg": "#1f1f1f",
+            "log_bg": "#fbfaf7",
+            "button_bg": "#e6e1d8",
+            "button_fg": "#1f1f1f",
+            "font_family": "Segoe UI",
+            "font_size": "9",
+            "title_size": "13",
+            "rowheight": "24",
+            "button_padding": "8 4",
+            "tab_padding": "10 6",
+        }
+        classic_dark = {
+            "bg": "#1e1f24",
+            "surface": "#1e1f24",
+            "surface_alt": "#2a2c33",
+            "fg": "#e9e6df",
+            "heading": "#f5f2eb",
+            "muted": "#a6a9b3",
+            "accent": "#63b7af",
+            "accent_hover": "#4fa79d",
+            "field_bg": "#2a2c33",
+            "field_fg": "#e9e6df",
+            "border": "#3b3f48",
+            "tab_bg": "#2a2c33",
+            "tab_active_bg": "#1e1f24",
+            "select_bg": "#394048",
+            "select_fg": "#e9e6df",
+            "log_bg": "#15171b",
+            "button_bg": "#2f323a",
+            "button_fg": "#e9e6df",
+            "font_family": "Segoe UI",
+            "font_size": "9",
+            "title_size": "13",
+            "rowheight": "24",
+            "button_padding": "8 4",
+            "tab_padding": "10 6",
+        }
         return {
-            "light": {
-                "bg": "#f6f4ef",
-                "fg": "#1f1f1f",
-                "muted": "#6b6b6b",
-                "accent": "#2b6e6d",
-                "accent_hover": "#245a59",
-                "field_bg": "#ffffff",
-                "field_fg": "#1f1f1f",
-                "border": "#c9c3b8",
-                "tab_bg": "#e9e5dd",
-                "tab_active_bg": "#f6f4ef",
-                "select_bg": "#dfe8e6",
-                "select_fg": "#1f1f1f",
-                "log_bg": "#fbfaf7",
-                "button_bg": "#e6e1d8",
-                "button_fg": "#1f1f1f",
+            "light": classic_light,
+            "dark": classic_dark,
+            "classic:light": classic_light,
+            "classic:dark": classic_dark,
+            "aurora_2026:light": {
+                **classic_light,
+                "bg": "#eef3f7",
+                "surface": "#ffffff",
+                "surface_alt": "#edf4f7",
+                "fg": "#182028",
+                "heading": "#0f1720",
+                "muted": "#5c6975",
+                "accent": "#0f8b8d",
+                "accent_hover": "#0b7378",
+                "field_bg": "#f8fbff",
+                "field_fg": "#182028",
+                "border": "#c9d7df",
+                "tab_bg": "#e4edf2",
+                "tab_active_bg": "#ffffff",
+                "select_bg": "#d6f4f0",
+                "select_fg": "#0f1720",
+                "log_bg": "#f9fbfd",
+                "button_bg": "#e2f3f2",
+                "button_fg": "#0f1720",
+                "font_size": "10",
+                "title_size": "16",
+                "rowheight": "28",
+                "button_padding": "12 7",
+                "tab_padding": "14 8",
             },
-            "dark": {
-                "bg": "#1e1f24",
-                "fg": "#e9e6df",
-                "muted": "#a6a9b3",
-                "accent": "#63b7af",
-                "accent_hover": "#4fa79d",
-                "field_bg": "#2a2c33",
-                "field_fg": "#e9e6df",
-                "border": "#3b3f48",
-                "tab_bg": "#2a2c33",
-                "tab_active_bg": "#1e1f24",
-                "select_bg": "#394048",
-                "select_fg": "#e9e6df",
-                "log_bg": "#15171b",
-                "button_bg": "#2f323a",
-                "button_fg": "#e9e6df",
+            "aurora_2026:dark": {
+                **classic_dark,
+                "bg": "#0f141b",
+                "surface": "#151d27",
+                "surface_alt": "#1c2733",
+                "fg": "#edf6f7",
+                "heading": "#ffffff",
+                "muted": "#9fb0bd",
+                "accent": "#5eead4",
+                "accent_hover": "#38c7bd",
+                "field_bg": "#0d1621",
+                "field_fg": "#edf6f7",
+                "border": "#2a3a4a",
+                "tab_bg": "#182231",
+                "tab_active_bg": "#233041",
+                "select_bg": "#123f46",
+                "select_fg": "#f8feff",
+                "log_bg": "#0a1017",
+                "button_bg": "#18343a",
+                "button_fg": "#f8feff",
+                "font_size": "10",
+                "title_size": "16",
+                "rowheight": "28",
+                "button_padding": "12 7",
+                "tab_padding": "14 8",
+            },
+            "graphite_2026:light": {
+                **classic_light,
+                "bg": "#f3f5f7",
+                "surface": "#ffffff",
+                "surface_alt": "#e8edf2",
+                "fg": "#181b20",
+                "heading": "#0d1014",
+                "muted": "#626b76",
+                "accent": "#2563eb",
+                "accent_hover": "#1d4ed8",
+                "field_bg": "#fbfcfe",
+                "field_fg": "#181b20",
+                "border": "#ccd3db",
+                "tab_bg": "#e7ebf0",
+                "tab_active_bg": "#ffffff",
+                "select_bg": "#dde7ff",
+                "select_fg": "#0d1014",
+                "log_bg": "#f8fafc",
+                "button_bg": "#e7ecf4",
+                "button_fg": "#111827",
+                "font_size": "10",
+                "title_size": "16",
+                "rowheight": "28",
+                "button_padding": "12 7",
+                "tab_padding": "14 8",
+            },
+            "graphite_2026:dark": {
+                **classic_dark,
+                "bg": "#101217",
+                "surface": "#181c23",
+                "surface_alt": "#222832",
+                "fg": "#f0f2f5",
+                "heading": "#ffffff",
+                "muted": "#a4adb8",
+                "accent": "#7dd3fc",
+                "accent_hover": "#38bdf8",
+                "field_bg": "#11151c",
+                "field_fg": "#f0f2f5",
+                "border": "#2e3541",
+                "tab_bg": "#1c222b",
+                "tab_active_bg": "#27313d",
+                "select_bg": "#1e3a5f",
+                "select_fg": "#ffffff",
+                "log_bg": "#0b0e13",
+                "button_bg": "#25313d",
+                "button_fg": "#f8fafc",
+                "font_size": "10",
+                "title_size": "16",
+                "rowheight": "28",
+                "button_padding": "12 7",
+                "tab_padding": "14 8",
             },
         }
 
+    def _palette_for(self, theme: str, ui_design: str) -> Dict[str, str]:
+        theme = self._normalize_theme(theme)
+        ui_design = self._normalize_ui_design(ui_design)
+        return self._themes.get(f"{ui_design}:{theme}", self._themes[f"classic:{theme}"])
+
     def _normalize_theme(self, theme: str) -> str:
         return "dark" if str(theme).strip().lower() == "dark" else "light"
+
+    def _normalize_ui_design(self, ui_design: str) -> str:
+        value = str(ui_design or "aurora_2026").strip().lower().replace("-", "_").replace(" ", "_")
+        return value if value in UI_DESIGN_LABELS else "aurora_2026"
 
     def _theme_label(self, theme: str) -> str:
         return "Dark" if self._normalize_theme(theme) == "dark" else "Light"
@@ -639,17 +808,35 @@ class App(tk.Tk):
     def _theme_from_label(self, label: str) -> str:
         return "dark" if str(label).strip().lower() == "dark" else "light"
 
+    def _ui_design_label(self, ui_design: str) -> str:
+        return UI_DESIGN_LABELS.get(self._normalize_ui_design(ui_design), UI_DESIGN_LABELS["aurora_2026"])
+
+    def _ui_design_from_label(self, label: str) -> str:
+        normalized = str(label or "").strip().lower()
+        if normalized in UI_DESIGN_BY_LABEL:
+            return UI_DESIGN_BY_LABEL[normalized]
+        return self._normalize_ui_design(normalized)
+
     def _on_theme_change(self):
         theme = self._theme_from_label(self.theme_var.get())
         if theme == self.cfg.theme:
             return
         self.cfg.theme = theme
         save_config(self.cfg)
-        self._apply_theme(theme)
+        self._apply_theme(theme, self.cfg.ui_design)
 
-    def _apply_theme(self, theme: str):
+    def _on_ui_design_change(self):
+        ui_design = self._ui_design_from_label(self.ui_design_var.get())
+        if ui_design == self.cfg.ui_design:
+            return
+        self.cfg.ui_design = ui_design
+        save_config(self.cfg)
+        self._apply_theme(self.cfg.theme, ui_design)
+
+    def _apply_theme(self, theme: str, ui_design: Optional[str] = None):
         theme = self._normalize_theme(theme)
-        palette = self._themes.get(theme, self._themes["light"])
+        ui_design = self._normalize_ui_design(ui_design or getattr(self.cfg, "ui_design", "aurora_2026"))
+        palette = self._palette_for(theme, ui_design)
         self._palette = palette
 
         try:
@@ -672,17 +859,29 @@ class App(tk.Tk):
         accent = palette["accent"]
         accent_hover = palette["accent_hover"]
         log_bg = palette["log_bg"]
+        surface = palette["surface"]
+        surface_alt = palette["surface_alt"]
+        heading = palette["heading"]
+        font_family = palette.get("font_family", "Segoe UI")
+        font_size = int(palette.get("font_size", "9"))
+        title_size = int(palette.get("title_size", "13"))
+        rowheight = int(palette.get("rowheight", "24"))
+        button_padding = tuple(int(part) for part in palette.get("button_padding", "8 4").split())
+        tab_padding = tuple(int(part) for part in palette.get("tab_padding", "10 6").split())
 
         self.configure(background=bg)
 
-        self.style.configure(".", background=bg, foreground=fg)
+        self.style.configure(".", background=bg, foreground=fg, font=(font_family, font_size))
         self.style.configure("TFrame", background=bg)
+        self.style.configure("CommandBar.TFrame", background=surface, borderwidth=1, relief="solid")
         self.style.configure("TLabel", background=bg, foreground=fg)
-        self.style.configure("Status.TLabel", background=bg, foreground=muted)
-        self.style.configure("TLabelframe", background=bg, foreground=fg)
-        self.style.configure("TLabelframe.Label", background=bg, foreground=fg)
+        self.style.configure("AppTitle.TLabel", background=surface, foreground=heading, font=(font_family, title_size, "bold"))
+        self.style.configure("AppSubtitle.TLabel", background=surface, foreground=muted, font=(font_family, font_size))
+        self.style.configure("Status.TLabel", background=bg, foreground=muted, font=(font_family, font_size))
+        self.style.configure("TLabelframe", background=bg, foreground=fg, bordercolor=border)
+        self.style.configure("TLabelframe.Label", background=bg, foreground=heading, font=(font_family, font_size, "bold"))
 
-        self.style.configure("TButton", background=button_bg, foreground=button_fg, bordercolor=border)
+        self.style.configure("TButton", background=button_bg, foreground=button_fg, bordercolor=border, padding=button_padding)
         self.style.map(
             "TButton",
             background=[("active", accent_hover), ("pressed", accent)],
@@ -705,7 +904,7 @@ class App(tk.Tk):
         self.style.map("TCheckbutton", background=[("active", bg)], foreground=[("disabled", muted)])
 
         self.style.configure("TNotebook", background=bg, bordercolor=border)
-        self.style.configure("TNotebook.Tab", background=tab_bg, foreground=fg, padding=(10, 6))
+        self.style.configure("TNotebook.Tab", background=tab_bg, foreground=fg, padding=tab_padding)
         self.style.map("TNotebook.Tab", background=[("selected", tab_active_bg), ("active", tab_active_bg)])
 
         self.style.configure(
@@ -714,9 +913,11 @@ class App(tk.Tk):
             fieldbackground=field_bg,
             foreground=field_fg,
             bordercolor=border,
+            rowheight=rowheight,
+            font=(font_family, font_size),
         )
         self.style.map("Treeview", background=[("selected", select_bg)], foreground=[("selected", select_fg)])
-        self.style.configure("Treeview.Heading", background=tab_bg, foreground=fg)
+        self.style.configure("Treeview.Heading", background=surface_alt, foreground=heading, font=(font_family, font_size, "bold"))
         self.style.map("Treeview.Heading", background=[("active", tab_active_bg)])
 
         self.option_add("*TCombobox*Listbox.background", field_bg)
@@ -752,19 +953,36 @@ class App(tk.Tk):
                 )
 
     def _icon_path(self) -> Optional[Path]:
-        path = Path(__file__).resolve().parent / "assets" / "polymarket.ico"
-        return path if path.exists() else None
-
-    def _icon_png_path(self) -> Optional[Path]:
-        root = Path(__file__).resolve().parent
-        candidates = [
-            root / "assets" / "polymarket.png",
-            root / "polymarket.png",
-        ]
-        for path in candidates:
+        for root in self._resource_roots():
+            path = root / "assets" / "polymarket.ico"
             if path.exists():
                 return path
         return None
+
+    def _icon_png_path(self) -> Optional[Path]:
+        for root in self._resource_roots():
+            for path in (
+                root / "assets" / "polymarket.png",
+                root / "polymarket.png",
+                root / "frontend" / "public" / "polymarket.png",
+            ):
+                if path.exists():
+                    return path
+        return None
+
+    def _resource_roots(self) -> List[Path]:
+        roots: List[Path] = []
+        frozen_root = getattr(sys, "_MEIPASS", None)
+        if frozen_root:
+            roots.append(Path(frozen_root))
+        if getattr(sys, "frozen", False):
+            roots.append(Path(sys.executable).resolve().parent)
+        roots.append(Path(__file__).resolve().parent)
+        unique: List[Path] = []
+        for root in roots:
+            if root not in unique:
+                unique.append(root)
+        return unique
 
     def _load_icon_image(self):
         self._icon_images = []
@@ -791,6 +1009,10 @@ class App(tk.Tk):
         if icon_path:
             try:
                 window.iconbitmap(str(icon_path))
+            except Exception:
+                pass
+            try:
+                window.iconbitmap(default=str(icon_path))
             except Exception:
                 pass
         if self._icon_images:
@@ -3412,12 +3634,16 @@ def tkinter_smoke_payload() -> Dict[str, Any]:
     cfg = AppConfig()
     market_ids = [metadata.market_id for metadata in registry.list_metadata()]
     choices = [market_choice_label(metadata) for metadata in registry.list_metadata()]
+    root = Path(__file__).resolve().parent
     return {
         "ok": True,
         "app_class": App.__name__,
         "tkinter_base": issubclass(App, tk.Tk),
         "window_title": "prediction-market-alert-and-copy-trade-gui",
         "selected_market_id": cfg.selected_market_id,
+        "ui_design": cfg.ui_design,
+        "ui_designs": list(UI_DESIGN_LABELS.values()),
+        "icon_available": (root / "assets" / "polymarket.ico").exists() and (root / "polymarket.png").exists(),
         "market_count": len(market_ids),
         "choice_count": len(choices),
         "all_markets_configured": set(market_ids) == set(cfg.markets),

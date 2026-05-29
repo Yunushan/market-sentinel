@@ -316,7 +316,7 @@ export function updateMarket(marketId: string, patch: MarketPatch): Promise<Mark
   });
 }
 
-export function updateConfig(payload: Partial<Pick<ConfigPayload, "selected_market_id" | "theme">>): Promise<ConfigPayload> {
+export function updateConfig(payload: Partial<Pick<ConfigPayload, "selected_market_id" | "theme" | "ui_design">>): Promise<ConfigPayload> {
   return request<ConfigPayload>("/api/config", {
     method: "PATCH",
     body: JSON.stringify(payload)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict, field
-from typing import Literal, Optional, Dict, Any, List
+from typing import Literal, Optional, Dict, Any, List, cast
 import uuid
 import time
 
@@ -11,7 +11,9 @@ from market_adapters.catalog import MARKET_CATALOG
 PriceSource = Literal["last_trade", "midpoint", "best_bid", "best_ask"]
 Direction = Literal["above", "below"]
 Theme = Literal["light", "dark"]
+UIDesign = Literal["classic", "aurora_2026", "graphite_2026"]
 DEFAULT_MARKET_ID = "polymarket"
+DEFAULT_UI_DESIGN: UIDesign = "aurora_2026"
 
 
 def _uuid() -> str:
@@ -210,6 +212,7 @@ class AppConfig:
     markets: Dict[str, MarketConfig] = field(default_factory=default_market_configs)
     selected_market_id: str = DEFAULT_MARKET_ID
     theme: Theme = "light"
+    ui_design: UIDesign = DEFAULT_UI_DESIGN
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -220,6 +223,7 @@ class AppConfig:
             "markets": {market_id: cfg.to_dict() for market_id, cfg in self.markets.items()},
             "selected_market_id": self.selected_market_id,
             "theme": self.theme,
+            "ui_design": self.ui_design,
         }
 
     @staticmethod
@@ -240,6 +244,8 @@ class AppConfig:
             selected_market_id = DEFAULT_MARKET_ID
         raw_theme = str(d.get("theme") or "").lower()
         theme: Theme = "dark" if raw_theme == "dark" else "light"
+        raw_ui_design = str(d.get("ui_design") or DEFAULT_UI_DESIGN).strip().lower().replace("-", "_")
+        ui_design = cast(UIDesign, raw_ui_design) if raw_ui_design in {"classic", "aurora_2026", "graphite_2026"} else DEFAULT_UI_DESIGN
         return AppConfig(
             alerts=alerts,
             paper_trades=paper_trades,
@@ -248,4 +254,5 @@ class AppConfig:
             markets=markets,
             selected_market_id=selected_market_id,
             theme=theme,
+            ui_design=ui_design,
         )
