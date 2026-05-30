@@ -250,7 +250,7 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 
 ## Install & Run
 
-Requires **Python >=3.10** with no artificial upper cap. Python **3.10** through **3.14** are required stable CI lanes today; Python **3.15**, **3.16**, and the moving latest stable **3.x** runner are included in forward-compatibility CI/release checks as GitHub Actions provides those interpreters.
+Requires **Python >=3.10** with no artificial upper cap. Python **3.10** through **3.14** are required stable CI lanes today, and the moving latest stable **3.x** runner is included in CI/release checks so future stable Python releases above 3.16 are covered automatically when GitHub Actions publishes them.
 
 ### 1) Create a venv (recommended)
 ```bash
@@ -274,6 +274,8 @@ Configuration examples:
 - `data/config.example.json` lists every supported market id, default enablement, and per-market settings.
 - `data/config.json` is local state and is intentionally gitignored.
 - Keep credentials in `.env` or your shell environment; config examples only reference env var names.
+
+Platform support is tracked in `docs/PLATFORM_SUPPORT.md`. Windows, Ubuntu Linux, and macOS are CI-tested source platforms; Windows also has EXE/MSI release packages. BSD, Solaris, Android, and iOS are not marked fully supported until dedicated runners, packaging, and platform-specific smoke tests exist.
 
 ### 4) Start the GUI
 ```bash
@@ -494,7 +496,7 @@ If `frontend/node_modules` is missing, the normal verifier records frontend buil
 ## CI/CD and Releases
 
 GitHub Actions workflows live under `.github/workflows`:
-- `ci.yml` runs Python verification across Ubuntu/Windows and Python `3.10` through `3.14`, runs forward-compatibility lanes for Python `3.15`, `3.16`, and latest stable `3.x` as those interpreters are available from GitHub Actions, builds the React frontend with Node.js `24`, and builds Python distributions.
+- `ci.yml` runs Python verification across Ubuntu/macOS/Windows and Python `3.10` through `3.14`, runs a moving latest stable `3.x` compatibility lane for future Python releases, builds the React frontend with Node.js `24`, and builds Python distributions.
 - `security.yml` runs CodeQL analysis and runs dependency review only when GitHub dependency graph is enabled.
 - `release.yml` publishes tagged releases (`v*.*.*`) with Python package artifacts, a zipped React production bundle, Windows x64 portable/installer packages, and SHA256 checksums.
 

@@ -771,12 +771,10 @@ def run_ci_cd_workflow_check() -> None:
         ROOT / ".github" / "workflows" / "ci.yml": (
             "actions/setup-python@v6",
             "actions/setup-node@v6",
+            "macos-latest",
             'node-version: "24"',
             "Future Python",
-            '"3.15"',
-            '"3.16"',
             '"3.x"',
-            "allow-prereleases: ${{ matrix.python-version != '3.x' }}",
             "python verify.py",
             "npm run build",
         ),
@@ -786,10 +784,7 @@ def run_ci_cd_workflow_check() -> None:
             "contents: write",
             "Validate package version matches release tag",
             "Python compatibility",
-            '"3.15"',
-            '"3.16"',
             '"3.x"',
-            "allow-prereleases: ${{ matrix.python-version != '3.x' }}",
             "Build Windows EXE and MSI",
             "scripts/build_windows_release.py",
             "windows-dist",
@@ -812,7 +807,18 @@ def run_ci_cd_workflow_check() -> None:
             "Release Process",
             "python verify.py --frontend-build",
             "Windows Release Packages",
+            "docs/PLATFORM_SUPPORT.md",
             "No custom release secrets are required",
+        ),
+        ROOT / "docs" / "PLATFORM_SUPPORT.md": (
+            "Windows",
+            "Ubuntu Linux",
+            "macOS",
+            "BSD",
+            "Solaris",
+            "Android",
+            "iOS",
+            "not marked fully supported",
         ),
     }
     for path, expected_fragments in required_files.items():
@@ -822,6 +828,14 @@ def run_ci_cd_workflow_check() -> None:
         missing = [fragment for fragment in expected_fragments if fragment not in text]
         if missing:
             raise SystemExit(f"{path.relative_to(ROOT)} is missing CI/CD fragments: {', '.join(missing)}")
+    result = subprocess.run(
+        [sys.executable, "scripts/verify_platform_support.py"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise SystemExit("Platform support claim check failed:\n" + (result.stdout + result.stderr).strip())
     print("[ok] CI/CD workflows")
 
 

@@ -12,8 +12,8 @@ Runs on pushes, pull requests, and manual dispatch.
 
 Jobs:
 
-- Python verification on Ubuntu and Windows across Python `3.10`, `3.11`, `3.12`, `3.13`, and `3.14`.
-- Forward Python compatibility checks for Python `3.15`, `3.16`, and latest stable `3.x`; prerelease-specific jobs skip cleanly if GitHub Actions has not published the requested interpreter yet, while the moving `3.x` lane follows future stable Python releases above 3.16.
+- Python verification on Ubuntu, macOS, and Windows across Python `3.10`, `3.11`, `3.12`, `3.13`, and `3.14`.
+- Forward Python compatibility checks through the moving latest stable `3.x` runner; this avoids prerelease runner failures while still following future stable Python releases above 3.16 as GitHub Actions publishes them.
 - Tkinter fallback smoke test with `python app.py --smoke-test`.
 - Full project verification with `python verify.py`.
 - React production build with Node.js `24`.
@@ -45,7 +45,7 @@ Release jobs:
 
 - Validate release tag shape.
 - Validate that `pyproject.toml` project version matches the release tag.
-- Verify Python, Tkinter fallback, and project checks across the supported release range, including forward compatibility for Python `3.15`, `3.16`, and future stable `3.x` releases when those interpreters are available.
+- Verify Python, Tkinter fallback, and project checks across the supported release range, including forward compatibility through future stable `3.x` releases when those interpreters are available.
 - Build Python wheel/source distribution.
 - Build React production assets.
 - Package `frontend/dist` as a zip file.
@@ -55,6 +55,10 @@ Release jobs:
 - Publish or update a GitHub Release using the built-in `GITHUB_TOKEN`.
 
 The publish job targets the `release` environment. Treat this as the release environment for production publishing, and configure protection rules for it in GitHub if releases should require manual approval.
+
+See `docs/PLATFORM_SUPPORT.md` for the platform support tiers and the gates required before any additional OS or mobile platform is advertised as fully supported.
+
+The normal verifier runs `python scripts/verify_platform_support.py` to ensure platform claims remain documented and honest. `python scripts/verify_platform_support.py --require-full` is the strict 100% platform certification gate; it must fail until every requested desktop, Unix, BSD/Solaris, Android, and iOS target has real repeatable test evidence.
 
 ## Release Process
 
