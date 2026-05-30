@@ -28,6 +28,9 @@ from web_api import ReactGuiServer  # noqa: E402
 DEFAULT_FRONTEND_DIR = ROOT / "frontend" / "dist"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_RENDER_TIMEOUT_SECONDS = 60
+DEFAULT_CDP_COMMAND_TIMEOUT_SECONDS = 15
+DEFAULT_BROWSER_ATTEMPTS_PER_MODE = 2
+CDP_RECV_POLL_SECONDS = 2.0
 
 REQUIRED_TEXT = (
     "MarketSentinel",
@@ -133,6 +136,48 @@ def _target_names(target_arg: str) -> Iterable[str]:
     return names
 
 
+def _cdp_call(
+    ws: Any,
+    *,
+    command_id: int,
+    method: str,
+    params: Dict[str, Any] | None,
+    overall_deadline: float,
+    target_name: str,
+    headless_arg: str,
+) -> Dict[str, Any]:
+    response_deadline = min(overall_deadline, time.monotonic() + DEFAULT_CDP_COMMAND_TIMEOUT_SECONDS)
+    payload = {"id": command_id, "method": method, "params": params or {}}
+    try:
+        ws.send(json.dumps(payload))
+    except (OSError, websocket.WebSocketConnectionClosedException) as exc:
+        raise BrowserStartupError(
+            f"{target_name} {headless_arg} lost CDP connection while sending {method}: {exc}"
+        ) from exc
+
+    while True:
+        remaining = response_deadline - time.monotonic()
+        if remaining <= 0:
+            raise BrowserStartupError(
+                f"{target_name} {headless_arg} timed out waiting for CDP response to {method}."
+            )
+        try:
+            ws.settimeout(max(0.25, min(CDP_RECV_POLL_SECONDS, remaining)))
+            message = json.loads(ws.recv())
+        except websocket.WebSocketTimeoutException as exc:
+            if time.monotonic() >= response_deadline:
+                raise BrowserStartupError(
+                    f"{target_name} {headless_arg} timed out waiting for CDP response to {method}."
+                ) from exc
+            continue
+        except (OSError, websocket.WebSocketConnectionClosedException) as exc:
+            raise BrowserStartupError(f"{target_name} {headless_arg} lost CDP connection during {method}: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise BrowserStartupError(f"{target_name} {headless_arg} returned invalid CDP JSON during {method}.") from exc
+        if message.get("id") == command_id:
+            return message
+
+
 def _browser_mobile_check_once(
     browser_path: str,
     url: str,
@@ -201,18 +246,27 @@ def _browser_mobile_check_once(
         if not page_ws_url:
             raise BrowserStartupError(f"{target_name} {headless_arg} did not expose a page debugging target.")
 
-        ws = websocket.create_connection(page_ws_url, timeout=5)
+        try:
+            ws = websocket.create_connection(page_ws_url, timeout=5)
+        except (OSError, websocket.WebSocketException) as exc:
+            raise BrowserStartupError(
+                f"{target_name} {headless_arg} could not connect to page CDP websocket: {exc}"
+            ) from exc
         try:
             command_id = 0
 
             def cdp(method: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
                 nonlocal command_id
                 command_id += 1
-                ws.send(json.dumps({"id": command_id, "method": method, "params": params or {}}))
-                while True:
-                    message = json.loads(ws.recv())
-                    if message.get("id") == command_id:
-                        return message
+                return _cdp_call(
+                    ws,
+                    command_id=command_id,
+                    method=method,
+                    params=params,
+                    overall_deadline=deadline,
+                    target_name=target_name,
+                    headless_arg=headless_arg,
+                )
 
             cdp("Page.enable")
             cdp("Runtime.enable")
@@ -306,20 +360,25 @@ def browser_mobile_check(
     timeout_seconds: int,
 ) -> Dict[str, Any]:
     errors = []
-    for headless_arg, suffix in (("--headless=new", ""), ("--headless", "-legacy")):
-        attempt_profile_dir = profile_dir if not suffix else profile_dir.with_name(f"{profile_dir.name}{suffix}")
-        try:
-            return _browser_mobile_check_once(
-                browser_path,
-                url,
-                attempt_profile_dir,
-                target_name,
-                target,
-                headless_arg=headless_arg,
-                timeout_seconds=timeout_seconds,
-            )
-        except BrowserStartupError as exc:
-            errors.append(str(exc))
+    for headless_arg, suffix in (("--headless=new", "-new"), ("--headless", "-legacy")):
+        for attempt in range(1, DEFAULT_BROWSER_ATTEMPTS_PER_MODE + 1):
+            attempt_suffix = "" if suffix == "-new" and attempt == 1 else f"{suffix}-attempt{attempt}"
+            if attempt_suffix:
+                attempt_profile_dir = profile_dir.with_name(f"{profile_dir.name}{attempt_suffix}")
+            else:
+                attempt_profile_dir = profile_dir
+            try:
+                return _browser_mobile_check_once(
+                    browser_path,
+                    url,
+                    attempt_profile_dir,
+                    target_name,
+                    target,
+                    headless_arg=headless_arg,
+                    timeout_seconds=timeout_seconds,
+                )
+            except BrowserStartupError as exc:
+                errors.append(str(exc))
     raise SystemExit("Headless browser failed to start for mobile smoke: " + " ".join(errors))
 
 
