@@ -341,7 +341,7 @@ jobs:
             sha256sum * > SHA256SUMS.txt
           )
           cat > RELEASE_NOTES.md <<EOF
-          ## ${APP_NAME} ${version}
+          ## ${APP_NAME} ${tag}
 
           Automated release for \`${tag}\`.
 
