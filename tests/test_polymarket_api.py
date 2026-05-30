@@ -1435,15 +1435,16 @@ class PolymarketApiWrapperTests(unittest.TestCase):
             self.assertEqual(listing["counts"]["duplicate_imports"], 1)
 
             allow_store_path = temp / "allow-store.json"
-            allowed_result = replay_live_validation_report_paths(
-                [
-                    LIVE_REPORT_FIXTURE_ROOT / "valid_credentialed_read.json",
-                    LIVE_REPORT_FIXTURE_ROOT / "valid_credentialed_read.json",
-                ],
-                import_reports=True,
-                store_path=allow_store_path,
-                allow_duplicate=True,
-            )
+            with patch("polymarket.live_reports.time.time_ns", return_value=1234567890):
+                allowed_result = replay_live_validation_report_paths(
+                    [
+                        LIVE_REPORT_FIXTURE_ROOT / "valid_credentialed_read.json",
+                        LIVE_REPORT_FIXTURE_ROOT / "valid_credentialed_read.json",
+                    ],
+                    import_reports=True,
+                    store_path=allow_store_path,
+                    allow_duplicate=True,
+                )
 
             self.assertTrue(allowed_result["ok"])
             self.assertEqual(allowed_result["counts"]["imported"], 2)
@@ -1452,6 +1453,7 @@ class PolymarketApiWrapperTests(unittest.TestCase):
             allow_listing = list_live_validation_reports(path=allow_store_path)
             self.assertEqual(allow_listing["counts"]["entries"], 2)
             self.assertEqual(allow_listing["counts"]["duplicate_payloads"], 1)
+            self.assertEqual(len({entry["key"] for entry in allow_listing["entries"]}), 2)
 
     def test_live_report_replay_cli_outputs_structured_json_and_nonzero_for_invalid(self) -> None:
         result = subprocess.run(

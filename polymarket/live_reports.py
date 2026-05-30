@@ -290,6 +290,15 @@ def store_live_validation_report(
         stored_at=now,
         stored_at_ns=stored_at_ns,
     )
+    while key in reports:
+        stored_at_ns += 1
+        key = make_live_validation_report_key(
+            clean_report,
+            source=clean_source,
+            label=clean_label,
+            stored_at=now,
+            stored_at_ns=stored_at_ns,
+        )
     duplicate_key = str(duplicate.get("key") or "") if duplicate else ""
     entry = {
         "key": key,
