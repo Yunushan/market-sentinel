@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -211,6 +212,9 @@ class AnalyticsHarness:
         self.lb_mdd_metric_var = FakeVar()
         self.lb_status_var = FakeVar()
         self.status_var = FakeVar()
+        self.lb_cancel_btn = FakeButton()
+        self._leaderboard_loading = False
+        self._leaderboard_cancel_event = threading.Event()
         self.logged = []
 
     def log(self, message: str) -> None:
@@ -404,6 +408,19 @@ class AppLogicTests(unittest.TestCase):
         row_values = next(iter(harness.leaderboard_tree.rows.values()))
         self.assertEqual(row_values[1], "alpha")
         self.assertIn("0xbbbbbbbb", row_values[2])
+
+    def test_desktop_polymarket_analytics_cancel_requests_background_stop(self) -> None:
+        harness = AnalyticsHarness()
+        harness._leaderboard_loading = True
+        harness.lb_cancel_btn.state = "normal"
+
+        App.cancel_polymarket_leaderboard_scan(harness)
+
+        self.assertTrue(harness._leaderboard_cancel_event.is_set())
+        self.assertEqual(harness.lb_cancel_btn.state, "disabled")
+        self.assertIn("Cancelling", harness.lb_status_var.get())
+        self.assertEqual(harness.status_var.get(), "Cancelling Polymarket analytics scan...")
+        self.assertIn("[analytics] cancel requested", harness.logged)
 
     def test_market_change_persists_kalshi_selection_without_gui_window(self) -> None:
         harness = MarketSelectionHarness()

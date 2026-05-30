@@ -179,6 +179,12 @@ def copy_release_payload(package_dir: Path, frontend_dist: Path, version: str) -
     copy_file(ROOT / "data" / "config.example.json", package_dir / "data" / "config.example.json")
     copy_file(ROOT / "assets" / "marketsentinel.ico", package_dir / "assets" / "marketsentinel.ico")
     copy_file(ROOT / "marketsentinel.png", package_dir / "assets" / "marketsentinel.png")
+    icon_dir = ROOT / "assets" / "icons"
+    if icon_dir.exists():
+        icon_target = package_dir / "assets" / "icons"
+        if icon_target.exists():
+            shutil.rmtree(icon_target)
+        shutil.copytree(icon_dir, icon_target)
 
     frontend_target = package_dir / "frontend" / "dist"
     if frontend_target.exists():

@@ -345,6 +345,7 @@ class App(tk.Tk):
         self._requirements = self._load_requirements()
         self._dep_check_running = False
         self._leaderboard_loading = False
+        self._leaderboard_cancel_event = threading.Event()
         self._last_leaderboard_payload: Optional[Dict[str, Any]] = None
 
         # price state by token_id
@@ -990,7 +991,18 @@ class App(tk.Tk):
         return None
 
     def _icon_png_path(self) -> Optional[Path]:
+        paths = self._icon_png_paths()
+        return paths[0] if paths else None
+
+    def _icon_png_paths(self) -> List[Path]:
+        exact_names = tuple(f"marketsentinel-{size}.png" for size in (256, 128, 64, 48, 40, 32, 24, 20, 16))
+        exact_paths: List[Path] = []
+        fallback_paths: List[Path] = []
         for root in self._resource_roots():
+            for name in exact_names:
+                path = root / "assets" / "icons" / name
+                if path.exists() and path not in exact_paths:
+                    exact_paths.append(path)
             for path in (
                 root / "assets" / "marketsentinel.png",
                 root / "marketsentinel.png",
@@ -999,9 +1011,9 @@ class App(tk.Tk):
                 root / "polymarket.png",
                 root / "frontend" / "public" / "polymarket.png",
             ):
-                if path.exists():
-                    return path
-        return None
+                if path.exists() and path not in fallback_paths:
+                    fallback_paths.append(path)
+        return exact_paths or fallback_paths
 
     def _resource_roots(self) -> List[Path]:
         roots: List[Path] = []
@@ -1019,19 +1031,21 @@ class App(tk.Tk):
 
     def _load_icon_image(self):
         self._icon_images = []
-        icon_path = self._icon_png_path()
-        if not icon_path:
+        icon_paths = self._icon_png_paths()
+        if not icon_paths:
             return
         try:
-            base = tk.PhotoImage(file=str(icon_path))
-            self._icon_images.append(base)
-            base_w = base.width()
-            for size in (256, 128, 64, 32, 16):
-                if base_w == size:
-                    continue
-                if base_w > size and base_w % size == 0:
-                    factor = base_w // size
-                    self._icon_images.append(base.subsample(factor, factor))
+            for icon_path in icon_paths:
+                self._icon_images.append(tk.PhotoImage(file=str(icon_path)))
+            if len(self._icon_images) == 1:
+                base = self._icon_images[0]
+                base_w = base.width()
+                for size in (256, 128, 64, 48, 40, 32, 24, 20, 16):
+                    if base_w == size:
+                        continue
+                    if base_w > size and base_w % size == 0:
+                        factor = base_w // size
+                        self._icon_images.append(base.subsample(factor, factor))
         except Exception:
             self._icon_images = []
 
@@ -1677,6 +1691,13 @@ class App(tk.Tk):
             command=self.load_polymarket_leaderboard,
         )
         self.lb_load_btn.pack(fill="x", pady=(3, 6))
+        self.lb_cancel_btn = ttk.Button(
+            actions,
+            text="Cancel Scan",
+            command=self.cancel_polymarket_leaderboard_scan,
+            state="disabled",
+        )
+        self.lb_cancel_btn.pack(fill="x", pady=(0, 6))
         ttk.Button(actions, text="Export CSV", command=self.export_polymarket_leaderboard).pack(fill="x")
 
         table_card = ttk.Frame(frm, style="Card.TFrame", padding=(12, 12))
@@ -1791,7 +1812,10 @@ class App(tk.Tk):
         if self._leaderboard_loading:
             return
         self._leaderboard_loading = True
+        self._leaderboard_cancel_event.clear()
         self.lb_load_btn.configure(state="disabled")
+        if hasattr(self, "lb_cancel_btn"):
+            self.lb_cancel_btn.configure(state="normal")
         params = self._polymarket_leaderboard_params()
         self.lb_status_var.set(
             f"Scanning Polymarket public leaderboard rows: returned={params['limit'][0]}, scanned={params['scan_limit'][0]}..."
@@ -1799,11 +1823,22 @@ class App(tk.Tk):
         self.status_var.set("Loading Polymarket analytics...")
         threading.Thread(target=self._load_polymarket_leaderboard_bg, args=(params,), daemon=True).start()
 
+    def cancel_polymarket_leaderboard_scan(self):
+        if not self._leaderboard_loading:
+            self.lb_status_var.set("No active Polymarket analytics scan to cancel.")
+            return
+        self._leaderboard_cancel_event.set()
+        if hasattr(self, "lb_cancel_btn"):
+            self.lb_cancel_btn.configure(state="disabled")
+        self.lb_status_var.set("Cancelling Polymarket analytics scan after the current API request finishes...")
+        self.status_var.set("Cancelling Polymarket analytics scan...")
+        self.log("[analytics] cancel requested")
+
     def _load_polymarket_leaderboard_bg(self, params: Dict[str, List[str]]) -> None:
         try:
             from web_api import polymarket_leaderboard_payload
 
-            payload = polymarket_leaderboard_payload(params)
+            payload = polymarket_leaderboard_payload(params, cancel_check=self._leaderboard_cancel_event.is_set)
         except Exception as exc:
             self.ui_queue.put(("polymarket_leaderboard_error", str(exc), None))
             return
@@ -1850,14 +1885,17 @@ class App(tk.Tk):
         self.lb_best_roi_metric_var.set(App._format_table_number(max(roi_values), decimals=2, suffix="%") if roi_values else "-")
 
         warnings = payload.get("warnings") or []
+        cancelled = bool(payload.get("cancelled"))
         warning_text = f" Warning: {warnings[0]}" if warnings else ""
+        status_prefix = "Cancelled. Loaded partial" if cancelled else "Loaded"
         self.lb_status_var.set(
-            f"Loaded {counts.get('returned', len(rows))} rows from {counts.get('scanned', 0)} scanned. "
+            f"{status_prefix} {counts.get('returned', len(rows))} rows from {counts.get('scanned', 0)} scanned. "
             f"Source: {payload.get('source', 'polymarket')}.{warning_text}"
         )
-        self.status_var.set("Polymarket analytics loaded.")
+        self.status_var.set("Polymarket analytics cancelled." if cancelled else "Polymarket analytics loaded.")
         self.log(
-            f"[analytics] loaded {counts.get('returned', len(rows))} rows from {counts.get('scanned', 0)} scanned "
+            f"[analytics] {'cancelled with' if cancelled else 'loaded'} {counts.get('returned', len(rows))} rows "
+            f"from {counts.get('scanned', 0)} scanned "
             f"sort={payload.get('sort')} direction={payload.get('direction')}"
         )
 
@@ -3970,11 +4008,15 @@ class App(tk.Tk):
                     self._leaderboard_loading = False
                     if hasattr(self, "lb_load_btn"):
                         self.lb_load_btn.configure(state="normal")
+                    if hasattr(self, "lb_cancel_btn"):
+                        self.lb_cancel_btn.configure(state="disabled")
                     self._refresh_polymarket_leaderboard_table(a or {})
                 elif kind == "polymarket_leaderboard_error":
                     self._leaderboard_loading = False
                     if hasattr(self, "lb_load_btn"):
                         self.lb_load_btn.configure(state="normal")
+                    if hasattr(self, "lb_cancel_btn"):
+                        self.lb_cancel_btn.configure(state="disabled")
                     self._handle_polymarket_leaderboard_error(str(a))
                 else:
                     self.log(f"[debug] unknown queue item: {kind}")

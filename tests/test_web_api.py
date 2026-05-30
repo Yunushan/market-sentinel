@@ -756,6 +756,33 @@ class WebApiTests(unittest.TestCase):
         self.assertFalse(payload["mdd_available"])
         self.assertEqual(payload["source_sort"], "PNL")
 
+    def test_polymarket_leaderboard_payload_can_cancel_after_current_page(self) -> None:
+        page_calls = 0
+        first_page = [
+            {"rank": index, "proxyWallet": f"0x{index:040x}", "pseudonym": f"user-{index}", "pnl": "1", "volume": "100"}
+            for index in range(1, 51)
+        ]
+
+        def fake_leaderboard(*_args, **_kwargs):
+            nonlocal page_calls
+            page_calls += 1
+            return first_page
+
+        def cancel_after_first_page() -> bool:
+            return page_calls >= 1
+
+        with patch("web_api.data_api.get_leaderboard", side_effect=fake_leaderboard) as mock_get:
+            payload = polymarket_leaderboard_payload(
+                {"sort": ["roi_pct"], "limit": ["10"], "scan_limit": ["100"]},
+                cancel_check=cancel_after_first_page,
+            )
+
+        mock_get.assert_called_once()
+        self.assertTrue(payload["cancelled"])
+        self.assertEqual(payload["counts"]["scanned"], 50)
+        self.assertEqual(payload["counts"]["returned"], 10)
+        self.assertIn("cancelled", payload["warnings"][0])
+
     def test_polymarket_leaderboard_payload_allows_million_row_caps(self) -> None:
         with patch("web_api.data_api.get_leaderboard", return_value=[]) as mock_get:
             payload = polymarket_leaderboard_payload(

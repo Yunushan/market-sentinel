@@ -35,6 +35,8 @@ class ProjectMetadataTests(unittest.TestCase):
         self.assertIn('assets/marketsentinel.svg', readme)
         self.assertTrue((ROOT / "assets" / "marketsentinel.svg").exists())
         self.assertTrue((ROOT / "assets" / "marketsentinel.ico").exists())
+        self.assertTrue((ROOT / "assets" / "icons" / "marketsentinel-32.png").exists())
+        self.assertTrue((ROOT / "assets" / "icons" / "marketsentinel-24.png").exists())
         self.assertTrue((ROOT / "marketsentinel.png").exists())
         self.assertTrue((ROOT / "frontend" / "public" / "marketsentinel.png").exists())
         self.assertIn(f'APP_TITLE = "{APP_TITLE}"', app)

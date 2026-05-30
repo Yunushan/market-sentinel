@@ -9,7 +9,7 @@ import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple, cast
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, cast
 from urllib.parse import parse_qs, unquote, urlparse
 
 from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, UIDesign, WalletWatch
@@ -1914,7 +1914,11 @@ def _number_in_range(value: Optional[float], minimum: Optional[float], maximum: 
     return True
 
 
-def polymarket_leaderboard_payload(params: Optional[Mapping[str, List[str]]] = None) -> Dict[str, Any]:
+def polymarket_leaderboard_payload(
+    params: Optional[Mapping[str, List[str]]] = None,
+    *,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> Dict[str, Any]:
     query = params or {}
     sort = _query_value(query, "sort", "roi_pct").lower()
     if sort not in LEADERBOARD_SORTS:
@@ -1978,10 +1982,25 @@ def polymarket_leaderboard_payload(params: Optional[Mapping[str, List[str]]] = N
         value is not None for value in (min_mdd_usd, max_mdd_usd, min_mdd_pct, max_mdd_pct)
     )
 
+    cancelled = False
+    warnings: List[str] = []
+
+    def is_cancelled() -> bool:
+        if cancel_check is None:
+            return False
+        try:
+            return bool(cancel_check())
+        except Exception:
+            return False
+
     remote_sort = LEADERBOARD_SORTS[sort]
     raw_rows: List[Dict[str, Any]] = []
     offset = 0
     while len(raw_rows) < scan_limit:
+        if is_cancelled():
+            cancelled = True
+            warnings.append("Leaderboard scan cancelled by user.")
+            break
         page_limit = min(50, scan_limit - len(raw_rows))
         page = data_api.get_leaderboard(
             limit=page_limit,
@@ -1994,11 +2013,14 @@ def polymarket_leaderboard_payload(params: Optional[Mapping[str, List[str]]] = N
         if not page:
             break
         raw_rows.extend(page)
+        if is_cancelled():
+            cancelled = True
+            warnings.append("Leaderboard scan cancelled by user.")
+            break
         if len(page) < page_limit:
             break
         offset += len(page)
 
-    warnings: List[str] = []
     rate_limit_events: List[Dict[str, Any]] = []
     rows = [normalize_polymarket_leaderboard_row(row, index + 1) for index, row in enumerate(raw_rows)]
     prefiltered: List[Dict[str, Any]] = []
@@ -2014,6 +2036,10 @@ def polymarket_leaderboard_payload(params: Optional[Mapping[str, List[str]]] = N
     computed_mdd = 0
     if mdd_requested:
         for row in prefiltered[:mdd_scan_limit]:
+            if is_cancelled():
+                cancelled = True
+                warnings.append("MDD scan cancelled by user.")
+                break
             wallet = normalize_wallet(row.get("wallet") or "")
             if not wallet:
                 continue
@@ -2142,6 +2168,7 @@ def polymarket_leaderboard_payload(params: Optional[Mapping[str, List[str]]] = N
             "events": rate_limit_events,
         },
         "source": "polymarket_data_api_leaderboard",
+        "cancelled": cancelled,
         "source_sort": remote_sort,
         "ranking_scope": "computed_from_scanned_public_leaderboard_rows_with_optional_public_data_mdd_v2",
         "mdd_available": mdd_values_available,
