@@ -35,5 +35,8 @@ classifiers = [
 ]
 
 [tool.setuptools]
-py-modules = ["app", "verify", "web_api"]
+py-modules = ["app", "verify", "web_api", "market_sentinel_cli"]
 packages = ["core", "market_adapters", "polymarket"]
+
+[project.scripts]
+market-sentinel = "market_sentinel_cli:main"

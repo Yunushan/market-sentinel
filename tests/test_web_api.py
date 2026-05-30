@@ -792,7 +792,7 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["counts"]["returned"], 10)
         self.assertIn("cancelled", payload["warnings"][0])
 
-    def test_polymarket_leaderboard_payload_allows_million_row_caps(self) -> None:
+    def test_polymarket_leaderboard_payload_does_not_cap_deep_scan_values(self) -> None:
         with patch("web_api.data_api.get_leaderboard", return_value=[]) as mock_get:
             payload = polymarket_leaderboard_payload(
                 {
@@ -803,11 +803,69 @@ class WebApiTests(unittest.TestCase):
                 }
             )
 
-        self.assertEqual(payload["limit"], 1_000_000)
-        self.assertEqual(payload["scan_limit"], 1_000_000)
-        self.assertEqual(payload["mdd_scan_limit"], 1_000_000)
+        self.assertEqual(payload["limit"], 2_000_000)
+        self.assertEqual(payload["scan_limit"], 2_000_000)
+        self.assertEqual(payload["mdd_scan_limit"], 2_000_000)
+        self.assertFalse(payload["limit_unlimited"])
+        self.assertFalse(payload["scan_limit_unlimited"])
+        self.assertFalse(payload["mdd_scan_limit_unlimited"])
         mock_get.assert_called_once()
         self.assertEqual(mock_get.call_args.kwargs["limit"], 50)
+
+    def test_polymarket_leaderboard_payload_accepts_unlimited_limits(self) -> None:
+        full_page = [
+            {"rank": index, "proxyWallet": f"0x{index:040x}", "pseudonym": f"user-{index}", "pnl": "1", "volume": "100"}
+            for index in range(1, 51)
+        ]
+        tail_page = [
+            {"rank": 51, "proxyWallet": WALLET, "pseudonym": "alpha", "pnl": "10", "volume": "100"},
+            {"rank": 52, "proxyWallet": WALLET_2, "pseudonym": "beta", "pnl": "20", "volume": "500"},
+        ]
+
+        def fake_leaderboard(*_args, **kwargs):
+            return full_page if kwargs["offset"] == 0 else tail_page
+
+        def fake_mdd(wallet, **_kwargs):
+            return {
+                "mdd_usd": 10.0,
+                "mdd_pct": 5.0,
+                "mdd_available": True,
+                "mdd_method": "test",
+                "mdd_pct_basis": "test",
+                "points": [{"value": 0}],
+                "closed_positions": 2,
+                "open_positions": 1,
+                "equity_base_usd": 1000,
+                "peak_value": 100,
+                "trough_value": 95,
+                "peak_timestamp": 10,
+                "trough_timestamp": 20,
+            }
+
+        with patch("web_api.data_api.get_leaderboard", side_effect=fake_leaderboard) as mock_get, patch(
+            "web_api.polymarket_user_mdd_payload",
+            side_effect=fake_mdd,
+        ) as mock_mdd:
+            payload = polymarket_leaderboard_payload(
+                {
+                    "limit": ["all"],
+                    "scan_limit": ["unlimited"],
+                    "mdd_scan_limit": ["0"],
+                    "compute_mdd": ["true"],
+                }
+            )
+
+        self.assertEqual(mock_get.call_count, 2)
+        self.assertEqual(mock_mdd.call_count, 52)
+        self.assertIsNone(payload["limit"])
+        self.assertIsNone(payload["scan_limit"])
+        self.assertIsNone(payload["mdd_scan_limit"])
+        self.assertTrue(payload["limit_unlimited"])
+        self.assertTrue(payload["scan_limit_unlimited"])
+        self.assertTrue(payload["mdd_scan_limit_unlimited"])
+        self.assertEqual(payload["counts"]["returned"], 52)
+        self.assertEqual(payload["counts"]["scanned"], 52)
+        self.assertEqual(payload["counts"]["mdd_computed"], 52)
 
     def test_polymarket_user_mdd_payload_computes_usd_and_percentage_drawdown(self) -> None:
         with patch(

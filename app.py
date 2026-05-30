@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import importlib
 import os
 import queue
 import re
@@ -49,6 +50,14 @@ from polymarket.trader import PolymarketTrader, TraderConfig
 APP_ID = "market-sentinel"
 APP_TITLE = "MarketSentinel"
 APP_USER_AGENT = f"{APP_ID}/1.0"
+
+DEPENDENCY_IMPORT_FALLBACKS = {
+    "websocket-client": ("websocket",),
+    "python-dotenv": ("dotenv",),
+    "py-clob-client": ("py_clob_client",),
+    "eth-account": ("eth_account",),
+    "eth-abi": ("eth_abi",),
+}
 
 
 def extract_slug(s: str) -> str:
@@ -1173,11 +1182,11 @@ class App(tk.Tk):
         )
         self.style.map(
             "TNotebook.Tab",
-            background=[("selected", tab_active_bg), ("active", tab_hover_bg)],
-            foreground=[("selected", heading), ("active", heading)],
-            bordercolor=[("selected", tab_active_bg), ("active", tab_hover_bg)],
-            lightcolor=[("selected", tab_active_bg), ("active", tab_hover_bg)],
-            darkcolor=[("selected", tab_active_bg), ("active", tab_hover_bg)],
+            background=[("active", tab_hover_bg), ("selected", tab_bg)],
+            foreground=[("active", heading), ("selected", heading)],
+            bordercolor=[("active", tab_hover_bg), ("selected", tab_bg)],
+            lightcolor=[("active", tab_hover_bg), ("selected", tab_bg)],
+            darkcolor=[("active", tab_hover_bg), ("selected", tab_bg)],
         )
 
         self.style.configure(
@@ -1372,10 +1381,23 @@ class App(tk.Tk):
             return None
         if "#" in line:
             line = line.split("#", 1)[0].strip()
-        if ";" in line:
-            line = line.split(";", 1)[0].strip()
         if not line:
             return None
+        try:
+            from packaging.requirements import Requirement
+
+            requirement = Requirement(line)
+            if requirement.marker is not None and not requirement.marker.evaluate():
+                return None
+            extras = f"[{','.join(sorted(requirement.extras))}]" if requirement.extras else ""
+            return {
+                "name": requirement.name,
+                "display": f"{requirement.name}{extras}",
+                "spec": str(requirement.specifier),
+            }
+        except Exception:
+            if ";" in line:
+                line = line.split(";", 1)[0].strip()
         match = re.match(r"([A-Za-z0-9_.-]+)(\[[^\]]+\])?(.*)$", line)
         if not match:
             return None
@@ -1433,7 +1455,16 @@ class App(tk.Tk):
         try:
             return importlib_metadata.version(package)
         except importlib_metadata.PackageNotFoundError:
-            return ""
+            pass
+        module_names = DEPENDENCY_IMPORT_FALLBACKS.get(package, (package.replace("-", "_"),))
+        for module_name in module_names:
+            try:
+                module = importlib.import_module(module_name)
+            except Exception:
+                continue
+            version = str(getattr(module, "__version__", "") or getattr(module, "version", "") or "").strip()
+            return version or "installed"
+        return ""
 
     def _fetch_latest_version(self, package: str) -> str:
         url = f"https://pypi.org/pypi/{package}/json"
@@ -1529,6 +1560,8 @@ class App(tk.Tk):
                 errors.append(f"{req['display']}: {exc}")
             if installed == "not installed":
                 status = "missing"
+            elif installed == "installed":
+                status = "installed"
             elif latest:
                 status = "ok" if self._is_up_to_date(installed, latest) else "outdated"
             else:
@@ -2427,7 +2460,9 @@ class App(tk.Tk):
         percent = max(0.0, min(safe_float(progress.get("percent"), 0.0) or 0.0, 100.0))
         phase = str(progress.get("phase") or "leaderboard").replace("_", " ").title()
         scanned = int(safe_float(progress.get("scanned"), 0) or 0)
+        scan_limit_unlimited = bool(progress.get("scan_limit_unlimited"))
         scan_limit = int(safe_float(progress.get("scan_limit"), 0) or 0)
+        scan_label = "unlimited" if scan_limit_unlimited else str(scan_limit)
         filtered = int(safe_float(progress.get("filtered"), 0) or 0)
         mdd_attempted = int(safe_float(progress.get("mdd_attempted"), 0) or 0)
         mdd_computed = int(safe_float(progress.get("mdd_computed"), 0) or 0)
@@ -2445,9 +2480,9 @@ class App(tk.Tk):
         message = str(progress.get("message") or "").strip()
         if not message:
             if phase.lower() == "mdd":
-                message = f"Computing MDD {mdd_attempted}/{mdd_total}; scanned {scanned}/{scan_limit} leaderboard rows."
+                message = f"Computing MDD {mdd_attempted}/{mdd_total}; scanned {scanned}/{scan_label} leaderboard rows."
             else:
-                message = f"Scanning leaderboard rows {scanned}/{scan_limit}."
+                message = f"Scanning leaderboard rows {scanned}/{scan_label}."
         if phase.lower() == "mdd":
             extra = f" Filtered candidates: {filtered}. Successful MDD: {mdd_computed}."
         else:

@@ -471,9 +471,12 @@ export interface PolymarketLeaderboardPayload {
   direction: "ASC" | "DESC";
   period: string;
   category: string;
-  limit: number;
-  scan_limit: number;
-  mdd_scan_limit: number;
+  limit: number | null;
+  limit_unlimited?: boolean;
+  scan_limit: number | null;
+  scan_limit_unlimited?: boolean;
+  mdd_scan_limit: number | null;
+  mdd_scan_limit_unlimited?: boolean;
   mdd_history_limit: number;
   mdd_activity_limit: number;
   mdd_trade_limit: number;

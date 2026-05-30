@@ -4,6 +4,7 @@ import queue
 import threading
 import time
 import unittest
+from importlib import metadata as importlib_metadata
 from unittest.mock import patch
 
 from app import (
@@ -403,6 +404,31 @@ class AppLogicTests(unittest.TestCase):
 
         self.assertEqual(market_ids, set(MARKET_IDS))
         self.assertIn("Polymarket (polymarket)", choices)
+
+    def test_dependency_parser_respects_environment_markers(self) -> None:
+        self.assertIsNone(App._parse_requirement_entry('tomli>=2.0.0; python_version < "0"'))
+
+        parsed = App._parse_requirement_entry("websocket-client>=1.7.0")
+
+        self.assertEqual(parsed, {"name": "websocket-client", "display": "websocket-client", "spec": ">=1.7.0"})
+
+    def test_dependency_version_falls_back_to_importable_module_when_metadata_missing(self) -> None:
+        class FakeModule:
+            __version__ = "1.2.3"
+
+        with patch("app.importlib_metadata.version", side_effect=importlib_metadata.PackageNotFoundError):
+            with patch("app.importlib.import_module", return_value=FakeModule()) as import_module:
+                installed = App._get_installed_version(object(), "websocket-client")
+
+        self.assertEqual(installed, "1.2.3")
+        import_module.assert_called_once_with("websocket")
+
+    def test_dependency_version_marks_importable_versionless_module_installed(self) -> None:
+        with patch("app.importlib_metadata.version", side_effect=importlib_metadata.PackageNotFoundError):
+            with patch("app.importlib.import_module", return_value=object()):
+                installed = App._get_installed_version(object(), "py-clob-client")
+
+        self.assertEqual(installed, "installed")
 
     def test_desktop_polymarket_analytics_builds_top_roi_query(self) -> None:
         harness = AnalyticsHarness()

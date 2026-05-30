@@ -154,7 +154,7 @@ def get_leaderboard(
         clean_category = "OVERALL"
     params = {
         "limit": max(1, min(int(limit), 50)),
-        "offset": max(0, min(int(offset), 1_000_000)),
+        "offset": max(0, int(offset)),
         "orderBy": clean_sort,
         "sortDirection": clean_direction,
         "timePeriod": clean_period,

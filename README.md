@@ -33,7 +33,7 @@ A local multi-market prediction-market command center for:
 ### 3) Polymarket user analytics
 - Search public Polymarket profiles by username/pseudonym and return proxy wallets for tracking or copy setup
 - Load public leaderboard rows and rank them by PnL USD, volume USD, or computed ROI %
-- The default ROI view returns up to the top 100 rows from as many as 500 scanned public leaderboard rows; returned rows, scanned rows, and MDD scan rows can each be raised up to 1,000,000 when an explicit deep scan is wanted
+- The default ROI view returns the top 100 rows from 500 scanned public leaderboard rows; returned rows, scanned rows, and MDD scan rows have no local 1,000,000-row cap and accept `all`, `unlimited`, `0`, or `-1` for explicit no-cap scans
 - Min/max filters are available for PnL USD, volume USD, and ROI %
 - MDD USD/% v2 can be computed from a public-data historical equity curve: closed-position realized PnL, public activity/trade capital basis, and the current open-position snapshot
 - MDD v2 supports min/max filters, MDD sorting, pagination controls for closed positions/activity/trades/open positions, and an optional `equity_base_usd` override
@@ -43,7 +43,7 @@ A local multi-market prediction-market command center for:
 - Optional audit caching stores bounded per-wallet MDD artifacts locally, reports retention/health metadata, supports targeted purge controls, and exposes JSON/CSV export links without rerunning expensive public API calls
 - Leaderboard and MDD payloads report Polymarket rate-limit/backoff metadata instead of hiding upstream 429 failures as generic errors
 - MDD payloads include assumptions and limitations because the public Data API does not expose a complete deposit/withdrawal ledger or historical unrealized mark replay
-- The desktop Polymarket Analytics tab embeds top-ROI leaderboard search, returned/scanned row controls up to 1,000,000, optional MDD filters, result metrics, table review, and CSV export without opening the web UI
+- The desktop Polymarket Analytics tab embeds top-ROI leaderboard search, uncapped returned/scanned row controls, optional MDD filters, result metrics, table review, and CSV export without opening the web UI
 - The React Analytics tab also exposes user search, direct wallet MDD lookup/export, cached audit details, cache management, leaderboard sorting, and filters through the local Python API
 
 ### Polymarket official API coverage
@@ -323,6 +323,47 @@ python web_api.py --host 127.0.0.1 --port 8765 --frontend-dir frontend/dist
 
 Then open `http://127.0.0.1:8765`.
 
+Headless CLI support for Linux, Windows, and servers:
+```bash
+python -m market_sentinel_cli polymarket-leaderboard \
+  --sort roi_pct --direction DESC \
+  --returned unlimited --scanned unlimited \
+  --compute-mdd --fast-scan --mdd-scan unlimited --max-mdd-pct 20 \
+  --format csv --output data/polymarket-best-roi-mdd20.csv
+```
+
+After package installation, the same command is available as `market-sentinel ...`. The CLI uses the same shared `data/config.json` file as the desktop and web UIs, and every command accepts `--config path/to/config.json` for isolated Linux/Windows automation.
+
+Common full-app CLI commands:
+```bash
+market-sentinel health
+market-sentinel state
+market-sentinel config set --theme dark --design sentinel_2027
+market-sentinel markets list
+market-sentinel markets set polymarket --enabled --live-trading-max-size 5
+market-sentinel live-safety show --market polymarket
+market-sentinel live-safety preflight --market polymarket --contract TOKEN --side BUY --size 1 --limit-price 0.50
+market-sentinel alerts list
+market-sentinel alerts add --market polymarket --contract TOKEN --direction above --threshold 0.65
+market-sentinel wallets add --wallet 0x...
+market-sentinel wallets poll --limit 25
+market-sentinel wallets watch --interval 10
+market-sentinel copy set --enabled --follow-wallet 0x... --copy-percentage 25 --max-usdc-per-trade 10 --no-live
+market-sentinel copy preview --proxy-wallet 0x... --token-id TOKEN --side BUY --size 5 --price 0.42
+market-sentinel paper show
+market-sentinel paper quote --market polymarket --contract TOKEN
+market-sentinel paper impact --market polymarket --contract TOKEN --side BUY --size 3 --limit-price 0.42
+market-sentinel paper order --market polymarket --contract TOKEN --side BUY --size 3 --limit-price 0.42
+market-sentinel dependencies
+market-sentinel polymarket-user-search --query trader
+market-sentinel polymarket-user-mdd --wallet 0x... --mode fast
+market-sentinel polymarket-readiness
+market-sentinel polymarket-mdd-cache list
+market-sentinel serve --host 127.0.0.1 --port 8765
+```
+
+Commands that mutate config or paper state write through the same atomic config storage as the GUI. Most commands return JSON to stdout and support `--output file.json` plus `--compact`; `polymarket-leaderboard` can emit CSV or JSON. Unlimited scans run until the public leaderboard API returns no more rows, a rate limit stops the run, or the process is cancelled; use finite `--scanned` and `--mdd-scan` values for normal interactive jobs.
+
 Useful local API endpoints:
 - `GET /api/state` returns the initial React GUI snapshot: health, config, markets, alerts, wallets, copy, live safety, and paper state.
 - `GET /api/health` returns API version, route metadata, React dev/build/prod commands, build availability, and confirms the Tkinter fallback remains `run_gui.bat` or `python app.py`.
@@ -341,7 +382,7 @@ Useful local API endpoints:
 - `DELETE /api/wallets/{wallet_id}` deletes a wallet watch from local config.
 - `POST /api/wallets/poll` polls enabled wallet watches once through the Polymarket Data API and updates dedupe state.
 - `GET /api/polymarket/users/search?q=...` searches public Polymarket profiles and returns proxy-wallet candidates.
-- `GET /api/polymarket/users/leaderboard` returns public leaderboard rows ranked by PnL USD, volume USD, computed ROI %, MDD USD, or MDD %, with min/max filters for PnL, volume, ROI, and MDD. `limit`, `scan_limit`, and `mdd_scan_limit` are configurable up to 1,000,000 each; smaller values can be selected for normal interactive use. MDD scans accept `mdd_mode`, `mdd_history_limit`, `mdd_activity_limit`, `mdd_trade_limit`, `mdd_open_limit`, `mdd_mark_replay_token_limit`, `mdd_mark_replay_interval`, `mdd_mark_replay_fidelity`, `mdd_include_accounting`, `mdd_persist_cache`, and `mdd_cache_ttl_seconds`; payloads include `analytics_cache` and `rate_limit` metadata.
+- `GET /api/polymarket/users/leaderboard` returns public leaderboard rows ranked by PnL USD, volume USD, computed ROI %, MDD USD, or MDD %, with min/max filters for PnL, volume, ROI, and MDD. `limit`, `scan_limit`, and `mdd_scan_limit` accept finite integers or explicit no-cap values (`all`, `unlimited`, `0`, `-1`) with no local 1,000,000-row cap; smaller values should be selected for normal interactive use. MDD scans accept `mdd_mode`, `mdd_history_limit`, `mdd_activity_limit`, `mdd_trade_limit`, `mdd_open_limit`, `mdd_mark_replay_token_limit`, `mdd_mark_replay_interval`, `mdd_mark_replay_fidelity`, `mdd_include_accounting`, `mdd_persist_cache`, and `mdd_cache_ttl_seconds`; payloads include `analytics_cache` and `rate_limit` metadata.
 - `GET /api/polymarket/users/mdd?user=0x...` computes one wallet's MDD USD/% v2 from public closed positions, activity/trade capital basis, and the current open-position snapshot. It accepts `mode=fast` by default or `mode=mark_replay` for CLOB price-history inventory replay, plus `include_accounting_snapshot=true` for accounting ZIP reconciliation, `persist_cache=true`, `closed_limit`, `activity_limit`, `trade_limit`, `open_limit`, `include_open`, `max_points`, `equity_base_usd`, `mark_replay_token_limit`, `mark_replay_interval`, `mark_replay_fidelity`, and `cache_ttl_seconds`.
 - `GET /api/polymarket/users/mdd/cache` lists cached MDD audit artifacts with wallet, MDD, age, TTL, expiry, size, and cache path metadata.
 - `GET /api/polymarket/users/mdd/cache/health` returns cache path, size, entry counts, active/expired counts, TTL, and retention bounds for MDD audit artifacts.
@@ -521,6 +562,7 @@ In-app checks:
 - **Wallets & Copy -> Preview** runs the live-copy preflight gate for a sample activity and does not place an order.
 - **Analytics** searches public Polymarket profiles and loads leaderboard rows by ROI %, PnL USD, volume USD, MDD USD, or MDD %.
 - **Analytics** computes MDD USD/% on demand from closed-position realized PnL plus current open-position PnL.
+- **Analytics** can run the same leaderboard/MDD scanner headlessly through `python -m market_sentinel_cli polymarket-leaderboard`, including unlimited returned/scanned/MDD-scan settings for Linux batch jobs.
 - **Analytics** can compute a single wallet's MDD directly, use a profile-search wallet as input, and inspect cached audit detail without rerunning the public API calls.
 - **Analytics** can persist MDD audit artifacts, inspect cache health/retention, purge selected/expired/all cache entries, and download artifacts as JSON or CSV.
 - **Paper Trading -> Refresh Quote** previews the selected contract's current adapter quote/orderbook without placing an order.

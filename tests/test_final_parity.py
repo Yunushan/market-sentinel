@@ -148,6 +148,7 @@ class FinalParityTests(unittest.TestCase):
         self.assertIn("SetCurrentProcessExplicitAppUserModelID", app_source)
         self.assertIn('APP_ID = "market-sentinel"', app_source)
         self.assertIn('APP_TITLE = "MarketSentinel"', app_source)
+        self.assertIn('background=[("active", tab_hover_bg), ("selected", tab_bg)]', app_source)
         self.assertIn("iconbitmap(default=str(icon_path))", app_source)
         self.assertIn("run_server(parsed.host, parsed.port, parsed.config, parsed.frontend_dir)", app_source)
         self.assertIn("PyInstaller", build_source)
@@ -169,14 +170,19 @@ class FinalParityTests(unittest.TestCase):
         self.assertIn("npm run build", text)
         self.assertIn("run_gui.bat", text)
 
-    def test_polymarket_leaderboard_deep_scan_caps_are_visible(self) -> None:
+    def test_polymarket_leaderboard_unlimited_scan_controls_are_visible(self) -> None:
         web_api_source = (ROOT / "web_api.py").read_text(encoding="utf-8")
         app_source = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        cli_source = (ROOT / "market_sentinel_cli.py").read_text(encoding="utf-8")
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        self.assertIn("POLYMARKET_LEADERBOARD_MAX_ROWS = 1_000_000", web_api_source)
-        self.assertIn('max="1000000"', app_source)
-        self.assertIn("up to 1,000,000", readme)
+        self.assertIn("UNLIMITED_LIMIT_TOKENS", web_api_source)
+        self.assertIn("POLYMARKET_LEADERBOARD_PAGE_SIZE = 50", web_api_source)
+        self.assertIn('type="text"', app_source)
+        self.assertIn("no local 1,000,000-row cap", readme)
+        self.assertIn("polymarket-leaderboard", cli_source)
+        self.assertIn('market-sentinel = "market_sentinel_cli:main"', pyproject)
 
     def test_verify_frontend_build_uses_windows_npm_command(self) -> None:
         source = (ROOT / "verify.py").read_text(encoding="utf-8")

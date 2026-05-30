@@ -252,10 +252,10 @@ class PolymarketApiWrapperTests(unittest.TestCase):
 
     def test_leaderboard_request_allows_deep_scan_offsets(self) -> None:
         with patch(HTTP_REQUEST, return_value=FakeResponse({"data": []})) as mock_get:
-            data_api.get_leaderboard(offset=50_000)
+            data_api.get_leaderboard(offset=2_500_000)
 
         params = mock_get.call_args.kwargs["params"]
-        self.assertEqual(params["offset"], 50_000)
+        self.assertEqual(params["offset"], 2_500_000)
 
     def test_closed_positions_request_uses_public_profile_endpoint(self) -> None:
         payload = [{"asset": "token-yes", "realizedPnl": "-12", "timestamp": 10}]

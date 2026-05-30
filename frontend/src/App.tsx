@@ -2145,10 +2145,8 @@ function PolymarketAnalyticsView({
           <label>
             <span>Returned</span>
             <input
-              inputMode="numeric"
-              min="1"
-              max="1000000"
-              type="number"
+              inputMode="text"
+              type="text"
               value={filters.limit}
               onChange={(event) => updateFilter("limit", event.target.value)}
             />
@@ -2156,10 +2154,8 @@ function PolymarketAnalyticsView({
           <label>
             <span>Scanned</span>
             <input
-              inputMode="numeric"
-              min="1"
-              max="1000000"
-              type="number"
+              inputMode="text"
+              type="text"
               value={filters.scan_limit}
               onChange={(event) => updateFilter("scan_limit", event.target.value)}
             />
@@ -2182,10 +2178,8 @@ function PolymarketAnalyticsView({
           <label>
             <span>MDD scan</span>
             <input
-              inputMode="numeric"
-              min="1"
-              max="1000000"
-              type="number"
+              inputMode="text"
+              type="text"
               value={filters.mdd_scan_limit}
               onChange={(event) => updateFilter("mdd_scan_limit", event.target.value)}
             />
