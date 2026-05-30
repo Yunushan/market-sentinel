@@ -17,8 +17,8 @@ class CiCdWorkflowTests(unittest.TestCase):
             "concurrency:",
             "cancel-in-progress: true",
             "ubuntu-latest",
-            "macos-latest",
-            "windows-latest",
+            "macos-15",
+            "windows-2025-vs2026",
             '"3.10"',
             '"3.11"',
             '"3.12"',
@@ -36,9 +36,12 @@ class CiCdWorkflowTests(unittest.TestCase):
             "npm run build",
             "npm install --no-audit --no-fund",
             "python -m build",
+            ".github/python-cache-version.txt",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, text)
+        self.assertNotIn("macos-latest", text)
+        self.assertNotIn("windows-latest", text)
 
     def test_release_workflow_publishes_checked_and_checksummed_assets(self) -> None:
         text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
@@ -56,7 +59,8 @@ class CiCdWorkflowTests(unittest.TestCase):
             '"3.x"',
             "npm run build",
             "Build Windows EXE and MSI",
-            "windows-latest",
+            "macos-15",
+            "windows-2025-vs2026",
             "requirements-build.txt",
             "dotnet tool install --global wix --version 6.0.2",
             'Expected WiX Toolset 6.0.2',
@@ -71,9 +75,12 @@ class CiCdWorkflowTests(unittest.TestCase):
             "gh release create",
             "gh release upload",
             "--target \"${GITHUB_SHA}\"",
+            ".github/python-cache-version.txt",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, text)
+        self.assertNotIn("macos-latest", text)
+        self.assertNotIn("windows-latest", text)
 
     def test_security_and_dependabot_automation_are_configured(self) -> None:
         security = (ROOT / ".github" / "workflows" / "security.yml").read_text(encoding="utf-8")

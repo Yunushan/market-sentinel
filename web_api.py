@@ -6,6 +6,7 @@ import mimetypes
 import os
 import posixpath
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1250,7 +1251,7 @@ def _leaderboard_display_name(row: Mapping[str, Any], wallet: str) -> str:
     )
     if name:
         return str(name)
-    return f"{wallet[:8]}...{wallet[-6:]}" if wallet else "-"
+    return wallet or "-"
 
 
 def normalize_polymarket_leaderboard_row(raw: Mapping[str, Any], fallback_rank: int) -> Dict[str, Any]:
@@ -1914,10 +1915,127 @@ def _number_in_range(value: Optional[float], minimum: Optional[float], maximum: 
     return True
 
 
+def _sort_polymarket_leaderboard_rows(rows: List[Dict[str, Any]], sort: str, direction: str) -> None:
+    reverse = direction != "ASC"
+    missing_numeric = float("-inf") if reverse else float("inf")
+    if sort == "roi_pct":
+        rows.sort(key=lambda row: row["roi_pct"] if row["roi_pct"] is not None else missing_numeric, reverse=reverse)
+    elif sort == "volume_usd":
+        rows.sort(key=lambda row: row["volume_usd"] if row["volume_usd"] is not None else missing_numeric, reverse=reverse)
+    elif sort == "mdd_usd":
+        rows.sort(key=lambda row: row["mdd_usd"] if row["mdd_usd"] is not None else missing_numeric, reverse=reverse)
+    elif sort == "mdd_pct":
+        rows.sort(key=lambda row: row["mdd_pct"] if row["mdd_pct"] is not None else missing_numeric, reverse=reverse)
+    else:
+        rows.sort(key=lambda row: row["pnl_usd"] if row["pnl_usd"] is not None else missing_numeric, reverse=reverse)
+
+
+def _fetch_polymarket_leaderboard_scan_rows(
+    *,
+    scan_limit: int,
+    remote_sort: str,
+    direction: str,
+    period: str,
+    category: str,
+    scan_concurrency: int,
+    is_cancelled: Callable[[], bool],
+    emit_progress: Callable[..., None],
+    warnings: List[str],
+) -> Tuple[List[Dict[str, Any]], bool]:
+    raw_rows: List[Dict[str, Any]] = []
+    offset = 0
+    cancelled = False
+    concurrency = max(1, int(scan_concurrency or 1))
+
+    emit_progress(
+        "leaderboard",
+        scanned=0,
+        message=f"Scanning leaderboard rows 0/{scan_limit}.",
+    )
+    while len(raw_rows) < scan_limit:
+        if is_cancelled():
+            cancelled = True
+            warnings.append("Leaderboard scan cancelled by user.")
+            break
+
+        remaining = scan_limit - len(raw_rows)
+        batch_specs: List[Tuple[int, int]] = []
+        for _ in range(min(concurrency, max(1, (remaining + 49) // 50))):
+            if remaining <= 0:
+                break
+            page_limit = min(50, remaining)
+            batch_specs.append((offset, page_limit))
+            offset += page_limit
+            remaining -= page_limit
+        if not batch_specs:
+            break
+
+        pages_by_offset: Dict[int, List[Dict[str, Any]]] = {}
+        if len(batch_specs) == 1:
+            page_offset, page_limit = batch_specs[0]
+            pages_by_offset[page_offset] = data_api.get_leaderboard(
+                limit=page_limit,
+                offset=page_offset,
+                sort_by=remote_sort,
+                sort_direction=direction,
+                period=period,
+                category=category,
+            )
+        else:
+            with ThreadPoolExecutor(max_workers=len(batch_specs)) as executor:
+                futures = {
+                    executor.submit(
+                        data_api.get_leaderboard,
+                        limit=page_limit,
+                        offset=page_offset,
+                        sort_by=remote_sort,
+                        sort_direction=direction,
+                        period=period,
+                        category=category,
+                    ): (page_offset, page_limit)
+                    for page_offset, page_limit in batch_specs
+                }
+                for future in as_completed(futures):
+                    page_offset, _page_limit = futures[future]
+                    pages_by_offset[page_offset] = future.result()
+                    completed = len(raw_rows) + sum(len(page) for page in pages_by_offset.values())
+                    emit_progress(
+                        "leaderboard",
+                        scanned=min(completed, scan_limit),
+                        message=f"Scanning leaderboard rows {min(completed, scan_limit)}/{scan_limit}.",
+                    )
+
+        stop_after_batch = False
+        for page_offset, page_limit in batch_specs:
+            page = pages_by_offset.get(page_offset) or []
+            if not page:
+                stop_after_batch = True
+                break
+            raw_rows.extend(page)
+            if len(page) < page_limit:
+                stop_after_batch = True
+                break
+
+        emit_progress(
+            "leaderboard",
+            scanned=min(len(raw_rows), scan_limit),
+            message=f"Scanning leaderboard rows {min(len(raw_rows), scan_limit)}/{scan_limit}.",
+        )
+        if is_cancelled():
+            cancelled = True
+            warnings.append("Leaderboard scan cancelled by user.")
+            break
+        if stop_after_batch:
+            break
+
+    return raw_rows[:scan_limit], cancelled
+
+
 def polymarket_leaderboard_payload(
     params: Optional[Mapping[str, List[str]]] = None,
     *,
     cancel_check: Optional[Callable[[], bool]] = None,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     query = params or {}
     sort = _query_value(query, "sort", "roi_pct").lower()
@@ -1967,6 +2085,21 @@ def polymarket_leaderboard_payload(
     )
     compute_mdd = _query_bool(query, "compute_mdd", False)
     equity_base_usd = _query_float(query, "equity_base_usd")
+    fast_scan = _query_bool(query, "fast_scan", False)
+    scan_concurrency_default = 6 if fast_scan else 1
+    mdd_concurrency_default = 3 if fast_scan else 1
+    scan_concurrency = _clamp_int(
+        _query_value(query, "scan_concurrency", str(scan_concurrency_default)),
+        scan_concurrency_default,
+        1,
+        12,
+    )
+    mdd_concurrency = _clamp_int(
+        _query_value(query, "mdd_concurrency", str(mdd_concurrency_default)),
+        mdd_concurrency_default,
+        1,
+        6,
+    )
 
     min_pnl = _query_float(query, "min_pnl_usd")
     max_pnl = _query_float(query, "max_pnl_usd")
@@ -1981,6 +2114,13 @@ def polymarket_leaderboard_payload(
     mdd_requested = compute_mdd or mdd_mode == "mark_replay" or sort in {"mdd_usd", "mdd_pct"} or any(
         value is not None for value in (min_mdd_usd, max_mdd_usd, min_mdd_pct, max_mdd_pct)
     )
+    mdd_stop_on_limit = _query_bool(
+        query,
+        "mdd_stop_on_limit",
+        fast_scan and sort == "roi_pct" and direction == "DESC" and any(
+            value is not None for value in (min_mdd_usd, max_mdd_usd, min_mdd_pct, max_mdd_pct)
+        ),
+    )
 
     cancelled = False
     warnings: List[str] = []
@@ -1993,33 +2133,60 @@ def polymarket_leaderboard_payload(
         except Exception:
             return False
 
+    def emit_progress(
+        phase: str,
+        *,
+        scanned: int,
+        filtered: int = 0,
+        mdd_attempted: int = 0,
+        mdd_computed: int = 0,
+        mdd_total: Optional[int] = None,
+        wallet: str = "",
+        message: str = "",
+        percent: Optional[float] = None,
+    ) -> None:
+        if progress_callback is None:
+            return
+        if percent is None:
+            if phase == "leaderboard":
+                scan_fraction = min(scanned / max(scan_limit, 1), 1.0)
+                percent = scan_fraction * (50.0 if mdd_requested else 100.0)
+            elif phase == "mdd":
+                total = max(int(mdd_total or 0), 1)
+                percent = 50.0 + (min(mdd_attempted / total, 1.0) * 50.0)
+            else:
+                percent = 100.0
+        try:
+            progress_callback(
+                {
+                    "phase": phase,
+                    "percent": max(0.0, min(float(percent), 100.0)),
+                    "scanned": scanned,
+                    "scan_limit": scan_limit,
+                    "filtered": filtered,
+                    "mdd_attempted": mdd_attempted,
+                    "mdd_computed": mdd_computed,
+                    "mdd_total": mdd_total if mdd_total is not None else (mdd_scan_limit if mdd_requested else 0),
+                    "wallet": wallet,
+                    "message": message,
+                }
+            )
+        except Exception:
+            pass
+
     remote_sort = LEADERBOARD_SORTS[sort]
-    raw_rows: List[Dict[str, Any]] = []
-    offset = 0
-    while len(raw_rows) < scan_limit:
-        if is_cancelled():
-            cancelled = True
-            warnings.append("Leaderboard scan cancelled by user.")
-            break
-        page_limit = min(50, scan_limit - len(raw_rows))
-        page = data_api.get_leaderboard(
-            limit=page_limit,
-            offset=offset,
-            sort_by=remote_sort,
-            sort_direction=direction,
-            period=period,
-            category=category,
-        )
-        if not page:
-            break
-        raw_rows.extend(page)
-        if is_cancelled():
-            cancelled = True
-            warnings.append("Leaderboard scan cancelled by user.")
-            break
-        if len(page) < page_limit:
-            break
-        offset += len(page)
+    raw_rows, leaderboard_cancelled = _fetch_polymarket_leaderboard_scan_rows(
+        scan_limit=scan_limit,
+        remote_sort=remote_sort,
+        direction=direction,
+        period=period,
+        category=category,
+        scan_concurrency=scan_concurrency,
+        is_cancelled=is_cancelled,
+        emit_progress=emit_progress,
+        warnings=warnings,
+    )
+    cancelled = cancelled or leaderboard_cancelled
 
     rate_limit_events: List[Dict[str, Any]] = []
     rows = [normalize_polymarket_leaderboard_row(row, index + 1) for index, row in enumerate(raw_rows)]
@@ -2034,16 +2201,17 @@ def polymarket_leaderboard_payload(
         prefiltered.append(row)
 
     computed_mdd = 0
+    attempted_mdd = 0
+    qualified_mdd = 0
     if mdd_requested:
-        for row in prefiltered[:mdd_scan_limit]:
-            if is_cancelled():
-                cancelled = True
-                warnings.append("MDD scan cancelled by user.")
-                break
-            wallet = normalize_wallet(row.get("wallet") or "")
-            if not wallet:
-                continue
-            mdd_options = {
+        mdd_candidate_rows = list(prefiltered)
+        if sort not in {"mdd_usd", "mdd_pct"}:
+            _sort_polymarket_leaderboard_rows(mdd_candidate_rows, sort, direction)
+        mdd_targets = mdd_candidate_rows[:mdd_scan_limit]
+        mdd_total = len(mdd_targets)
+
+        def build_mdd_options() -> Dict[str, Any]:
+            return {
                 "mode": mdd_mode,
                 "closed_limit": mdd_history_limit,
                 "open_limit": mdd_open_limit,
@@ -2061,16 +2229,58 @@ def polymarket_leaderboard_payload(
                 "include_accounting_snapshot": mdd_include_accounting,
                 "accounting_timeout": mdd_accounting_timeout,
             }
+
+        def compute_mdd_for_row(row: Dict[str, Any]) -> Tuple[Dict[str, Any], str, Optional[Dict[str, Any]], Dict[str, Any], Optional[BaseException]]:
+            wallet = normalize_wallet(row.get("wallet") or "")
+            if not wallet:
+                return row, "", None, {}, None
+            options = build_mdd_options()
             try:
-                mdd = polymarket_user_mdd_payload(wallet, **mdd_options)
-            except PolymarketRateLimitError as exc:
+                return row, wallet, polymarket_user_mdd_payload(wallet, **options), options, None
+            except Exception as exc:
+                return row, wallet, None, options, exc
+
+        def apply_mdd_result(
+            row: Dict[str, Any],
+            wallet: str,
+            mdd: Optional[Dict[str, Any]],
+            mdd_options: Dict[str, Any],
+            exc: Optional[BaseException],
+        ) -> bool:
+            nonlocal attempted_mdd, computed_mdd, qualified_mdd
+            attempted_mdd += 1
+            if not wallet:
+                emit_progress(
+                    "mdd",
+                    scanned=len(rows),
+                    filtered=len(prefiltered),
+                    mdd_attempted=attempted_mdd,
+                    mdd_computed=computed_mdd,
+                    mdd_total=mdd_total,
+                    message=f"Computing MDD {attempted_mdd}/{mdd_total}.",
+                )
+                return False
+            if isinstance(exc, PolymarketRateLimitError):
                 status = polymarket_rate_limit_status(exc)
                 rate_limit_events.extend(status["events"])
                 warnings.append(f"MDD rate-limited for {wallet}; retry after the upstream backoff window.")
-                break
-            except Exception as exc:
+                return True
+            if exc is not None:
                 warnings.append(f"MDD unavailable for {wallet}: {exc}")
-                continue
+                emit_progress(
+                    "mdd",
+                    scanned=len(rows),
+                    filtered=len(prefiltered),
+                    mdd_attempted=attempted_mdd,
+                    mdd_computed=computed_mdd,
+                    mdd_total=mdd_total,
+                    wallet=wallet,
+                    message=f"Computing MDD {attempted_mdd}/{mdd_total}.",
+                )
+                return False
+            if mdd is None:
+                return False
+
             audit_cache = attach_polymarket_mdd_audit_cache(
                 mdd,
                 polymarket_mdd_audit_params(wallet, mdd_options),
@@ -2107,6 +2317,62 @@ def polymarket_leaderboard_payload(
                 }
             )
             computed_mdd += 1
+            if _number_in_range(row["mdd_usd"], min_mdd_usd, max_mdd_usd) and _number_in_range(row["mdd_pct"], min_mdd_pct, max_mdd_pct):
+                qualified_mdd += 1
+            emit_progress(
+                "mdd",
+                scanned=len(rows),
+                filtered=len(prefiltered),
+                mdd_attempted=attempted_mdd,
+                mdd_computed=computed_mdd,
+                mdd_total=mdd_total,
+                wallet=wallet,
+                message=f"Computing MDD {attempted_mdd}/{mdd_total}; matched {qualified_mdd}/{limit}.",
+            )
+            return False
+
+        emit_progress(
+            "mdd",
+            scanned=len(rows),
+            filtered=len(prefiltered),
+            mdd_attempted=0,
+            mdd_computed=0,
+            mdd_total=mdd_total,
+            message=f"Computing MDD 0/{mdd_total}.",
+            percent=50.0 if mdd_total else 100.0,
+        )
+        mdd_index = 0
+        rate_limited = False
+        while mdd_index < len(mdd_targets):
+            if is_cancelled():
+                cancelled = True
+                warnings.append("MDD scan cancelled by user.")
+                break
+            if mdd_stop_on_limit and qualified_mdd >= limit:
+                warnings.append(f"MDD scan stopped after finding {qualified_mdd} qualifying row(s) within the scanned ROI candidates.")
+                break
+            batch = mdd_targets[mdd_index : mdd_index + max(1, mdd_concurrency)]
+            emit_progress(
+                "mdd",
+                scanned=len(rows),
+                filtered=len(prefiltered),
+                mdd_attempted=attempted_mdd,
+                mdd_computed=computed_mdd,
+                mdd_total=mdd_total,
+                message=f"Computing MDD {attempted_mdd + 1}/{mdd_total}.",
+            )
+            if len(batch) == 1:
+                rate_limited = apply_mdd_result(*compute_mdd_for_row(batch[0]))
+            else:
+                with ThreadPoolExecutor(max_workers=len(batch)) as executor:
+                    for future in as_completed([executor.submit(compute_mdd_for_row, row) for row in batch]):
+                        if apply_mdd_result(*future.result()):
+                            rate_limited = True
+                if rate_limited:
+                    break
+            mdd_index += len(batch)
+            if rate_limited:
+                break
 
     filtered: List[Dict[str, Any]] = []
     for row in prefiltered:
@@ -2119,18 +2385,7 @@ def polymarket_leaderboard_payload(
                 continue
         filtered.append(row)
 
-    reverse = direction != "ASC"
-    missing_numeric = float("-inf") if reverse else float("inf")
-    if sort == "roi_pct":
-        filtered.sort(key=lambda row: row["roi_pct"] if row["roi_pct"] is not None else missing_numeric, reverse=reverse)
-    elif sort == "volume_usd":
-        filtered.sort(key=lambda row: row["volume_usd"] if row["volume_usd"] is not None else missing_numeric, reverse=reverse)
-    elif sort == "mdd_usd":
-        filtered.sort(key=lambda row: row["mdd_usd"] if row["mdd_usd"] is not None else missing_numeric, reverse=reverse)
-    elif sort == "mdd_pct":
-        filtered.sort(key=lambda row: row["mdd_pct"] if row["mdd_pct"] is not None else missing_numeric, reverse=reverse)
-    else:
-        filtered.sort(key=lambda row: row["pnl_usd"] if row["pnl_usd"] is not None else missing_numeric, reverse=reverse)
+    _sort_polymarket_leaderboard_rows(filtered, sort, direction)
 
     mdd_values_available = any(row["mdd_available"] for row in filtered)
     return {
@@ -2139,7 +2394,9 @@ def polymarket_leaderboard_payload(
             "returned": len(filtered[:limit]),
             "filtered": len(filtered),
             "scanned": len(rows),
+            "mdd_attempted": attempted_mdd,
             "mdd_computed": computed_mdd,
+            "mdd_qualified": qualified_mdd,
         },
         "sort": sort,
         "direction": direction,
@@ -2161,6 +2418,10 @@ def polymarket_leaderboard_payload(
         "mdd_accounting_timeout": mdd_accounting_timeout,
         "mdd_persist_cache": mdd_persist_cache,
         "mdd_cache_ttl_seconds": mdd_cache_ttl_seconds,
+        "fast_scan": fast_scan,
+        "scan_concurrency": scan_concurrency,
+        "mdd_concurrency": mdd_concurrency,
+        "mdd_stop_on_limit": mdd_stop_on_limit,
         "analytics_cache": analytics_cache_summary(enabled=mdd_persist_cache),
         "rate_limit": {
             "limited": bool(rate_limit_events),
@@ -2171,6 +2432,11 @@ def polymarket_leaderboard_payload(
         "cancelled": cancelled,
         "source_sort": remote_sort,
         "ranking_scope": "computed_from_scanned_public_leaderboard_rows_with_optional_public_data_mdd_v2",
+        "search_strategy": (
+            "fast_roi_candidates_then_adaptive_mdd_filter"
+            if fast_scan and mdd_requested and sort == "roi_pct"
+            else "scanned_public_leaderboard_rows"
+        ),
         "mdd_available": mdd_values_available,
         "mdd_method": MDD_METHOD_MARK_REPLAY if mdd_mode == "mark_replay" else MDD_METHOD_V2,
         "mdd_pct_basis": MDD_PCT_BASIS_V2,

@@ -756,6 +756,15 @@ class WebApiTests(unittest.TestCase):
         self.assertFalse(payload["mdd_available"])
         self.assertEqual(payload["source_sort"], "PNL")
 
+    def test_polymarket_leaderboard_payload_uses_full_wallet_display_fallback(self) -> None:
+        leaderboard = [{"rank": 1, "proxyWallet": WALLET, "pnl": "10", "volume": "100"}]
+
+        with patch("web_api.data_api.get_leaderboard", return_value=leaderboard):
+            payload = polymarket_leaderboard_payload({"sort": ["roi_pct"], "limit": ["1"], "scan_limit": ["1"]})
+
+        self.assertEqual(payload["rows"][0]["wallet"], WALLET)
+        self.assertEqual(payload["rows"][0]["display_name"], WALLET)
+
     def test_polymarket_leaderboard_payload_can_cancel_after_current_page(self) -> None:
         page_calls = 0
         first_page = [
@@ -1045,6 +1054,97 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["rows"][0]["wallet"], WALLET_2)
         self.assertAlmostEqual(payload["rows"][0]["mdd_pct"], 12.0)
         self.assertTrue(payload["mdd_available"])
+
+    def test_polymarket_leaderboard_payload_applies_mdd_budget_after_local_roi_sort(self) -> None:
+        leaderboard = [
+            {"rank": 1, "proxyWallet": WALLET, "pseudonym": "high-pnl-low-roi", "pnl": "1000", "volume": "100000"},
+            {"rank": 2, "proxyWallet": WALLET_2, "pseudonym": "lower-pnl-high-roi", "pnl": "100", "volume": "200"},
+        ]
+
+        def fake_mdd(wallet, **_kwargs):
+            return {
+                "mdd_usd": 10.0,
+                "mdd_pct": 5.0,
+                "mdd_available": True,
+                "mdd_method": "test",
+                "mdd_pct_basis": "test",
+                "points": [{"value": 0}],
+                "closed_positions": 2,
+                "open_positions": 1,
+                "equity_base_usd": 1000,
+                "peak_value": 100,
+                "trough_value": 95,
+                "peak_timestamp": 10,
+                "trough_timestamp": 20,
+            }
+
+        with patch("web_api.data_api.get_leaderboard", return_value=leaderboard), patch(
+            "web_api.polymarket_user_mdd_payload",
+            side_effect=fake_mdd,
+        ) as mock_mdd:
+            payload = polymarket_leaderboard_payload(
+                {
+                    "sort": ["roi_pct"],
+                    "direction": ["DESC"],
+                    "limit": ["1"],
+                    "scan_limit": ["2"],
+                    "mdd_scan_limit": ["1"],
+                    "compute_mdd": ["true"],
+                }
+            )
+
+        mock_mdd.assert_called_once()
+        self.assertEqual(mock_mdd.call_args.args[0], WALLET_2)
+        self.assertEqual(payload["counts"]["mdd_computed"], 1)
+        self.assertEqual(payload["rows"][0]["wallet"], WALLET_2)
+
+    def test_polymarket_leaderboard_payload_fast_mdd_stops_after_enough_qualified_rows(self) -> None:
+        leaderboard = [
+            {"rank": 1, "proxyWallet": WALLET, "pseudonym": "top-roi", "pnl": "200", "volume": "400"},
+            {"rank": 2, "proxyWallet": WALLET_2, "pseudonym": "next-roi", "pnl": "100", "volume": "400"},
+        ]
+
+        def fake_mdd(wallet, **_kwargs):
+            return {
+                "mdd_usd": 10.0,
+                "mdd_pct": 10.0,
+                "mdd_available": True,
+                "mdd_method": "test",
+                "mdd_pct_basis": "test",
+                "points": [{"value": 0}],
+                "closed_positions": 2,
+                "open_positions": 1,
+                "equity_base_usd": 1000,
+                "peak_value": 100,
+                "trough_value": 90,
+                "peak_timestamp": 10,
+                "trough_timestamp": 20,
+            }
+
+        with patch("web_api.data_api.get_leaderboard", return_value=leaderboard), patch(
+            "web_api.polymarket_user_mdd_payload",
+            side_effect=fake_mdd,
+        ) as mock_mdd:
+            payload = polymarket_leaderboard_payload(
+                {
+                    "sort": ["roi_pct"],
+                    "direction": ["DESC"],
+                    "limit": ["1"],
+                    "scan_limit": ["2"],
+                    "mdd_scan_limit": ["2"],
+                    "compute_mdd": ["true"],
+                    "max_mdd_pct": ["20"],
+                    "fast_scan": ["true"],
+                    "mdd_concurrency": ["1"],
+                }
+            )
+
+        mock_mdd.assert_called_once()
+        self.assertEqual(mock_mdd.call_args.args[0], WALLET)
+        self.assertEqual(payload["counts"]["returned"], 1)
+        self.assertEqual(payload["counts"]["mdd_attempted"], 1)
+        self.assertEqual(payload["counts"]["mdd_qualified"], 1)
+        self.assertTrue(payload["mdd_stop_on_limit"])
 
     def test_polymarket_leaderboard_payload_persists_mdd_audit_cache_when_requested(self) -> None:
         leaderboard = [{"rank": 1, "proxyWallet": WALLET, "pseudonym": "alpha", "pnl": "10", "volume": "100"}]

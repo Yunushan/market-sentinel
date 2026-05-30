@@ -14,7 +14,7 @@ PLATFORMS: Dict[str, Dict[str, Any]] = {
         "label": "Windows",
         "required_for_full_claim": True,
         "fully_tested": True,
-        "evidence": ["windows-latest CI", "Tkinter smoke", "python verify.py", "Windows EXE/MSI release build"],
+        "evidence": ["windows-2025-vs2026 CI", "Tkinter smoke", "python verify.py", "Windows EXE/MSI release build"],
     },
     "ubuntu_linux": {
         "label": "Ubuntu Linux",
@@ -26,7 +26,7 @@ PLATFORMS: Dict[str, Dict[str, Any]] = {
         "label": "macOS",
         "required_for_full_claim": True,
         "fully_tested": True,
-        "evidence": ["macos-latest CI", "Tkinter smoke", "python verify.py"],
+        "evidence": ["macos-15 CI", "Tkinter smoke", "python verify.py"],
     },
     "other_linux": {
         "label": "Other Linux distributions",

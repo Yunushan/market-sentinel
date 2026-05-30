@@ -33,8 +33,8 @@ jobs:
       matrix:
         os:
           - ubuntu-latest
-          - macos-latest
-          - windows-latest
+          - macos-15
+          - windows-2025-vs2026
         python-version:
           - "3.10"
           - "3.11"
@@ -53,6 +53,7 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             pyproject.toml
+            .github/python-cache-version.txt
 
       - name: Install Python dependencies
         run: |
@@ -75,8 +76,8 @@ jobs:
       matrix:
         os:
           - ubuntu-latest
-          - macos-latest
-          - windows-latest
+          - macos-15
+          - windows-2025-vs2026
         python-version:
           - "3.x"
     steps:
@@ -91,6 +92,7 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             pyproject.toml
+            .github/python-cache-version.txt
 
       - name: Install Python dependencies
         run: |
@@ -160,6 +162,7 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             pyproject.toml
+            .github/python-cache-version.txt
 
       - name: Build Python distribution
         run: |

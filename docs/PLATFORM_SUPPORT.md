@@ -6,9 +6,9 @@ MarketSentinel does not claim full support for a platform until that platform ha
 
 | Platform | Current status | Verification |
 | --- | --- | --- |
-| Windows | Supported source platform; Windows x64 portable zip and MSI release packages are built. | GitHub Actions `windows-latest` runs Python verification, Tkinter smoke, and project verification. Release workflow builds EXE/MSI on `windows-latest`. |
+| Windows | Supported source platform; Windows x64 portable zip and MSI release packages are built. | GitHub Actions `windows-2025-vs2026` runs Python verification, Tkinter smoke, and project verification. Release workflow builds EXE/MSI on `windows-2025-vs2026`. |
 | Ubuntu Linux | Supported source platform. | GitHub Actions `ubuntu-latest` runs Python verification, Tkinter smoke, and project verification. |
-| macOS | Supported source platform after CI verification; no native app bundle is built yet. | GitHub Actions `macos-latest` runs Python verification, Tkinter smoke, and project verification. |
+| macOS | Supported source platform after CI verification; no native app bundle is built yet. | GitHub Actions `macos-15` runs Python verification, Tkinter smoke, and project verification. |
 | Other Linux distributions | Source-compatible target, not fully certified. | Not individually tested; Ubuntu is the Linux CI representative. |
 | BSD | not marked fully supported. | Requires a BSD runner, dependency install validation, Tkinter availability check, and release/install documentation. |
 | generic Unix | not marked fully supported beyond Linux/macOS source compatibility. | Requires a named OS runner and repeatable verification. |

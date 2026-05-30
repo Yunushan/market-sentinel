@@ -199,6 +199,7 @@ class AnalyticsHarness:
         self.lb_period_var = FakeVar("All")
         self.lb_category_var = FakeVar("OVERALL")
         self.lb_compute_mdd_var = FakeVar(False)
+        self.lb_fast_scan_var = FakeVar(True)
         self.lb_mdd_mode_var = FakeVar("Fast public curve")
         self.lb_mdd_scan_limit_var = FakeVar("100")
         self.lb_min_roi_var = FakeVar("")
@@ -212,6 +213,7 @@ class AnalyticsHarness:
         self.lb_mdd_metric_var = FakeVar()
         self.lb_status_var = FakeVar()
         self.status_var = FakeVar()
+        self.lb_fast_roi_btn = FakeButton()
         self.lb_cancel_btn = FakeButton()
         self._leaderboard_loading = False
         self._leaderboard_cancel_event = threading.Event()
@@ -375,6 +377,10 @@ class AppLogicTests(unittest.TestCase):
         self.assertEqual(params["limit"], ["1000"])
         self.assertEqual(params["scan_limit"], ["1000"])
         self.assertEqual(params["compute_mdd"], ["true"])
+        self.assertEqual(params["fast_scan"], ["true"])
+        self.assertEqual(params["scan_concurrency"], ["6"])
+        self.assertEqual(params["mdd_concurrency"], ["3"])
+        self.assertEqual(params["mdd_stop_on_limit"], ["true"])
         self.assertEqual(params["max_mdd_pct"], ["25"])
 
     def test_desktop_polymarket_analytics_refreshes_table_metrics(self) -> None:
@@ -407,7 +413,7 @@ class AppLogicTests(unittest.TestCase):
         self.assertEqual(len(harness.leaderboard_tree.rows), 1)
         row_values = next(iter(harness.leaderboard_tree.rows.values()))
         self.assertEqual(row_values[1], "alpha")
-        self.assertIn("0xbbbbbbbb", row_values[2])
+        self.assertEqual(row_values[2], WALLET)
 
     def test_desktop_polymarket_analytics_cancel_requests_background_stop(self) -> None:
         harness = AnalyticsHarness()

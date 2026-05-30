@@ -140,6 +140,75 @@ def set_windows_app_id(app_id: str) -> None:
         pass
 
 
+def _hex_to_colorref(color: str, fallback: str) -> int:
+    text = str(color or fallback).strip()
+    if text.startswith("#"):
+        text = text[1:]
+    if len(text) == 3:
+        text = "".join(part * 2 for part in text)
+    if len(text) != 6:
+        text = fallback.lstrip("#")
+    try:
+        red = int(text[0:2], 16)
+        green = int(text[2:4], 16)
+        blue = int(text[4:6], 16)
+    except Exception:
+        red = int(fallback[1:3], 16)
+        green = int(fallback[3:5], 16)
+        blue = int(fallback[5:7], 16)
+    return red | (green << 8) | (blue << 16)
+
+
+def _set_windows_titlebar_theme(
+    window: tk.Misc,
+    *,
+    dark: bool,
+    caption_color: str,
+    text_color: str,
+    border_color: str,
+) -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        window.update_idletasks()
+        hwnd = int(window.winfo_id())
+        if not hwnd:
+            return
+
+        dwm = ctypes.windll.dwmapi
+        enabled = ctypes.c_int(1 if dark else 0)
+        result = dwm.DwmSetWindowAttribute(
+            ctypes.c_void_p(hwnd),
+            ctypes.c_uint(20),
+            ctypes.byref(enabled),
+            ctypes.sizeof(enabled),
+        )
+        if result != 0:
+            dwm.DwmSetWindowAttribute(
+                ctypes.c_void_p(hwnd),
+                ctypes.c_uint(19),
+                ctypes.byref(enabled),
+                ctypes.sizeof(enabled),
+            )
+
+        for attribute, color, fallback in (
+            (34, border_color, "#2a3a4a" if dark else "#c9c3b8"),
+            (35, caption_color, "#151d27" if dark else "#f6f4ef"),
+            (36, text_color, "#ffffff" if dark else "#161616"),
+        ):
+            colorref = ctypes.c_int(_hex_to_colorref(color, fallback))
+            dwm.DwmSetWindowAttribute(
+                ctypes.c_void_p(hwnd),
+                ctypes.c_uint(attribute),
+                ctypes.byref(colorref),
+                ctypes.sizeof(colorref),
+            )
+    except Exception:
+        pass
+
+
 # ---------------------------
 # Background wallet poller
 # ---------------------------
@@ -983,6 +1052,32 @@ class App(tk.Tk):
                     highlightcolor=border,
                 )
 
+        self._apply_native_titlebar(self)
+
+    def _apply_native_titlebar(self, window: tk.Misc) -> None:
+        palette = getattr(self, "_palette", {}) or {}
+        cfg = getattr(self, "cfg", None)
+        theme = self._normalize_theme(getattr(cfg, "theme", "light"))
+        dark = theme == "dark"
+        caption_color = palette.get("surface", "#151d27" if dark else "#f6f4ef")
+        text_color = palette.get("heading", "#ffffff" if dark else "#161616")
+        border_color = palette.get("border", "#2a3a4a" if dark else "#c9c3b8")
+
+        def apply_titlebar() -> None:
+            _set_windows_titlebar_theme(
+                window,
+                dark=dark,
+                caption_color=caption_color,
+                text_color=text_color,
+                border_color=border_color,
+            )
+
+        apply_titlebar()
+        try:
+            window.after(100, apply_titlebar)
+        except Exception:
+            pass
+
     def _icon_path(self) -> Optional[Path]:
         for root in self._resource_roots():
             for path in (root / "assets" / "marketsentinel.ico", root / "assets" / "polymarket.ico"):
@@ -995,7 +1090,7 @@ class App(tk.Tk):
         return paths[0] if paths else None
 
     def _icon_png_paths(self) -> List[Path]:
-        exact_names = tuple(f"marketsentinel-{size}.png" for size in (256, 128, 64, 48, 40, 32, 24, 20, 16))
+        exact_names = tuple(f"marketsentinel-{size}.png" for size in (16, 20, 24, 32, 40, 48, 64, 128, 256))
         exact_paths: List[Path] = []
         fallback_paths: List[Path] = []
         for root in self._resource_roots():
@@ -1067,6 +1162,7 @@ class App(tk.Tk):
                 window.iconphoto(True, *self._icon_images)
             except Exception:
                 pass
+        self._apply_native_titlebar(window)
 
     # ------------------ Dependency versions ------------------
 
@@ -1633,6 +1729,7 @@ class App(tk.Tk):
         self.lb_period_var = tk.StringVar(value="All")
         self.lb_category_var = tk.StringVar(value="OVERALL")
         self.lb_compute_mdd_var = tk.BooleanVar(value=False)
+        self.lb_fast_scan_var = tk.BooleanVar(value=True)
         self.lb_mdd_mode_var = tk.StringVar(value="Fast public curve")
         self.lb_mdd_scan_limit_var = tk.StringVar(value="100")
         self.lb_min_roi_var = tk.StringVar(value="")
@@ -1680,17 +1777,30 @@ class App(tk.Tk):
             variable=self.lb_compute_mdd_var,
             style="Card.TCheckbutton",
         ).pack(anchor="w", pady=(18, 4))
+        ttk.Checkbutton(
+            checks,
+            text="Fast scan",
+            variable=self.lb_fast_scan_var,
+            style="Card.TCheckbutton",
+        ).pack(anchor="w", pady=(0, 4))
 
         actions = ttk.Frame(controls, style="PanelBody.TFrame")
         actions.grid(row=0, column=7, columnspan=3, rowspan=2, sticky="nsew", padx=(10, 0), pady=4)
         ttk.Label(actions, text="Search", style="Muted.TLabel").pack(anchor="w")
+        self.lb_fast_roi_btn = ttk.Button(
+            actions,
+            text="Best ROI <=20% MDD",
+            style="Accent.TButton",
+            command=self.load_fast_polymarket_roi_mdd,
+        )
+        self.lb_fast_roi_btn.pack(fill="x", pady=(3, 6))
         self.lb_load_btn = ttk.Button(
             actions,
             text="Load Top ROI",
             style="Accent.TButton",
             command=self.load_polymarket_leaderboard,
         )
-        self.lb_load_btn.pack(fill="x", pady=(3, 6))
+        self.lb_load_btn.pack(fill="x", pady=(0, 6))
         self.lb_cancel_btn = ttk.Button(
             actions,
             text="Cancel Scan",
@@ -1727,8 +1837,8 @@ class App(tk.Tk):
         }
         widths = {
             "rank": 70,
-            "user": 190,
-            "wallet": 250,
+            "user": 320,
+            "wallet": 360,
             "pnl": 110,
             "volume": 120,
             "roi": 90,
@@ -1748,8 +1858,22 @@ class App(tk.Tk):
         yscroll.grid(row=0, column=1, sticky="ns")
         xscroll.grid(row=1, column=0, sticky="ew")
 
+        progress = ttk.Frame(table_card, style="PanelBody.TFrame")
+        progress.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        progress.columnconfigure(0, weight=1)
+        self.lb_progress_var = tk.DoubleVar(value=0.0)
+        self.lb_progress_text_var = tk.StringVar(value="Idle")
+        self.lb_progress_bar = ttk.Progressbar(progress, variable=self.lb_progress_var, maximum=100)
+        self.lb_progress_bar.grid(row=0, column=0, sticky="ew")
+        ttk.Label(progress, textvariable=self.lb_progress_text_var, style="Muted.TLabel", width=18, anchor="e").grid(
+            row=0,
+            column=1,
+            sticky="e",
+            padx=(10, 0),
+        )
+
         self.lb_status_var = tk.StringVar(value="Ready. Set Returned/Scanned and load Polymarket ROI rankings.")
-        ttk.Label(table_card, textvariable=self.lb_status_var, style="Muted.TLabel", wraplength=1160).grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        ttk.Label(table_card, textvariable=self.lb_status_var, style="Muted.TLabel", wraplength=1160).grid(row=3, column=0, sticky="ew", pady=(8, 0))
 
     @staticmethod
     def _leaderboard_sort_value(label: str) -> str:
@@ -1777,17 +1901,12 @@ class App(tk.Tk):
             return "-"
         return f"{number:,.{decimals}f}{suffix}"
 
-    @staticmethod
-    def _short_wallet(value: Any) -> str:
-        wallet = str(value or "").strip()
-        if len(wallet) <= 18:
-            return wallet
-        return f"{wallet[:10]}...{wallet[-6:]}"
-
     def _polymarket_leaderboard_params(self) -> Dict[str, List[str]]:
+        sort_value = App._leaderboard_sort_value(self.lb_sort_var.get())
+        direction_value = App._leaderboard_direction_value(self.lb_direction_var.get())
         params: Dict[str, List[str]] = {
-            "sort": [App._leaderboard_sort_value(self.lb_sort_var.get())],
-            "direction": [App._leaderboard_direction_value(self.lb_direction_var.get())],
+            "sort": [sort_value],
+            "direction": [direction_value],
             "period": [str(self.lb_period_var.get() or "All").strip().upper()],
             "category": [str(self.lb_category_var.get() or "OVERALL").strip().upper()],
             "limit": [str(self.lb_limit_var.get() or "1000").strip()],
@@ -1796,6 +1915,12 @@ class App(tk.Tk):
             "mdd_mode": [App._leaderboard_mdd_mode_value(self.lb_mdd_mode_var.get())],
             "mdd_scan_limit": [str(self.lb_mdd_scan_limit_var.get() or "100").strip()],
         }
+        fast_scan_var = getattr(self, "lb_fast_scan_var", None)
+        fast_scan = bool(fast_scan_var.get()) if fast_scan_var is not None else False
+        params["fast_scan"] = ["true" if fast_scan else "false"]
+        params["scan_concurrency"] = ["6" if fast_scan else "1"]
+        params["mdd_concurrency"] = ["3" if fast_scan else "1"]
+        params["mdd_stop_on_limit"] = ["true" if fast_scan and sort_value == "roi_pct" and direction_value == "DESC" else "false"]
         optional = {
             "min_roi_pct": self.lb_min_roi_var.get(),
             "max_roi_pct": self.lb_max_roi_var.get(),
@@ -1808,15 +1933,38 @@ class App(tk.Tk):
                 params[key] = [text]
         return params
 
+    def load_fast_polymarket_roi_mdd(self):
+        if self._leaderboard_loading:
+            return
+        self.lb_sort_var.set("ROI %")
+        self.lb_direction_var.set("High to low")
+        self.lb_period_var.set("All")
+        self.lb_category_var.set("OVERALL")
+        self.lb_limit_var.set("100")
+        self.lb_scan_limit_var.set("5000")
+        self.lb_compute_mdd_var.set(True)
+        self.lb_fast_scan_var.set(True)
+        self.lb_mdd_mode_var.set("Fast public curve")
+        self.lb_mdd_scan_limit_var.set("500")
+        self.lb_min_mdd_pct_var.set("")
+        self.lb_max_mdd_pct_var.set("20")
+        self.load_polymarket_leaderboard()
+
     def load_polymarket_leaderboard(self):
         if self._leaderboard_loading:
             return
         self._leaderboard_loading = True
         self._leaderboard_cancel_event.clear()
         self.lb_load_btn.configure(state="disabled")
+        if hasattr(self, "lb_fast_roi_btn"):
+            self.lb_fast_roi_btn.configure(state="disabled")
         if hasattr(self, "lb_cancel_btn"):
             self.lb_cancel_btn.configure(state="normal")
         params = self._polymarket_leaderboard_params()
+        if hasattr(self, "lb_progress_var"):
+            self.lb_progress_var.set(0.0)
+        if hasattr(self, "lb_progress_text_var"):
+            self.lb_progress_text_var.set("0%")
         self.lb_status_var.set(
             f"Scanning Polymarket public leaderboard rows: returned={params['limit'][0]}, scanned={params['scan_limit'][0]}..."
         )
@@ -1838,11 +1986,50 @@ class App(tk.Tk):
         try:
             from web_api import polymarket_leaderboard_payload
 
-            payload = polymarket_leaderboard_payload(params, cancel_check=self._leaderboard_cancel_event.is_set)
+            def progress_callback(progress: Dict[str, Any]) -> None:
+                self.ui_queue.put(("polymarket_leaderboard_progress", progress, None))
+
+            payload = polymarket_leaderboard_payload(
+                params,
+                cancel_check=self._leaderboard_cancel_event.is_set,
+                progress_callback=progress_callback,
+            )
         except Exception as exc:
             self.ui_queue.put(("polymarket_leaderboard_error", str(exc), None))
             return
         self.ui_queue.put(("polymarket_leaderboard", payload, None))
+
+    def _handle_polymarket_leaderboard_progress(self, progress: Dict[str, Any]) -> None:
+        percent = max(0.0, min(safe_float(progress.get("percent"), 0.0) or 0.0, 100.0))
+        phase = str(progress.get("phase") or "leaderboard").replace("_", " ").title()
+        scanned = int(safe_float(progress.get("scanned"), 0) or 0)
+        scan_limit = int(safe_float(progress.get("scan_limit"), 0) or 0)
+        filtered = int(safe_float(progress.get("filtered"), 0) or 0)
+        mdd_attempted = int(safe_float(progress.get("mdd_attempted"), 0) or 0)
+        mdd_computed = int(safe_float(progress.get("mdd_computed"), 0) or 0)
+        mdd_total = int(safe_float(progress.get("mdd_total"), 0) or 0)
+
+        if hasattr(self, "lb_progress_var"):
+            self.lb_progress_var.set(percent)
+        if hasattr(self, "lb_progress_text_var"):
+            self.lb_progress_text_var.set(f"{percent:.0f}%")
+        if hasattr(self, "lb_scanned_metric_var"):
+            self.lb_scanned_metric_var.set(str(scanned))
+        if hasattr(self, "lb_mdd_metric_var"):
+            self.lb_mdd_metric_var.set(str(mdd_computed))
+
+        message = str(progress.get("message") or "").strip()
+        if not message:
+            if phase.lower() == "mdd":
+                message = f"Computing MDD {mdd_attempted}/{mdd_total}; scanned {scanned}/{scan_limit} leaderboard rows."
+            else:
+                message = f"Scanning leaderboard rows {scanned}/{scan_limit}."
+        if phase.lower() == "mdd":
+            extra = f" Filtered candidates: {filtered}. Successful MDD: {mdd_computed}."
+        else:
+            extra = ""
+        self.lb_status_var.set(f"{phase}: {percent:.0f}% - {message}{extra}")
+        self.status_var.set(f"Polymarket analytics {percent:.0f}%")
 
     def _refresh_polymarket_leaderboard_table(self, payload: Dict[str, Any]) -> None:
         self._last_leaderboard_payload = payload
@@ -1865,7 +2052,7 @@ class App(tk.Tk):
                 values=(
                     row.get("rank") or index + 1,
                     row.get("display_name") or "-",
-                    App._short_wallet(row.get("wallet")),
+                    str(row.get("wallet") or "-"),
                     App._format_table_number(row.get("pnl_usd"), decimals=2),
                     App._format_table_number(row.get("volume_usd"), decimals=2),
                     App._format_table_number(row.get("roi_pct"), decimals=2, suffix="%"),
@@ -1888,6 +2075,10 @@ class App(tk.Tk):
         cancelled = bool(payload.get("cancelled"))
         warning_text = f" Warning: {warnings[0]}" if warnings else ""
         status_prefix = "Cancelled. Loaded partial" if cancelled else "Loaded"
+        if hasattr(self, "lb_progress_var"):
+            self.lb_progress_var.set(self.lb_progress_var.get() if cancelled else 100.0)
+        if hasattr(self, "lb_progress_text_var"):
+            self.lb_progress_text_var.set("Cancelled" if cancelled else "100%")
         self.lb_status_var.set(
             f"{status_prefix} {counts.get('returned', len(rows))} rows from {counts.get('scanned', 0)} scanned. "
             f"Source: {payload.get('source', 'polymarket')}.{warning_text}"
@@ -1900,6 +2091,8 @@ class App(tk.Tk):
         )
 
     def _handle_polymarket_leaderboard_error(self, message: str) -> None:
+        if hasattr(self, "lb_progress_text_var"):
+            self.lb_progress_text_var.set("Failed")
         self.lb_status_var.set(f"Polymarket analytics failed: {message}")
         self.status_var.set("Polymarket analytics failed.")
         self.log(f"[analytics] leaderboard error: {message}")
@@ -4008,13 +4201,19 @@ class App(tk.Tk):
                     self._leaderboard_loading = False
                     if hasattr(self, "lb_load_btn"):
                         self.lb_load_btn.configure(state="normal")
+                    if hasattr(self, "lb_fast_roi_btn"):
+                        self.lb_fast_roi_btn.configure(state="normal")
                     if hasattr(self, "lb_cancel_btn"):
                         self.lb_cancel_btn.configure(state="disabled")
                     self._refresh_polymarket_leaderboard_table(a or {})
+                elif kind == "polymarket_leaderboard_progress":
+                    self._handle_polymarket_leaderboard_progress(a or {})
                 elif kind == "polymarket_leaderboard_error":
                     self._leaderboard_loading = False
                     if hasattr(self, "lb_load_btn"):
                         self.lb_load_btn.configure(state="normal")
+                    if hasattr(self, "lb_fast_roi_btn"):
+                        self.lb_fast_roi_btn.configure(state="normal")
                     if hasattr(self, "lb_cancel_btn"):
                         self.lb_cancel_btn.configure(state="disabled")
                     self._handle_polymarket_leaderboard_error(str(a))
