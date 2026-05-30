@@ -1268,6 +1268,37 @@ class PolymarketApiWrapperTests(unittest.TestCase):
                 decision_path=decision_path,
                 target_tier="credential_live_verified",
             )
+            collision_snapshot_path = temp / "collision-proposal-snapshots.json"
+            with (
+                patch("polymarket.live_reports._now", return_value=1700000000),
+                patch("polymarket.live_reports.time.time_ns", return_value=1700000000000000000),
+            ):
+                first_collision = store_live_validation_coverage_promotion_proposal_snapshot(
+                    proposal=proposal,
+                    report_store_path=report_path,
+                    decision_path=decision_path,
+                    target_tier="credential_live_verified",
+                    path=collision_snapshot_path,
+                    source="unit-test",
+                    label="same clock snapshot",
+                )
+                second_collision = store_live_validation_coverage_promotion_proposal_snapshot(
+                    proposal=proposal,
+                    report_store_path=report_path,
+                    decision_path=decision_path,
+                    target_tier="credential_live_verified",
+                    path=collision_snapshot_path,
+                    source="unit-test",
+                    label="same clock snapshot",
+                )
+            self.assertNotEqual(first_collision["key"], second_collision["key"])
+            collision_listing = list_live_validation_coverage_promotion_proposal_snapshots(
+                path=collision_snapshot_path,
+                report_store_path=report_path,
+                decision_path=decision_path,
+            )
+            self.assertEqual(collision_listing["counts"]["entries"], 2)
+
             snapshot = store_live_validation_coverage_promotion_proposal_snapshot(
                 proposal=proposal,
                 report_store_path=report_path,

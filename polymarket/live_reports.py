@@ -1229,6 +1229,14 @@ def store_live_validation_coverage_promotion_proposal_snapshot(
         stored_at=now,
         stored_at_ns=stored_at_ns,
     )
+    while key in snapshots:
+        stored_at_ns += 1
+        key = make_live_validation_promotion_proposal_snapshot_key(
+            proposal_hash=expected_hash,
+            target_tier=effective_target,
+            stored_at=now,
+            stored_at_ns=stored_at_ns,
+        )
     record = {
         "key": key,
         "kind": POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOT_KIND,
