@@ -36,10 +36,11 @@ class CiCdWorkflowTests(unittest.TestCase):
             "npm run build",
             "npm install --no-audit --no-fund",
             "python -m build",
-            ".github/python-cache-version.txt",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, text)
+        self.assertNotIn("cache: pip", text)
+        self.assertNotIn("cache-dependency-path", text)
         self.assertNotIn("macos-latest", text)
         self.assertNotIn("windows-latest", text)
 
@@ -75,10 +76,11 @@ class CiCdWorkflowTests(unittest.TestCase):
             "gh release create",
             "gh release upload",
             "--target \"${GITHUB_SHA}\"",
-            ".github/python-cache-version.txt",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, text)
+        self.assertNotIn("cache: pip", text)
+        self.assertNotIn("cache-dependency-path", text)
         self.assertNotIn("macos-latest", text)
         self.assertNotIn("windows-latest", text)
 
