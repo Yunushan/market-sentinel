@@ -20,7 +20,6 @@ except ModuleNotFoundError:  # Python 3.10 compatibility.
 
 ROOT = Path(__file__).resolve().parent
 MIN_PYTHON = (3, 10)
-MAX_PYTHON = (3, 15)
 PROJECT_NAME = "market-sentinel"
 APP_TITLE = "MarketSentinel"
 
@@ -40,10 +39,10 @@ REQUIRED_IMPORTS = {
 
 def check_python_version() -> None:
     current = sys.version_info[:3]
-    if current < MIN_PYTHON or current >= MAX_PYTHON:
+    if current < MIN_PYTHON:
         raise SystemExit(
             "Unsupported Python "
-            f"{current[0]}.{current[1]}.{current[2]}; expected >=3.10,<3.15."
+            f"{current[0]}.{current[1]}.{current[2]}; expected >=3.10."
         )
     print(f"[ok] Python {current[0]}.{current[1]}.{current[2]}")
 
@@ -121,6 +120,12 @@ def run_project_metadata_check() -> None:
         raise SystemExit(f"pyproject.toml project name must be {PROJECT_NAME!r}; got {name!r}.")
     if "_" in name:
         raise SystemExit("pyproject.toml project name must use dashes, not underscores.")
+    if data.get("project", {}).get("requires-python") != ">=3.10":
+        raise SystemExit("pyproject.toml requires-python must allow Python >=3.10 without an artificial upper cap.")
+    classifiers = set(data.get("project", {}).get("classifiers", []))
+    for classifier in ("Programming Language :: Python :: 3.15", "Programming Language :: Python :: 3.16"):
+        if classifier not in classifiers:
+            raise SystemExit(f"pyproject.toml is missing classifier: {classifier}")
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     app = (ROOT / "app.py").read_text(encoding="utf-8")
@@ -767,6 +772,11 @@ def run_ci_cd_workflow_check() -> None:
             "actions/setup-python@v6",
             "actions/setup-node@v6",
             'node-version: "24"',
+            "Future Python",
+            '"3.15"',
+            '"3.16"',
+            '"3.x"',
+            "allow-prereleases: ${{ matrix.python-version != '3.x' }}",
             "python verify.py",
             "npm run build",
         ),
@@ -775,6 +785,11 @@ def run_ci_cd_workflow_check() -> None:
             "environment: release",
             "contents: write",
             "Validate package version matches release tag",
+            "Python compatibility",
+            '"3.15"',
+            '"3.16"',
+            '"3.x"',
+            "allow-prereleases: ${{ matrix.python-version != '3.x' }}",
             "Build Windows EXE and MSI",
             "scripts/build_windows_release.py",
             "windows-dist",

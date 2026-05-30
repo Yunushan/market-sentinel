@@ -22,6 +22,9 @@ class ProjectMetadataTests(unittest.TestCase):
 
         self.assertEqual(name, PROJECT_NAME)
         self.assertNotIn("_", name)
+        self.assertEqual(data["project"]["requires-python"], ">=3.10")
+        self.assertIn("Programming Language :: Python :: 3.15", data["project"]["classifiers"])
+        self.assertIn("Programming Language :: Python :: 3.16", data["project"]["classifiers"])
         self.assertIn('"name": "market-sentinel-react-gui"', frontend_package)
 
     def test_user_facing_project_title_uses_marketsentinel_brand(self) -> None:

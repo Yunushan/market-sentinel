@@ -13,6 +13,7 @@ Runs on pushes, pull requests, and manual dispatch.
 Jobs:
 
 - Python verification on Ubuntu and Windows across Python `3.10`, `3.11`, `3.12`, `3.13`, and `3.14`.
+- Forward Python compatibility checks for Python `3.15`, `3.16`, and latest stable `3.x`; prerelease-specific jobs skip cleanly if GitHub Actions has not published the requested interpreter yet, while the moving `3.x` lane follows future stable Python releases above 3.16.
 - Tkinter fallback smoke test with `python app.py --smoke-test`.
 - Full project verification with `python verify.py`.
 - React production build with Node.js `24`.
@@ -44,7 +45,7 @@ Release jobs:
 
 - Validate release tag shape.
 - Validate that `pyproject.toml` project version matches the release tag.
-- Verify Python, Tkinter fallback, and project checks.
+- Verify Python, Tkinter fallback, and project checks across the supported release range, including forward compatibility for Python `3.15`, `3.16`, and future stable `3.x` releases when those interpreters are available.
 - Build Python wheel/source distribution.
 - Build React production assets.
 - Package `frontend/dist` as a zip file.
