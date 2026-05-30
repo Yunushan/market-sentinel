@@ -12,8 +12,12 @@ Runs on pushes, pull requests, and manual dispatch.
 
 Jobs:
 
-- Python verification on Ubuntu, macOS, and Windows across Python `3.10`, `3.11`, `3.12`, `3.13`, and `3.14`.
+- Python verification on Ubuntu, macOS `14`, macOS `15`, macOS `26`, and hosted Windows across Python `3.10`, `3.11`, `3.12`, `3.13`, and `3.14`.
 - Forward Python compatibility checks through the moving latest stable `3.x` runner; this avoids prerelease runner failures while still following future stable Python releases above 3.16 as GitHub Actions publishes them.
+- Enterprise Linux smoke checks through RHEL UBI 8/9/10, a RHEL 7-era manylinux2014 ABI container, and Rocky Linux 8/9/10 containers.
+- Windows 11 ARM hosted compatibility checks with Python `3.12`.
+- An opt-in Windows 10 self-hosted job, enabled only when repository variable `ENABLE_WINDOWS_10_SELF_HOSTED=true` and a self-hosted runner labelled `windows-10` are available.
+- Mobile web smoke checks for Android 14/15/16 and iOS 15/16/18/26 user-agent and viewport profiles against the built React UI.
 - Tkinter fallback smoke test with `python app.py --smoke-test`.
 - Full project verification with `python verify.py`.
 - React production build with Node.js `24`.
@@ -45,7 +49,7 @@ Release jobs:
 
 - Validate release tag shape.
 - Validate that `pyproject.toml` project version matches the release tag.
-- Verify Python, Tkinter fallback, and project checks across the supported release range, including forward compatibility through future stable `3.x` releases when those interpreters are available.
+- Verify Python, Tkinter fallback, and project checks across the supported release range, including macOS `14`, macOS `15`, macOS `26`, and forward compatibility through future stable `3.x` releases when those interpreters are available.
 - Build Python wheel/source distribution.
 - Build React production assets.
 - Package `frontend/dist` as a zip file.

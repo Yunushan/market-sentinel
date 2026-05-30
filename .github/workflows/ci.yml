@@ -21,6 +21,7 @@ concurrency:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_CACHE_DIR: "1"
   PYTHONUNBUFFERED: "1"
 
 jobs:
@@ -33,7 +34,9 @@ jobs:
       matrix:
         os:
           - ubuntu-latest
+          - macos-14
           - macos-15
+          - macos-26
           - windows-2025-vs2026
         python-version:
           - "3.10"
@@ -52,9 +55,9 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          python -m pip install -e .
+          python -m pip install --no-cache-dir --upgrade pip
+          python -m pip install --no-cache-dir -r requirements.txt
+          python -m pip install --no-cache-dir -e .
 
       - name: Tkinter fallback smoke test
         run: python app.py --smoke-test
@@ -71,7 +74,9 @@ jobs:
       matrix:
         os:
           - ubuntu-latest
+          - macos-14
           - macos-15
+          - macos-26
           - windows-2025-vs2026
         python-version:
           - "3.x"
@@ -86,9 +91,152 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          python -m pip install -e .
+          python -m pip install --no-cache-dir --upgrade pip
+          python -m pip install --no-cache-dir -r requirements.txt
+          python -m pip install --no-cache-dir -e .
+
+      - name: Tkinter fallback smoke test
+        run: python app.py --smoke-test
+
+      - name: Project verification
+        run: python verify.py
+
+  enterprise-linux:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: RHEL 8 UBI / Python 3.12
+            image: registry.access.redhat.com/ubi8/python-312:latest
+            python: python3.12
+            bootstrap: ""
+          - name: RHEL 9 UBI / Python 3.12
+            image: registry.access.redhat.com/ubi9/python-312:latest
+            python: python3.12
+            bootstrap: ""
+          - name: RHEL 10 UBI / Python 3.12 minimal
+            image: registry.access.redhat.com/ubi10/python-312-minimal:latest
+            python: python3.12
+            bootstrap: ""
+          - name: RHEL 7 ABI / manylinux2014 Python 3.10
+            image: quay.io/pypa/manylinux2014_x86_64:latest
+            python: /opt/python/cp310-cp310/bin/python
+            bootstrap: ""
+          - name: Rocky Linux 8 / Python 3.12
+            image: rockylinux/rockylinux:8
+            python: python3.12
+            bootstrap: dnf -y install python3.12 python3.12-pip
+          - name: Rocky Linux 9 / Python 3.12
+            image: rockylinux/rockylinux:9
+            python: python3.12
+            bootstrap: dnf -y install python3.12 python3.12-pip
+          - name: Rocky Linux 10 / Python 3.12
+            image: rockylinux/rockylinux:10
+            python: python3.12
+            bootstrap: dnf -y install python3.12 python3.12-pip
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Verify in Enterprise Linux container
+        shell: bash
+        env:
+          BOOTSTRAP_COMMAND: ${{ matrix.bootstrap }}
+          CONTAINER_IMAGE: ${{ matrix.image }}
+          CONTAINER_NAME: ${{ matrix.name }}
+          PYTHON_COMMAND: ${{ matrix.python }}
+        run: |
+          docker run --rm \
+            --user 0 \
+            -e CI_BOOTSTRAP_COMMAND="$BOOTSTRAP_COMMAND" \
+            -e CI_CONTAINER_NAME="$CONTAINER_NAME" \
+            -e CI_PYTHON_COMMAND="$PYTHON_COMMAND" \
+            -e PIP_DISABLE_PIP_VERSION_CHECK=1 \
+            -e PIP_NO_CACHE_DIR=1 \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            "$CONTAINER_IMAGE" \
+            sh -lc '
+              set -eu
+              if [ -n "${CI_BOOTSTRAP_COMMAND:-}" ]; then
+                sh -lc "$CI_BOOTSTRAP_COMMAND"
+              fi
+
+              PYTHON="${CI_PYTHON_COMMAND:-python3}"
+              if [ -x "$PYTHON" ]; then
+                PYTHON_BIN="$PYTHON"
+              elif command -v "$PYTHON" >/dev/null 2>&1; then
+                PYTHON_BIN="$PYTHON"
+              elif command -v python3.12 >/dev/null 2>&1; then
+                PYTHON_BIN=python3.12
+              elif command -v python3 >/dev/null 2>&1; then
+                PYTHON_BIN=python3
+              else
+                PYTHON_BIN=python
+              fi
+
+              "$PYTHON_BIN" --version
+              if "$PYTHON_BIN" -m venv /tmp/marketsentinel-enterprise-venv; then
+                . /tmp/marketsentinel-enterprise-venv/bin/activate
+                PYTHON_BIN=python
+              fi
+              "$PYTHON_BIN" -m pip install --no-cache-dir --upgrade pip
+              "$PYTHON_BIN" -m pip install --no-cache-dir -r requirements.txt
+              "$PYTHON_BIN" -m pip install --no-cache-dir .
+              "$PYTHON_BIN" scripts/ci_enterprise_linux_smoke.py --label "$CI_CONTAINER_NAME"
+            '
+
+  windows-11:
+    name: Windows 11 ARM / Python 3.12
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --no-cache-dir --upgrade pip
+          python -m pip install --no-cache-dir -r requirements.txt
+          python -m pip install --no-cache-dir -e .
+
+      - name: Tkinter fallback smoke test
+        run: python app.py --smoke-test
+
+      - name: Project verification
+        run: python verify.py
+
+  windows-10-self-hosted:
+    name: Windows 10 self-hosted / Python 3.12
+    if: ${{ vars.ENABLE_WINDOWS_10_SELF_HOSTED == 'true' }}
+    runs-on:
+      - self-hosted
+      - windows
+      - x64
+      - windows-10
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --no-cache-dir --upgrade pip
+          python -m pip install --no-cache-dir -r requirements.txt
+          python -m pip install --no-cache-dir -e .
 
       - name: Tkinter fallback smoke test
         run: python app.py --smoke-test
@@ -132,6 +280,47 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  mobile-web:
+    name: Mobile web smoke / ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs:
+      - frontend
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - android-14
+          - android-15
+          - android-16
+          - ios-15
+          - ios-16
+          - ios-18
+          - ios-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Download built frontend
+        uses: actions/download-artifact@v8
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --no-cache-dir --upgrade pip
+          python -m pip install --no-cache-dir -r requirements.txt
+          python -m pip install --no-cache-dir -e .
+
+      - name: Mobile web smoke
+        run: python scripts/verify_mobile_web_smoke.py --target "${{ matrix.target }}"
+
   package:
     name: Python package build
     runs-on: ubuntu-latest
@@ -139,7 +328,10 @@ jobs:
     needs:
       - python
       - future-python
+      - enterprise-linux
+      - windows-11
       - frontend
+      - mobile-web
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -151,8 +343,8 @@ jobs:
 
       - name: Build Python distribution
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install build
+          python -m pip install --no-cache-dir --upgrade pip
+          python -m pip install --no-cache-dir build
           python -m build
 
       - name: Upload Python distributions

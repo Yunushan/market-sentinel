@@ -1,0 +1,375 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any, Dict, Iterable
+from urllib.request import urlopen
+
+import websocket
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.verify_live_validation_report_smoke import (  # noqa: E402
+    BrowserStartupError,
+    close_browser_debug_endpoint,
+    find_browser,
+    start_server,
+)
+from web_api import ReactGuiServer  # noqa: E402
+
+
+DEFAULT_FRONTEND_DIR = ROOT / "frontend" / "dist"
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_RENDER_TIMEOUT_SECONDS = 60
+
+REQUIRED_TEXT = (
+    "MarketSentinel",
+    "Markets",
+    "Live Safety",
+    "Polymarket Analytics",
+    "Wallets",
+    "Paper Trading",
+)
+
+MOBILE_TARGETS: Dict[str, Dict[str, Any]] = {
+    "android-14": {
+        "platform": "Android",
+        "os_version": "14",
+        "api_level": 34,
+        "width": 412,
+        "height": 915,
+        "device_scale_factor": 2.625,
+        "user_agent": (
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
+        ),
+    },
+    "android-15": {
+        "platform": "Android",
+        "os_version": "15",
+        "api_level": 35,
+        "width": 412,
+        "height": 915,
+        "device_scale_factor": 2.625,
+        "user_agent": (
+            "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+        ),
+    },
+    "android-16": {
+        "platform": "Android",
+        "os_version": "16",
+        "api_level": 36,
+        "width": 412,
+        "height": 915,
+        "device_scale_factor": 2.625,
+        "user_agent": (
+            "Mozilla/5.0 (Linux; Android 16; Pixel 10) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36"
+        ),
+    },
+    "ios-15": {
+        "platform": "iOS",
+        "os_version": "15",
+        "width": 390,
+        "height": 844,
+        "device_scale_factor": 3,
+        "user_agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1"
+        ),
+    },
+    "ios-16": {
+        "platform": "iOS",
+        "os_version": "16",
+        "width": 390,
+        "height": 844,
+        "device_scale_factor": 3,
+        "user_agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
+        ),
+    },
+    "ios-18": {
+        "platform": "iOS",
+        "os_version": "18",
+        "width": 393,
+        "height": 852,
+        "device_scale_factor": 3,
+        "user_agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+        ),
+    },
+    "ios-26": {
+        "platform": "iOS",
+        "os_version": "26",
+        "width": 393,
+        "height": 852,
+        "device_scale_factor": 3,
+        "user_agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1"
+        ),
+    },
+}
+
+
+def _target_names(target_arg: str) -> Iterable[str]:
+    if target_arg == "all":
+        return MOBILE_TARGETS.keys()
+    names = [item.strip() for item in target_arg.split(",") if item.strip()]
+    unknown = [item for item in names if item not in MOBILE_TARGETS]
+    if unknown:
+        raise SystemExit("Unknown mobile smoke target(s): " + ", ".join(unknown))
+    return names
+
+
+def _browser_mobile_check_once(
+    browser_path: str,
+    url: str,
+    profile_dir: Path,
+    target_name: str,
+    target: Dict[str, Any],
+    *,
+    headless_arg: str,
+    timeout_seconds: int,
+) -> Dict[str, Any]:
+    width = int(target["width"])
+    height = int(target["height"])
+    command = [
+        browser_path,
+        headless_arg,
+        "--disable-background-networking",
+        "--disable-component-extensions-with-background-pages",
+        "--disable-default-apps",
+        "--disable-extensions",
+        "--disable-gpu",
+        "--disable-sync",
+        "--no-default-browser-check",
+        "--no-first-run",
+        "--remote-debugging-port=0",
+        "--remote-allow-origins=*",
+        f"--window-size={width},{height}",
+        f"--user-agent={target['user_agent']}",
+        f"--user-data-dir={profile_dir}",
+        url,
+    ]
+    import subprocess
+
+    process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    browser_port: int | None = None
+    browser_ws_path = ""
+    try:
+        deadline = time.monotonic() + max(5, int(timeout_seconds))
+        port_file = profile_dir / "DevToolsActivePort"
+        while time.monotonic() < deadline and not port_file.exists():
+            time.sleep(0.1)
+        if not port_file.exists():
+            exit_code = process.poll()
+            if exit_code is None:
+                raise BrowserStartupError(f"{target_name} {headless_arg} did not expose a debugging port.")
+            raise BrowserStartupError(f"{target_name} {headless_arg} exited before exposing DevTools with code {exit_code}.")
+
+        port_lines = port_file.read_text(encoding="utf-8").splitlines()
+        port = int(port_lines[0])
+        browser_port = port
+        browser_ws_path = port_lines[1] if len(port_lines) > 1 else ""
+        page_ws_url = ""
+        while time.monotonic() < deadline and not page_ws_url:
+            try:
+                with urlopen(f"http://127.0.0.1:{port}/json/list", timeout=2) as response:
+                    tabs = json.loads(response.read().decode("utf-8"))
+            except Exception:
+                tabs = []
+            for item in tabs:
+                if (
+                    isinstance(item, dict)
+                    and item.get("type") == "page"
+                    and item.get("webSocketDebuggerUrl")
+                    and str(item.get("url") or "").startswith(url)
+                ):
+                    page_ws_url = str(item["webSocketDebuggerUrl"])
+                    break
+            if not page_ws_url:
+                time.sleep(0.1)
+        if not page_ws_url:
+            raise BrowserStartupError(f"{target_name} {headless_arg} did not expose a page debugging target.")
+
+        ws = websocket.create_connection(page_ws_url, timeout=5)
+        try:
+            command_id = 0
+
+            def cdp(method: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+                nonlocal command_id
+                command_id += 1
+                ws.send(json.dumps({"id": command_id, "method": method, "params": params or {}}))
+                while True:
+                    message = json.loads(ws.recv())
+                    if message.get("id") == command_id:
+                        return message
+
+            cdp("Page.enable")
+            cdp("Runtime.enable")
+            cdp(
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": width,
+                    "height": height,
+                    "deviceScaleFactor": float(target["device_scale_factor"]),
+                    "mobile": True,
+                },
+            )
+            cdp("Emulation.setUserAgentOverride", {"userAgent": target["user_agent"], "platform": target["platform"]})
+            cdp("Page.reload", {"ignoreCache": True})
+
+            expression = f"""
+(() => {{
+  const required = {json.dumps(list(REQUIRED_TEXT))};
+  const html = document.documentElement ? document.documentElement.outerHTML : "";
+  const text = document.body ? document.body.innerText : "";
+  const haystack = html + "\\n" + text;
+  const body = document.body;
+  const root = document.documentElement;
+  const scrollWidth = Math.max(body ? body.scrollWidth : 0, root ? root.scrollWidth : 0);
+  const clientWidth = root ? root.clientWidth : window.innerWidth;
+  return {{
+    title: document.title,
+    url: location.href,
+    userAgent: navigator.userAgent,
+    width: window.innerWidth,
+    height: window.innerHeight,
+    devicePixelRatio: window.devicePixelRatio,
+    textLength: text.length,
+    missing: required.filter((fragment) => !haystack.includes(fragment)),
+    horizontalOverflow: scrollWidth > clientWidth + 2,
+    scrollWidth,
+    clientWidth,
+    textSnippet: text.slice(0, 500)
+  }};
+}})()
+"""
+            last_value: Dict[str, Any] = {}
+            while time.monotonic() < deadline:
+                response = cdp("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+                value = response.get("result", {}).get("result", {}).get("value")
+                if isinstance(value, dict):
+                    last_value = value
+                    if not value.get("missing") and not value.get("horizontalOverflow"):
+                        return value
+                time.sleep(0.25)
+            detail = json.dumps(last_value, sort_keys=True) if last_value else "{}"
+            raise SystemExit(f"{target_name} mobile smoke failed: {detail}")
+        finally:
+            try:
+                ws.close()
+            except Exception:
+                pass
+    finally:
+        close_browser_debug_endpoint(browser_port, browser_ws_path)
+        if process.poll() is None:
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+
+
+def browser_mobile_check(
+    browser_path: str,
+    url: str,
+    profile_dir: Path,
+    target_name: str,
+    target: Dict[str, Any],
+    *,
+    timeout_seconds: int,
+) -> Dict[str, Any]:
+    errors = []
+    for headless_arg, suffix in (("--headless=new", ""), ("--headless", "-legacy")):
+        attempt_profile_dir = profile_dir if not suffix else profile_dir.with_name(f"{profile_dir.name}{suffix}")
+        try:
+            return _browser_mobile_check_once(
+                browser_path,
+                url,
+                attempt_profile_dir,
+                target_name,
+                target,
+                headless_arg=headless_arg,
+                timeout_seconds=timeout_seconds,
+            )
+        except BrowserStartupError as exc:
+            errors.append(str(exc))
+    raise SystemExit("Headless browser failed to start for mobile smoke: " + " ".join(errors))
+
+
+def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
+    frontend_dir = args.frontend_dir.resolve()
+    if not (frontend_dir / "index.html").exists():
+        raise SystemExit(f"React build is missing at {frontend_dir}; run npm run build or python verify.py --frontend-build first.")
+
+    browser_path = find_browser(args.browser_path)
+    results: Dict[str, Any] = {}
+    with tempfile.TemporaryDirectory(prefix="marketsentinel-mobile-smoke-", ignore_cleanup_errors=True) as tmpdir:
+        temp_root = Path(tmpdir)
+        config_path = temp_root / "config.json"
+        server: ReactGuiServer | None = None
+        thread = None
+        try:
+            server, thread, base_url = start_server(args.host, args.port, config_path, frontend_dir)
+            for target_name in _target_names(args.target):
+                target = MOBILE_TARGETS[target_name]
+                results[target_name] = {
+                    "target": target,
+                    "dom_check": browser_mobile_check(
+                        browser_path,
+                        f"{base_url}/",
+                        temp_root / f"{target_name}-profile",
+                        target_name,
+                        target,
+                        timeout_seconds=args.render_timeout_seconds,
+                    ),
+                }
+        finally:
+            if server is not None:
+                server.shutdown()
+                server.server_close()
+            if thread is not None:
+                thread.join(timeout=5)
+
+    return {"ok": True, "browser": browser_path, "targets": results}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Smoke-test the built React UI with mobile browser emulation.")
+    parser.add_argument("--host", default=DEFAULT_HOST)
+    parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--frontend-dir", type=Path, default=DEFAULT_FRONTEND_DIR)
+    parser.add_argument("--browser-path", default="")
+    parser.add_argument("--target", default="all", help="Target name, comma-separated targets, or all.")
+    parser.add_argument("--render-timeout-seconds", type=int, default=DEFAULT_RENDER_TIMEOUT_SECONDS)
+    parser.add_argument("--json", action="store_true", help="Print the smoke payload as JSON.")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    result = run_smoke(args)
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print("[ok] Mobile web smoke (" + ", ".join(result["targets"].keys()) + ")")
+
+
+if __name__ == "__main__":
+    main()
