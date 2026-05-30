@@ -178,6 +178,8 @@ def _browser_dom_check_once(
         "--disable-default-apps",
         "--disable-extensions",
         "--disable-gpu",
+        "--disable-dev-shm-usage",
+        "--no-sandbox",
         "--disable-sync",
         "--no-default-browser-check",
         "--no-first-run",

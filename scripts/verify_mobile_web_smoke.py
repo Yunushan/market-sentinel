@@ -32,10 +32,11 @@ DEFAULT_RENDER_TIMEOUT_SECONDS = 60
 REQUIRED_TEXT = (
     "MarketSentinel",
     "Markets",
+    "Analytics",
     "Live Safety",
-    "Polymarket Analytics",
     "Wallets",
-    "Paper Trading",
+    "Paper",
+    "Settings",
 )
 
 MOBILE_TARGETS: Dict[str, Dict[str, Any]] = {
@@ -152,6 +153,8 @@ def _browser_mobile_check_once(
         "--disable-default-apps",
         "--disable-extensions",
         "--disable-gpu",
+        "--disable-dev-shm-usage",
+        "--no-sandbox",
         "--disable-sync",
         "--no-default-browser-check",
         "--no-first-run",
@@ -160,7 +163,7 @@ def _browser_mobile_check_once(
         f"--window-size={width},{height}",
         f"--user-agent={target['user_agent']}",
         f"--user-data-dir={profile_dir}",
-        url,
+        "about:blank",
     ]
     import subprocess
 
@@ -190,12 +193,7 @@ def _browser_mobile_check_once(
             except Exception:
                 tabs = []
             for item in tabs:
-                if (
-                    isinstance(item, dict)
-                    and item.get("type") == "page"
-                    and item.get("webSocketDebuggerUrl")
-                    and str(item.get("url") or "").startswith(url)
-                ):
+                if isinstance(item, dict) and item.get("type") == "page" and item.get("webSocketDebuggerUrl"):
                     page_ws_url = str(item["webSocketDebuggerUrl"])
                     break
             if not page_ws_url:
@@ -228,7 +226,7 @@ def _browser_mobile_check_once(
                 },
             )
             cdp("Emulation.setUserAgentOverride", {"userAgent": target["user_agent"], "platform": target["platform"]})
-            cdp("Page.reload", {"ignoreCache": True})
+            cdp("Page.navigate", {"url": url})
 
             expression = f"""
 (() => {{
@@ -243,6 +241,7 @@ def _browser_mobile_check_once(
   return {{
     title: document.title,
     url: location.href,
+    htmlLength: html.length,
     userAgent: navigator.userAgent,
     width: window.innerWidth,
     height: window.innerHeight,
@@ -257,6 +256,8 @@ def _browser_mobile_check_once(
 }})()
 """
             last_value: Dict[str, Any] = {}
+            reload_attempts = 0
+            next_reload_at = time.monotonic() + 5
             while time.monotonic() < deadline:
                 response = cdp("Runtime.evaluate", {"expression": expression, "returnByValue": True})
                 value = response.get("result", {}).get("result", {}).get("value")
@@ -264,6 +265,15 @@ def _browser_mobile_check_once(
                     last_value = value
                     if not value.get("missing") and not value.get("horizontalOverflow"):
                         return value
+                    if (
+                        reload_attempts < 2
+                        and time.monotonic() >= next_reload_at
+                        and int(value.get("htmlLength") or 0) < 1000
+                        and int(value.get("textLength") or 0) == 0
+                    ):
+                        reload_attempts += 1
+                        next_reload_at = time.monotonic() + 10
+                        cdp("Page.navigate", {"url": url})
                 time.sleep(0.25)
             detail = json.dumps(last_value, sort_keys=True) if last_value else "{}"
             raise SystemExit(f"{target_name} mobile smoke failed: {detail}")

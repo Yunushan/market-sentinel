@@ -20,7 +20,7 @@ PLATFORMS: Dict[str, Dict[str, Any]] = {
         "label": "Windows 11",
         "required_for_full_claim": True,
         "fully_tested": True,
-        "evidence": ["windows-11-arm CI", "Tkinter smoke", "python verify.py"],
+        "evidence": ["windows-11-arm CI", "Python 3.12 x64 dependency wheels", "Tkinter smoke", "python verify.py"],
     },
     "windows_10": {
         "label": "Windows 10",
