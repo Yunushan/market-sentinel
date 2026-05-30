@@ -43,7 +43,8 @@ A local multi-market prediction-market command center for:
 - Optional audit caching stores bounded per-wallet MDD artifacts locally, reports retention/health metadata, supports targeted purge controls, and exposes JSON/CSV export links without rerunning expensive public API calls
 - Leaderboard and MDD payloads report Polymarket rate-limit/backoff metadata instead of hiding upstream 429 failures as generic errors
 - MDD payloads include assumptions and limitations because the public Data API does not expose a complete deposit/withdrawal ledger or historical unrealized mark replay
-- The React Analytics tab exposes user search, direct wallet MDD lookup/export, cached audit details, cache management, leaderboard sorting, and filters through the local Python API
+- The desktop Polymarket Analytics tab embeds top-ROI leaderboard search, returned/scanned row controls up to 1,000,000, optional MDD filters, result metrics, table review, and CSV export without opening the web UI
+- The React Analytics tab also exposes user search, direct wallet MDD lookup/export, cached audit details, cache management, leaderboard sorting, and filters through the local Python API
 
 ### Polymarket official API coverage
 - Official Polymarket docs checked on 2026-05-28: Gamma, Data, CLOB, Bridge, Relayer, and WebSocket surfaces are represented by local wrapper modules

@@ -4,6 +4,7 @@ import json
 import os
 import queue
 import re
+import csv
 import sys
 import threading
 import time
@@ -15,7 +16,7 @@ from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Tuple
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 from dotenv import load_dotenv
 
@@ -324,8 +325,8 @@ class App(tk.Tk):
         set_windows_app_id(APP_ID)
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("1180x780")
-        self.minsize(1050, 700)
+        self.geometry("1320x860")
+        self.minsize(1180, 760)
         self._icon_images: List[tk.PhotoImage] = []
         self._load_icon_image()
         self._apply_window_icon(self)
@@ -343,6 +344,8 @@ class App(tk.Tk):
         self._palette = self._palette_for(self.cfg.theme, self.cfg.ui_design)
         self._requirements = self._load_requirements()
         self._dep_check_running = False
+        self._leaderboard_loading = False
+        self._last_leaderboard_payload: Optional[Dict[str, Any]] = None
 
         # price state by token_id
         self.price_state: Dict[str, Dict[str, Optional[float]]] = {}
@@ -604,6 +607,7 @@ class App(tk.Tk):
         self.tab_paper = ttk.Frame(nb)
         self.tab_safety = ttk.Frame(nb)
         self.tab_wallets = ttk.Frame(nb)
+        self.tab_analytics = ttk.Frame(nb)
         self.tab_copy = ttk.Frame(nb)
         self.tab_logs = ttk.Frame(nb)
         self.tab_about = ttk.Frame(nb)
@@ -612,6 +616,7 @@ class App(tk.Tk):
         nb.add(self.tab_paper, text="Paper Trading")
         nb.add(self.tab_safety, text="Market Safety")
         nb.add(self.tab_wallets, text="Wallet Tracker")
+        nb.add(self.tab_analytics, text="Polymarket Analytics")
         nb.add(self.tab_copy, text="Copy Trading")
         nb.add(self.tab_logs, text="Logs")
         nb.add(self.tab_about, text="About")
@@ -620,6 +625,7 @@ class App(tk.Tk):
         self._build_paper_tab()
         self._build_market_safety_tab()
         self._build_wallets_tab()
+        self._build_analytics_tab()
         self._build_copy_tab()
         self._build_logs_tab()
         self._build_about_tab()
@@ -878,19 +884,36 @@ class App(tk.Tk):
 
         self.style.configure(".", background=bg, foreground=fg, font=(font_family, font_size))
         self.style.configure("TFrame", background=bg)
+        self.style.configure("Page.TFrame", background=bg)
         self.style.configure("CommandBar.TFrame", background=surface, borderwidth=1, relief="solid")
+        self.style.configure("Hero.TFrame", background=surface, borderwidth=1, relief="solid")
+        self.style.configure("Card.TFrame", background=surface, borderwidth=1, relief="solid")
+        self.style.configure("PanelBody.TFrame", background=surface)
+        self.style.configure("MetricCard.TFrame", background=surface_alt, borderwidth=1, relief="solid")
         self.style.configure("TLabel", background=bg, foreground=fg)
         self.style.configure("AppTitle.TLabel", background=surface, foreground=heading, font=(font_family, title_size, "bold"))
         self.style.configure("AppSubtitle.TLabel", background=surface, foreground=muted, font=(font_family, font_size))
+        self.style.configure("HeroTitle.TLabel", background=surface, foreground=heading, font=(font_family, title_size + 3, "bold"))
+        self.style.configure("HeroSubtitle.TLabel", background=surface, foreground=muted, font=(font_family, font_size + 1))
+        self.style.configure("SectionTitle.TLabel", background=surface, foreground=heading, font=(font_family, font_size + 2, "bold"))
+        self.style.configure("Muted.TLabel", background=surface, foreground=muted, font=(font_family, font_size))
+        self.style.configure("MetricLabel.TLabel", background=surface_alt, foreground=muted, font=(font_family, font_size))
+        self.style.configure("MetricValue.TLabel", background=surface_alt, foreground=heading, font=(font_family, title_size + 1, "bold"))
         self.style.configure("Status.TLabel", background=bg, foreground=muted, font=(font_family, font_size))
         self.style.configure("TLabelframe", background=bg, foreground=fg, bordercolor=border)
         self.style.configure("TLabelframe.Label", background=bg, foreground=heading, font=(font_family, font_size, "bold"))
 
         self.style.configure("TButton", background=button_bg, foreground=button_fg, bordercolor=border, padding=button_padding)
+        self.style.configure("Accent.TButton", background=accent, foreground=select_fg, bordercolor=accent, padding=button_padding)
         self.style.map(
             "TButton",
             background=[("active", accent_hover), ("pressed", accent)],
             foreground=[("active", button_fg), ("pressed", button_fg)],
+        )
+        self.style.map(
+            "Accent.TButton",
+            background=[("active", accent_hover), ("pressed", accent_hover), ("disabled", button_bg)],
+            foreground=[("active", select_fg), ("pressed", select_fg), ("disabled", muted)],
         )
 
         self.style.configure("TEntry", fieldbackground=field_bg, foreground=field_fg, background=bg, bordercolor=border)
@@ -907,6 +930,8 @@ class App(tk.Tk):
 
         self.style.configure("TCheckbutton", background=bg, foreground=fg)
         self.style.map("TCheckbutton", background=[("active", bg)], foreground=[("disabled", muted)])
+        self.style.configure("Card.TCheckbutton", background=surface, foreground=fg)
+        self.style.map("Card.TCheckbutton", background=[("active", surface)], foreground=[("disabled", muted)])
 
         self.style.configure("TNotebook", background=bg, bordercolor=border)
         self.style.configure("TNotebook.Tab", background=tab_bg, foreground=fg, padding=tab_padding)
@@ -1547,6 +1572,340 @@ class App(tk.Tk):
         self.activity_list.pack(fill="both", expand=True)
 
         self._refresh_wallet_table()
+
+    def _build_analytics_tab(self):
+        frm = self.tab_analytics
+        frm.configure(style="Page.TFrame")
+        frm.columnconfigure(0, weight=1)
+        frm.rowconfigure(2, weight=1)
+
+        hero = ttk.Frame(frm, style="Hero.TFrame", padding=(18, 16))
+        hero.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 8))
+        hero.columnconfigure(0, weight=1)
+        ttk.Label(hero, text="Polymarket trader analytics", style="HeroTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            hero,
+            text="Rank public leaderboard users by computed ROI %, PnL, volume, or drawdown without opening the web UI.",
+            style="HeroSubtitle.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+        metric_bar = ttk.Frame(hero, style="Hero.TFrame")
+        metric_bar.grid(row=0, column=1, rowspan=2, sticky="e", padx=(18, 0))
+        self.lb_returned_metric_var = tk.StringVar(value="0")
+        self.lb_scanned_metric_var = tk.StringVar(value="0")
+        self.lb_best_roi_metric_var = tk.StringVar(value="-")
+        self.lb_mdd_metric_var = tk.StringVar(value="0")
+        metrics = (
+            ("Returned", self.lb_returned_metric_var),
+            ("Scanned", self.lb_scanned_metric_var),
+            ("Best ROI", self.lb_best_roi_metric_var),
+            ("MDD runs", self.lb_mdd_metric_var),
+        )
+        for idx, (label, var) in enumerate(metrics):
+            card = ttk.Frame(metric_bar, style="MetricCard.TFrame", padding=(14, 10))
+            card.grid(row=0, column=idx, sticky="nsew", padx=(0 if idx == 0 else 8, 0))
+            ttk.Label(card, text=label, style="MetricLabel.TLabel").pack(anchor="w")
+            ttk.Label(card, textvariable=var, style="MetricValue.TLabel").pack(anchor="w", pady=(2, 0))
+
+        controls = ttk.Frame(frm, style="Card.TFrame", padding=(14, 12))
+        controls.grid(row=1, column=0, sticky="ew", padx=14, pady=8)
+        for col in range(10):
+            controls.columnconfigure(col, weight=1)
+
+        self.lb_sort_var = tk.StringVar(value="ROI %")
+        self.lb_direction_var = tk.StringVar(value="High to low")
+        self.lb_limit_var = tk.StringVar(value="1000")
+        self.lb_scan_limit_var = tk.StringVar(value="1000")
+        self.lb_period_var = tk.StringVar(value="All")
+        self.lb_category_var = tk.StringVar(value="OVERALL")
+        self.lb_compute_mdd_var = tk.BooleanVar(value=False)
+        self.lb_mdd_mode_var = tk.StringVar(value="Fast public curve")
+        self.lb_mdd_scan_limit_var = tk.StringVar(value="100")
+        self.lb_min_roi_var = tk.StringVar(value="")
+        self.lb_max_roi_var = tk.StringVar(value="")
+        self.lb_min_mdd_pct_var = tk.StringVar(value="")
+        self.lb_max_mdd_pct_var = tk.StringVar(value="")
+
+        fields = (
+            ("Sort", self.lb_sort_var, ["ROI %", "PnL USD", "Volume USD", "MDD %", "MDD USD"], 0, 0, 14),
+            ("Direction", self.lb_direction_var, ["High to low", "Low to high"], 0, 1, 12),
+            ("Period", self.lb_period_var, ["All", "Day", "Week", "Month"], 0, 2, 10),
+            ("Category", self.lb_category_var, ["OVERALL", "POLITICS", "SPORTS", "CRYPTO", "CULTURE", "WEATHER", "ECONOMICS", "TECH", "FINANCE"], 0, 3, 14),
+            ("MDD mode", self.lb_mdd_mode_var, ["Fast public curve", "CLOB mark replay"], 1, 3, 16),
+        )
+        for label, var, values, row, col, width in fields:
+            cell = ttk.Frame(controls, style="PanelBody.TFrame")
+            cell.grid(row=row, column=col, sticky="ew", padx=5, pady=4)
+            ttk.Label(cell, text=label, style="Muted.TLabel").pack(anchor="w")
+            ttk.Combobox(cell, textvariable=var, values=values, state="readonly", width=width).pack(fill="x")
+
+        numeric_fields = (
+            ("Returned", self.lb_limit_var, "1", "1000000", 0, 4),
+            ("Scanned", self.lb_scan_limit_var, "1", "1000000", 0, 5),
+            ("MDD scan", self.lb_mdd_scan_limit_var, "1", "1000000", 1, 4),
+            ("Min ROI %", self.lb_min_roi_var, None, None, 1, 0),
+            ("Max ROI %", self.lb_max_roi_var, None, None, 1, 1),
+            ("Min MDD %", self.lb_min_mdd_pct_var, None, None, 1, 2),
+            ("Max MDD %", self.lb_max_mdd_pct_var, None, None, 1, 5),
+        )
+        for label, var, min_value, max_value, row, col in numeric_fields:
+            cell = ttk.Frame(controls, style="PanelBody.TFrame")
+            cell.grid(row=row, column=col, sticky="ew", padx=5, pady=4)
+            ttk.Label(cell, text=label, style="Muted.TLabel").pack(anchor="w")
+            entry_kwargs = {"textvariable": var, "width": 12}
+            if min_value is not None and max_value is not None:
+                entry_kwargs.update({"inputMode": "numeric"})
+            entry = ttk.Entry(cell, **{k: v for k, v in entry_kwargs.items() if k != "inputMode"})
+            entry.pack(fill="x")
+
+        checks = ttk.Frame(controls, style="PanelBody.TFrame")
+        checks.grid(row=0, column=6, rowspan=2, sticky="nsew", padx=(10, 5), pady=4)
+        ttk.Checkbutton(
+            checks,
+            text="Compute MDD",
+            variable=self.lb_compute_mdd_var,
+            style="Card.TCheckbutton",
+        ).pack(anchor="w", pady=(18, 4))
+
+        actions = ttk.Frame(controls, style="PanelBody.TFrame")
+        actions.grid(row=0, column=7, columnspan=3, rowspan=2, sticky="nsew", padx=(10, 0), pady=4)
+        ttk.Label(actions, text="Search", style="Muted.TLabel").pack(anchor="w")
+        self.lb_load_btn = ttk.Button(
+            actions,
+            text="Load Top ROI",
+            style="Accent.TButton",
+            command=self.load_polymarket_leaderboard,
+        )
+        self.lb_load_btn.pack(fill="x", pady=(3, 6))
+        ttk.Button(actions, text="Export CSV", command=self.export_polymarket_leaderboard).pack(fill="x")
+
+        table_card = ttk.Frame(frm, style="Card.TFrame", padding=(12, 12))
+        table_card.grid(row=2, column=0, sticky="nsew", padx=14, pady=(8, 14))
+        table_card.rowconfigure(1, weight=1)
+        table_card.columnconfigure(0, weight=1)
+        ttk.Label(table_card, text="Leaderboard results", style="SectionTitle.TLabel").grid(row=0, column=0, sticky="w")
+
+        table_wrap = ttk.Frame(table_card, style="PanelBody.TFrame")
+        table_wrap.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+        table_wrap.rowconfigure(0, weight=1)
+        table_wrap.columnconfigure(0, weight=1)
+
+        cols = ("rank", "user", "wallet", "pnl", "volume", "roi", "trades", "mdd_usd", "mdd_pct", "source")
+        self.leaderboard_tree = ttk.Treeview(table_wrap, columns=cols, show="headings", height=16)
+        headings = {
+            "rank": "Rank",
+            "user": "User",
+            "wallet": "Wallet",
+            "pnl": "PnL",
+            "volume": "Volume",
+            "roi": "ROI %",
+            "trades": "Trades",
+            "mdd_usd": "MDD USD",
+            "mdd_pct": "MDD %",
+            "source": "MDD source",
+        }
+        widths = {
+            "rank": 70,
+            "user": 190,
+            "wallet": 250,
+            "pnl": 110,
+            "volume": 120,
+            "roi": 90,
+            "trades": 80,
+            "mdd_usd": 110,
+            "mdd_pct": 90,
+            "source": 140,
+        }
+        for col in cols:
+            self.leaderboard_tree.heading(col, text=headings[col])
+            anchor = "e" if col in {"rank", "pnl", "volume", "roi", "trades", "mdd_usd", "mdd_pct"} else "w"
+            self.leaderboard_tree.column(col, width=widths[col], minwidth=60, anchor=anchor, stretch=col in {"user", "wallet", "source"})
+        yscroll = ttk.Scrollbar(table_wrap, orient="vertical", command=self.leaderboard_tree.yview)
+        xscroll = ttk.Scrollbar(table_wrap, orient="horizontal", command=self.leaderboard_tree.xview)
+        self.leaderboard_tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        self.leaderboard_tree.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+
+        self.lb_status_var = tk.StringVar(value="Ready. Set Returned/Scanned and load Polymarket ROI rankings.")
+        ttk.Label(table_card, textvariable=self.lb_status_var, style="Muted.TLabel", wraplength=1160).grid(row=2, column=0, sticky="ew", pady=(10, 0))
+
+    @staticmethod
+    def _leaderboard_sort_value(label: str) -> str:
+        normalized = str(label or "").strip().lower()
+        return {
+            "roi %": "roi_pct",
+            "pnl usd": "pnl_usd",
+            "volume usd": "volume_usd",
+            "mdd %": "mdd_pct",
+            "mdd usd": "mdd_usd",
+        }.get(normalized, "roi_pct")
+
+    @staticmethod
+    def _leaderboard_direction_value(label: str) -> str:
+        return "ASC" if str(label or "").strip().lower().startswith("low") else "DESC"
+
+    @staticmethod
+    def _leaderboard_mdd_mode_value(label: str) -> str:
+        return "mark_replay" if "replay" in str(label or "").strip().lower() else "fast"
+
+    @staticmethod
+    def _format_table_number(value: Any, *, decimals: int = 2, suffix: str = "") -> str:
+        number = safe_float(value, None)
+        if number is None:
+            return "-"
+        return f"{number:,.{decimals}f}{suffix}"
+
+    @staticmethod
+    def _short_wallet(value: Any) -> str:
+        wallet = str(value or "").strip()
+        if len(wallet) <= 18:
+            return wallet
+        return f"{wallet[:10]}...{wallet[-6:]}"
+
+    def _polymarket_leaderboard_params(self) -> Dict[str, List[str]]:
+        params: Dict[str, List[str]] = {
+            "sort": [App._leaderboard_sort_value(self.lb_sort_var.get())],
+            "direction": [App._leaderboard_direction_value(self.lb_direction_var.get())],
+            "period": [str(self.lb_period_var.get() or "All").strip().upper()],
+            "category": [str(self.lb_category_var.get() or "OVERALL").strip().upper()],
+            "limit": [str(self.lb_limit_var.get() or "1000").strip()],
+            "scan_limit": [str(self.lb_scan_limit_var.get() or "1000").strip()],
+            "compute_mdd": ["true" if bool(self.lb_compute_mdd_var.get()) else "false"],
+            "mdd_mode": [App._leaderboard_mdd_mode_value(self.lb_mdd_mode_var.get())],
+            "mdd_scan_limit": [str(self.lb_mdd_scan_limit_var.get() or "100").strip()],
+        }
+        optional = {
+            "min_roi_pct": self.lb_min_roi_var.get(),
+            "max_roi_pct": self.lb_max_roi_var.get(),
+            "min_mdd_pct": self.lb_min_mdd_pct_var.get(),
+            "max_mdd_pct": self.lb_max_mdd_pct_var.get(),
+        }
+        for key, value in optional.items():
+            text = str(value or "").strip()
+            if text:
+                params[key] = [text]
+        return params
+
+    def load_polymarket_leaderboard(self):
+        if self._leaderboard_loading:
+            return
+        self._leaderboard_loading = True
+        self.lb_load_btn.configure(state="disabled")
+        params = self._polymarket_leaderboard_params()
+        self.lb_status_var.set(
+            f"Scanning Polymarket public leaderboard rows: returned={params['limit'][0]}, scanned={params['scan_limit'][0]}..."
+        )
+        self.status_var.set("Loading Polymarket analytics...")
+        threading.Thread(target=self._load_polymarket_leaderboard_bg, args=(params,), daemon=True).start()
+
+    def _load_polymarket_leaderboard_bg(self, params: Dict[str, List[str]]) -> None:
+        try:
+            from web_api import polymarket_leaderboard_payload
+
+            payload = polymarket_leaderboard_payload(params)
+        except Exception as exc:
+            self.ui_queue.put(("polymarket_leaderboard_error", str(exc), None))
+            return
+        self.ui_queue.put(("polymarket_leaderboard", payload, None))
+
+    def _refresh_polymarket_leaderboard_table(self, payload: Dict[str, Any]) -> None:
+        self._last_leaderboard_payload = payload
+        for iid in self.leaderboard_tree.get_children():
+            self.leaderboard_tree.delete(iid)
+
+        rows = list(payload.get("rows") or [])
+        for index, row in enumerate(rows):
+            mdd_source = "-"
+            if row.get("mdd_available"):
+                mdd_source = str(
+                    row.get("mdd_accounting_status")
+                    or row.get("mdd_mark_replay_status")
+                    or row.get("mdd_method")
+                    or "fast"
+                )
+            self.leaderboard_tree.insert(
+                "",
+                "end",
+                values=(
+                    row.get("rank") or index + 1,
+                    row.get("display_name") or "-",
+                    App._short_wallet(row.get("wallet")),
+                    App._format_table_number(row.get("pnl_usd"), decimals=2),
+                    App._format_table_number(row.get("volume_usd"), decimals=2),
+                    App._format_table_number(row.get("roi_pct"), decimals=2, suffix="%"),
+                    row.get("trade_count") or "-",
+                    App._format_table_number(row.get("mdd_usd"), decimals=2) if row.get("mdd_available") else "-",
+                    App._format_table_number(row.get("mdd_pct"), decimals=2, suffix="%") if row.get("mdd_available") else "-",
+                    mdd_source,
+                ),
+            )
+
+        counts = payload.get("counts") or {}
+        self.lb_returned_metric_var.set(str(counts.get("returned", len(rows))))
+        self.lb_scanned_metric_var.set(str(counts.get("scanned", 0)))
+        self.lb_mdd_metric_var.set(str(counts.get("mdd_computed", 0)))
+        roi_values = [safe_float(row.get("roi_pct"), None) for row in rows]
+        roi_values = [value for value in roi_values if value is not None]
+        self.lb_best_roi_metric_var.set(App._format_table_number(max(roi_values), decimals=2, suffix="%") if roi_values else "-")
+
+        warnings = payload.get("warnings") or []
+        warning_text = f" Warning: {warnings[0]}" if warnings else ""
+        self.lb_status_var.set(
+            f"Loaded {counts.get('returned', len(rows))} rows from {counts.get('scanned', 0)} scanned. "
+            f"Source: {payload.get('source', 'polymarket')}.{warning_text}"
+        )
+        self.status_var.set("Polymarket analytics loaded.")
+        self.log(
+            f"[analytics] loaded {counts.get('returned', len(rows))} rows from {counts.get('scanned', 0)} scanned "
+            f"sort={payload.get('sort')} direction={payload.get('direction')}"
+        )
+
+    def _handle_polymarket_leaderboard_error(self, message: str) -> None:
+        self.lb_status_var.set(f"Polymarket analytics failed: {message}")
+        self.status_var.set("Polymarket analytics failed.")
+        self.log(f"[analytics] leaderboard error: {message}")
+        messagebox.showerror("Polymarket analytics", message)
+
+    def export_polymarket_leaderboard(self):
+        payload = self._last_leaderboard_payload or {}
+        rows = list(payload.get("rows") or [])
+        if not rows:
+            messagebox.showinfo("Polymarket analytics", "Load leaderboard rows before exporting.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export Polymarket leaderboard",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialfile="polymarket-top-roi.csv",
+        )
+        if not path:
+            return
+        fields = [
+            "rank",
+            "display_name",
+            "wallet",
+            "pnl_usd",
+            "volume_usd",
+            "roi_pct",
+            "trade_count",
+            "mdd_usd",
+            "mdd_pct",
+            "mdd_method",
+            "mdd_pct_basis",
+            "mdd_audit_cache_key",
+        ]
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(fh, fieldnames=fields)
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow({field: row.get(field) for field in fields})
+        except Exception as exc:
+            messagebox.showerror("Polymarket analytics", f"Could not export CSV: {exc}")
+            return
+        self.lb_status_var.set(f"Exported {len(rows)} rows to {path}.")
+        self.log(f"[analytics] exported {len(rows)} rows to {path}")
 
     def _build_copy_tab(self):
         frm = self.tab_copy
@@ -3607,6 +3966,16 @@ class App(tk.Tk):
                         self.dep_status_var.set(f"Checked at {ts}.")
                     self.check_versions_btn.configure(state="normal")
                     self._dep_check_running = False
+                elif kind == "polymarket_leaderboard":
+                    self._leaderboard_loading = False
+                    if hasattr(self, "lb_load_btn"):
+                        self.lb_load_btn.configure(state="normal")
+                    self._refresh_polymarket_leaderboard_table(a or {})
+                elif kind == "polymarket_leaderboard_error":
+                    self._leaderboard_loading = False
+                    if hasattr(self, "lb_load_btn"):
+                        self.lb_load_btn.configure(state="normal")
+                    self._handle_polymarket_leaderboard_error(str(a))
                 else:
                     self.log(f"[debug] unknown queue item: {kind}")
         except queue.Empty:
@@ -3651,6 +4020,16 @@ def tkinter_smoke_payload() -> Dict[str, Any]:
         "selected_market_id": cfg.selected_market_id,
         "ui_design": cfg.ui_design,
         "ui_designs": list(UI_DESIGN_LABELS.values()),
+        "desktop_tabs": [
+            "Markets & Alerts",
+            "Paper Trading",
+            "Market Safety",
+            "Wallet Tracker",
+            "Polymarket Analytics",
+            "Copy Trading",
+            "Logs",
+            "About",
+        ],
         "icon_available": (root / "assets" / "marketsentinel.ico").exists() and (root / "marketsentinel.png").exists(),
         "market_count": len(market_ids),
         "choice_count": len(choices),

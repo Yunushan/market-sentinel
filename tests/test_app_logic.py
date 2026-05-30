@@ -78,6 +78,7 @@ class FakeTree:
     def __init__(self) -> None:
         self.rows = {}
         self.selection_ids = ()
+        self.next_id = 0
 
     def get_children(self):
         return list(self.rows)
@@ -86,6 +87,9 @@ class FakeTree:
         self.rows.pop(iid, None)
 
     def insert(self, _parent, _index, iid=None, values=()) -> None:
+        if iid is None:
+            iid = f"row-{self.next_id}"
+            self.next_id += 1
         self.rows[iid] = values
 
     def selection(self):
@@ -183,6 +187,34 @@ class CopyHarness:
 
     def _get_polymarket_adapter(self) -> "FakePolymarketAdapter":
         return self.polymarket_adapter
+
+
+class AnalyticsHarness:
+    def __init__(self) -> None:
+        self.lb_sort_var = FakeVar("ROI %")
+        self.lb_direction_var = FakeVar("High to low")
+        self.lb_limit_var = FakeVar("1000")
+        self.lb_scan_limit_var = FakeVar("1000")
+        self.lb_period_var = FakeVar("All")
+        self.lb_category_var = FakeVar("OVERALL")
+        self.lb_compute_mdd_var = FakeVar(False)
+        self.lb_mdd_mode_var = FakeVar("Fast public curve")
+        self.lb_mdd_scan_limit_var = FakeVar("100")
+        self.lb_min_roi_var = FakeVar("")
+        self.lb_max_roi_var = FakeVar("")
+        self.lb_min_mdd_pct_var = FakeVar("")
+        self.lb_max_mdd_pct_var = FakeVar("")
+        self.leaderboard_tree = FakeTree()
+        self.lb_returned_metric_var = FakeVar()
+        self.lb_scanned_metric_var = FakeVar()
+        self.lb_best_roi_metric_var = FakeVar()
+        self.lb_mdd_metric_var = FakeVar()
+        self.lb_status_var = FakeVar()
+        self.status_var = FakeVar()
+        self.logged = []
+
+    def log(self, message: str) -> None:
+        self.logged.append(message)
 
 
 class FakePolymarketAdapter:
@@ -326,6 +358,52 @@ class AppLogicTests(unittest.TestCase):
 
         self.assertEqual(market_ids, set(MARKET_IDS))
         self.assertIn("Polymarket (polymarket)", choices)
+
+    def test_desktop_polymarket_analytics_builds_top_roi_query(self) -> None:
+        harness = AnalyticsHarness()
+        harness.lb_compute_mdd_var.set(True)
+        harness.lb_max_mdd_pct_var.set("25")
+
+        params = App._polymarket_leaderboard_params(harness)
+
+        self.assertEqual(params["sort"], ["roi_pct"])
+        self.assertEqual(params["direction"], ["DESC"])
+        self.assertEqual(params["limit"], ["1000"])
+        self.assertEqual(params["scan_limit"], ["1000"])
+        self.assertEqual(params["compute_mdd"], ["true"])
+        self.assertEqual(params["max_mdd_pct"], ["25"])
+
+    def test_desktop_polymarket_analytics_refreshes_table_metrics(self) -> None:
+        harness = AnalyticsHarness()
+
+        App._refresh_polymarket_leaderboard_table(
+            harness,
+            {
+                "rows": [
+                    {
+                        "rank": 1,
+                        "display_name": "alpha",
+                        "wallet": WALLET,
+                        "pnl_usd": 20,
+                        "volume_usd": 100,
+                        "roi_pct": 20,
+                        "trade_count": 4,
+                    }
+                ],
+                "counts": {"returned": 1, "scanned": 1000, "mdd_computed": 0},
+                "source": "polymarket_data_api_leaderboard",
+                "sort": "roi_pct",
+                "direction": "DESC",
+            },
+        )
+
+        self.assertEqual(harness.lb_returned_metric_var.get(), "1")
+        self.assertEqual(harness.lb_scanned_metric_var.get(), "1000")
+        self.assertEqual(harness.lb_best_roi_metric_var.get(), "20.00%")
+        self.assertEqual(len(harness.leaderboard_tree.rows), 1)
+        row_values = next(iter(harness.leaderboard_tree.rows.values()))
+        self.assertEqual(row_values[1], "alpha")
+        self.assertIn("0xbbbbbbbb", row_values[2])
 
     def test_market_change_persists_kalshi_selection_without_gui_window(self) -> None:
         harness = MarketSelectionHarness()

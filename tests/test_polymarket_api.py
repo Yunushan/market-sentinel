@@ -245,9 +245,17 @@ class PolymarketApiWrapperTests(unittest.TestCase):
         self.assertEqual(params["limit"], 50)
         self.assertEqual(params["offset"], 0)
         self.assertEqual(params["orderBy"], "PNL")
+        self.assertEqual(params["sortDirection"], "DESC")
         self.assertEqual(params["timePeriod"], "ALL")
         self.assertEqual(params["category"], "OVERALL")
         self.assertEqual(mock_get.call_args.kwargs["timeout"], 5)
+
+    def test_leaderboard_request_allows_deep_scan_offsets(self) -> None:
+        with patch(HTTP_REQUEST, return_value=FakeResponse({"data": []})) as mock_get:
+            data_api.get_leaderboard(offset=50_000)
+
+        params = mock_get.call_args.kwargs["params"]
+        self.assertEqual(params["offset"], 50_000)
 
     def test_closed_positions_request_uses_public_profile_endpoint(self) -> None:
         payload = [{"asset": "token-yes", "realizedPnl": "-12", "timestamp": 10}]
