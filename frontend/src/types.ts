@@ -1,5 +1,5 @@
 export type Theme = "light" | "dark";
-export type UiDesign = "classic" | "aurora_2026" | "graphite_2026";
+export type UiDesign = "classic" | "aurora_2026" | "graphite_2026" | "sentinel_2027";
 
 export interface MarketCapabilities {
   market_discovery: boolean;

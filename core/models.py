@@ -11,7 +11,7 @@ from market_adapters.catalog import MARKET_CATALOG
 PriceSource = Literal["last_trade", "midpoint", "best_bid", "best_ask"]
 Direction = Literal["above", "below"]
 Theme = Literal["light", "dark"]
-UIDesign = Literal["classic", "aurora_2026", "graphite_2026"]
+UIDesign = Literal["classic", "aurora_2026", "graphite_2026", "sentinel_2027"]
 DEFAULT_MARKET_ID = "polymarket"
 DEFAULT_UI_DESIGN: UIDesign = "aurora_2026"
 
@@ -245,7 +245,11 @@ class AppConfig:
         raw_theme = str(d.get("theme") or "").lower()
         theme: Theme = "dark" if raw_theme == "dark" else "light"
         raw_ui_design = str(d.get("ui_design") or DEFAULT_UI_DESIGN).strip().lower().replace("-", "_")
-        ui_design = cast(UIDesign, raw_ui_design) if raw_ui_design in {"classic", "aurora_2026", "graphite_2026"} else DEFAULT_UI_DESIGN
+        ui_design = (
+            cast(UIDesign, raw_ui_design)
+            if raw_ui_design in {"classic", "aurora_2026", "graphite_2026", "sentinel_2027"}
+            else DEFAULT_UI_DESIGN
+        )
         return AppConfig(
             alerts=alerts,
             paper_trades=paper_trades,

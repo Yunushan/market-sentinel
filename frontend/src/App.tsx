@@ -4585,6 +4585,7 @@ function SettingsView({
             <option value="classic">Classic</option>
             <option value="aurora_2026">Aurora 2026</option>
             <option value="graphite_2026">Graphite 2026</option>
+            <option value="sentinel_2027">Sentinel 2027</option>
           </select>
         </label>
         <label>

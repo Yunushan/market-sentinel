@@ -1393,11 +1393,11 @@ class WebApiTests(unittest.TestCase):
     def test_apply_config_patch_validates_selected_market_theme_and_ui_design(self) -> None:
         cfg = AppConfig()
 
-        apply_config_patch(cfg, {"selected_market_id": "kalshi", "theme": "dark", "ui_design": "graphite_2026"})
+        apply_config_patch(cfg, {"selected_market_id": "kalshi", "theme": "dark", "ui_design": "sentinel_2027"})
 
         self.assertEqual(cfg.selected_market_id, "kalshi")
         self.assertEqual(cfg.theme, "dark")
-        self.assertEqual(cfg.ui_design, "graphite_2026")
+        self.assertEqual(cfg.ui_design, "sentinel_2027")
         with self.assertRaises(ValueError):
             apply_config_patch(cfg, {"selected_market_id": "missing"})
         with self.assertRaises(ValueError):

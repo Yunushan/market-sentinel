@@ -27,6 +27,8 @@ class FinalParityTests(unittest.TestCase):
         self.assertTrue(payload["all_markets_configured"])
         self.assertIn("Classic", payload["ui_designs"])
         self.assertIn("Aurora 2026", payload["ui_designs"])
+        self.assertIn("Graphite 2026", payload["ui_designs"])
+        self.assertIn("Sentinel 2027", payload["ui_designs"])
         self.assertIn("Polymarket Analytics", payload["desktop_tabs"])
         self.assertTrue(payload["icon_available"])
 

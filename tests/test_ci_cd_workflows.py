@@ -105,6 +105,8 @@ class CiCdWorkflowTests(unittest.TestCase):
             "macos-26",
             "windows-2025-vs2026",
             "requirements-build.txt",
+            "requirements.txt",
+            "pyproject.toml",
             "dotnet tool install --global wix --version 6.0.2",
             'Expected WiX Toolset 6.0.2',
             "scripts/build_windows_release.py",

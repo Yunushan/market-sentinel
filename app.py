@@ -98,6 +98,7 @@ UI_DESIGN_LABELS = {
     "classic": "Classic",
     "aurora_2026": "Aurora 2026",
     "graphite_2026": "Graphite 2026",
+    "sentinel_2027": "Sentinel 2027",
 }
 
 UI_DESIGN_BY_LABEL = {label.lower(): key for key, label in UI_DESIGN_LABELS.items()}
@@ -140,6 +141,32 @@ def set_windows_app_id(app_id: str) -> None:
         pass
 
 
+def set_windows_dpi_awareness() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        awareness_context_per_monitor_v2 = ctypes.c_void_p(-4)
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(awareness_context_per_monitor_v2):
+            return
+    except Exception:
+        pass
+    try:
+        import ctypes
+
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        return
+    except Exception:
+        pass
+    try:
+        import ctypes
+
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
 def _hex_to_colorref(color: str, fallback: str) -> int:
     text = str(color or fallback).strip()
     if text.startswith("#"):
@@ -173,38 +200,47 @@ def _set_windows_titlebar_theme(
         import ctypes
 
         window.update_idletasks()
-        hwnd = int(window.winfo_id())
-        if not hwnd:
+        base_hwnd = int(window.winfo_id())
+        if not base_hwnd:
             return
 
+        user32 = ctypes.windll.user32
         dwm = ctypes.windll.dwmapi
-        enabled = ctypes.c_int(1 if dark else 0)
-        result = dwm.DwmSetWindowAttribute(
-            ctypes.c_void_p(hwnd),
-            ctypes.c_uint(20),
-            ctypes.byref(enabled),
-            ctypes.sizeof(enabled),
-        )
-        if result != 0:
-            dwm.DwmSetWindowAttribute(
-                ctypes.c_void_p(hwnd),
-                ctypes.c_uint(19),
-                ctypes.byref(enabled),
-                ctypes.sizeof(enabled),
-            )
-
-        for attribute, color, fallback in (
-            (34, border_color, "#2a3a4a" if dark else "#c9c3b8"),
-            (35, caption_color, "#151d27" if dark else "#f6f4ef"),
-            (36, text_color, "#ffffff" if dark else "#161616"),
+        user32.GetParent.restype = ctypes.c_void_p
+        user32.GetParent.argtypes = [ctypes.c_void_p]
+        user32.GetAncestor.restype = ctypes.c_void_p
+        user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        hwnds = [base_hwnd]
+        for candidate in (
+            user32.GetParent(ctypes.c_void_p(base_hwnd)),
+            user32.GetAncestor(ctypes.c_void_p(base_hwnd), ctypes.c_uint(2)),
         ):
-            colorref = ctypes.c_int(_hex_to_colorref(color, fallback))
-            dwm.DwmSetWindowAttribute(
-                ctypes.c_void_p(hwnd),
-                ctypes.c_uint(attribute),
-                ctypes.byref(colorref),
-                ctypes.sizeof(colorref),
-            )
+            candidate = int(candidate or 0)
+            if candidate and candidate not in hwnds:
+                hwnds.append(candidate)
+
+        for hwnd in hwnds:
+            enabled = ctypes.c_int(1 if dark else 0)
+            for attribute in (20, 19):
+                dwm.DwmSetWindowAttribute(
+                    ctypes.c_void_p(hwnd),
+                    ctypes.c_uint(attribute),
+                    ctypes.byref(enabled),
+                    ctypes.sizeof(enabled),
+                )
+
+            for attribute, color, fallback in (
+                (34, border_color, "#2a3a4a" if dark else "#c9c3b8"),
+                (35, caption_color, "#151d27" if dark else "#f6f4ef"),
+                (36, text_color, "#ffffff" if dark else "#161616"),
+            ):
+                colorref = ctypes.c_int(_hex_to_colorref(color, fallback))
+                dwm.DwmSetWindowAttribute(
+                    ctypes.c_void_p(hwnd),
+                    ctypes.c_uint(attribute),
+                    ctypes.byref(colorref),
+                    ctypes.sizeof(colorref),
+                )
     except Exception:
         pass
 
@@ -392,6 +428,7 @@ class AdapterPricePoller:
 class App(tk.Tk):
     def __init__(self):
         set_windows_app_id(APP_ID)
+        set_windows_dpi_awareness()
         super().__init__()
         self.title(APP_TITLE)
         self.geometry("1320x860")
@@ -444,6 +481,8 @@ class App(tk.Tk):
         self._build_ui()
         self._apply_theme(self.cfg.theme, self.cfg.ui_design)
         self._apply_window_icon(self)
+        self.bind("<Map>", lambda _event: self._apply_native_titlebar(self), add="+")
+        self.bind("<FocusIn>", lambda _event: self._apply_native_titlebar(self), add="+")
 
         # Kick off queue processing
         self.after(100, self._process_queue)
@@ -656,7 +695,7 @@ class App(tk.Tk):
             textvariable=self.ui_design_var,
             values=list(UI_DESIGN_LABELS.values()),
             state="readonly",
-            width=14,
+            width=16,
         )
         self.ui_design_combo.pack(side="left", padx=(6, 0))
         self.ui_design_combo.bind("<<ComboboxSelected>>", lambda e: self._on_ui_design_change())
@@ -869,6 +908,76 @@ class App(tk.Tk):
                 "button_padding": "12 7",
                 "tab_padding": "14 8",
             },
+            "sentinel_2027:light": {
+                **classic_light,
+                "bg": "#eef1f3",
+                "surface": "#ffffff",
+                "surface_alt": "#edf2f5",
+                "fg": "#182027",
+                "heading": "#0a1118",
+                "muted": "#596672",
+                "accent": "#119c87",
+                "accent_hover": "#0d806f",
+                "field_bg": "#f8fafb",
+                "field_fg": "#111820",
+                "border": "#d5dde3",
+                "tab_bg": "#dfe7ed",
+                "tab_active_bg": "#ffffff",
+                "select_bg": "#d8f2ec",
+                "select_fg": "#071412",
+                "log_bg": "#f7f9fb",
+                "button_bg": "#e5ecef",
+                "button_fg": "#111820",
+                "button_active_bg": "#d9e3e8",
+                "button_pressed_bg": "#119c87",
+                "tab_hover_bg": "#edf2f5",
+                "command_borderwidth": "0",
+                "hero_borderwidth": "0",
+                "card_borderwidth": "0",
+                "metric_borderwidth": "0",
+                "frame_relief": "flat",
+                "font_size": "10",
+                "title_size": "17",
+                "rowheight": "30",
+                "button_padding": "16 8",
+                "tab_padding": "18 10",
+                "notebook_tabmargins": "14 8 14 0",
+            },
+            "sentinel_2027:dark": {
+                **classic_dark,
+                "bg": "#0b1015",
+                "surface": "#121922",
+                "surface_alt": "#1b2430",
+                "fg": "#edf3f5",
+                "heading": "#ffffff",
+                "muted": "#94a3ad",
+                "accent": "#2dd4bf",
+                "accent_hover": "#14b8a6",
+                "field_bg": "#0f151d",
+                "field_fg": "#edf3f5",
+                "border": "#25313d",
+                "tab_bg": "#121922",
+                "tab_active_bg": "#1f2a36",
+                "select_bg": "#123d38",
+                "select_fg": "#f8fffe",
+                "log_bg": "#070b10",
+                "button_bg": "#1d2833",
+                "button_fg": "#f2f7f8",
+                "button_active_bg": "#273542",
+                "button_pressed_bg": "#2dd4bf",
+                "tab_hover_bg": "#182330",
+                "command_borderwidth": "0",
+                "hero_borderwidth": "0",
+                "card_borderwidth": "0",
+                "metric_borderwidth": "0",
+                "frame_relief": "flat",
+                "font_size": "10",
+                "title_size": "17",
+                "rowheight": "30",
+                "button_padding": "16 8",
+                "tab_padding": "18 10",
+                "notebook_tabmargins": "14 8 14 0",
+            },
         }
 
     def _palette_for(self, theme: str, ui_design: str) -> Dict[str, str]:
@@ -949,17 +1058,26 @@ class App(tk.Tk):
         rowheight = int(palette.get("rowheight", "24"))
         button_padding = tuple(int(part) for part in palette.get("button_padding", "8 4").split())
         tab_padding = tuple(int(part) for part in palette.get("tab_padding", "10 6").split())
+        notebook_tabmargins = tuple(int(part) for part in palette.get("notebook_tabmargins", "0 6 0 0").split())
+        frame_relief = palette.get("frame_relief", "solid")
+        command_borderwidth = int(palette.get("command_borderwidth", "1"))
+        hero_borderwidth = int(palette.get("hero_borderwidth", "1"))
+        card_borderwidth = int(palette.get("card_borderwidth", "1"))
+        metric_borderwidth = int(palette.get("metric_borderwidth", "1"))
+        button_active_bg = palette.get("button_active_bg", surface_alt)
+        button_pressed_bg = palette.get("button_pressed_bg", accent)
+        tab_hover_bg = palette.get("tab_hover_bg", surface_alt)
 
         self.configure(background=bg)
 
-        self.style.configure(".", background=bg, foreground=fg, font=(font_family, font_size))
+        self.style.configure(".", background=bg, foreground=fg, font=(font_family, font_size), borderwidth=0)
         self.style.configure("TFrame", background=bg)
         self.style.configure("Page.TFrame", background=bg)
-        self.style.configure("CommandBar.TFrame", background=surface, borderwidth=1, relief="solid")
-        self.style.configure("Hero.TFrame", background=surface, borderwidth=1, relief="solid")
-        self.style.configure("Card.TFrame", background=surface, borderwidth=1, relief="solid")
+        self.style.configure("CommandBar.TFrame", background=surface, borderwidth=command_borderwidth, relief=frame_relief)
+        self.style.configure("Hero.TFrame", background=surface, borderwidth=hero_borderwidth, relief=frame_relief)
+        self.style.configure("Card.TFrame", background=surface, borderwidth=card_borderwidth, relief=frame_relief)
         self.style.configure("PanelBody.TFrame", background=surface)
-        self.style.configure("MetricCard.TFrame", background=surface_alt, borderwidth=1, relief="solid")
+        self.style.configure("MetricCard.TFrame", background=surface_alt, borderwidth=metric_borderwidth, relief=frame_relief)
         self.style.configure("TLabel", background=bg, foreground=fg)
         self.style.configure("AppTitle.TLabel", background=surface, foreground=heading, font=(font_family, title_size, "bold"))
         self.style.configure("AppSubtitle.TLabel", background=surface, foreground=muted, font=(font_family, font_size))
@@ -973,23 +1091,60 @@ class App(tk.Tk):
         self.style.configure("TLabelframe", background=bg, foreground=fg, bordercolor=border)
         self.style.configure("TLabelframe.Label", background=bg, foreground=heading, font=(font_family, font_size, "bold"))
 
-        self.style.configure("TButton", background=button_bg, foreground=button_fg, bordercolor=border, padding=button_padding)
-        self.style.configure("Accent.TButton", background=accent, foreground=select_fg, bordercolor=accent, padding=button_padding)
+        self.style.configure(
+            "TButton",
+            background=button_bg,
+            foreground=button_fg,
+            bordercolor=button_bg,
+            lightcolor=button_bg,
+            darkcolor=button_bg,
+            focuscolor=button_bg,
+            borderwidth=0,
+            relief="flat",
+            padding=button_padding,
+        )
+        self.style.configure(
+            "Accent.TButton",
+            background=accent,
+            foreground=select_fg,
+            bordercolor=accent,
+            lightcolor=accent,
+            darkcolor=accent,
+            focuscolor=accent,
+            borderwidth=0,
+            relief="flat",
+            padding=button_padding,
+        )
         self.style.map(
             "TButton",
-            background=[("active", accent_hover), ("pressed", accent)],
-            foreground=[("active", button_fg), ("pressed", button_fg)],
+            background=[("disabled", surface_alt), ("pressed", button_pressed_bg), ("active", button_active_bg)],
+            foreground=[("disabled", muted), ("active", button_fg), ("pressed", select_fg)],
+            bordercolor=[("active", button_active_bg), ("pressed", button_pressed_bg)],
+            lightcolor=[("active", button_active_bg), ("pressed", button_pressed_bg)],
+            darkcolor=[("active", button_active_bg), ("pressed", button_pressed_bg)],
         )
         self.style.map(
             "Accent.TButton",
             background=[("active", accent_hover), ("pressed", accent_hover), ("disabled", button_bg)],
             foreground=[("active", select_fg), ("pressed", select_fg), ("disabled", muted)],
+            bordercolor=[("active", accent_hover), ("pressed", accent_hover), ("disabled", button_bg)],
+            lightcolor=[("active", accent_hover), ("pressed", accent_hover), ("disabled", button_bg)],
+            darkcolor=[("active", accent_hover), ("pressed", accent_hover), ("disabled", button_bg)],
         )
 
-        self.style.configure("TEntry", fieldbackground=field_bg, foreground=field_fg, background=bg, bordercolor=border)
+        self.style.configure("TEntry", fieldbackground=field_bg, foreground=field_fg, background=bg, bordercolor=border, lightcolor=border, darkcolor=border)
         self.style.map("TEntry", fieldbackground=[("disabled", tab_bg)], foreground=[("disabled", muted)])
 
-        self.style.configure("TCombobox", fieldbackground=field_bg, background=bg, foreground=field_fg, bordercolor=border)
+        self.style.configure(
+            "TCombobox",
+            fieldbackground=field_bg,
+            background=field_bg,
+            foreground=field_fg,
+            bordercolor=border,
+            lightcolor=border,
+            darkcolor=border,
+            arrowcolor=muted,
+        )
         self.style.map(
             "TCombobox",
             fieldbackground=[("readonly", field_bg)],
@@ -1003,9 +1158,27 @@ class App(tk.Tk):
         self.style.configure("Card.TCheckbutton", background=surface, foreground=fg)
         self.style.map("Card.TCheckbutton", background=[("active", surface)], foreground=[("disabled", muted)])
 
-        self.style.configure("TNotebook", background=bg, bordercolor=border)
-        self.style.configure("TNotebook.Tab", background=tab_bg, foreground=fg, padding=tab_padding)
-        self.style.map("TNotebook.Tab", background=[("selected", tab_active_bg), ("active", tab_active_bg)])
+        self.style.configure("TNotebook", background=bg, bordercolor=bg, borderwidth=0, tabmargins=notebook_tabmargins)
+        self.style.configure(
+            "TNotebook.Tab",
+            background=tab_bg,
+            foreground=muted,
+            bordercolor=tab_bg,
+            lightcolor=tab_bg,
+            darkcolor=tab_bg,
+            focuscolor=tab_bg,
+            borderwidth=0,
+            relief="flat",
+            padding=tab_padding,
+        )
+        self.style.map(
+            "TNotebook.Tab",
+            background=[("selected", tab_active_bg), ("active", tab_hover_bg)],
+            foreground=[("selected", heading), ("active", heading)],
+            bordercolor=[("selected", tab_active_bg), ("active", tab_hover_bg)],
+            lightcolor=[("selected", tab_active_bg), ("active", tab_hover_bg)],
+            darkcolor=[("selected", tab_active_bg), ("active", tab_hover_bg)],
+        )
 
         self.style.configure(
             "Treeview",
@@ -1017,7 +1190,16 @@ class App(tk.Tk):
             font=(font_family, font_size),
         )
         self.style.map("Treeview", background=[("selected", select_bg)], foreground=[("selected", select_fg)])
-        self.style.configure("Treeview.Heading", background=surface_alt, foreground=heading, font=(font_family, font_size, "bold"))
+        self.style.configure(
+            "Treeview.Heading",
+            background=surface_alt,
+            foreground=heading,
+            bordercolor=border,
+            lightcolor=border,
+            darkcolor=border,
+            font=(font_family, font_size, "bold"),
+            relief="flat",
+        )
         self.style.map("Treeview.Heading", background=[("active", tab_active_bg)])
 
         self.option_add("*TCombobox*Listbox.background", field_bg)
@@ -1074,7 +1256,8 @@ class App(tk.Tk):
 
         apply_titlebar()
         try:
-            window.after(100, apply_titlebar)
+            for delay in (50, 150, 500, 1500):
+                window.after(delay, apply_titlebar)
         except Exception:
             pass
 
@@ -1090,7 +1273,7 @@ class App(tk.Tk):
         return paths[0] if paths else None
 
     def _icon_png_paths(self) -> List[Path]:
-        exact_names = tuple(f"marketsentinel-{size}.png" for size in (16, 20, 24, 32, 40, 48, 64, 128, 256))
+        exact_names = tuple(f"marketsentinel-{size}.png" for size in (256, 128, 64, 48, 40, 32, 24, 20, 16))
         exact_paths: List[Path] = []
         fallback_paths: List[Path] = []
         for root in self._resource_roots():
@@ -1130,17 +1313,19 @@ class App(tk.Tk):
         if not icon_paths:
             return
         try:
+            images: List[tk.PhotoImage] = []
             for icon_path in icon_paths:
-                self._icon_images.append(tk.PhotoImage(file=str(icon_path)))
-            if len(self._icon_images) == 1:
-                base = self._icon_images[0]
+                images.append(tk.PhotoImage(file=str(icon_path)))
+            if len(images) == 1:
+                base = images[0]
                 base_w = base.width()
                 for size in (256, 128, 64, 48, 40, 32, 24, 20, 16):
                     if base_w == size:
                         continue
                     if base_w > size and base_w % size == 0:
                         factor = base_w // size
-                        self._icon_images.append(base.subsample(factor, factor))
+                        images.append(base.subsample(factor, factor))
+            self._icon_images = sorted(images, key=lambda image: image.width(), reverse=True)
         except Exception:
             self._icon_images = []
 
@@ -1148,6 +1333,11 @@ class App(tk.Tk):
         icon_path = self._icon_path()
         if not icon_path:
             icon_path = None
+        if self._icon_images:
+            try:
+                window.iconphoto(True, *self._icon_images)
+            except Exception:
+                pass
         if icon_path:
             try:
                 window.iconbitmap(str(icon_path))
@@ -1157,41 +1347,87 @@ class App(tk.Tk):
                 window.iconbitmap(default=str(icon_path))
             except Exception:
                 pass
-        if self._icon_images:
-            try:
-                window.iconphoto(True, *self._icon_images)
-            except Exception:
-                pass
         self._apply_native_titlebar(window)
 
     # ------------------ Dependency versions ------------------
 
     def _requirements_path(self) -> Path:
+        for root in self._resource_roots():
+            path = root / "requirements.txt"
+            if path.exists():
+                return path
         return Path(__file__).resolve().parent / "requirements.txt"
+
+    def _pyproject_path(self) -> Optional[Path]:
+        for root in self._resource_roots():
+            path = root / "pyproject.toml"
+            if path.exists():
+                return path
+        return None
+
+    @staticmethod
+    def _parse_requirement_entry(raw: str) -> Optional[Dict[str, str]]:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            return None
+        if "#" in line:
+            line = line.split("#", 1)[0].strip()
+        if ";" in line:
+            line = line.split(";", 1)[0].strip()
+        if not line:
+            return None
+        match = re.match(r"([A-Za-z0-9_.-]+)(\[[^\]]+\])?(.*)$", line)
+        if not match:
+            return None
+        name = match.group(1)
+        extras = match.group(2) or ""
+        spec = (match.group(3) or "").strip()
+        return {"name": name, "display": f"{name}{extras}", "spec": spec}
 
     def _load_requirements(self) -> List[Dict[str, str]]:
         path = self._requirements_path()
-        if not path.exists():
-            return []
         reqs: List[Dict[str, str]] = []
+        if not path.exists():
+            pyproject = self._pyproject_path()
+            if not pyproject:
+                return []
+            try:
+                try:
+                    import tomllib
+                except ModuleNotFoundError:
+                    import tomli as tomllib  # type: ignore
+                data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+                dependencies = data.get("project", {}).get("dependencies", [])
+            except Exception:
+                return []
+            for raw in dependencies:
+                parsed = self._parse_requirement_entry(str(raw))
+                if parsed:
+                    reqs.append(parsed)
+            return reqs
         for raw in path.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "#" in line:
-                line = line.split("#", 1)[0].strip()
-            if ";" in line:
-                line = line.split(";", 1)[0].strip()
-            if not line:
-                continue
-            match = re.match(r"([A-Za-z0-9_.-]+)(\[[^\]]+\])?(.*)$", line)
-            if not match:
-                continue
-            name = match.group(1)
-            extras = match.group(2) or ""
-            spec = (match.group(3) or "").strip()
-            reqs.append({"name": name, "display": f"{name}{extras}", "spec": spec})
+            parsed = self._parse_requirement_entry(raw)
+            if parsed:
+                reqs.append(parsed)
         return reqs
+
+    def _project_version(self) -> str:
+        try:
+            return importlib_metadata.version("market-sentinel")
+        except importlib_metadata.PackageNotFoundError:
+            pass
+        pyproject = self._pyproject_path()
+        if not pyproject:
+            return "unknown"
+        try:
+            try:
+                import tomllib
+            except ModuleNotFoundError:
+                import tomli as tomllib  # type: ignore
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            return str(data.get("project", {}).get("version") or "unknown")
+        except Exception:
+            return "unknown"
 
     def _get_installed_version(self, package: str) -> str:
         try:
@@ -1244,11 +1480,16 @@ class App(tk.Tk):
                 )
 
         if not rows:
-            self.deps_tree.insert("", "end", values=("No requirements.txt", "", "", "", ""))
+            self.deps_tree.insert("", "end", values=("No dependency metadata found", "", "", "", ""))
             if hasattr(self, "check_versions_btn"):
                 self.check_versions_btn.configure(state="disabled")
-            self.dep_status_var.set("No requirements found.")
+            self.dep_status_var.set("No dependency metadata found.")
             return
+
+        if hasattr(self, "check_versions_btn"):
+            self.check_versions_btn.configure(state="normal")
+        if hasattr(self, "dep_status_var") and not self.dep_status_var.get().startswith("Checked"):
+            self.dep_status_var.set(f"Loaded {len(rows)} dependencies.")
 
         for row in rows:
             spec = row.get("spec") or "-"
@@ -1268,7 +1509,7 @@ class App(tk.Tk):
         if self._dep_check_running:
             return
         if not self._requirements:
-            self.dep_status_var.set("No requirements found.")
+            self.dep_status_var.set("No dependency metadata found.")
             return
         self._dep_check_running = True
         self.dep_status_var.set("Checking versions...")
@@ -1311,36 +1552,66 @@ class App(tk.Tk):
 
     def _build_about_tab(self):
         frm = self.tab_about
-        content = ttk.Frame(frm)
-        content.pack(fill="both", expand=True, padx=10, pady=10)
+        frm.configure(style="Page.TFrame")
+        frm.columnconfigure(0, weight=1)
+        frm.rowconfigure(1, weight=1)
 
-        header = ttk.Label(content, text="Dependency versions")
-        header.pack(anchor="w")
+        summary = ttk.Frame(frm, style="Hero.TFrame", padding=(18, 16))
+        summary.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 8))
+        summary.columnconfigure(0, weight=1)
+        ttk.Label(summary, text=APP_TITLE, style="HeroTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            summary,
+            text="Local command center for alerts, analytics, paper trading, wallet tracking, and guarded copy execution.",
+            style="HeroSubtitle.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
 
-        info = ttk.Label(
-            content,
-            text="Check installed dependencies against the latest versions on PyPI.",
-            wraplength=700,
-            justify="left",
-        )
-        info.pack(anchor="w", pady=(4, 10))
+        meta = ttk.Frame(summary, style="Hero.TFrame")
+        meta.grid(row=0, column=1, rowspan=2, sticky="e", padx=(18, 0))
+        for idx, (label, value) in enumerate(
+            (
+                ("Version", self._project_version()),
+                ("Python", sys.version.split()[0]),
+                ("Theme", self._theme_label(self.cfg.theme)),
+            )
+        ):
+            tile = ttk.Frame(meta, style="MetricCard.TFrame", padding=(14, 10))
+            tile.grid(row=0, column=idx, sticky="nsew", padx=(0 if idx == 0 else 8, 0))
+            ttk.Label(tile, text=label, style="MetricLabel.TLabel").pack(anchor="w")
+            ttk.Label(tile, text=value, style="MetricValue.TLabel").pack(anchor="w", pady=(2, 0))
 
+        deps = ttk.Frame(frm, style="Card.TFrame", padding=(14, 12))
+        deps.grid(row=1, column=0, sticky="nsew", padx=14, pady=(8, 14))
+        deps.columnconfigure(0, weight=1)
+        deps.rowconfigure(1, weight=1)
+
+        deps_header = ttk.Frame(deps, style="PanelBody.TFrame")
+        deps_header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        deps_header.columnconfigure(0, weight=1)
+        ttk.Label(deps_header, text="Dependency versions", style="SectionTitle.TLabel").grid(row=0, column=0, sticky="w")
         self.dep_status_var = tk.StringVar(value="Versions not checked.")
-        ttk.Label(content, textvariable=self.dep_status_var).pack(anchor="w", pady=(0, 8))
+        ttk.Label(deps_header, textvariable=self.dep_status_var, style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.check_versions_btn = ttk.Button(
+            deps_header,
+            text="Check versions",
+            style="Accent.TButton",
+            command=self.check_dependency_versions,
+        )
+        self.check_versions_btn.grid(row=0, column=1, rowspan=2, sticky="e", padx=(12, 0))
 
         cols = ("package", "required", "installed", "latest", "status")
-        self.deps_tree = ttk.Treeview(content, columns=cols, show="headings", height=10)
+        self.deps_tree = ttk.Treeview(deps, columns=cols, show="headings", height=12)
         for c in cols:
             self.deps_tree.heading(c, text=c)
-        self.deps_tree.column("package", width=180, stretch=True)
-        self.deps_tree.column("required", width=120, stretch=False, anchor="center")
-        self.deps_tree.column("installed", width=120, stretch=False, anchor="center")
-        self.deps_tree.column("latest", width=100, stretch=False, anchor="center")
-        self.deps_tree.column("status", width=90, stretch=False, anchor="center")
-        self.deps_tree.pack(fill="x", pady=(0, 8))
-
-        self.check_versions_btn = ttk.Button(content, text="Check versions", command=self.check_dependency_versions)
-        self.check_versions_btn.pack(anchor="w")
+        self.deps_tree.column("package", width=260, stretch=True)
+        self.deps_tree.column("required", width=190, stretch=False, anchor="center")
+        self.deps_tree.column("installed", width=150, stretch=False, anchor="center")
+        self.deps_tree.column("latest", width=140, stretch=False, anchor="center")
+        self.deps_tree.column("status", width=110, stretch=False, anchor="center")
+        dep_scroll = ttk.Scrollbar(deps, orient="vertical", command=self.deps_tree.yview)
+        self.deps_tree.configure(yscrollcommand=dep_scroll.set)
+        self.deps_tree.grid(row=1, column=0, sticky="nsew")
+        dep_scroll.grid(row=1, column=1, sticky="ns")
 
         self._refresh_dependency_table()
 
@@ -1814,7 +2085,16 @@ class App(tk.Tk):
         table_card.grid(row=2, column=0, sticky="nsew", padx=14, pady=(8, 14))
         table_card.rowconfigure(1, weight=1)
         table_card.columnconfigure(0, weight=1)
-        ttk.Label(table_card, text="Leaderboard results", style="SectionTitle.TLabel").grid(row=0, column=0, sticky="w")
+        header = ttk.Frame(table_card, style="PanelBody.TFrame")
+        header.grid(row=0, column=0, sticky="ew")
+        header.columnconfigure(0, weight=1)
+        ttk.Label(header, text="Leaderboard results", style="SectionTitle.TLabel").grid(row=0, column=0, sticky="w")
+        row_actions = ttk.Frame(header, style="PanelBody.TFrame")
+        row_actions.grid(row=0, column=1, sticky="e")
+        ttk.Button(row_actions, text="Copy Wallet", command=self.copy_selected_leaderboard_wallet).pack(side="left", padx=(0, 6))
+        ttk.Button(row_actions, text="Copy User", command=self.copy_selected_leaderboard_user).pack(side="left", padx=(0, 6))
+        ttk.Button(row_actions, text="Track Wallet", command=self.track_selected_leaderboard_wallet).pack(side="left", padx=(0, 6))
+        ttk.Button(row_actions, text="Follow for Copy Trading", command=self.follow_selected_leaderboard_for_copy_trading).pack(side="left")
 
         table_wrap = ttk.Frame(table_card, style="PanelBody.TFrame")
         table_wrap.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
@@ -1822,6 +2102,7 @@ class App(tk.Tk):
         table_wrap.columnconfigure(0, weight=1)
 
         cols = ("rank", "user", "wallet", "pnl", "volume", "roi", "trades", "mdd_usd", "mdd_pct", "source")
+        self._leaderboard_row_by_iid: Dict[str, Dict[str, Any]] = {}
         self.leaderboard_tree = ttk.Treeview(table_wrap, columns=cols, show="headings", height=16)
         headings = {
             "rank": "Rank",
@@ -1857,6 +2138,16 @@ class App(tk.Tk):
         self.leaderboard_tree.grid(row=0, column=0, sticky="nsew")
         yscroll.grid(row=0, column=1, sticky="ns")
         xscroll.grid(row=1, column=0, sticky="ew")
+        self.leaderboard_tree.bind("<Button-3>", self._show_leaderboard_context_menu)
+        self.leaderboard_tree.bind("<Control-Button-1>", self._show_leaderboard_context_menu)
+        self.leaderboard_tree.bind("<Double-1>", lambda _event: self.copy_selected_leaderboard_wallet())
+
+        self.leaderboard_menu = tk.Menu(self, tearoff=0)
+        self.leaderboard_menu.add_command(label="Copy Wallet", command=self.copy_selected_leaderboard_wallet)
+        self.leaderboard_menu.add_command(label="Copy User", command=self.copy_selected_leaderboard_user)
+        self.leaderboard_menu.add_separator()
+        self.leaderboard_menu.add_command(label="Track Wallet", command=self.track_selected_leaderboard_wallet)
+        self.leaderboard_menu.add_command(label="Follow for Copy Trading", command=self.follow_selected_leaderboard_for_copy_trading)
 
         progress = ttk.Frame(table_card, style="PanelBody.TFrame")
         progress.grid(row=2, column=0, sticky="ew", pady=(10, 0))
@@ -1900,6 +2191,139 @@ class App(tk.Tk):
         if number is None:
             return "-"
         return f"{number:,.{decimals}f}{suffix}"
+
+    def _show_leaderboard_context_menu(self, event) -> None:
+        row_id = self.leaderboard_tree.identify_row(event.y)
+        if row_id:
+            self.leaderboard_tree.selection_set(row_id)
+            self.leaderboard_menu.tk_popup(event.x_root, event.y_root)
+        self.leaderboard_menu.grab_release()
+
+    def _selected_leaderboard_row(self) -> Optional[Dict[str, Any]]:
+        selection = self.leaderboard_tree.selection()
+        if not selection:
+            return None
+        iid = str(selection[0])
+        row = getattr(self, "_leaderboard_row_by_iid", {}).get(iid)
+        if row:
+            return dict(row)
+        values = self.leaderboard_tree.item(selection[0], "values")
+        if not values:
+            return None
+        return {
+            "rank": values[0] if len(values) > 0 else "",
+            "display_name": values[1] if len(values) > 1 else "",
+            "wallet": values[2] if len(values) > 2 else "",
+            "pnl_usd": values[3] if len(values) > 3 else "",
+            "volume_usd": values[4] if len(values) > 4 else "",
+            "roi_pct": values[5] if len(values) > 5 else "",
+        }
+
+    def _selected_leaderboard_wallet(self) -> Optional[str]:
+        row = self._selected_leaderboard_row()
+        if not row:
+            messagebox.showinfo("Polymarket analytics", "Select a leaderboard row first.")
+            return None
+        wallet = normalize_wallet(row.get("wallet"))
+        if not wallet:
+            messagebox.showerror("Polymarket analytics", "Selected row does not contain a valid wallet address.")
+            return None
+        return wallet
+
+    def _selected_leaderboard_display_name(self) -> str:
+        row = self._selected_leaderboard_row() or {}
+        name = str(row.get("display_name") or row.get("user") or "").strip()
+        return "" if name == "-" else name
+
+    def _copy_text_to_clipboard(self, text: str, label: str) -> bool:
+        value = str(text or "").strip()
+        if not value or value == "-":
+            messagebox.showinfo("Polymarket analytics", f"No {label} value is available for the selected row.")
+            return False
+        self.clipboard_clear()
+        self.clipboard_append(value)
+        try:
+            self.update_idletasks()
+        except Exception:
+            pass
+        message = f"Copied {label}: {value}"
+        if hasattr(self, "lb_status_var"):
+            self.lb_status_var.set(message)
+        if hasattr(self, "status_var"):
+            self.status_var.set(message)
+        return True
+
+    def copy_selected_leaderboard_wallet(self) -> None:
+        wallet = self._selected_leaderboard_wallet()
+        if wallet:
+            self._copy_text_to_clipboard(wallet, "wallet")
+
+    def copy_selected_leaderboard_user(self) -> None:
+        row = self._selected_leaderboard_row()
+        if not row:
+            messagebox.showinfo("Polymarket analytics", "Select a leaderboard row first.")
+            return
+        user = self._selected_leaderboard_display_name() or str(row.get("wallet") or "").strip()
+        self._copy_text_to_clipboard(user, "user")
+
+    def _ensure_wallet_watch_from_leaderboard(self, wallet: str, display_name: str = "", *, persist: bool = True) -> bool:
+        wallet = wallet.lower().strip()
+        if not is_wallet_address(wallet):
+            messagebox.showerror("Polymarket analytics", "Selected row does not contain a valid wallet address.")
+            return False
+        if any(str(w.wallet).lower() == wallet for w in self.cfg.wallets):
+            return False
+        self.cfg.wallets.append(WalletWatch(wallet=wallet, display_name=display_name, enabled=True))
+        if persist:
+            save_config(self.cfg)
+        self._refresh_wallet_table()
+        if hasattr(self, "ui_queue"):
+            self.ui_queue.put(("log", f"Added wallet watch from leaderboard: {display_name or wallet} ({wallet})"))
+        return True
+
+    def track_selected_leaderboard_wallet(self) -> None:
+        wallet = self._selected_leaderboard_wallet()
+        if not wallet:
+            return
+        name = self._selected_leaderboard_display_name()
+        display_name = name if name and name.lower() != wallet else ""
+        added = self._ensure_wallet_watch_from_leaderboard(wallet, display_name)
+        if added:
+            message = f"Tracking wallet: {wallet}"
+        else:
+            message = f"Wallet is already tracked: {wallet}"
+        self.lb_status_var.set(message)
+        self.status_var.set(message)
+
+    def follow_selected_leaderboard_for_copy_trading(self) -> None:
+        wallet = self._selected_leaderboard_wallet()
+        if not wallet:
+            return
+        name = self._selected_leaderboard_display_name()
+        display_name = name if name and name.lower() != wallet else ""
+        follow_wallets = self._copy_follow_wallets_from_text() if hasattr(self, "ct_follow_var") else self.cfg.copytrading.normalized_follow_wallets()
+        if follow_wallets is None:
+            return
+        tracked = self._ensure_wallet_watch_from_leaderboard(wallet, display_name, persist=False)
+        added_follow = wallet not in follow_wallets
+        if added_follow:
+            follow_wallets.append(wallet)
+        self.cfg.copytrading.follow_wallet = follow_wallets[0] if follow_wallets else ""
+        self.cfg.copytrading.follow_wallets = follow_wallets
+        if hasattr(self, "ct_follow_var"):
+            self.ct_follow_var.set(", ".join(follow_wallets))
+        save_config(self.cfg)
+        if hasattr(self, "ui_queue"):
+            self.ui_queue.put(("log", f"Added leaderboard wallet to copy-trading follow list: {wallet}"))
+        details = []
+        if tracked:
+            details.append("tracked")
+        if added_follow:
+            details.append("added to copy trading")
+        suffix = ", ".join(details) if details else "already configured"
+        message = f"Wallet {suffix}: {wallet}. Copy trading uses future tracked activity when tracking and copy trading are enabled."
+        self.lb_status_var.set(message)
+        self.status_var.set(message)
 
     def _polymarket_leaderboard_params(self) -> Dict[str, List[str]]:
         sort_value = App._leaderboard_sort_value(self.lb_sort_var.get())
@@ -2033,11 +2457,14 @@ class App(tk.Tk):
 
     def _refresh_polymarket_leaderboard_table(self, payload: Dict[str, Any]) -> None:
         self._last_leaderboard_payload = payload
+        self._leaderboard_row_by_iid = {}
         for iid in self.leaderboard_tree.get_children():
             self.leaderboard_tree.delete(iid)
 
         rows = list(payload.get("rows") or [])
         for index, row in enumerate(rows):
+            iid = f"leaderboard-{index}"
+            self._leaderboard_row_by_iid[iid] = dict(row)
             mdd_source = "-"
             if row.get("mdd_available"):
                 mdd_source = str(
@@ -2049,6 +2476,7 @@ class App(tk.Tk):
             self.leaderboard_tree.insert(
                 "",
                 "end",
+                iid=iid,
                 values=(
                     row.get("rank") or index + 1,
                     row.get("display_name") or "-",

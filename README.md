@@ -289,6 +289,7 @@ The Tkinter app keeps the classic interface available and adds selectable UI des
 - `Classic` preserves the older compact desktop styling.
 - `Aurora 2026` is the default modern light/dark command-center design.
 - `Graphite 2026` is a denser modern design with stronger contrast.
+- `Sentinel 2027` is a flatter, roomier redesign with borderless panels, modern tabs, and higher-DPI spacing.
 
 The Windows app and release packages include the same ICO/PNG icon assets for the title bar, taskbar, portable zip, and MSI install layout.
 

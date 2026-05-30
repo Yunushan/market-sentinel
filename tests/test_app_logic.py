@@ -96,6 +96,9 @@ class FakeTree:
     def selection(self):
         return self.selection_ids
 
+    def selection_set(self, iid) -> None:
+        self.selection_ids = (iid,)
+
     def item(self, iid, option=None):
         values = self.rows.get(iid, ())
         if option == "values":
@@ -192,6 +195,7 @@ class CopyHarness:
 
 class AnalyticsHarness:
     def __init__(self) -> None:
+        self.cfg = AppConfig()
         self.lb_sort_var = FakeVar("ROI %")
         self.lb_direction_var = FakeVar("High to low")
         self.lb_limit_var = FakeVar("1000")
@@ -207,20 +211,55 @@ class AnalyticsHarness:
         self.lb_min_mdd_pct_var = FakeVar("")
         self.lb_max_mdd_pct_var = FakeVar("")
         self.leaderboard_tree = FakeTree()
+        self.wallet_tree = FakeTree()
         self.lb_returned_metric_var = FakeVar()
         self.lb_scanned_metric_var = FakeVar()
         self.lb_best_roi_metric_var = FakeVar()
         self.lb_mdd_metric_var = FakeVar()
         self.lb_status_var = FakeVar()
         self.status_var = FakeVar()
+        self.ct_follow_var = FakeVar("")
         self.lb_fast_roi_btn = FakeButton()
         self.lb_cancel_btn = FakeButton()
         self._leaderboard_loading = False
         self._leaderboard_cancel_event = threading.Event()
+        self._leaderboard_row_by_iid = {}
+        self.ui_queue: "queue.Queue[tuple]" = queue.Queue()
         self.logged = []
+        self.clipboard = []
 
     def log(self, message: str) -> None:
         self.logged.append(message)
+
+    def clipboard_clear(self) -> None:
+        self.clipboard = []
+
+    def clipboard_append(self, value: str) -> None:
+        self.clipboard.append(value)
+
+    def update_idletasks(self) -> None:
+        pass
+
+    def _selected_leaderboard_row(self):
+        return App._selected_leaderboard_row(self)
+
+    def _selected_leaderboard_wallet(self):
+        return App._selected_leaderboard_wallet(self)
+
+    def _selected_leaderboard_display_name(self):
+        return App._selected_leaderboard_display_name(self)
+
+    def _copy_text_to_clipboard(self, text: str, label: str):
+        return App._copy_text_to_clipboard(self, text, label)
+
+    def _ensure_wallet_watch_from_leaderboard(self, wallet: str, display_name: str = "", *, persist: bool = True):
+        return App._ensure_wallet_watch_from_leaderboard(self, wallet, display_name, persist=persist)
+
+    def _copy_follow_wallets_from_text(self):
+        return App._copy_follow_wallets_from_text(self)
+
+    def _refresh_wallet_table(self):
+        return App._refresh_wallet_table(self)
 
 
 class FakePolymarketAdapter:
@@ -414,6 +453,58 @@ class AppLogicTests(unittest.TestCase):
         row_values = next(iter(harness.leaderboard_tree.rows.values()))
         self.assertEqual(row_values[1], "alpha")
         self.assertEqual(row_values[2], WALLET)
+
+    def test_desktop_polymarket_leaderboard_row_actions_copy_full_values(self) -> None:
+        harness = AnalyticsHarness()
+        App._refresh_polymarket_leaderboard_table(
+            harness,
+            {
+                "rows": [
+                    {
+                        "rank": 1,
+                        "display_name": "alpha-trader",
+                        "wallet": WALLET,
+                        "roi_pct": 20,
+                    }
+                ],
+                "counts": {"returned": 1, "scanned": 1, "mdd_computed": 0},
+            },
+        )
+        harness.leaderboard_tree.selection_ids = ("leaderboard-0",)
+
+        App.copy_selected_leaderboard_wallet(harness)
+        self.assertEqual(harness.clipboard, [WALLET])
+        self.assertIn(WALLET, harness.lb_status_var.get())
+
+        App.copy_selected_leaderboard_user(harness)
+        self.assertEqual(harness.clipboard, ["alpha-trader"])
+
+    def test_desktop_polymarket_leaderboard_action_sets_up_copy_trading_follow(self) -> None:
+        harness = AnalyticsHarness()
+        App._refresh_polymarket_leaderboard_table(
+            harness,
+            {
+                "rows": [
+                    {
+                        "rank": 1,
+                        "display_name": "alpha-trader",
+                        "wallet": WALLET,
+                        "roi_pct": 20,
+                    }
+                ],
+                "counts": {"returned": 1, "scanned": 1, "mdd_computed": 0},
+            },
+        )
+        harness.leaderboard_tree.selection_ids = ("leaderboard-0",)
+
+        with patch("app.save_config") as save_config:
+            App.follow_selected_leaderboard_for_copy_trading(harness)
+
+        self.assertEqual([w.wallet for w in harness.cfg.wallets], [WALLET])
+        self.assertEqual(harness.cfg.wallets[0].display_name, "alpha-trader")
+        self.assertEqual(harness.cfg.copytrading.normalized_follow_wallets(), [WALLET])
+        self.assertEqual(harness.ct_follow_var.get(), WALLET)
+        save_config.assert_called_once_with(harness.cfg)
 
     def test_desktop_polymarket_analytics_cancel_requests_background_stop(self) -> None:
         harness = AnalyticsHarness()

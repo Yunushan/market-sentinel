@@ -878,8 +878,8 @@ def apply_config_patch(cfg: AppConfig, payload: Dict[str, Any]) -> AppConfig:
         cfg.theme = "dark" if theme == "dark" else "light"
     if "ui_design" in payload:
         ui_design = str(payload["ui_design"] or "").strip().lower().replace("-", "_").replace(" ", "_")
-        if ui_design not in {"classic", "aurora_2026", "graphite_2026"}:
-            raise ValueError("ui_design must be classic, aurora_2026, or graphite_2026.")
+        if ui_design not in {"classic", "aurora_2026", "graphite_2026", "sentinel_2027"}:
+            raise ValueError("ui_design must be classic, aurora_2026, graphite_2026, or sentinel_2027.")
         cfg.ui_design = cast(UIDesign, ui_design)
     return cfg
 

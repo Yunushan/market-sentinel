@@ -63,7 +63,7 @@ class CoreModelTests(unittest.TestCase):
             ),
             selected_market_id="kalshi",
             theme="dark",
-            ui_design="graphite_2026",
+            ui_design="sentinel_2027",
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -72,7 +72,7 @@ class CoreModelTests(unittest.TestCase):
             loaded = load_config(path)
 
         self.assertEqual(loaded.theme, "dark")
-        self.assertEqual(loaded.ui_design, "graphite_2026")
+        self.assertEqual(loaded.ui_design, "sentinel_2027")
         self.assertEqual(loaded.selected_market_id, "kalshi")
         self.assertEqual(len(loaded.alerts), 1)
         self.assertEqual(loaded.alerts[0].threshold, 0.55)
