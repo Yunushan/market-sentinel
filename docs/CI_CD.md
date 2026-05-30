@@ -113,7 +113,7 @@ Windows artifacts are produced by `scripts/build_windows_release.py` on the `win
 
 The portable zip contains:
 
-- `prediction-market-alert-and-copy-trade-gui.exe`
+- `market-sentinel.exe`
 - `start_tkinter_gui.bat`
 - `start_web_gui.bat`
 - bundled app icons in `assets\`
@@ -122,7 +122,7 @@ The portable zip contains:
 
 The MSI installs the same payload under Program Files, creates Start Menu shortcuts for the Tkinter and React launchers, and supports normal Windows uninstall/upgrade behavior through MSI product metadata. The package is currently unsigned; add code-signing certificate secrets before treating the installer as a polished public Windows distribution.
 
-The Windows launchers use `data/config.json` when the package folder is writable, which keeps the portable zip self-contained. If the app is installed under a protected folder such as Program Files, the launchers set `PREDICTION_MARKET_CONFIG_PATH` to `%APPDATA%\prediction-market-alert-and-copy-trade-gui\data\config.json` so normal users can save settings without administrator privileges.
+The Windows launchers use `data/config.json` when the package folder is writable, which keeps the portable zip self-contained. If the app is installed under a protected folder such as Program Files, the launchers set `PREDICTION_MARKET_CONFIG_PATH` to `%APPDATA%\market-sentinel\data\config.json` so normal users can save settings without administrator privileges.
 
 ## Required Repository Settings
 

@@ -14,7 +14,7 @@ import requests
 from .errors import MarketConfigurationError, MarketHTTPError
 
 
-DEFAULT_USER_AGENT = "prediction-market-alert-and-copy-trade-gui/1.0"
+DEFAULT_USER_AGENT = "market-sentinel/1.0"
 DEFAULT_TIMEOUT_SECONDS = 10.0
 REDACTED = "***"
 

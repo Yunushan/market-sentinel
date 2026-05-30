@@ -21,7 +21,8 @@ except ModuleNotFoundError:  # Python 3.10 compatibility.
 ROOT = Path(__file__).resolve().parent
 MIN_PYTHON = (3, 10)
 MAX_PYTHON = (3, 15)
-PROJECT_NAME = "prediction-market-alert-and-copy-trade-gui"
+PROJECT_NAME = "market-sentinel"
+APP_TITLE = "MarketSentinel"
 
 REQUIRED_IMPORTS = {
     "requests": "requests",
@@ -123,13 +124,16 @@ def run_project_metadata_check() -> None:
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     app = (ROOT / "app.py").read_text(encoding="utf-8")
-    if f"# {PROJECT_NAME}" not in readme:
-        raise SystemExit("README.md title must use the dashed project name.")
-    if f'self.title("{PROJECT_NAME}")' not in app:
-        raise SystemExit("app.py window title must use the dashed project name.")
-    if f'User-Agent": "{PROJECT_NAME}/1.0"' not in app:
+    if f"# {APP_TITLE}" not in readme:
+        raise SystemExit("README.md title must use the MarketSentinel app title.")
+    if f'APP_TITLE = "{APP_TITLE}"' not in app:
+        raise SystemExit("app.py window title must use the MarketSentinel app title.")
+    if f'APP_ID = "{PROJECT_NAME}"' not in app:
+        raise SystemExit("app.py AppUserModelID must use the dashed project id.")
+    if 'APP_USER_AGENT = f"{APP_ID}/1.0"' not in app or 'headers={"User-Agent": APP_USER_AGENT}' not in app:
         raise SystemExit("app.py User-Agent must use the dashed project name.")
     forbidden = (
+        "prediction-market-alert-and-copy-trade-gui",
         "polymarket-alert-and-copy-trade-gui",
         "polymarket-sentinel-gui",
         "Polymarket Sentinel GUI",

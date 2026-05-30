@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">MarketSentinel logo</title>
+  <desc id="desc">A sentinel shield with a prediction-market signal line.</desc>
+  <defs>
+    <linearGradient id="shield" x1="45" y1="18" x2="213" y2="229" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#63f5dc"/>
+      <stop offset="0.46" stop-color="#14b8a6"/>
+      <stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+    <linearGradient id="inner" x1="75" y1="55" x2="179" y2="198" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#122033"/>
+      <stop offset="1" stop-color="#07111f"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="11" flood-color="#07111f" flood-opacity="0.32"/>
+    </filter>
+  </defs>
+  <rect width="256" height="256" rx="54" fill="#0b1220"/>
+  <path
+    d="M128 24 210 55v64c0 56-33 91-82 115-49-24-82-59-82-115V55l82-31Z"
+    fill="url(#shield)"
+    filter="url(#shadow)"
+  />
+  <path d="M128 48 188 71v48c0 40-22 66-60 86-38-20-60-46-60-86V71l60-23Z" fill="url(#inner)"/>
+  <path
+    d="M78 143h24l18-42 25 74 18-37h20"
+    fill="none"
+    stroke="#ecfeff"
+    stroke-width="15"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <circle cx="128" cy="80" r="13" fill="#63f5dc"/>
+  <circle cx="128" cy="80" r="5" fill="#07111f"/>
+</svg>

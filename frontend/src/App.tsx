@@ -1258,10 +1258,10 @@ export default function App() {
     <main className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <img src="/polymarket.png" alt="" />
+          <img src="/marketsentinel.png" alt="MarketSentinel logo" />
           <div>
-            <strong>Market Console</strong>
-            <span>Local app</span>
+            <strong>MarketSentinel</strong>
+            <span>Local command center</span>
           </div>
         </div>
         <nav className="nav-list" aria-label="Primary">
@@ -2147,7 +2147,7 @@ function PolymarketAnalyticsView({
             <input
               inputMode="numeric"
               min="1"
-              max="100"
+              max="1000000"
               type="number"
               value={filters.limit}
               onChange={(event) => updateFilter("limit", event.target.value)}
@@ -2158,7 +2158,7 @@ function PolymarketAnalyticsView({
             <input
               inputMode="numeric"
               min="1"
-              max="500"
+              max="1000000"
               type="number"
               value={filters.scan_limit}
               onChange={(event) => updateFilter("scan_limit", event.target.value)}
@@ -2184,7 +2184,7 @@ function PolymarketAnalyticsView({
             <input
               inputMode="numeric"
               min="1"
-              max="100"
+              max="1000000"
               type="number"
               value={filters.mdd_scan_limit}
               onChange={(event) => updateFilter("mdd_scan_limit", event.target.value)}

@@ -2,7 +2,7 @@
 
 ## Objective
 
-Refactor the existing `prediction-market-alert-and-copy-trade-gui` into a market-adapter based application and add configurable support for these markets:
+Refactor the existing `MarketSentinel` app into a market-adapter based application and add configurable support for these markets:
 
 - Polymarket
 - Kalshi

@@ -45,6 +45,11 @@ from polymarket.trader import PolymarketTrader, TraderConfig
 # Helpers
 # ---------------------------
 
+APP_ID = "market-sentinel"
+APP_TITLE = "MarketSentinel"
+APP_USER_AGENT = f"{APP_ID}/1.0"
+
+
 def extract_slug(s: str) -> str:
     """
     Accept a raw slug or a Polymarket URL and try to extract the last path segment.
@@ -316,9 +321,9 @@ class AdapterPricePoller:
 
 class App(tk.Tk):
     def __init__(self):
-        set_windows_app_id("prediction-market-alert-and-copy-trade-gui")
+        set_windows_app_id(APP_ID)
         super().__init__()
-        self.title("prediction-market-alert-and-copy-trade-gui")
+        self.title(APP_TITLE)
         self.geometry("1180x780")
         self.minsize(1050, 700)
         self._icon_images: List[tk.PhotoImage] = []
@@ -541,7 +546,7 @@ class App(tk.Tk):
         header.pack(fill="x")
         brand = ttk.Frame(header, style="CommandBar.TFrame")
         brand.pack(side="left", fill="x", expand=True)
-        ttk.Label(brand, text="Prediction Market Command Center", style="AppTitle.TLabel").pack(anchor="w")
+        ttk.Label(brand, text="MarketSentinel Command Center", style="AppTitle.TLabel").pack(anchor="w")
         ttk.Label(brand, text="Alerts, safety, paper trading, wallet tracking, and guarded copy execution", style="AppSubtitle.TLabel").pack(anchor="w")
 
         mode_bar = ttk.Frame(topbar, style="CommandBar.TFrame")
@@ -954,14 +959,17 @@ class App(tk.Tk):
 
     def _icon_path(self) -> Optional[Path]:
         for root in self._resource_roots():
-            path = root / "assets" / "polymarket.ico"
-            if path.exists():
-                return path
+            for path in (root / "assets" / "marketsentinel.ico", root / "assets" / "polymarket.ico"):
+                if path.exists():
+                    return path
         return None
 
     def _icon_png_path(self) -> Optional[Path]:
         for root in self._resource_roots():
             for path in (
+                root / "assets" / "marketsentinel.png",
+                root / "marketsentinel.png",
+                root / "frontend" / "public" / "marketsentinel.png",
                 root / "assets" / "polymarket.png",
                 root / "polymarket.png",
                 root / "frontend" / "public" / "polymarket.png",
@@ -1060,7 +1068,7 @@ class App(tk.Tk):
         url = f"https://pypi.org/pypi/{package}/json"
         req = urllib_request.Request(
             url,
-            headers={"User-Agent": "prediction-market-alert-and-copy-trade-gui/1.0"},
+            headers={"User-Agent": APP_USER_AGENT},
         )
         try:
             with urllib_request.urlopen(req, timeout=10) as resp:
@@ -3639,11 +3647,11 @@ def tkinter_smoke_payload() -> Dict[str, Any]:
         "ok": True,
         "app_class": App.__name__,
         "tkinter_base": issubclass(App, tk.Tk),
-        "window_title": "prediction-market-alert-and-copy-trade-gui",
+        "window_title": APP_TITLE,
         "selected_market_id": cfg.selected_market_id,
         "ui_design": cfg.ui_design,
         "ui_designs": list(UI_DESIGN_LABELS.values()),
-        "icon_available": (root / "assets" / "polymarket.ico").exists() and (root / "polymarket.png").exists(),
+        "icon_available": (root / "assets" / "marketsentinel.ico").exists() and (root / "marketsentinel.png").exists(),
         "market_count": len(market_ids),
         "choice_count": len(choices),
         "all_markets_configured": set(market_ids) == set(cfg.markets),
@@ -3671,7 +3679,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         run_server(parsed.host, parsed.port, parsed.config, parsed.frontend_dir)
         return 0
 
-    set_windows_app_id("prediction-market-alert-and-copy-trade-gui")
+    set_windows_app_id(APP_ID)
     app = App()
     app.mainloop()
     return 0

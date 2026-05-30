@@ -1223,6 +1223,7 @@ LEADERBOARD_SORTS = {
     "mdd_usd": "PNL",
     "mdd_pct": "PNL",
 }
+POLYMARKET_LEADERBOARD_MAX_ROWS = 1_000_000
 
 
 def _leaderboard_lookup(row: Mapping[str, Any], *keys: str) -> Any:
@@ -1923,14 +1924,24 @@ def polymarket_leaderboard_payload(params: Optional[Mapping[str, List[str]]] = N
         direction = "DESC"
     period = _query_value(query, "period", "all") or "all"
     category = _query_value(query, "category", "OVERALL") or "OVERALL"
-    limit = _clamp_int(_query_value(query, "limit", "100"), 100, 1, 100)
+    limit = _clamp_int(_query_value(query, "limit", "100"), 100, 1, POLYMARKET_LEADERBOARD_MAX_ROWS)
     default_scan = 500 if sort == "roi_pct" else max(100, limit)
-    scan_limit = _clamp_int(_query_value(query, "scan_limit", str(default_scan)), default_scan, limit, 500)
+    scan_limit = _clamp_int(
+        _query_value(query, "scan_limit", str(default_scan)),
+        default_scan,
+        limit,
+        POLYMARKET_LEADERBOARD_MAX_ROWS,
+    )
     mdd_history_limit = _clamp_int(_query_value(query, "mdd_history_limit", "500"), 500, 1, 1000)
     mdd_activity_limit = _clamp_int(_query_value(query, "mdd_activity_limit", "1000"), 1000, 0, 5000)
     mdd_trade_limit = _clamp_int(_query_value(query, "mdd_trade_limit", "1000"), 1000, 0, 5000)
     mdd_open_limit = _clamp_int(_query_value(query, "mdd_open_limit", "500"), 500, 0, 1000)
-    mdd_scan_limit = _clamp_int(_query_value(query, "mdd_scan_limit", str(min(scan_limit, 100))), min(scan_limit, 100), 1, 100)
+    mdd_scan_limit = _clamp_int(
+        _query_value(query, "mdd_scan_limit", str(min(scan_limit, 100))),
+        min(scan_limit, 100),
+        1,
+        min(scan_limit, POLYMARKET_LEADERBOARD_MAX_ROWS),
+    )
     raw_mdd_mode = _query_value(query, "mdd_mode", "fast").lower()
     mdd_mode = "mark_replay" if raw_mdd_mode in {"mark_replay", "mark-replay", "clob_mark_replay", "price_history"} else "fast"
     mdd_mark_replay_token_limit = _clamp_int(_query_value(query, "mdd_mark_replay_token_limit", "10"), 10, 1, 20)

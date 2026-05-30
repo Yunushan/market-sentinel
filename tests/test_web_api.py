@@ -756,6 +756,23 @@ class WebApiTests(unittest.TestCase):
         self.assertFalse(payload["mdd_available"])
         self.assertEqual(payload["source_sort"], "PNL")
 
+    def test_polymarket_leaderboard_payload_allows_million_row_caps(self) -> None:
+        with patch("web_api.data_api.get_leaderboard", return_value=[]) as mock_get:
+            payload = polymarket_leaderboard_payload(
+                {
+                    "limit": ["2000000"],
+                    "scan_limit": ["2000000"],
+                    "mdd_scan_limit": ["2000000"],
+                    "compute_mdd": ["true"],
+                }
+            )
+
+        self.assertEqual(payload["limit"], 1_000_000)
+        self.assertEqual(payload["scan_limit"], 1_000_000)
+        self.assertEqual(payload["mdd_scan_limit"], 1_000_000)
+        mock_get.assert_called_once()
+        self.assertEqual(mock_get.call_args.kwargs["limit"], 50)
+
     def test_polymarket_user_mdd_payload_computes_usd_and_percentage_drawdown(self) -> None:
         with patch(
             "web_api.data_api.get_closed_positions",

@@ -13,9 +13,9 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 
 ROOT = Path(__file__).resolve().parent.parent
-APP_NAME = "prediction-market-alert-and-copy-trade-gui"
-DISPLAY_NAME = "Prediction Market Alert and Copy Trade GUI"
-MANUFACTURER = "prediction-market-alert-and-copy-trade-gui contributors"
+APP_NAME = "market-sentinel"
+DISPLAY_NAME = "MarketSentinel"
+MANUFACTURER = "MarketSentinel contributors"
 UPGRADE_CODE = str(uuid.uuid5(uuid.NAMESPACE_DNS, APP_NAME)).upper()
 COMPONENT_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, f"https://github.com/Yunushan/{APP_NAME}/windows-msi")
 
@@ -70,7 +70,7 @@ def build_pyinstaller(work_dir: Path, package_dir: Path) -> None:
         "--name",
         APP_NAME,
         "--icon",
-        str(ROOT / "assets" / "polymarket.ico"),
+        str(ROOT / "assets" / "marketsentinel.ico"),
         "--distpath",
         str(pyinstaller_dist),
         "--workpath",
@@ -177,8 +177,8 @@ def copy_release_payload(package_dir: Path, frontend_dist: Path, version: str) -
     copy_file(ROOT / "LICENSE", package_dir / "LICENSE")
     copy_file(ROOT / ".env.example", package_dir / ".env.example")
     copy_file(ROOT / "data" / "config.example.json", package_dir / "data" / "config.example.json")
-    copy_file(ROOT / "assets" / "polymarket.ico", package_dir / "assets" / "polymarket.ico")
-    copy_file(ROOT / "polymarket.png", package_dir / "assets" / "polymarket.png")
+    copy_file(ROOT / "assets" / "marketsentinel.ico", package_dir / "assets" / "marketsentinel.ico")
+    copy_file(ROOT / "marketsentinel.png", package_dir / "assets" / "marketsentinel.png")
 
     frontend_target = package_dir / "frontend" / "dist"
     if frontend_target.exists():

@@ -20,7 +20,7 @@ class FinalParityTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["tkinter_base"])
         self.assertEqual(payload["app_class"], "App")
-        self.assertEqual(payload["window_title"], "prediction-market-alert-and-copy-trade-gui")
+        self.assertEqual(payload["window_title"], "MarketSentinel")
         self.assertEqual(payload["fallback_command"], "python app.py")
         self.assertEqual(payload["market_count"], len(MARKET_IDS))
         self.assertEqual(payload["choice_count"], len(MARKET_IDS))
@@ -143,11 +143,13 @@ class FinalParityTests(unittest.TestCase):
         self.assertIn("--web-gui", app_source)
         self.assertIn("UI_DESIGN_LABELS", app_source)
         self.assertIn("SetCurrentProcessExplicitAppUserModelID", app_source)
+        self.assertIn('APP_ID = "market-sentinel"', app_source)
+        self.assertIn('APP_TITLE = "MarketSentinel"', app_source)
         self.assertIn("iconbitmap(default=str(icon_path))", app_source)
         self.assertIn("run_server(parsed.host, parsed.port, parsed.config, parsed.frontend_dir)", app_source)
         self.assertIn("PyInstaller", build_source)
-        self.assertIn('copy_file(ROOT / "assets" / "polymarket.ico"', build_source)
-        self.assertIn('copy_file(ROOT / "polymarket.png"', build_source)
+        self.assertIn('copy_file(ROOT / "assets" / "marketsentinel.ico"', build_source)
+        self.assertIn('copy_file(ROOT / "marketsentinel.png"', build_source)
         self.assertIn("start_tkinter_gui.bat", build_source)
         self.assertIn("start_web_gui.bat", build_source)
         self.assertIn("PREDICTION_MARKET_CONFIG_PATH", build_source)
@@ -163,6 +165,15 @@ class FinalParityTests(unittest.TestCase):
         self.assertIn("python verify.py --frontend-build", text)
         self.assertIn("npm run build", text)
         self.assertIn("run_gui.bat", text)
+
+    def test_polymarket_leaderboard_deep_scan_caps_are_visible(self) -> None:
+        web_api_source = (ROOT / "web_api.py").read_text(encoding="utf-8")
+        app_source = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("POLYMARKET_LEADERBOARD_MAX_ROWS = 1_000_000", web_api_source)
+        self.assertIn('max="1000000"', app_source)
+        self.assertIn("up to 1,000,000", readme)
 
     def test_verify_frontend_build_uses_windows_npm_command(self) -> None:
         source = (ROOT / "verify.py").read_text(encoding="utf-8")
