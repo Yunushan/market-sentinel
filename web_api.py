@@ -1953,24 +1953,61 @@ def _sort_polymarket_leaderboard_rows(rows: List[Dict[str, Any]], sort: str, dir
 def _fetch_polymarket_leaderboard_scan_rows(
     *,
     scan_limit: Optional[int],
+    scan_start_offset: int = 0,
+    initial_rows: Optional[List[Dict[str, Any]]] = None,
     remote_sort: str,
     direction: str,
     period: str,
     category: str,
     scan_concurrency: int,
+    scan_retry_attempts: int = 1,
+    scan_retry_delay_seconds: float = 0.0,
     is_cancelled: Callable[[], bool],
     emit_progress: Callable[..., None],
     warnings: List[str],
+    page_callback: Optional[Callable[[int, int, List[Dict[str, Any]]], None]] = None,
 ) -> Tuple[List[Dict[str, Any]], bool]:
-    raw_rows: List[Dict[str, Any]] = []
-    offset = 0
+    raw_rows: List[Dict[str, Any]] = [dict(row) for row in (initial_rows or [])]
+    offset = max(0, int(scan_start_offset or 0))
+    if raw_rows and offset <= 0:
+        offset = len(raw_rows)
     cancelled = False
     concurrency = max(1, int(scan_concurrency or 1))
+    retry_attempts = max(1, int(scan_retry_attempts or 1))
+    retry_delay = max(0.0, float(scan_retry_delay_seconds or 0.0))
+
+    def fetch_page(page_offset: int, page_limit: int) -> List[Dict[str, Any]]:
+        for attempt in range(1, retry_attempts + 1):
+            try:
+                return data_api.get_leaderboard(
+                    limit=page_limit,
+                    offset=page_offset,
+                    sort_by=remote_sort,
+                    sort_direction=direction,
+                    period=period,
+                    category=category,
+                )
+            except Exception as exc:
+                if attempt >= retry_attempts:
+                    raise
+                warning = (
+                    f"Leaderboard page offset {page_offset} failed attempt {attempt}/{retry_attempts}: "
+                    f"{exc}; retrying in {retry_delay:g}s."
+                )
+                warnings.append(warning)
+                emit_progress(
+                    "leaderboard",
+                    scanned=len(raw_rows),
+                    message=warning,
+                )
+                if retry_delay:
+                    time.sleep(retry_delay)
+        return []
 
     emit_progress(
         "leaderboard",
-        scanned=0,
-        message=f"Scanning leaderboard rows 0/{_limit_label(scan_limit)}.",
+        scanned=len(raw_rows),
+        message=f"Scanning leaderboard rows {len(raw_rows)}/{_limit_label(scan_limit)} from offset {offset}.",
     )
     while scan_limit is None or len(raw_rows) < scan_limit:
         if is_cancelled():
@@ -1995,26 +2032,11 @@ def _fetch_polymarket_leaderboard_scan_rows(
         pages_by_offset: Dict[int, List[Dict[str, Any]]] = {}
         if len(batch_specs) == 1:
             page_offset, page_limit = batch_specs[0]
-            pages_by_offset[page_offset] = data_api.get_leaderboard(
-                limit=page_limit,
-                offset=page_offset,
-                sort_by=remote_sort,
-                sort_direction=direction,
-                period=period,
-                category=category,
-            )
+            pages_by_offset[page_offset] = fetch_page(page_offset, page_limit)
         else:
             with ThreadPoolExecutor(max_workers=len(batch_specs)) as executor:
                 futures = {
-                    executor.submit(
-                        data_api.get_leaderboard,
-                        limit=page_limit,
-                        offset=page_offset,
-                        sort_by=remote_sort,
-                        sort_direction=direction,
-                        period=period,
-                        category=category,
-                    ): (page_offset, page_limit)
+                    executor.submit(fetch_page, page_offset, page_limit): (page_offset, page_limit)
                     for page_offset, page_limit in batch_specs
                 }
                 for future in as_completed(futures):
@@ -2031,6 +2053,12 @@ def _fetch_polymarket_leaderboard_scan_rows(
         stop_after_batch = False
         for page_offset, page_limit in batch_specs:
             page = pages_by_offset.get(page_offset) or []
+            if page_callback is not None:
+                try:
+                    page_callback(page_offset, page_limit, page)
+                except Exception as exc:
+                    warnings.append(f"Leaderboard checkpoint callback failed at offset {page_offset}: {exc}")
+                    raise
             if not page:
                 stop_after_batch = True
                 break
@@ -2060,6 +2088,8 @@ def polymarket_leaderboard_payload(
     *,
     cancel_check: Optional[Callable[[], bool]] = None,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    initial_raw_rows: Optional[List[Mapping[str, Any]]] = None,
+    leaderboard_page_callback: Optional[Callable[[int, int, List[Dict[str, Any]]], None]] = None,
 ) -> Dict[str, Any]:
     query = params or {}
     sort = _query_value(query, "sort", "roi_pct").lower()
@@ -2107,6 +2137,17 @@ def polymarket_leaderboard_payload(
     fast_scan = _query_bool(query, "fast_scan", False)
     scan_concurrency_default = 6 if fast_scan else 1
     mdd_concurrency_default = 3 if fast_scan else 1
+    scan_start_offset = max(0, _safe_int(_query_value(query, "scan_start_offset", "0"), 0))
+    scan_retry_attempts = _clamp_int(
+        _query_value(query, "scan_retry_attempts", "1"),
+        1,
+        1,
+        50,
+    )
+    scan_retry_delay_seconds = max(
+        0.0,
+        min(float(_safe_float(_query_value(query, "scan_retry_delay_seconds", "0"), 0.0) or 0.0), 3600.0),
+    )
     scan_concurrency = _clamp_int(
         _query_value(query, "scan_concurrency", str(scan_concurrency_default)),
         scan_concurrency_default,
@@ -2200,16 +2241,22 @@ def polymarket_leaderboard_payload(
             pass
 
     remote_sort = LEADERBOARD_SORTS[sort]
+    checkpoint_rows = [dict(row) for row in (initial_raw_rows or [])]
     raw_rows, leaderboard_cancelled = _fetch_polymarket_leaderboard_scan_rows(
         scan_limit=scan_limit,
+        scan_start_offset=scan_start_offset,
+        initial_rows=checkpoint_rows,
         remote_sort=remote_sort,
         direction=direction,
         period=period,
         category=category,
         scan_concurrency=scan_concurrency,
+        scan_retry_attempts=scan_retry_attempts,
+        scan_retry_delay_seconds=scan_retry_delay_seconds,
         is_cancelled=is_cancelled,
         emit_progress=emit_progress,
         warnings=warnings,
+        page_callback=leaderboard_page_callback,
     )
     cancelled = cancelled or leaderboard_cancelled
 
@@ -2450,6 +2497,10 @@ def polymarket_leaderboard_payload(
         "mdd_cache_ttl_seconds": mdd_cache_ttl_seconds,
         "fast_scan": fast_scan,
         "scan_concurrency": scan_concurrency,
+        "scan_start_offset": scan_start_offset,
+        "scan_retry_attempts": scan_retry_attempts,
+        "scan_retry_delay_seconds": scan_retry_delay_seconds,
+        "initial_checkpoint_rows": len(checkpoint_rows),
         "mdd_concurrency": mdd_concurrency,
         "mdd_stop_on_limit": mdd_stop_on_limit,
         "analytics_cache": analytics_cache_summary(enabled=mdd_persist_cache),

@@ -792,6 +792,63 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["counts"]["returned"], 10)
         self.assertIn("cancelled", payload["warnings"][0])
 
+    def test_polymarket_leaderboard_payload_retries_transient_page_error(self) -> None:
+        calls = 0
+        progress: list[dict] = []
+
+        def fake_leaderboard(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("ssl eof")
+            return [{"rank": 1, "proxyWallet": WALLET, "pnl": "10", "volume": "100"}]
+
+        with patch("web_api.data_api.get_leaderboard", side_effect=fake_leaderboard):
+            payload = polymarket_leaderboard_payload(
+                {
+                    "sort": ["roi_pct"],
+                    "limit": ["1"],
+                    "scan_limit": ["1"],
+                    "scan_retry_attempts": ["2"],
+                    "scan_retry_delay_seconds": ["0"],
+                },
+                progress_callback=progress.append,
+            )
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(payload["counts"]["scanned"], 1)
+        self.assertEqual(payload["scan_retry_attempts"], 2)
+        self.assertTrue(any("retrying" in warning for warning in payload["warnings"]))
+        self.assertTrue(any("retrying" in item.get("message", "") for item in progress))
+
+    def test_polymarket_leaderboard_payload_resumes_from_checkpoint_rows(self) -> None:
+        checkpoint_rows = [{"rank": 1, "proxyWallet": WALLET, "pnl": "10", "volume": "100"}]
+        page_callbacks = []
+
+        def fake_leaderboard(*_args, **kwargs):
+            self.assertEqual(kwargs["offset"], 1)
+            return []
+
+        with patch("web_api.data_api.get_leaderboard", side_effect=fake_leaderboard) as mock_get:
+            payload = polymarket_leaderboard_payload(
+                {
+                    "sort": ["roi_pct"],
+                    "limit": ["all"],
+                    "scan_limit": ["all"],
+                    "scan_start_offset": ["1"],
+                },
+                initial_raw_rows=checkpoint_rows,
+                leaderboard_page_callback=lambda offset, limit, rows: page_callbacks.append((offset, limit, rows)),
+            )
+
+        mock_get.assert_called_once()
+        self.assertEqual(payload["counts"]["scanned"], 1)
+        self.assertEqual(payload["counts"]["returned"], 1)
+        self.assertEqual(payload["scan_start_offset"], 1)
+        self.assertEqual(payload["initial_checkpoint_rows"], 1)
+        self.assertEqual(payload["rows"][0]["wallet"], WALLET)
+        self.assertEqual(page_callbacks[0][0], 1)
+
     def test_polymarket_leaderboard_payload_does_not_cap_deep_scan_values(self) -> None:
         with patch("web_api.data_api.get_leaderboard", return_value=[]) as mock_get:
             payload = polymarket_leaderboard_payload(

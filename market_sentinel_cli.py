@@ -225,6 +225,8 @@ def build_polymarket_leaderboard_params(args: argparse.Namespace) -> Dict[str, L
     _add_param(params, "mdd_cache_ttl_seconds", args.mdd_cache_ttl_seconds)
     _add_param(params, "equity_base_usd", args.equity_base_usd)
     _add_param(params, "scan_concurrency", args.scan_concurrency)
+    _add_param(params, "scan_retry_attempts", args.scan_retry_attempts)
+    _add_param(params, "scan_retry_delay_seconds", args.scan_retry_delay_seconds)
     _add_param(params, "mdd_concurrency", args.mdd_concurrency)
     _add_param(params, "mdd_stop_on_limit", args.mdd_stop_on_limit)
 
@@ -272,6 +274,32 @@ def _open_output(path: Optional[str]) -> tuple[TextIO, bool]:
     return output.open("w", encoding="utf-8", newline=""), True
 
 
+def _log_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def _format_elapsed(seconds: float) -> str:
+    total = max(0, int(seconds))
+    days, remainder = divmod(total, 86_400)
+    hours, remainder = divmod(remainder, 3_600)
+    minutes, secs = divmod(remainder, 60)
+    clock = f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{days}d {clock}" if days else clock
+
+
+def _progress_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _format_rate(count: int, elapsed_seconds: float) -> str:
+    if count <= 0 or elapsed_seconds <= 0:
+        return "-"
+    return f"{count / elapsed_seconds:.2f}/s"
+
+
 def write_leaderboard_payload(payload: Mapping[str, Any], *, output_format: str, output: Optional[str]) -> None:
     stream, should_close = _open_output(output)
     try:
@@ -288,34 +316,190 @@ def write_leaderboard_payload(payload: Mapping[str, Any], *, output_format: str,
             stream.close()
 
 
-def _progress_printer(enabled: bool):
+def _load_leaderboard_checkpoint(path: Path) -> tuple[List[Dict[str, Any]], int, int, int]:
+    if not path.exists():
+        return [], 0, 0, 0
+
+    pages: Dict[int, tuple[int, List[Dict[str, Any]]]] = {}
+    ignored = 0
+    with path.open("r", encoding="utf-8") as stream:
+        for line in stream:
+            raw = line.strip()
+            if not raw:
+                continue
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError:
+                ignored += 1
+                continue
+            if not isinstance(record, Mapping) or record.get("type") != "leaderboard_page":
+                ignored += 1
+                continue
+            try:
+                offset = max(0, int(record.get("offset", 0)))
+                limit = max(0, int(record.get("limit", 0)))
+            except (TypeError, ValueError):
+                ignored += 1
+                continue
+            raw_rows = record.get("rows")
+            if not isinstance(raw_rows, list):
+                ignored += 1
+                continue
+            rows = [dict(row) for row in raw_rows if isinstance(row, Mapping)]
+            pages[offset] = (limit, rows)
+
+    rows: List[Dict[str, Any]] = []
+    expected_offset = 0
+    loaded_pages = 0
+    for offset, (_limit, page_rows) in sorted(pages.items()):
+        if offset < expected_offset:
+            ignored += 1
+            continue
+        if offset > expected_offset:
+            ignored += 1
+            break
+        rows.extend(page_rows)
+        loaded_pages += 1
+        expected_offset = offset + len(page_rows)
+
+    return rows, expected_offset, loaded_pages, ignored
+
+
+class _LeaderboardCheckpointWriter:
+    def __init__(self, path: Path, *, fsync_every: int = 20) -> None:
+        self.path = path
+        self.fsync_every = max(1, int(fsync_every or 20))
+        self.written = 0
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.stream = self.path.open("a", encoding="utf-8")
+
+    def record(self, offset: int, limit: int, rows: List[Dict[str, Any]]) -> None:
+        json.dump(
+            {
+                "type": "leaderboard_page",
+                "offset": int(offset),
+                "limit": int(limit),
+                "row_count": len(rows),
+                "written_at": int(time.time()),
+                "rows": rows,
+            },
+            self.stream,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        self.stream.write("\n")
+        self.stream.flush()
+        self.written += 1
+        if self.written % self.fsync_every == 0:
+            os.fsync(self.stream.fileno())
+
+    def close(self) -> None:
+        if self.stream.closed:
+            return
+        self.stream.flush()
+        os.fsync(self.stream.fileno())
+        self.stream.close()
+
+
+def _progress_printer(enabled: bool, *, started_at: Optional[float] = None):
     if not enabled:
         return None
+    start = started_at if started_at is not None else time.monotonic()
+    pid = os.getpid()
 
     def emit(progress: Dict[str, Any]) -> None:
+        elapsed_seconds = max(0.0, time.monotonic() - start)
         phase = str(progress.get("phase") or "scan")
-        scanned = progress.get("scanned", 0)
-        scan_limit = "unlimited" if progress.get("scan_limit_unlimited") else progress.get("scan_limit", 0)
-        mdd_attempted = progress.get("mdd_attempted", 0)
-        mdd_total = progress.get("mdd_total", 0)
+        scanned = _progress_int(progress.get("scanned", 0))
+        scan_limit = "unlimited" if progress.get("scan_limit_unlimited") else _progress_int(progress.get("scan_limit", 0))
+        mdd_attempted = _progress_int(progress.get("mdd_attempted", 0))
+        mdd_total = _progress_int(progress.get("mdd_total", 0))
+        percent_value = progress.get("percent")
+        percent = ""
+        if percent_value is not None:
+            try:
+                percent = f" percent={float(percent_value):.1f}%"
+            except (TypeError, ValueError):
+                percent = ""
+        eta = ""
+        if elapsed_seconds > 0:
+            if phase == "mdd" and mdd_total > 0 and 0 < mdd_attempted < mdd_total:
+                eta_seconds = (mdd_total - mdd_attempted) / max(mdd_attempted / elapsed_seconds, 0.000001)
+                eta = f" eta={_format_elapsed(eta_seconds)}"
+            elif scan_limit != "unlimited":
+                scan_limit_int = _progress_int(scan_limit)
+                if 0 < scanned < scan_limit_int:
+                    eta_seconds = (scan_limit_int - scanned) / max(scanned / elapsed_seconds, 0.000001)
+                    eta = f" eta={_format_elapsed(eta_seconds)}"
         message = str(progress.get("message") or "").strip()
         if not message:
             message = f"{phase}: scanned {scanned}/{scan_limit}; mdd {mdd_attempted}/{mdd_total}"
-        print(message, file=sys.stderr, flush=True)
+        prefix = (
+            f"[{_log_timestamp()} pid={pid} status=running elapsed={_format_elapsed(elapsed_seconds)} "
+            f"phase={phase}{percent} scanned={scanned}/{scan_limit} scan_rate={_format_rate(scanned, elapsed_seconds)} "
+            f"mdd={mdd_attempted}/{mdd_total} mdd_rate={_format_rate(mdd_attempted, elapsed_seconds)}{eta}]"
+        )
+        print(f"{prefix} {message}", file=sys.stderr, flush=True)
 
     return emit
 
 
 def run_polymarket_leaderboard(args: argparse.Namespace) -> int:
+    started_at = time.monotonic()
     params = build_polymarket_leaderboard_params(args)
-    payload = polymarket_leaderboard_payload(params, progress_callback=_progress_printer(not args.quiet))
+    progress_callback = _progress_printer(not args.quiet, started_at=started_at)
+    checkpoint_path_text = str(getattr(args, "checkpoint", "") or "").strip()
+    checkpoint_writer: Optional[_LeaderboardCheckpointWriter] = None
+    initial_raw_rows: Optional[List[Mapping[str, Any]]] = None
+    payload_kwargs: Dict[str, Any] = {"progress_callback": progress_callback}
+    if not args.quiet:
+        checkpoint_label = checkpoint_path_text or "-"
+        print(
+            f"[{_log_timestamp()} pid={os.getpid()} status=starting elapsed=00:00:00 phase=setup] "
+            f"Starting Polymarket leaderboard scan output={args.output} checkpoint={checkpoint_label}.",
+            file=sys.stderr,
+            flush=True,
+        )
+    if checkpoint_path_text:
+        checkpoint_path = Path(checkpoint_path_text).expanduser()
+        if getattr(args, "resume", False):
+            checkpoint_rows, next_offset, loaded_pages, ignored_lines = _load_leaderboard_checkpoint(checkpoint_path)
+            initial_raw_rows = checkpoint_rows
+            _add_param(params, "scan_start_offset", next_offset)
+            if not args.quiet:
+                print(
+                    f"[{_log_timestamp()} pid={os.getpid()} status=running elapsed={_format_elapsed(time.monotonic() - started_at)} phase=resume] "
+                    f"Resuming leaderboard scan from {checkpoint_path}: loaded {len(checkpoint_rows)} rows "
+                    f"from {loaded_pages} page(s); next offset {next_offset}; ignored {ignored_lines} line(s).",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        else:
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            checkpoint_path.write_text("", encoding="utf-8")
+        checkpoint_writer = _LeaderboardCheckpointWriter(
+            checkpoint_path,
+            fsync_every=max(1, int(str(getattr(args, "checkpoint_fsync_every", "20") or "20"))),
+        )
+        payload_kwargs["initial_raw_rows"] = initial_raw_rows or []
+        payload_kwargs["leaderboard_page_callback"] = checkpoint_writer.record
+
+    try:
+        payload = polymarket_leaderboard_payload(params, **payload_kwargs)
+    finally:
+        if checkpoint_writer is not None:
+            checkpoint_writer.close()
     write_leaderboard_payload(payload, output_format=args.format, output=args.output)
 
     counts = payload.get("counts") or {}
     warning_count = len(payload.get("warnings") or [])
     if not args.quiet:
         print(
+            "[{timestamp} pid={pid} status=done elapsed={elapsed} phase=done] "
             "Done: returned={returned} filtered={filtered} scanned={scanned} mdd_computed={mdd_computed} warnings={warnings}".format(
+                timestamp=_log_timestamp(),
+                pid=os.getpid(),
+                elapsed=_format_elapsed(time.monotonic() - started_at),
                 returned=counts.get("returned", 0),
                 filtered=counts.get("filtered", 0),
                 scanned=counts.get("scanned", 0),
@@ -873,6 +1057,11 @@ def build_parser() -> argparse.ArgumentParser:
     leaderboard.add_argument("--mdd-cache-ttl-seconds", default="60")
     leaderboard.add_argument("--equity-base-usd", default="")
     leaderboard.add_argument("--scan-concurrency", default="")
+    leaderboard.add_argument("--scan-retry-attempts", default="5", help="Retry each leaderboard page this many times before failing.")
+    leaderboard.add_argument("--scan-retry-delay-seconds", "--scan-retry-delay", default="30", help="Seconds to wait between leaderboard page retry attempts.")
+    leaderboard.add_argument("--checkpoint", default="", help="Append fetched leaderboard pages to this JSONL checkpoint file.")
+    leaderboard.add_argument("--resume", action="store_true", help="Load --checkpoint and continue scanning from the last saved page.")
+    leaderboard.add_argument("--checkpoint-fsync-every", type=int, default=20, help="Flush checkpoint data to disk every N pages.")
     leaderboard.add_argument("--mdd-concurrency", default="")
     leaderboard.add_argument("--mdd-stop-on-limit", action="store_true", default=None)
     leaderboard.add_argument("--min-pnl-usd", default="")

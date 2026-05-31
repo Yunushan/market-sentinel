@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -51,6 +52,8 @@ class MarketSentinelCliTests(unittest.TestCase):
         self.assertEqual(params["mdd_scan_limit"], ["0"])
         self.assertEqual(params["max_mdd_pct"], ["20"])
         self.assertEqual(params["mdd_cache_ttl_seconds"], ["120"])
+        self.assertEqual(params["scan_retry_attempts"], ["5"])
+        self.assertEqual(params["scan_retry_delay_seconds"], ["30"])
 
     def test_polymarket_leaderboard_cli_runs_headless_json_output(self) -> None:
         payload = {
@@ -83,6 +86,95 @@ class MarketSentinelCliTests(unittest.TestCase):
         self.assertEqual(called_params["limit"], ["all"])
         self.assertEqual(called_params["scan_limit"], ["all"])
         self.assertIsNone(mock_payload.call_args.kwargs["progress_callback"])
+
+    def test_polymarket_leaderboard_progress_logs_runtime_data(self) -> None:
+        stderr = io.StringIO()
+        emit = market_sentinel_cli._progress_printer(True, started_at=time.monotonic() - 10)
+
+        with patch("sys.stderr", stderr):
+            emit(
+                {
+                    "phase": "leaderboard",
+                    "percent": 12.5,
+                    "scanned": 100,
+                    "scan_limit": 1000,
+                    "scan_limit_unlimited": False,
+                    "mdd_attempted": 0,
+                    "mdd_total": 0,
+                    "message": "Scanning leaderboard rows 100/1000.",
+                }
+            )
+
+        line = stderr.getvalue()
+        self.assertIn("status=running", line)
+        self.assertIn("elapsed=", line)
+        self.assertIn("phase=leaderboard", line)
+        self.assertIn("percent=12.5%", line)
+        self.assertIn("scan_rate=", line)
+        self.assertIn("eta=", line)
+        self.assertIn("Scanning leaderboard rows 100/1000.", line)
+
+    def test_polymarket_leaderboard_cli_checkpoints_and_resumes_pages(self) -> None:
+        payload = {
+            "rows": [],
+            "counts": {"returned": 0, "filtered": 0, "scanned": 1, "mdd_computed": 0},
+            "warnings": [],
+        }
+        checkpoint_row = {
+            "rank": 1,
+            "proxyWallet": "0x" + "1" * 40,
+            "pnl": "10",
+            "volume": "100",
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "leaderboard.checkpoint.jsonl"
+
+            def fake_payload(_params, **kwargs):
+                kwargs["leaderboard_page_callback"](0, 1, [checkpoint_row])
+                return payload
+
+            stdout = io.StringIO()
+            with patch("market_sentinel_cli.polymarket_leaderboard_payload", side_effect=fake_payload), patch(
+                "sys.stdout",
+                stdout,
+            ):
+                exit_code = market_sentinel_cli.main(
+                    [
+                        "polymarket-leaderboard",
+                        "--checkpoint",
+                        str(checkpoint),
+                        "--format",
+                        "json",
+                        "--quiet",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn('"type":"leaderboard_page"', checkpoint.read_text(encoding="utf-8"))
+
+            stdout = io.StringIO()
+            with patch("market_sentinel_cli.polymarket_leaderboard_payload", return_value=payload) as mock_payload, patch(
+                "sys.stdout",
+                stdout,
+            ):
+                exit_code = market_sentinel_cli.main(
+                    [
+                        "polymarket-leaderboard",
+                        "--checkpoint",
+                        str(checkpoint),
+                        "--resume",
+                        "--format",
+                        "json",
+                        "--quiet",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            called_params = mock_payload.call_args.args[0]
+            self.assertEqual(called_params["scan_start_offset"], ["1"])
+            self.assertEqual(mock_payload.call_args.kwargs["initial_raw_rows"], [checkpoint_row])
+            self.assertTrue(callable(mock_payload.call_args.kwargs["leaderboard_page_callback"]))
 
     def test_config_and_market_cli_update_persisted_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

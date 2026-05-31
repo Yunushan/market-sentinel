@@ -329,6 +329,8 @@ python -m market_sentinel_cli polymarket-leaderboard \
   --sort roi_pct --direction DESC \
   --returned unlimited --scanned unlimited \
   --compute-mdd --fast-scan --mdd-scan unlimited --max-mdd-pct 20 \
+  --scan-retry-attempts 10 --scan-retry-delay 60 \
+  --checkpoint data/polymarket-best-roi-mdd20.checkpoint.jsonl --resume \
   --format csv --output data/polymarket-best-roi-mdd20.csv
 ```
 
@@ -362,7 +364,7 @@ market-sentinel polymarket-mdd-cache list
 market-sentinel serve --host 127.0.0.1 --port 8765
 ```
 
-Commands that mutate config or paper state write through the same atomic config storage as the GUI. Most commands return JSON to stdout and support `--output file.json` plus `--compact`; `polymarket-leaderboard` can emit CSV or JSON. Unlimited scans run until the public leaderboard API returns no more rows, a rate limit stops the run, or the process is cancelled; use finite `--scanned` and `--mdd-scan` values for normal interactive jobs.
+Commands that mutate config or paper state write through the same atomic config storage as the GUI. Most commands return JSON to stdout and support `--output file.json` plus `--compact`; `polymarket-leaderboard` can emit CSV or JSON. Unlimited scans run until the public leaderboard API returns no more rows, a rate limit stops the run, or the process is cancelled; use finite `--scanned` and `--mdd-scan` values for normal interactive jobs. For long VPS scans, use `--checkpoint ... --resume` plus retry flags so transient SSL/API failures only lose the current small page batch instead of the whole run. The checkpoint is append-only JSONL and can grow large during multi-million-row scans; the final CSV/JSON is still written after the scan completes. Progress logs on stderr include timestamp, PID, running status, elapsed time, phase, percent, scan rate, MDD rate, and ETA when a finite limit is known.
 
 Useful local API endpoints:
 - `GET /api/state` returns the initial React GUI snapshot: health, config, markets, alerts, wallets, copy, live safety, and paper state.
