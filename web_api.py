@@ -58,6 +58,7 @@ from polymarket.live_reports import (
     live_validation_coverage_promotion_proposal_export_filename,
     live_validation_coverage_promotion_proposal_markdown,
     live_validation_promotion_proposal_snapshot_export_filename,
+    live_validation_promotion_proposal_snapshot_diff_markdown,
     live_validation_promotion_proposal_snapshot_markdown,
     live_validation_report_review_bundle,
     live_validation_report_review_export_filename,
@@ -139,6 +140,8 @@ API_ROUTES = {
         "/api/polymarket/live-validation/promotion-proposal/snapshots/{key}",
         "/api/polymarket/live-validation/promotion-proposal/snapshots/{key}/export.json",
         "/api/polymarket/live-validation/promotion-proposal/snapshots/{key}/export.md",
+        "/api/polymarket/live-validation/promotion-proposal/snapshots/{key}/diff.json",
+        "/api/polymarket/live-validation/promotion-proposal/snapshots/{key}/diff.md",
     ],
     "PATCH": [
         "/api/config",
@@ -1811,6 +1814,12 @@ def polymarket_live_validation_promotion_proposal_snapshot_payload(key: str) -> 
     return load_live_validation_coverage_promotion_proposal_snapshot(key)
 
 
+def polymarket_live_validation_promotion_proposal_snapshot_diff_payload(key: str) -> Optional[Dict[str, Any]]:
+    snapshot = polymarket_live_validation_promotion_proposal_snapshot_payload(key)
+    diff = snapshot.get("diff") if isinstance(snapshot, Mapping) else None
+    return dict(diff) if isinstance(diff, Mapping) else None
+
+
 def polymarket_live_validation_promotion_proposal_snapshot_store_payload(
     payload: Mapping[str, Any],
 ) -> Dict[str, Any]:
@@ -1955,6 +1964,8 @@ def _fetch_polymarket_leaderboard_scan_rows(
     scan_limit: Optional[int],
     scan_start_offset: int = 0,
     initial_rows: Optional[List[Dict[str, Any]]] = None,
+    initial_scanned: Optional[int] = None,
+    retain_rows: bool = True,
     remote_sort: str,
     direction: str,
     period: str,
@@ -1968,9 +1979,12 @@ def _fetch_polymarket_leaderboard_scan_rows(
     page_callback: Optional[Callable[[int, int, List[Dict[str, Any]]], None]] = None,
 ) -> Tuple[List[Dict[str, Any]], bool]:
     raw_rows: List[Dict[str, Any]] = [dict(row) for row in (initial_rows or [])]
+    scanned_count = max(len(raw_rows), int(initial_scanned or 0))
+    if not retain_rows:
+        raw_rows = []
     offset = max(0, int(scan_start_offset or 0))
-    if raw_rows and offset <= 0:
-        offset = len(raw_rows)
+    if scanned_count and offset <= 0:
+        offset = scanned_count
     cancelled = False
     concurrency = max(1, int(scan_concurrency or 1))
     retry_attempts = max(1, int(scan_retry_attempts or 1))
@@ -1997,7 +2011,7 @@ def _fetch_polymarket_leaderboard_scan_rows(
                 warnings.append(warning)
                 emit_progress(
                     "leaderboard",
-                    scanned=len(raw_rows),
+                    scanned=scanned_count,
                     message=warning,
                 )
                 if retry_delay:
@@ -2006,16 +2020,16 @@ def _fetch_polymarket_leaderboard_scan_rows(
 
     emit_progress(
         "leaderboard",
-        scanned=len(raw_rows),
-        message=f"Scanning leaderboard rows {len(raw_rows)}/{_limit_label(scan_limit)} from offset {offset}.",
+        scanned=scanned_count,
+        message=f"Scanning leaderboard rows {scanned_count}/{_limit_label(scan_limit)} from offset {offset}.",
     )
-    while scan_limit is None or len(raw_rows) < scan_limit:
+    while scan_limit is None or scanned_count < scan_limit:
         if is_cancelled():
             cancelled = True
             warnings.append("Leaderboard scan cancelled by user.")
             break
 
-        remaining = None if scan_limit is None else scan_limit - len(raw_rows)
+        remaining = None if scan_limit is None else scan_limit - scanned_count
         batch_specs: List[Tuple[int, int]] = []
         page_count = concurrency if remaining is None else min(concurrency, max(1, (remaining + POLYMARKET_LEADERBOARD_PAGE_SIZE - 1) // POLYMARKET_LEADERBOARD_PAGE_SIZE))
         for _ in range(page_count):
@@ -2042,7 +2056,7 @@ def _fetch_polymarket_leaderboard_scan_rows(
                 for future in as_completed(futures):
                     page_offset, _page_limit = futures[future]
                     pages_by_offset[page_offset] = future.result()
-                    completed = len(raw_rows) + sum(len(page) for page in pages_by_offset.values())
+                    completed = scanned_count + sum(len(page) for page in pages_by_offset.values())
                     progress_scanned = completed if scan_limit is None else min(completed, scan_limit)
                     emit_progress(
                         "leaderboard",
@@ -2062,12 +2076,14 @@ def _fetch_polymarket_leaderboard_scan_rows(
             if not page:
                 stop_after_batch = True
                 break
-            raw_rows.extend(page)
+            scanned_count += len(page)
+            if retain_rows:
+                raw_rows.extend(page)
             if len(page) < page_limit:
                 stop_after_batch = True
                 break
 
-        progress_scanned = len(raw_rows) if scan_limit is None else min(len(raw_rows), scan_limit)
+        progress_scanned = scanned_count if scan_limit is None else min(scanned_count, scan_limit)
         emit_progress(
             "leaderboard",
             scanned=progress_scanned,
@@ -3499,9 +3515,15 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 return
             if path.startswith("/api/polymarket/live-validation/promotion-proposal/snapshots/"):
                 suffix = path[len("/api/polymarket/live-validation/promotion-proposal/snapshots/") :]
+                diff_json = suffix.endswith("/diff.json")
+                diff_markdown = suffix.endswith("/diff.md")
                 export_json = suffix.endswith("/export.json")
                 export_markdown = suffix.endswith("/export.md")
-                if export_json:
+                if diff_json:
+                    raw_key = suffix[: -len("/diff.json")]
+                elif diff_markdown:
+                    raw_key = suffix[: -len("/diff.md")]
+                elif export_json:
                     raw_key = suffix[: -len("/export.json")]
                 elif export_markdown:
                     raw_key = suffix[: -len("/export.md")]
@@ -3515,7 +3537,21 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 if snapshot is None:
                     self._send_error(HTTPStatus.NOT_FOUND, "not_found", "Unknown promotion proposal snapshot.")
                     return
-                if export_json:
+                if diff_json:
+                    self._send_text(
+                        HTTPStatus.OK,
+                        json.dumps(snapshot.get("diff") or {}, indent=2, sort_keys=True),
+                        content_type="application/json; charset=utf-8",
+                        filename=live_validation_promotion_proposal_snapshot_export_filename(snapshot_key, "diff.json"),
+                    )
+                elif diff_markdown:
+                    self._send_text(
+                        HTTPStatus.OK,
+                        live_validation_promotion_proposal_snapshot_diff_markdown(snapshot.get("diff") or {}),
+                        content_type="text/markdown; charset=utf-8",
+                        filename=live_validation_promotion_proposal_snapshot_export_filename(snapshot_key, "diff.md"),
+                    )
+                elif export_json:
                     self._send_text(
                         HTTPStatus.OK,
                         json.dumps(snapshot, indent=2, sort_keys=True),

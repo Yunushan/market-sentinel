@@ -1340,11 +1340,17 @@ def load_live_validation_coverage_promotion_proposal_snapshot(
         decision_path=decision_path,
     )
     proposal = _jsonable(entry.get("proposal") or {})
+    diff = live_validation_promotion_proposal_snapshot_diff(
+        entry,
+        report_store_path=report_store_path,
+        decision_path=decision_path,
+    )
     return {
         "source": "polymarket_live_validation_promotion_proposal_snapshot",
         "kind": POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOT_KIND,
         "entry": metadata,
         "proposal": proposal,
+        "diff": diff,
         "export": {
             "json_filename": live_validation_promotion_proposal_snapshot_export_filename(clean_key, "json"),
             "markdown_filename": live_validation_promotion_proposal_snapshot_export_filename(clean_key, "md"),
@@ -1465,9 +1471,177 @@ def live_validation_promotion_proposal_snapshot_metadata(
     return metadata
 
 
+def live_validation_promotion_proposal_snapshot_diff(
+    entry: Mapping[str, Any],
+    *,
+    report_store_path: Optional[Path | str] = None,
+    decision_path: Optional[Path | str] = None,
+) -> Dict[str, Any]:
+    """Return a compact no-secrets diff between a stored snapshot and its current proposal."""
+    snapshot = _jsonable(entry.get("proposal") or {})
+    if not isinstance(snapshot, Mapping):
+        snapshot = {}
+    target_tier = str(snapshot.get("target_tier_filter") or entry.get("target_tier_filter") or "").strip()
+    current = live_validation_coverage_promotion_proposal(
+        report_store_path=report_store_path,
+        decision_path=decision_path,
+        target_tier=target_tier,
+    )
+    stored_hash = str(entry.get("proposal_hash") or snapshot.get("proposal_hash") or "")
+    snapshot_hash = live_validation_coverage_promotion_proposal_hash(snapshot) if snapshot else ""
+    current_hash = str(current.get("proposal_hash") or "")
+    counts = _promotion_proposal_count_diff(snapshot, current)
+    accepted = _promotion_proposal_row_diff(snapshot, current, "accepted_decisions")
+    stale = _promotion_proposal_row_diff(snapshot, current, "stale_decisions")
+    files = _promotion_proposal_file_diff(snapshot, current)
+    gates = _promotion_proposal_gate_diff(snapshot, current)
+
+    categories: List[str] = []
+    if stored_hash != current_hash:
+        categories.append("proposal_hash")
+    if stored_hash and snapshot_hash and stored_hash != snapshot_hash:
+        categories.append("snapshot_integrity")
+    if any(item.get("delta") for item in counts.values()):
+        categories.append("counts")
+    if accepted["added"] or accepted["removed"]:
+        categories.append("accepted_decisions")
+    if stale["added"] or stale["removed"]:
+        categories.append("stale_decisions")
+    if files["added"] or files["removed"]:
+        categories.append("proposed_files")
+    if gates["added"] or gates["removed"] or gates["changed"]:
+        categories.append("review_gates")
+
+    return {
+        "source": "polymarket_live_validation_promotion_proposal_snapshot_diff",
+        "kind": "polymarket_live_validation_coverage_promotion_proposal_snapshot_diff",
+        "snapshot_key": str(entry.get("key") or ""),
+        "target_tier_filter": target_tier or None,
+        "proposal_hash": {
+            "snapshot": stored_hash,
+            "snapshot_canonical": snapshot_hash,
+            "current": current_hash,
+            "changed": stored_hash != current_hash,
+            "snapshot_integrity_valid": not stored_hash or stored_hash == snapshot_hash,
+        },
+        "counts": counts,
+        "accepted_decisions": accepted,
+        "stale_decisions": stale,
+        "proposed_files": files,
+        "review_gates": gates,
+        "changed": bool(categories),
+        "change_categories": categories,
+        "static_coverage_mutated": False,
+        "funded_execution_exposed": False,
+        "notes": [
+            "The diff is a read-only comparison of stored and current no-secrets proposal summaries.",
+            "It does not apply coverage or documentation changes and does not alter promotion decisions.",
+        ],
+    }
+
+
+def _promotion_proposal_count_diff(snapshot: Mapping[str, Any], current: Mapping[str, Any]) -> Dict[str, Dict[str, int]]:
+    before = snapshot.get("counts") if isinstance(snapshot.get("counts"), Mapping) else {}
+    after = current.get("counts") if isinstance(current.get("counts"), Mapping) else {}
+    fields = sorted({str(key) for key in before} | {str(key) for key in after})
+    return {
+        field: {
+            "snapshot": _safe_int(before.get(field)) or 0,
+            "current": _safe_int(after.get(field)) or 0,
+            "delta": (_safe_int(after.get(field)) or 0) - (_safe_int(before.get(field)) or 0),
+        }
+        for field in fields
+    }
+
+
+def _promotion_proposal_row_diff(
+    snapshot: Mapping[str, Any],
+    current: Mapping[str, Any],
+    field: str,
+) -> Dict[str, Any]:
+    before = _promotion_proposal_row_map(snapshot.get(field))
+    after = _promotion_proposal_row_map(current.get(field))
+    added = [after[key] for key in sorted(set(after) - set(before))]
+    removed = [before[key] for key in sorted(set(before) - set(after))]
+    return {"snapshot": len(before), "current": len(after), "added": added, "removed": removed, "unchanged": len(set(before) & set(after))}
+
+
+def _promotion_proposal_row_map(rows: Any) -> Dict[str, Dict[str, Any]]:
+    result: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(rows, list):
+        return result
+    for index, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            continue
+        decision_key = str(row.get("decision_key") or row.get("key") or "").strip()
+        report_key = str(row.get("report_key") or "").strip()
+        tier = str(row.get("target_tier") or "").strip()
+        identity = decision_key or f"{report_key}:{tier}:{index}"
+        result[identity] = {
+            "decision_key": decision_key or None,
+            "report_key": report_key or None,
+            "target_tier": tier or None,
+        }
+    return result
+
+
+def _promotion_proposal_file_diff(snapshot: Mapping[str, Any], current: Mapping[str, Any]) -> Dict[str, Any]:
+    before = set(_promotion_proposal_files(snapshot))
+    after = set(_promotion_proposal_files(current))
+    return {
+        "snapshot": sorted(before),
+        "current": sorted(after),
+        "added": sorted(after - before),
+        "removed": sorted(before - after),
+        "unchanged": sorted(before & after),
+    }
+
+
+def _promotion_proposal_files(proposal: Mapping[str, Any]) -> List[str]:
+    patch = proposal.get("patch_proposal") if isinstance(proposal.get("patch_proposal"), Mapping) else {}
+    files = patch.get("files") if isinstance(patch.get("files"), list) else []
+    return [str(path) for path in files if str(path or "").strip()]
+
+
+def _promotion_proposal_gate_diff(snapshot: Mapping[str, Any], current: Mapping[str, Any]) -> Dict[str, Any]:
+    before = _promotion_proposal_gate_map(snapshot.get("review_gates"))
+    after = _promotion_proposal_gate_map(current.get("review_gates"))
+    shared = sorted(set(before) & set(after))
+    changed = [
+        {"gate": key, "snapshot": before[key], "current": after[key]}
+        for key in shared
+        if before[key] != after[key]
+    ]
+    return {
+        "snapshot": len(before),
+        "current": len(after),
+        "added": [after[key] for key in sorted(set(after) - set(before))],
+        "removed": [before[key] for key in sorted(set(before) - set(after))],
+        "changed": changed,
+        "unchanged": len(shared) - len(changed),
+    }
+
+
+def _promotion_proposal_gate_map(gates: Any) -> Dict[str, Dict[str, Any]]:
+    result: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(gates, list):
+        return result
+    for index, gate in enumerate(gates):
+        if not isinstance(gate, Mapping):
+            continue
+        name = str(gate.get("gate") or f"gate-{index}").strip()
+        result[name] = {
+            "gate": name,
+            "status": str(gate.get("status") or ""),
+            "description": str(gate.get("description") or ""),
+        }
+    return result
+
+
 def live_validation_promotion_proposal_snapshot_markdown(payload: Mapping[str, Any]) -> str:
     entry = payload.get("entry") if isinstance(payload.get("entry"), Mapping) else {}
     proposal = payload.get("proposal") if isinstance(payload.get("proposal"), Mapping) else {}
+    diff = payload.get("diff") if isinstance(payload.get("diff"), Mapping) else {}
     lines = [
         "# Polymarket Live Validation Promotion Proposal Snapshot",
         "",
@@ -1486,7 +1660,57 @@ def live_validation_promotion_proposal_snapshot_markdown(payload: Mapping[str, A
         live_validation_coverage_promotion_proposal_markdown(proposal) if proposal else "- Missing proposal payload",
         "",
     ]
+    if diff:
+        hash_diff = diff.get("proposal_hash") if isinstance(diff.get("proposal_hash"), Mapping) else {}
+        count_diff = diff.get("counts") if isinstance(diff.get("counts"), Mapping) else {}
+        files = diff.get("proposed_files") if isinstance(diff.get("proposed_files"), Mapping) else {}
+        gates = diff.get("review_gates") if isinstance(diff.get("review_gates"), Mapping) else {}
+        lines.extend(
+            [
+                "## Current-vs-Snapshot Diff",
+                "",
+                f"- Changed: {str(bool(diff.get('changed'))).lower()}",
+                f"- Change categories: {', '.join(str(item) for item in diff.get('change_categories') or []) or '-'}",
+                f"- Snapshot hash: {hash_diff.get('snapshot') or '-'}",
+                f"- Current hash: {hash_diff.get('current') or '-'}",
+                f"- Snapshot integrity valid: {str(bool(hash_diff.get('snapshot_integrity_valid'))).lower()}",
+                "",
+                "### Count Changes",
+                "",
+                "| Count | Snapshot | Current | Delta |",
+                "| --- | --- | --- | --- |",
+            ]
+        )
+        for key in sorted(count_diff):
+            value = count_diff.get(key) if isinstance(count_diff.get(key), Mapping) else {}
+            lines.append(
+                f"| {_markdown_cell(key)} | {_markdown_cell(value.get('snapshot') or 0)} | "
+                f"{_markdown_cell(value.get('current') or 0)} | {_markdown_cell(value.get('delta') or 0)} |"
+            )
+        if not count_diff:
+            lines.append("| - | 0 | 0 | 0 |")
+        lines.extend(
+            [
+                "",
+                "### Decision, File, and Gate Changes",
+                "",
+                f"- Accepted decisions added/removed: {len(diff.get('accepted_decisions', {}).get('added', [])) if isinstance(diff.get('accepted_decisions'), Mapping) else 0}/"
+                f"{len(diff.get('accepted_decisions', {}).get('removed', [])) if isinstance(diff.get('accepted_decisions'), Mapping) else 0}",
+                f"- Stale decisions added/removed: {len(diff.get('stale_decisions', {}).get('added', [])) if isinstance(diff.get('stale_decisions'), Mapping) else 0}/"
+                f"{len(diff.get('stale_decisions', {}).get('removed', [])) if isinstance(diff.get('stale_decisions'), Mapping) else 0}",
+                f"- Proposed files added/removed: {', '.join(str(item) for item in files.get('added') or []) or '-'}/"
+                f"{', '.join(str(item) for item in files.get('removed') or []) or '-'}",
+                f"- Review gates added/removed/changed: {len(gates.get('added') or [])}/{len(gates.get('removed') or [])}/{len(gates.get('changed') or [])}",
+                "",
+            ]
+        )
     return "\n".join(lines)
+
+
+def live_validation_promotion_proposal_snapshot_diff_markdown(payload: Mapping[str, Any]) -> str:
+    return live_validation_promotion_proposal_snapshot_markdown(
+        {"entry": {"key": payload.get("snapshot_key") or "", "snapshot_status": "diff"}, "diff": payload}
+    )
 
 
 def live_validation_promotion_proposal_snapshot_export_filename(key: str, extension: str) -> str:

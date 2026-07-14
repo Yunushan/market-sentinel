@@ -49,7 +49,7 @@ Refactor the existing `MarketSentinel` app into a market-adapter based applicati
 ## Critical constraints
 
 - Do not break existing working features.
-- Keep Python support as >=3.10,<3.15, including Python 3.14.
+- Keep Python support as >=3.10 with no artificial upper cap; Python 3.10 through 3.14 are required CI lanes and the moving latest stable 3.x lane covers future stable releases when runners provide them.
 - Do not hardcode API keys, cookies, credentials, private URLs, IPs, domains, tokens, or user data.
 - Use official APIs/SDKs/documented endpoints only.
 - If a platform has no reliable/official API support, create a graceful stub adapter with clear "unsupported" messages.
@@ -202,12 +202,12 @@ These articles completed the catalog, adapter architecture, verification, docs, 
 - Article 65 Polymarket Live Validation Coverage Promotion Proposal Export: scope complete; accepted promotion-decision ledger entries now produce a guarded no-automerge JSON/Markdown coverage/docs proposal with current review-bundle revalidation, stale-decision detection, human-review gates, CLI/API/React download surfaces, docs, focused tests, verifier checks, and no static coverage mutation.
 - Article 66 Polymarket Live Validation Promotion Proposal React Preview: scope complete; the React Live Safety tab now has a read-only Promotion Proposal Preview with target-tier filtering, accepted/stale/ignored counts, review-gate display, accepted/stale/change tables, filtered JSON/Markdown downloads, no apply/automerge action, docs, browser-smoke fragments, source parity tests, and frontend build coverage.
 - Article 67 Polymarket Live Validation Promotion Proposal Snapshot Archive: scope complete; promotion proposals can now be stored as bounded no-secrets snapshots with proposal hashes, provenance, current/stale hash checks, list/open/delete/export API routes, React archive controls, docs, smoke coverage, verifier checks, and regression tests while keeping static coverage unmutated.
+- Article 68 Polymarket Live Validation Promotion Proposal Snapshot Diff Review: scope complete; opened snapshots now include a deterministic no-secrets current-versus-snapshot diff for proposal hashes, count deltas, accepted/stale decision identities, proposed files, and review gates; snapshot/diff JSON and Markdown routes, React review controls, docs, API/browser smoke, verifier checks, and regression tests preserve read-only no-automerge behavior.
 
 ## Active continuation goals
 
 When continuing article by article, complete each task to 100% of its scoped objective with tests and docs. Do not reinterpret blocked markets as implemented unless the official-access constraints are solved.
 
-- Article 68 Polymarket Live Validation Promotion Proposal Snapshot Diff Review: add current-vs-snapshot diff summaries for proposal counts, accepted/stale decisions, proposed files, review gates, and proposal hashes across API/React/Markdown exports, with docs, verifier checks, and tests.
 - Real Polymarket credential/funded execution: blocked until the user supplies credentials through local environment variables or an approved secret mechanism, confirms eligible region/KYC/account status, provides a safe token/price/size allow-list, and explicitly approves each funded live check.
 
 ## Non-negotiable remaining blockers

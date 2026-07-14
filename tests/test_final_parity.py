@@ -456,6 +456,31 @@ class FinalParityTests(unittest.TestCase):
         self.assertIn("Snapshot Archive", docs)
         self.assertIn("Article 67", goal)
 
+    def test_polymarket_live_report_promotion_proposal_snapshot_diff_is_documented_and_verified(self) -> None:
+        live_reports_source = (ROOT / "polymarket" / "live_reports.py").read_text(encoding="utf-8")
+        web_api_source = (ROOT / "web_api.py").read_text(encoding="utf-8")
+        verify_source = (ROOT / "verify.py").read_text(encoding="utf-8")
+        app_source = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+        api_source = (ROOT / "frontend" / "src" / "api.ts").read_text(encoding="utf-8")
+        type_source = (ROOT / "frontend" / "src" / "types.ts").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        docs = (ROOT / "docs" / "POLYMARKET_LIVE_REPORT_PROMOTION_PROPOSAL.md").read_text(encoding="utf-8")
+        goal = (ROOT / "GOAL.md").read_text(encoding="utf-8")
+
+        self.assertIn("live_validation_promotion_proposal_snapshot_diff", live_reports_source)
+        self.assertIn("_promotion_proposal_count_diff", live_reports_source)
+        self.assertIn("Current-vs-Snapshot Diff", live_reports_source)
+        self.assertIn("/diff.json", web_api_source)
+        self.assertIn("polymarket_live_validation_promotion_proposal_snapshot_diff_payload", web_api_source)
+        self.assertIn("ProposalSnapshotDiffReview", app_source)
+        self.assertIn("Diff Markdown", app_source)
+        self.assertIn("polymarketLiveValidationPromotionProposalSnapshotDiffJsonUrl", api_source)
+        self.assertIn("PolymarketLiveValidationPromotionProposalSnapshotDiff", type_source)
+        self.assertIn("live_validation_promotion_proposal_snapshot_diff_markdown", verify_source)
+        self.assertIn("current-versus-snapshot diff", readme.lower())
+        self.assertIn("current-vs-snapshot diff", docs.lower())
+        self.assertIn("Article 68", goal)
+
 
 if __name__ == "__main__":
     unittest.main()

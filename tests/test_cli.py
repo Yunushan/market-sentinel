@@ -176,6 +176,123 @@ class MarketSentinelCliTests(unittest.TestCase):
             self.assertEqual(mock_payload.call_args.kwargs["initial_raw_rows"], [checkpoint_row])
             self.assertTrue(callable(mock_payload.call_args.kwargs["leaderboard_page_callback"]))
 
+    def test_polymarket_leaderboard_cli_state_db_streams_csv_and_resumes(self) -> None:
+        raw_rows = [
+            {"rank": 2, "proxyWallet": "0x" + "2" * 40, "pseudonym": "second", "pnl": "20", "volume": "200", "trades": 4},
+            {"rank": 1, "proxyWallet": "0x" + "1" * 40, "pseudonym": "first", "pnl": "30", "volume": "100", "trades": 7},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            state_db = Path(tmp) / "leaderboard.sqlite3"
+            output = Path(tmp) / "leaderboard.csv"
+
+            def fake_scan(*_args, **kwargs):
+                kwargs["page_callback"](0, 50, raw_rows)
+                kwargs["page_callback"](2, 50, [])
+                return [], False
+
+            with patch("market_sentinel_cli._fetch_polymarket_leaderboard_scan_rows", side_effect=fake_scan) as mock_scan:
+                exit_code = market_sentinel_cli.main(
+                    [
+                        "polymarket-leaderboard",
+                        "--state-db",
+                        str(state_db),
+                        "--scanned",
+                        "unlimited",
+                        "--returned",
+                        "unlimited",
+                        "--format",
+                        "csv",
+                        "--output",
+                        str(output),
+                        "--quiet",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(state_db.exists())
+            self.assertFalse(mock_scan.call_args.kwargs["retain_rows"])
+            csv_lines = output.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(csv_lines), 3)
+            self.assertIn("first", csv_lines[1])
+            self.assertIn(",7,", csv_lines[1])
+
+            with patch("market_sentinel_cli._fetch_polymarket_leaderboard_scan_rows") as mock_scan:
+                exit_code = market_sentinel_cli.main(
+                    [
+                        "polymarket-leaderboard",
+                        "--state-db",
+                        str(state_db),
+                        "--resume",
+                        "--scanned",
+                        "unlimited",
+                        "--returned",
+                        "unlimited",
+                        "--format",
+                        "csv",
+                        "--output",
+                        str(output),
+                        "--quiet",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            mock_scan.assert_not_called()
+
+    def test_polymarket_leaderboard_state_db_resumes_mdd_filtering(self) -> None:
+        raw_rows = [
+            {"rank": 1, "proxyWallet": "0x" + "1" * 40, "pnl": "30", "volume": "100"},
+            {"rank": 2, "proxyWallet": "0x" + "2" * 40, "pnl": "20", "volume": "100"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            state_db = Path(tmp) / "leaderboard.sqlite3"
+            output = Path(tmp) / "leaderboard.json"
+
+            def fake_scan(*_args, **kwargs):
+                kwargs["page_callback"](0, 50, raw_rows)
+                kwargs["page_callback"](2, 50, [])
+                return [], False
+
+            def fake_mdd(wallet, **_kwargs):
+                return {
+                    "mdd_usd": 10.0,
+                    "mdd_pct": 10.0 if wallet.endswith("1") else 25.0,
+                    "mdd_method": "public_data_historical_equity_curve_v2",
+                    "mdd_pct_basis": "public equity basis",
+                    "points": [{"timestamp": 1, "value": 1.0}],
+                }
+
+            with patch("market_sentinel_cli._fetch_polymarket_leaderboard_scan_rows", side_effect=fake_scan), patch(
+                "market_sentinel_cli.polymarket_user_mdd_payload", side_effect=fake_mdd
+            ) as mock_mdd:
+                exit_code = market_sentinel_cli.main(
+                    [
+                        "polymarket-leaderboard",
+                        "--state-db",
+                        str(state_db),
+                        "--scanned",
+                        "unlimited",
+                        "--returned",
+                        "unlimited",
+                        "--compute-mdd",
+                        "--mdd-scan",
+                        "unlimited",
+                        "--max-mdd-pct",
+                        "20",
+                        "--format",
+                        "json",
+                        "--output",
+                        str(output),
+                        "--quiet",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(mock_mdd.call_count, 2)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["counts"]["returned"], 1)
+            self.assertEqual(payload["rows"][0]["mdd_pct"], 10.0)
+            self.assertNotIn("points", payload["rows"][0])
+
     def test_config_and_market_cli_update_persisted_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = str(Path(tmp) / "config.json")

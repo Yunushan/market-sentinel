@@ -29,6 +29,7 @@ from polymarket.gamma import ProfileResult
 from polymarket.http_client import PolymarketRateLimitError
 from polymarket.mdd import MDD_METHOD_MARK_REPLAY, MDD_METHOD_V2
 from web_api import (
+    _fetch_polymarket_leaderboard_scan_rows,
     _read_json_body,
     add_wallet_watch,
     alert_from_payload,
@@ -59,6 +60,7 @@ from web_api import (
     polymarket_live_validation_decisions_payload,
     polymarket_live_validation_promotion_proposal_payload,
     polymarket_live_validation_promotion_proposal_snapshot_payload,
+    polymarket_live_validation_promotion_proposal_snapshot_diff_payload,
     polymarket_live_validation_promotion_proposal_snapshot_store_payload,
     polymarket_live_validation_promotion_proposal_snapshots_payload,
     polymarket_live_validation_report_payload,
@@ -820,6 +822,31 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["scan_retry_attempts"], 2)
         self.assertTrue(any("retrying" in warning for warning in payload["warnings"]))
         self.assertTrue(any("retrying" in item.get("message", "") for item in progress))
+
+    def test_leaderboard_scanner_can_checkpoint_without_retaining_pages(self) -> None:
+        captured_pages = []
+        progress = []
+        page = [{"rank": 1, "proxyWallet": WALLET, "pnl": "10", "volume": "100"}]
+
+        with patch("web_api.data_api.get_leaderboard", return_value=page):
+            rows, cancelled = _fetch_polymarket_leaderboard_scan_rows(
+                scan_limit=1,
+                retain_rows=False,
+                remote_sort="PNL",
+                direction="DESC",
+                period="all",
+                category="OVERALL",
+                scan_concurrency=1,
+                is_cancelled=lambda: False,
+                emit_progress=lambda _phase, **values: progress.append(values),
+                warnings=[],
+                page_callback=lambda offset, limit, rows: captured_pages.append((offset, limit, rows)),
+            )
+
+        self.assertEqual(rows, [])
+        self.assertFalse(cancelled)
+        self.assertEqual(captured_pages, [(0, 1, page)])
+        self.assertEqual(progress[-1]["scanned"], 1)
 
     def test_polymarket_leaderboard_payload_resumes_from_checkpoint_rows(self) -> None:
         checkpoint_rows = [{"rank": 1, "proxyWallet": WALLET, "pnl": "10", "volume": "100"}]
@@ -2090,6 +2117,10 @@ class WebApiTests(unittest.TestCase):
                     self.assertIsNotNone(direct_opened)
                     self.assertEqual(direct_opened["entry"]["key"], snapshot_key)
                     self.assertFalse(direct_opened["entry"]["static_coverage_mutated"])
+                    direct_diff = polymarket_live_validation_promotion_proposal_snapshot_diff_payload(snapshot_key)
+                    self.assertIsNotNone(direct_diff)
+                    assert direct_diff is not None
+                    self.assertFalse(direct_diff["static_coverage_mutated"])
 
                     status, opened_snapshot = self._request_json(
                         base_url,
@@ -2097,6 +2128,7 @@ class WebApiTests(unittest.TestCase):
                     )
                     self.assertEqual(status, 200)
                     self.assertIn(opened_snapshot["entry"]["snapshot_status"], {"current", "stale"})
+                    self.assertIn("diff", opened_snapshot)
                     self.assertNotIn("route-secret", json.dumps(opened_snapshot, sort_keys=True))
 
                     status, headers, body = self._request_raw(
@@ -2107,6 +2139,25 @@ class WebApiTests(unittest.TestCase):
                     snapshot_export = json.loads(body.decode("utf-8"))
                     self.assertEqual(snapshot_export["entry"]["key"], snapshot_key)
                     self.assertNotIn("route-secret", body.decode("utf-8"))
+
+                    status, headers, body = self._request_raw(
+                        base_url,
+                        f"/api/polymarket/live-validation/promotion-proposal/snapshots/{snapshot_key}/diff.json",
+                    )
+                    self.assertEqual(status, 200)
+                    snapshot_diff = json.loads(body.decode("utf-8"))
+                    self.assertEqual(snapshot_diff["snapshot_key"], snapshot_key)
+                    self.assertFalse(snapshot_diff["static_coverage_mutated"])
+                    self.assertNotIn("route-secret", body.decode("utf-8"))
+
+                    status, headers, body = self._request_raw(
+                        base_url,
+                        f"/api/polymarket/live-validation/promotion-proposal/snapshots/{snapshot_key}/diff.md",
+                    )
+                    self.assertEqual(status, 200)
+                    snapshot_diff_markdown = body.decode("utf-8")
+                    self.assertIn("Current-vs-Snapshot Diff", snapshot_diff_markdown)
+                    self.assertNotIn("route-secret", snapshot_diff_markdown)
 
                     status, headers, body = self._request_raw(
                         base_url,

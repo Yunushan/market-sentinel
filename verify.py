@@ -583,6 +583,7 @@ def run_polymarket_live_report_promotion_proposal_snapshot_check() -> None:
     from polymarket.live_reports import (
         list_live_validation_coverage_promotion_proposal_snapshots,
         live_validation_coverage_promotion_proposal,
+        live_validation_promotion_proposal_snapshot_diff_markdown,
         live_validation_promotion_proposal_snapshot_markdown,
         live_validation_report_review_bundle,
         load_live_validation_coverage_promotion_proposal_snapshot,
@@ -679,6 +680,22 @@ def run_polymarket_live_report_promotion_proposal_snapshot_check() -> None:
         )
         if listing.get("counts", {}).get("stale") != 1:
             raise SystemExit("Polymarket promotion proposal snapshot did not detect stale proposal hash.")
+        stale_opened = load_live_validation_coverage_promotion_proposal_snapshot(
+            str(snapshot.get("key") or ""),
+            path=snapshot_path,
+            report_store_path=report_path,
+            decision_path=decision_path,
+        )
+        if stale_opened is None:
+            raise SystemExit("Polymarket promotion proposal snapshot diff could not reopen the stored snapshot.")
+        diff = stale_opened.get("diff") or {}
+        diff_markdown = live_validation_promotion_proposal_snapshot_diff_markdown(diff)
+        if not diff.get("changed") or "proposal_hash" not in (diff.get("change_categories") or []):
+            raise SystemExit("Polymarket promotion proposal snapshot diff did not report changed proposal evidence.")
+        if "Current-vs-Snapshot Diff" not in diff_markdown:
+            raise SystemExit("Polymarket promotion proposal snapshot diff markdown is missing its review summary.")
+        if "verify-snapshot-secret" in json.dumps(diff, sort_keys=True) or "verify-snapshot-secret" in diff_markdown:
+            raise SystemExit("Polymarket promotion proposal snapshot diff leaked a seeded secret.")
     print("[ok] Polymarket live report promotion proposal snapshots")
 
 

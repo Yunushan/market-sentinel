@@ -69,6 +69,13 @@ opened:
   decision-ledger or stored-report change. Stale snapshots must be reviewed again
   before they are used as evidence.
 
+Opening a snapshot also returns a no-secrets **current-vs-snapshot diff**. It reports
+proposal-hash integrity, every proposal count delta, added/removed accepted and stale
+decision identities, proposed-file additions/removals, and added/removed/changed review
+gates. The diff is evidence for human review only; it never edits coverage, docs, or
+the decision ledger. Snapshot JSON/Markdown exports include this summary, and the
+dedicated diff downloads are useful when only the comparison is needed.
+
 Snapshot API routes:
 
 - `GET /api/polymarket/live-validation/promotion-proposal/snapshots`
@@ -76,6 +83,8 @@ Snapshot API routes:
 - `GET /api/polymarket/live-validation/promotion-proposal/snapshots/{key}`
 - `GET /api/polymarket/live-validation/promotion-proposal/snapshots/{key}/export.json`
 - `GET /api/polymarket/live-validation/promotion-proposal/snapshots/{key}/export.md`
+- `GET /api/polymarket/live-validation/promotion-proposal/snapshots/{key}/diff.json`
+- `GET /api/polymarket/live-validation/promotion-proposal/snapshots/{key}/diff.md`
 - `DELETE /api/polymarket/live-validation/promotion-proposal/snapshots/{key}`
 
 ## Required Review Gates

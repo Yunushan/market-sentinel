@@ -963,12 +963,44 @@ export interface PolymarketLiveValidationPromotionProposalSnapshotPayload {
   kind: string;
   entry: PolymarketLiveValidationPromotionProposalSnapshotEntry;
   proposal: PolymarketLiveValidationPromotionProposalPayload | Record<string, unknown>;
+  diff: PolymarketLiveValidationPromotionProposalSnapshotDiff;
   export: {
     json_filename: string;
     markdown_filename: string;
   };
   static_coverage_mutated: boolean;
   funded_execution_exposed: boolean;
+}
+
+export interface PolymarketLiveValidationPromotionProposalSnapshotDiff {
+  source: string;
+  kind: string;
+  snapshot_key: string;
+  target_tier_filter?: string | null;
+  proposal_hash: {
+    snapshot: string;
+    snapshot_canonical: string;
+    current: string;
+    changed: boolean;
+    snapshot_integrity_valid: boolean;
+  };
+  counts: Record<string, { snapshot: number; current: number; delta: number }>;
+  accepted_decisions: { snapshot: number; current: number; added: Array<Record<string, unknown>>; removed: Array<Record<string, unknown>>; unchanged: number };
+  stale_decisions: { snapshot: number; current: number; added: Array<Record<string, unknown>>; removed: Array<Record<string, unknown>>; unchanged: number };
+  proposed_files: { snapshot: string[]; current: string[]; added: string[]; removed: string[]; unchanged: string[] };
+  review_gates: {
+    snapshot: number;
+    current: number;
+    added: Array<Record<string, unknown>>;
+    removed: Array<Record<string, unknown>>;
+    changed: Array<Record<string, unknown>>;
+    unchanged: number;
+  };
+  changed: boolean;
+  change_categories: string[];
+  static_coverage_mutated: boolean;
+  funded_execution_exposed: boolean;
+  notes: string[];
 }
 
 export interface PolymarketLiveValidationPromotionProposalSnapshotStoreRequest {

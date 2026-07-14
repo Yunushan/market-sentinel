@@ -57,6 +57,8 @@ import {
   polymarketLiveValidationPromotionProposalJsonUrl,
   polymarketLiveValidationPromotionProposalMarkdownUrl,
   polymarketLiveValidationPromotionProposalSnapshotJsonUrl,
+  polymarketLiveValidationPromotionProposalSnapshotDiffJsonUrl,
+  polymarketLiveValidationPromotionProposalSnapshotDiffMarkdownUrl,
   polymarketLiveValidationPromotionProposalSnapshotMarkdownUrl,
   polymarketLiveValidationReportReviewJsonUrl,
   polymarketLiveValidationReportReviewMarkdownUrl,
@@ -3550,11 +3552,66 @@ function ProposalSnapshotArchive({
         </table>
       </div>
       {detail ? (
-        <div className={`info-banner ${detail.entry.stale ? "warn" : ""}`}>
-          Opened snapshot {formatHash(detail.entry.key)} is {detail.entry.snapshot_status}; reasons:{" "}
-          {detail.entry.stale_reasons.length ? detail.entry.stale_reasons.join(", ") : "none"}.
-        </div>
+        <>
+          <div className={`info-banner ${detail.entry.stale ? "warn" : ""}`}>
+            Opened snapshot {formatHash(detail.entry.key)} is {detail.entry.snapshot_status}; reasons:{" "}
+            {detail.entry.stale_reasons.length ? detail.entry.stale_reasons.join(", ") : "none"}.
+          </div>
+          <ProposalSnapshotDiffReview detail={detail} />
+        </>
       ) : null}
+    </div>
+  );
+}
+
+function ProposalSnapshotDiffReview({ detail }: { detail: PolymarketLiveValidationPromotionProposalSnapshotPayload }) {
+  const diff = detail.diff;
+  const countRows = Object.entries(diff.counts).filter(([, value]) => value.delta !== 0);
+  const acceptedChanges = diff.accepted_decisions.added.length + diff.accepted_decisions.removed.length;
+  const staleChanges = diff.stale_decisions.added.length + diff.stale_decisions.removed.length;
+  const snapshotKey = detail.entry.key ?? "";
+  return (
+    <div className="proposal-snapshot-diff audit-box">
+      <div className="panel-header compact">
+        <div>
+          <h4>Current-vs-Snapshot Diff</h4>
+          <p>Read-only change summary. It does not apply a coverage or documentation change.</p>
+        </div>
+        {snapshotKey ? (
+          <div className="button-row compact">
+            <a className="icon-button compact" href={polymarketLiveValidationPromotionProposalSnapshotDiffJsonUrl(snapshotKey)} download>
+              <Download size={14} /> Diff JSON
+            </a>
+            <a className="icon-button compact" href={polymarketLiveValidationPromotionProposalSnapshotDiffMarkdownUrl(snapshotKey)} download>
+              <Download size={14} /> Diff Markdown
+            </a>
+          </div>
+        ) : null}
+      </div>
+      <div className="chip-row">
+        <span className={`chip ${diff.changed ? "" : "muted"}`}>changed: {diff.changed ? "yes" : "no"}</span>
+        <span className={`chip ${diff.proposal_hash.snapshot_integrity_valid ? "muted" : ""}`}>integrity: {diff.proposal_hash.snapshot_integrity_valid ? "valid" : "mismatch"}</span>
+        <span className="chip">accepted changes: {acceptedChanges}</span>
+        <span className="chip">stale changes: {staleChanges}</span>
+        <span className="chip">file changes: {diff.proposed_files.added.length + diff.proposed_files.removed.length}</span>
+        <span className="chip">gate changes: {diff.review_gates.added.length + diff.review_gates.removed.length + diff.review_gates.changed.length}</span>
+      </div>
+      <p className="muted-text">Categories: {diff.change_categories.length ? diff.change_categories.join(", ") : "none"}</p>
+      <div className="proposal-table-wrap">
+        <table className="proposal-table snapshot-table">
+          <thead>
+            <tr><th>Count</th><th>Snapshot</th><th>Current</th><th>Delta</th></tr>
+          </thead>
+          <tbody>
+            {(countRows.length ? countRows : Object.entries(diff.counts)).map(([key, value]) => (
+              <tr key={key}><td>{key}</td><td>{value.snapshot}</td><td>{value.current}</td><td>{value.delta > 0 ? `+${value.delta}` : value.delta}</td></tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="info-banner compact">
+        Files added/removed: {diff.proposed_files.added.join(", ") || "none"} / {diff.proposed_files.removed.join(", ") || "none"}. Review-gate changes: {diff.review_gates.changed.length} changed, {diff.review_gates.added.length} added, {diff.review_gates.removed.length} removed.
+      </div>
     </div>
   );
 }

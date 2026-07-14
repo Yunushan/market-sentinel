@@ -34,6 +34,7 @@ A local multi-market prediction-market command center for:
 - Search public Polymarket profiles by username/pseudonym and return proxy wallets for tracking or copy setup
 - Load public leaderboard rows and rank them by PnL USD, volume USD, or computed ROI %
 - The default ROI view returns the top 100 rows from 500 scanned public leaderboard rows; returned rows, scanned rows, and MDD scan rows have no local 1,000,000-row cap and accept `all`, `unlimited`, `0`, or `-1` for explicit no-cap scans
+- An unlimited run enumerates every row the public leaderboard endpoint exposes for the selected period/category. It is not evidence that the endpoint contains every Polymarket account ever created, inactive, hidden, or omitted by upstream ranking rules.
 - Min/max filters are available for PnL USD, volume USD, and ROI %
 - MDD USD/% v2 can be computed from a public-data historical equity curve: closed-position realized PnL, public activity/trade capital basis, and the current open-position snapshot
 - MDD v2 supports min/max filters, MDD sorting, pagination controls for closed positions/activity/trades/open positions, and an optional `equity_base_usd` override
@@ -251,7 +252,7 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 
 ## Install & Run
 
-Requires **Python >=3.10** with no artificial upper cap. Python **3.10** through **3.14** are required stable CI lanes today, and the moving latest stable **3.x** runner is included in CI/release checks so future stable Python releases above 3.16 are covered automatically when GitHub Actions publishes them.
+Requires **Python >=3.10** with no artificial upper cap. Python **3.10** through **3.14** are required stable CI lanes today, and the moving latest stable **3.x** runner is included in CI/release checks so future stable Python releases are covered automatically when GitHub Actions publishes them.
 
 ### 1) Create a venv (recommended)
 ```bash
@@ -330,7 +331,7 @@ python -m market_sentinel_cli polymarket-leaderboard \
   --returned unlimited --scanned unlimited \
   --compute-mdd --fast-scan --mdd-scan unlimited --max-mdd-pct 20 \
   --scan-retry-attempts 10 --scan-retry-delay 60 \
-  --checkpoint data/polymarket-best-roi-mdd20.checkpoint.jsonl --resume \
+  --state-db data/polymarket-best-roi-mdd20.sqlite3 --resume \
   --format csv --output data/polymarket-best-roi-mdd20.csv
 ```
 
@@ -364,7 +365,9 @@ market-sentinel polymarket-mdd-cache list
 market-sentinel serve --host 127.0.0.1 --port 8765
 ```
 
-Commands that mutate config or paper state write through the same atomic config storage as the GUI. Most commands return JSON to stdout and support `--output file.json` plus `--compact`; `polymarket-leaderboard` can emit CSV or JSON. Unlimited scans run until the public leaderboard API returns no more rows, a rate limit stops the run, or the process is cancelled; use finite `--scanned` and `--mdd-scan` values for normal interactive jobs. For long VPS scans, use `--checkpoint ... --resume` plus retry flags so transient SSL/API failures only lose the current small page batch instead of the whole run. The checkpoint is append-only JSONL and can grow large during multi-million-row scans; the final CSV/JSON is still written after the scan completes. Progress logs on stderr include timestamp, PID, running status, elapsed time, phase, percent, scan rate, MDD rate, and ETA when a finite limit is known.
+Commands that mutate config or paper state write through the same atomic config storage as the GUI. Most commands return JSON to stdout and support `--output file.json` plus `--compact`; `polymarket-leaderboard` can emit CSV or JSON. Unlimited scans run until the public leaderboard API returns no more rows, a rate limit stops the run, or the process is cancelled; use finite `--scanned` and `--mdd-scan` values for normal interactive jobs. For long VPS scans, use `--state-db path.sqlite3 --resume` plus retry flags: every fetched page, normalized row, and completed MDD audit is committed to SQLite, so a transient SSL/API failure only loses the current page batch and a later invocation resumes from the durable state. The CSV/JSON output is streamed from SQLite rather than rebuilding all rows in RAM. `--checkpoint` remains available as a lightweight JSONL checkpoint for shorter scans, but cannot be combined with `--state-db`. Progress logs on stderr include timestamp, PID, running status, elapsed time, phase, percent, scan rate, MDD rate, and ETA when a finite limit is known.
+
+For a strict public-data ROI/MDD screen, `--max-mdd-pct 20` filters to successful public-data MDD calculations at or below 20%. Fast MDD is a public historical-equity approximation, not independently verified account-equity MDD: public deposits/withdrawals, unresolved historical marks, fees, and records outside the selected fetch windows can change the true result. Use `--mdd-mode mark_replay --mdd-include-accounting` for deeper sampled reconciliation, inspect the exported `mdd_method`, `mdd_pct_basis`, `mdd_source`, and warnings, and treat results as candidates for manual due diligence.
 
 Useful local API endpoints:
 - `GET /api/state` returns the initial React GUI snapshot: health, config, markets, alerts, wallets, copy, live safety, and paper state.
@@ -409,6 +412,7 @@ Useful local API endpoints:
 - `GET /api/polymarket/live-validation/promotion-proposal/snapshots/{key}` opens one proposal snapshot with current-hash staleness metadata.
 - `GET /api/polymarket/live-validation/promotion-proposal/snapshots/{key}/export.json` downloads one proposal snapshot as JSON.
 - `GET /api/polymarket/live-validation/promotion-proposal/snapshots/{key}/export.md` downloads one proposal snapshot as Markdown.
+- `GET /api/polymarket/live-validation/promotion-proposal/snapshots/{key}/diff.json` and `/diff.md` provide a no-secrets current-versus-snapshot diff summary for hashes, counts, decisions, proposed files, and review gates.
 - `DELETE /api/polymarket/live-validation/promotion-proposal/snapshots/{key}` deletes one proposal snapshot.
 - `POST /api/polymarket/live-validation/reports` stores the current GUI readiness snapshot or imports a CLI JSON report from `report_json`.
 - `POST /api/polymarket/live-validation/decisions` records a review-bundle decision after validating report key, payload hash, target tier, decision, reviewer note, and review-bundle hash.

@@ -309,6 +309,14 @@ export function polymarketLiveValidationPromotionProposalSnapshotMarkdownUrl(key
   return `${apiBase}/api/polymarket/live-validation/promotion-proposal/snapshots/${encodeURIComponent(key)}/export.md`;
 }
 
+export function polymarketLiveValidationPromotionProposalSnapshotDiffJsonUrl(key: string): string {
+  return `${apiBase}/api/polymarket/live-validation/promotion-proposal/snapshots/${encodeURIComponent(key)}/diff.json`;
+}
+
+export function polymarketLiveValidationPromotionProposalSnapshotDiffMarkdownUrl(key: string): string {
+  return `${apiBase}/api/polymarket/live-validation/promotion-proposal/snapshots/${encodeURIComponent(key)}/diff.md`;
+}
+
 export function updateMarket(marketId: string, patch: MarketPatch): Promise<MarketsPayload> {
   return request<MarketsPayload>(`/api/markets/${encodeURIComponent(marketId)}`, {
     method: "PATCH",

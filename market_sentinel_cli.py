@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, TextIO
 from urllib import error as urllib_error
@@ -15,8 +16,12 @@ from urllib import request as urllib_request
 
 from core.storage import DEFAULT_CONFIG_PATH, load_config, save_config
 from market_adapters import build_default_registry
+from polymarket.http_client import PolymarketRateLimitError
+from polymarket.leaderboard_state import LeaderboardStateStore
 from web_api import (
     DEFAULT_FRONTEND_DIR,
+    LEADERBOARD_SORTS,
+    _fetch_polymarket_leaderboard_scan_rows,
     add_wallet_watch,
     alert_from_payload,
     alerts_payload,
@@ -46,6 +51,7 @@ from web_api import (
     polymarket_mdd_cache_health_payload,
     polymarket_mdd_cache_payload,
     polymarket_mdd_cache_purge_payload,
+    polymarket_mdd_audit_params,
     polymarket_user_mdd_payload,
     polymarket_user_search_payload,
     poll_wallet_activity,
@@ -53,6 +59,8 @@ from web_api import (
     refresh_alert_price,
     refresh_all_alert_prices,
     run_server,
+    attach_polymarket_mdd_audit_cache,
+    normalize_polymarket_leaderboard_row,
     submit_paper_order,
     update_wallet_watch,
     wallets_payload,
@@ -316,6 +324,288 @@ def write_leaderboard_payload(payload: Mapping[str, Any], *, output_format: str,
             stream.close()
 
 
+_UNLIMITED_LIMIT_TOKENS = {"0", "-1", "all", "any", "none", "unlimited", "max"}
+
+
+def _cli_optional_limit(value: Any, default: int) -> Optional[int]:
+    text = str(value if value is not None else "").strip().lower()
+    if text in _UNLIMITED_LIMIT_TOKENS:
+        return None
+    return max(1, _progress_int(value, default))
+
+
+def _cli_optional_float(value: Any) -> Optional[float]:
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _cli_clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    return max(minimum, min(_progress_int(value, default), maximum))
+
+
+def _write_streamed_leaderboard_payload(
+    payload: Mapping[str, Any],
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    output_format: str,
+    output: Optional[str],
+) -> None:
+    stream, should_close = _open_output(output)
+    try:
+        if output_format == "csv":
+            writer = csv.DictWriter(stream, fieldnames=LEADERBOARD_FIELDS)
+            writer.writeheader()
+            writer.writerows(_csv_rows(rows))
+            return
+
+        stream.write('{"rows":[')
+        first = True
+        for row in rows:
+            if not first:
+                stream.write(",")
+            json.dump(row, stream, separators=(",", ":"), sort_keys=True)
+            first = False
+        stream.write("]")
+        for key, value in payload.items():
+            if key == "rows":
+                continue
+            stream.write(",")
+            json.dump(str(key), stream)
+            stream.write(":")
+            json.dump(value, stream, separators=(",", ":"), sort_keys=True)
+        stream.write("}\n")
+    finally:
+        if should_close:
+            stream.close()
+
+
+def _disk_backed_mdd_options(args: argparse.Namespace) -> Dict[str, Any]:
+    return {
+        "mode": str(args.mdd_mode or "fast"),
+        "closed_limit": _cli_clamp_int(args.mdd_history_limit, 500, 1, 1000),
+        "open_limit": _cli_clamp_int(args.mdd_open_limit, 500, 0, 1000),
+        "activity_limit": _cli_clamp_int(args.mdd_activity_limit, 1000, 0, 5000),
+        "trade_limit": _cli_clamp_int(args.mdd_trade_limit, 1000, 0, 5000),
+        "include_open": True,
+        "equity_base_usd": _cli_optional_float(args.equity_base_usd),
+        "cache_ttl_seconds": _cli_clamp_int(args.mdd_cache_ttl_seconds, 60, 0, 300),
+        "mark_replay_token_limit": _cli_clamp_int(args.mdd_mark_replay_token_limit, 10, 1, 20),
+        "mark_replay_point_limit": _cli_clamp_int(args.mdd_mark_replay_point_limit, 5000, 1, 10000),
+        "mark_replay_interval": str(args.mdd_mark_replay_interval or "1h"),
+        "mark_replay_fidelity": _cli_clamp_int(args.mdd_mark_replay_fidelity, 60, 1, 1440),
+        "include_accounting_snapshot": bool(args.mdd_include_accounting),
+        "accounting_timeout": _cli_clamp_int(args.mdd_accounting_timeout, 30, 1, 60),
+    }
+
+
+def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
+    if args.checkpoint:
+        raise ValueError("Use either --checkpoint or --state-db. The SQLite state database is already resumable.")
+
+    started_at = time.monotonic()
+    params = build_polymarket_leaderboard_params(args)
+    progress_callback = _progress_printer(not args.quiet, started_at=started_at)
+    sort = str(params["sort"][0])
+    direction = str(params["direction"][0]).upper()
+    period = str(params["period"][0])
+    category = str(params["category"][0])
+    remote_sort = LEADERBOARD_SORTS[sort]
+    scan_limit = _cli_optional_limit(args.scanned, 500)
+    returned_limit = _cli_optional_limit(args.returned, 100)
+    mdd_scan_limit = _cli_optional_limit(args.mdd_scan, 100)
+    filters = {key: _cli_optional_float(getattr(args, key)) for key in (
+        "min_pnl_usd", "max_pnl_usd", "min_volume_usd", "max_volume_usd", "min_roi_pct", "max_roi_pct",
+        "min_mdd_usd", "max_mdd_usd", "min_mdd_pct", "max_mdd_pct",
+    )}
+    mdd_requested = bool(args.compute_mdd) or sort in {"mdd_usd", "mdd_pct"} or any(
+        filters[key] is not None for key in ("min_mdd_usd", "max_mdd_usd", "min_mdd_pct", "max_mdd_pct")
+    )
+    scan_concurrency = _cli_clamp_int(args.scan_concurrency, 6 if args.fast_scan else 1, 1, 12)
+    mdd_concurrency = _cli_clamp_int(args.mdd_concurrency, 3 if args.fast_scan else 1, 1, 6)
+    retry_attempts = _cli_clamp_int(args.scan_retry_attempts, 5, 1, 50)
+    retry_delay = max(0.0, min(_cli_optional_float(args.scan_retry_delay_seconds) or 0.0, 3600.0))
+    warnings: List[str] = []
+    state_path = Path(args.state_db).expanduser()
+    store = LeaderboardStateStore(state_path)
+    try:
+        store.prepare(
+            {"remote_sort": remote_sort, "direction": direction, "period": period, "category": category},
+            resume=bool(args.resume),
+        )
+        state = store.progress()
+        if not args.quiet:
+            print(
+                f"[{_log_timestamp()} pid={os.getpid()} status=starting elapsed=00:00:00 phase=setup] "
+                f"Starting disk-backed Polymarket scan state_db={state_path} rows={state['rows']} next_offset={state['next_offset']}.",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        def emit(phase: str, **values: Any) -> None:
+            if progress_callback is None:
+                return
+            scanned = int(values.get("scanned", store.progress()["rows"]))
+            if phase == "mdd":
+                total = int(values.get("mdd_total", 0))
+                attempted = int(values.get("mdd_attempted", 0))
+                percent = 50.0 + (50.0 * attempted / total) if total else 100.0
+            elif scan_limit is None:
+                percent = 0.0
+            else:
+                percent = min(50.0 if mdd_requested else 100.0, scanned / max(scan_limit, 1) * (50.0 if mdd_requested else 100.0))
+            progress_callback(
+                {
+                    "phase": phase,
+                    "percent": percent,
+                    "scanned": scanned,
+                    "scan_limit": scan_limit,
+                    "scan_limit_unlimited": scan_limit is None,
+                    "filtered": values.get("filtered", 0),
+                    "mdd_attempted": values.get("mdd_attempted", 0),
+                    "mdd_computed": values.get("mdd_computed", 0),
+                    "mdd_total": values.get("mdd_total", 0),
+                    "mdd_scan_limit": mdd_scan_limit,
+                    "mdd_scan_limit_unlimited": mdd_scan_limit is None,
+                    "wallet": values.get("wallet", ""),
+                    "message": values.get("message", ""),
+                }
+            )
+
+        if not state["scan_complete"] and (scan_limit is None or state["rows"] < scan_limit):
+            def save_page(offset: int, _limit: int, page: List[Dict[str, Any]]) -> None:
+                normalized = [normalize_polymarket_leaderboard_row(row, offset + index + 1) for index, row in enumerate(page)]
+                store.record_page(offset, _limit, normalized)
+
+            _fetch_polymarket_leaderboard_scan_rows(
+                scan_limit=scan_limit,
+                scan_start_offset=int(state["next_offset"]),
+                initial_scanned=int(state["rows"]),
+                retain_rows=False,
+                remote_sort=remote_sort,
+                direction=direction,
+                period=period,
+                category=category,
+                scan_concurrency=scan_concurrency,
+                scan_retry_attempts=retry_attempts,
+                scan_retry_delay_seconds=retry_delay,
+                is_cancelled=lambda: False,
+                emit_progress=emit,
+                warnings=warnings,
+                page_callback=save_page,
+            )
+
+        if mdd_requested:
+            candidate_count = store.candidate_count(filters)
+            mdd_total = min(candidate_count, mdd_scan_limit) if mdd_scan_limit is not None else candidate_count
+            mdd_options = _disk_backed_mdd_options(args)
+            processed = 0
+            computed = 0
+            rate_limited = False
+
+            def compute(row: Mapping[str, Any]) -> tuple[Mapping[str, Any], Optional[Dict[str, Any]], Optional[BaseException]]:
+                wallet = str(row.get("wallet") or "").strip()
+                if not wallet:
+                    return row, None, ValueError("Leaderboard row does not contain a wallet.")
+                try:
+                    return row, polymarket_user_mdd_payload(wallet, **mdd_options), None
+                except Exception as exc:
+                    return row, None, exc
+
+            batch: List[Mapping[str, Any]] = []
+            for candidate in store.iter_mdd_candidates(filters, sort=sort, direction=direction, limit=mdd_scan_limit):
+                if candidate["mdd_status"] == "done":
+                    processed += 1
+                    continue
+                batch.append(candidate)
+                if len(batch) < mdd_concurrency:
+                    continue
+                futures = []
+                with ThreadPoolExecutor(max_workers=len(batch)) as executor:
+                    futures = [executor.submit(compute, row) for row in batch]
+                    results = [future.result() for future in as_completed(futures)]
+                for row, mdd, exc in results:
+                    processed += 1
+                    if exc is None and mdd is not None:
+                        attach_polymarket_mdd_audit_cache(
+                            mdd,
+                            polymarket_mdd_audit_params(str(row["wallet"]), mdd_options),
+                            enabled=bool(args.mdd_persist_cache),
+                        )
+                        store.set_mdd(int(row["id"]), mdd)
+                        computed += 1
+                    else:
+                        store.set_mdd(int(row["id"]), None, exc)
+                        if len(warnings) < 100:
+                            warnings.append(f"MDD unavailable for {row.get('wallet')}: {exc}")
+                        rate_limited = rate_limited or isinstance(exc, PolymarketRateLimitError)
+                    emit("mdd", scanned=store.progress()["rows"], filtered=candidate_count, mdd_attempted=processed, mdd_computed=computed, mdd_total=mdd_total,
+                         message=f"Computing MDD {processed}/{mdd_total}.")
+                batch = []
+                if rate_limited:
+                    warnings.append("MDD scan paused after an upstream rate-limit response; rerun with --resume.")
+                    break
+            if batch and not rate_limited:
+                for row, mdd, exc in [compute(row) for row in batch]:
+                    processed += 1
+                    if exc is None and mdd is not None:
+                        attach_polymarket_mdd_audit_cache(
+                            mdd, polymarket_mdd_audit_params(str(row["wallet"]), mdd_options), enabled=bool(args.mdd_persist_cache)
+                        )
+                        store.set_mdd(int(row["id"]), mdd)
+                        computed += 1
+                    else:
+                        store.set_mdd(int(row["id"]), None, exc)
+                        if len(warnings) < 100:
+                            warnings.append(f"MDD unavailable for {row.get('wallet')}: {exc}")
+                    emit("mdd", scanned=store.progress()["rows"], filtered=candidate_count, mdd_attempted=processed, mdd_computed=computed, mdd_total=mdd_total,
+                         message=f"Computing MDD {processed}/{mdd_total}.")
+
+        final_state = store.progress()
+        qualified = store.result_count(filters, require_mdd=mdd_requested)
+        returned = min(qualified, returned_limit) if returned_limit is not None else qualified
+        payload: Dict[str, Any] = {
+            "counts": {"returned": returned, "filtered": qualified, "scanned": final_state["rows"], "mdd_attempted": final_state["mdd_done"] + final_state["mdd_errors"], "mdd_computed": final_state["mdd_done"]},
+            "sort": sort,
+            "direction": direction,
+            "period": period,
+            "category": category,
+            "limit": returned_limit,
+            "limit_unlimited": returned_limit is None,
+            "scan_limit": scan_limit,
+            "scan_limit_unlimited": scan_limit is None,
+            "mdd_scan_limit": mdd_scan_limit,
+            "mdd_scan_limit_unlimited": mdd_scan_limit is None,
+            "disk_backed": True,
+            "state_db": str(state_path),
+            "state": final_state,
+            "source": "polymarket_data_api_leaderboard",
+            "source_sort": remote_sort,
+            "ranking_scope": "computed_from_scanned_public_leaderboard_rows_with_durable_local_state",
+            "mdd_available": final_state["mdd_done"] > 0,
+            "warnings": warnings,
+        }
+        _write_streamed_leaderboard_payload(
+            payload,
+            store.iter_results(filters, require_mdd=mdd_requested, sort=sort, direction=direction, limit=returned_limit),
+            output_format=args.format,
+            output=args.output,
+        )
+        if not args.quiet:
+            print(
+                f"[{_log_timestamp()} pid={os.getpid()} status=done elapsed={_format_elapsed(time.monotonic() - started_at)} phase=done] "
+                f"Done: returned={returned} filtered={qualified} scanned={final_state['rows']} mdd_computed={final_state['mdd_done']} warnings={len(warnings)} state_db={state_path}",
+                file=sys.stderr,
+            )
+        return 0
+    finally:
+        store.close()
+
+
 def _load_leaderboard_checkpoint(path: Path) -> tuple[List[Dict[str, Any]], int, int, int]:
     if not path.exists():
         return [], 0, 0, 0
@@ -445,6 +735,9 @@ def _progress_printer(enabled: bool, *, started_at: Optional[float] = None):
 
 
 def run_polymarket_leaderboard(args: argparse.Namespace) -> int:
+    if str(getattr(args, "state_db", "") or "").strip():
+        return _run_disk_backed_polymarket_leaderboard(args)
+
     started_at = time.monotonic()
     params = build_polymarket_leaderboard_params(args)
     progress_callback = _progress_printer(not args.quiet, started_at=started_at)
@@ -1059,8 +1352,13 @@ def build_parser() -> argparse.ArgumentParser:
     leaderboard.add_argument("--scan-concurrency", default="")
     leaderboard.add_argument("--scan-retry-attempts", default="5", help="Retry each leaderboard page this many times before failing.")
     leaderboard.add_argument("--scan-retry-delay-seconds", "--scan-retry-delay", default="30", help="Seconds to wait between leaderboard page retry attempts.")
+    leaderboard.add_argument(
+        "--state-db",
+        default="",
+        help="SQLite state database for durable, resumable large scans. Do not combine with --checkpoint.",
+    )
     leaderboard.add_argument("--checkpoint", default="", help="Append fetched leaderboard pages to this JSONL checkpoint file.")
-    leaderboard.add_argument("--resume", action="store_true", help="Load --checkpoint and continue scanning from the last saved page.")
+    leaderboard.add_argument("--resume", action="store_true", help="Resume --checkpoint or --state-db from its saved scan state.")
     leaderboard.add_argument("--checkpoint-fsync-every", type=int, default=20, help="Flush checkpoint data to disk every N pages.")
     leaderboard.add_argument("--mdd-concurrency", default="")
     leaderboard.add_argument("--mdd-stop-on-limit", action="store_true", default=None)

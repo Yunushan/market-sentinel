@@ -38,6 +38,7 @@ from polymarket.live_reports import (
     live_validation_coverage_promotion_proposal,
     live_validation_coverage_promotion_proposal_hash,
     live_validation_coverage_promotion_proposal_markdown,
+    live_validation_promotion_proposal_snapshot_diff_markdown,
     live_validation_promotion_proposal_snapshot_markdown,
     live_validation_report_payload_hash,
     live_validation_report_decisions_markdown,
@@ -1356,6 +1357,25 @@ class PolymarketApiWrapperTests(unittest.TestCase):
             )
             self.assertEqual(stale_listing["counts"]["stale"], 1)
             self.assertIn("proposal_hash_mismatch", stale_listing["entries"][0]["stale_reasons"])
+            stale_opened = load_live_validation_coverage_promotion_proposal_snapshot(
+                snapshot["key"],
+                path=snapshot_path,
+                report_store_path=report_path,
+                decision_path=decision_path,
+            )
+            self.assertIsNotNone(stale_opened)
+            assert stale_opened is not None
+            diff = stale_opened["diff"]
+            self.assertTrue(diff["changed"])
+            self.assertIn("proposal_hash", diff["change_categories"])
+            self.assertEqual(len(diff["accepted_decisions"]["added"]), 1)
+            self.assertEqual(diff["accepted_decisions"]["added"][0]["report_key"], duplicate["key"])
+            self.assertEqual(diff["accepted_decisions"]["added"][0]["target_tier"], "credential_live_verified")
+            self.assertIn("Current-vs-Snapshot Diff", live_validation_promotion_proposal_snapshot_markdown(stale_opened))
+            diff_markdown = live_validation_promotion_proposal_snapshot_diff_markdown(diff)
+            self.assertIn("Current-vs-Snapshot Diff", diff_markdown)
+            self.assertNotIn("snapshot-secret-api-key", json.dumps(diff, sort_keys=True))
+            self.assertNotIn("snapshot-secret-api-key", diff_markdown)
 
             changed = live_validation_coverage_promotion_proposal(
                 report_store_path=report_path,

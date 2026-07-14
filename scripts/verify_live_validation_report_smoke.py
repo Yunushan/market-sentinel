@@ -469,6 +469,29 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
             if SEED_SECRET in snapshot_markdown:
                 raise SystemExit("Live validation promotion proposal snapshot Markdown leaked the seeded secret.")
 
+            status, snapshot_diff_body = request_raw(
+                base_url,
+                f"/api/polymarket/live-validation/promotion-proposal/snapshots/{snapshot_key}/diff.json",
+            )
+            snapshot_diff = json.loads(snapshot_diff_body.decode("utf-8", errors="replace"))
+            if status != 200 or snapshot_diff.get("snapshot_key") != snapshot_key:
+                raise SystemExit(f"Exporting live validation promotion proposal snapshot diff failed with HTTP {status}: {snapshot_diff}")
+            if snapshot_diff.get("static_coverage_mutated") is not False or SEED_SECRET in json.dumps(snapshot_diff, sort_keys=True):
+                raise SystemExit("Live validation promotion proposal snapshot diff was unsafe or leaked the seeded secret.")
+
+            status, snapshot_diff_markdown_body = request_raw(
+                base_url,
+                f"/api/polymarket/live-validation/promotion-proposal/snapshots/{snapshot_key}/diff.md",
+            )
+            snapshot_diff_markdown = snapshot_diff_markdown_body.decode("utf-8", errors="replace")
+            if status != 200 or "Current-vs-Snapshot Diff" not in snapshot_diff_markdown:
+                raise SystemExit(
+                    f"Exporting live validation promotion proposal snapshot diff Markdown failed with HTTP {status}: "
+                    f"{snapshot_diff_markdown}"
+                )
+            if SEED_SECRET in snapshot_diff_markdown:
+                raise SystemExit("Live validation promotion proposal snapshot diff Markdown leaked the seeded secret.")
+
             status, deleted_snapshot = request_raw(
                 base_url,
                 f"/api/polymarket/live-validation/promotion-proposal/snapshots/{snapshot_key}",
