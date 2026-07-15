@@ -43,6 +43,32 @@ MIN_TOTAL_BRANCH_COVERAGE = 65.0
 MIN_BACKEND_BRANCH_COVERAGE = 74.0
 BACKEND_COVERAGE_INCLUDE = "core/*,market_adapters/*,polymarket/*,web_api.py,market_sentinel_cli.py"
 
+WORKFLOW_ACTION_MINIMUM_MAJORS = {
+    ".github/workflows/ci.yml": {
+        "actions/checkout": 7,
+        "actions/setup-python": 6,
+        "actions/setup-node": 7,
+        "actions/upload-artifact": 7,
+        "actions/download-artifact": 8,
+    },
+    ".github/workflows/release.yml": {
+        "actions/checkout": 7,
+        "actions/setup-python": 6,
+        "actions/setup-node": 7,
+        "actions/upload-artifact": 7,
+        "actions/download-artifact": 8,
+    },
+    ".github/workflows/security.yml": {
+        "actions/checkout": 7,
+        "actions/dependency-review-action": 5,
+        "github/codeql-action/init": 4,
+        "github/codeql-action/analyze": 4,
+    },
+}
+WORKFLOW_ACTION_REF_RE = re.compile(
+    r"(?m)^\s*(?:-\s*)?uses:\s*['\"]?([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)@v(\d+)['\"]?\s*(?:#.*)?$"
+)
+
 
 IMPLEMENTED_ADAPTER_FIXTURE_TESTS = {
     "polymarket": ("polymarket", "test_polymarket_adapter.py"),
@@ -975,11 +1001,30 @@ def run_launch_ux_check() -> None:
     print("[ok] launch UX")
 
 
+def workflow_action_minimum_issues(
+    text: str,
+    minimum_majors: dict[str, int],
+) -> list[str]:
+    observed: dict[str, list[int]] = {}
+    for action, major_text in WORKFLOW_ACTION_REF_RE.findall(text):
+        observed.setdefault(action, []).append(int(major_text))
+
+    issues: list[str] = []
+    for action, minimum_major in minimum_majors.items():
+        majors = observed.get(action)
+        if not majors:
+            issues.append(f"{action}@v{minimum_major}+ is missing")
+            continue
+        outdated = sorted({major for major in majors if major < minimum_major})
+        if outdated:
+            found = ", ".join(f"v{major}" for major in outdated)
+            issues.append(f"{action} requires v{minimum_major}+; found {found}")
+    return issues
+
+
 def run_ci_cd_workflow_check() -> None:
     required_files = {
         ROOT / ".github" / "workflows" / "ci.yml": (
-            "actions/setup-python@v6",
-            "actions/setup-node@v6",
             "macos-14",
             "macos-15",
             "macos-26",
@@ -1053,10 +1098,8 @@ def run_ci_cd_workflow_check() -> None:
             "scripts/verify_python_dist_artifacts.py",
         ),
         ROOT / ".github" / "workflows" / "security.yml": (
-            "actions/dependency-review-action@v5",
             "Detect dependency graph support",
             "DEPENDENCY_REVIEW_ENABLED",
-            "github/codeql-action/init@v4",
             "security-events: write",
         ),
         ROOT / ".github" / "dependabot.yml": (
@@ -1099,6 +1142,12 @@ def run_ci_cd_workflow_check() -> None:
         missing = [fragment for fragment in expected_fragments if fragment not in text]
         if missing:
             raise SystemExit(f"{path.relative_to(ROOT)} is missing CI/CD fragments: {', '.join(missing)}")
+
+    for relative_path, minimum_majors in WORKFLOW_ACTION_MINIMUM_MAJORS.items():
+        path = ROOT / relative_path
+        issues = workflow_action_minimum_issues(path.read_text(encoding="utf-8"), minimum_majors)
+        if issues:
+            raise SystemExit(f"{relative_path} has invalid action versions: {'; '.join(issues)}")
     result = subprocess.run(
         [sys.executable, "scripts/verify_platform_support.py"],
         cwd=ROOT,

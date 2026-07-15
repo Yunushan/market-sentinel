@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+from verify import workflow_action_minimum_issues
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -30,11 +32,7 @@ class CiCdWorkflowTests(unittest.TestCase):
             '"3.14"',
             '"3.x"',
             "Future Python",
-            "actions/checkout@v6",
-            "actions/setup-python@v6",
-            "actions/setup-node@v6",
             'node-version: "24"',
-            "actions/upload-artifact@v7",
             "python app.py --smoke-test",
             "python verify.py",
             "python -m pip install --no-cache-dir --upgrade pip",
@@ -85,6 +83,19 @@ class CiCdWorkflowTests(unittest.TestCase):
         self.assertNotIn("cache-dependency-path", text)
         self.assertNotIn("macos-latest", text)
         self.assertNotIn("windows-latest", text)
+        self.assertEqual(
+            [],
+            workflow_action_minimum_issues(
+                text,
+                {
+                    "actions/checkout": 7,
+                    "actions/setup-python": 6,
+                    "actions/setup-node": 7,
+                    "actions/upload-artifact": 7,
+                    "actions/download-artifact": 8,
+                },
+            ),
+        )
 
     def test_release_workflow_publishes_checked_and_checksummed_assets(self) -> None:
         text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
@@ -117,10 +128,7 @@ class CiCdWorkflowTests(unittest.TestCase):
             "scripts/build_windows_release.py",
             "windows-dist",
             "Windows x64 MSI installer",
-            "actions/setup-node@v6",
             'node-version: "24"',
-            "actions/upload-artifact@v7",
-            "actions/download-artifact@v8",
             "sha256sum * > SHA256SUMS.txt",
             "gh release create",
             "gh release upload",
@@ -137,22 +145,45 @@ class CiCdWorkflowTests(unittest.TestCase):
         self.assertNotIn("cache-dependency-path", text)
         self.assertNotIn("macos-latest", text)
         self.assertNotIn("windows-latest", text)
+        self.assertEqual(
+            [],
+            workflow_action_minimum_issues(
+                text,
+                {
+                    "actions/checkout": 7,
+                    "actions/setup-python": 6,
+                    "actions/setup-node": 7,
+                    "actions/upload-artifact": 7,
+                    "actions/download-artifact": 8,
+                },
+            ),
+        )
 
     def test_security_and_dependabot_automation_are_configured(self) -> None:
         security = (ROOT / ".github" / "workflows" / "security.yml").read_text(encoding="utf-8")
         dependabot = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
 
         for fragment in (
-            "actions/dependency-review-action@v5",
             "Detect dependency graph support",
             "DEPENDENCY_REVIEW_ENABLED",
-            "github/codeql-action/init@v4",
-            "github/codeql-action/analyze@v4",
             "security-events: write",
             "fail-on-severity: high",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, security)
+
+        self.assertEqual(
+            [],
+            workflow_action_minimum_issues(
+                security,
+                {
+                    "actions/checkout": 7,
+                    "actions/dependency-review-action": 5,
+                    "github/codeql-action/init": 4,
+                    "github/codeql-action/analyze": 4,
+                },
+            ),
+        )
 
         for fragment in (
             "package-ecosystem: github-actions",
@@ -164,6 +195,26 @@ class CiCdWorkflowTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, dependabot)
         self.assertNotIn("labels:", dependabot)
+
+    def test_action_policy_accepts_upgrades_and_rejects_downgrades(self) -> None:
+        minimums = {
+            "actions/checkout": 7,
+            "actions/setup-node": 7,
+        }
+        future = """
+        - uses: actions/checkout@v8
+        - uses: actions/setup-node@v9 # future major
+        """
+        outdated = """
+        - uses: actions/checkout@v7
+        - uses: actions/setup-node@v6
+        """
+
+        self.assertEqual([], workflow_action_minimum_issues(future, minimums))
+        self.assertEqual(
+            ["actions/setup-node requires v7+; found v6"],
+            workflow_action_minimum_issues(outdated, minimums),
+        )
 
     def test_actionlint_knows_the_intentional_windows_10_runner_label(self) -> None:
         text = (ROOT / ".github" / "actionlint.yaml").read_text(encoding="utf-8")
