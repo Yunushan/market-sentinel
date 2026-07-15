@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import time
 from pathlib import Path
@@ -42,6 +43,7 @@ class LeaderboardStateStore:
                 page_offset INTEGER PRIMARY KEY,
                 page_limit INTEGER NOT NULL,
                 row_count INTEGER NOT NULL,
+                fingerprint TEXT NOT NULL DEFAULT '',
                 saved_at INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS rows (
@@ -73,21 +75,35 @@ class LeaderboardStateStore:
             CREATE INDEX IF NOT EXISTS rows_mdd_status_idx ON rows(mdd_status);
             """
         )
+        page_columns = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(pages)")
+        }
+        if "fingerprint" not in page_columns:
+            self.connection.execute("ALTER TABLE pages ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''")
+        self.connection.execute("CREATE INDEX IF NOT EXISTS pages_fingerprint_idx ON pages(fingerprint)")
         self.connection.commit()
 
     def prepare(self, signature: Mapping[str, Any], *, resume: bool) -> None:
         serialized = json.dumps(dict(signature), sort_keys=True, separators=(",", ":"))
         existing = self._metadata("signature")
+        now = str(int(time.time()))
         if resume:
             if existing and existing != serialized:
                 raise ValueError("State database was created with different leaderboard scan settings.")
             if not existing:
                 self._set_metadata("signature", serialized)
+            if not self._metadata("started_at"):
+                self._set_metadata("started_at", now)
+            self._set_metadata("last_updated_at", now)
+            self.connection.commit()
             return
 
         self.connection.executescript("DELETE FROM pages; DELETE FROM rows; DELETE FROM metadata;")
         self._set_metadata("signature", serialized)
         self._set_metadata("scan_complete", "0")
+        self._set_metadata("started_at", now)
+        self._set_metadata("last_updated_at", now)
         self.connection.commit()
 
     def _metadata(self, key: str) -> str:
@@ -102,6 +118,7 @@ class LeaderboardStateStore:
 
     def progress(self) -> Dict[str, Any]:
         row_count = int(self.connection.execute("SELECT COUNT(*) AS count FROM rows").fetchone()["count"])
+        page_count = int(self.connection.execute("SELECT COUNT(*) AS count FROM pages").fetchone()["count"])
         done = int(
             self.connection.execute("SELECT COUNT(*) AS count FROM rows WHERE mdd_status = 'done'").fetchone()["count"]
         )
@@ -111,25 +128,61 @@ class LeaderboardStateStore:
         last_page = self.connection.execute(
             "SELECT page_offset, page_limit, row_count FROM pages ORDER BY page_offset DESC LIMIT 1"
         ).fetchone()
+        page_times = self.connection.execute("SELECT MIN(saved_at) AS started_at, MAX(saved_at) AS updated_at FROM pages").fetchone()
         next_offset = 0
         if last_page is not None:
             next_offset = int(last_page["page_offset"]) + int(last_page["row_count"])
+        page_started_at = str(page_times["started_at"] or "") if page_times is not None else ""
+        page_updated_at = str(page_times["updated_at"] or "") if page_times is not None else ""
+        started_at = self._metadata("started_at") or page_started_at
+        last_updated_at = self._metadata("last_updated_at") or page_updated_at
         return {
             "rows": row_count,
+            "pages": page_count,
             "mdd_done": done,
             "mdd_errors": failed,
+            "mdd_pending": max(0, row_count - done - failed),
             "next_offset": next_offset,
             "scan_complete": self._metadata("scan_complete") == "1",
+            "stop_reason": self._metadata("stop_reason"),
+            "started_at": started_at,
+            "last_updated_at": last_updated_at,
         }
 
-    def record_page(self, offset: int, limit: int, rows: list[Mapping[str, Any]]) -> None:
+    def status(self) -> Dict[str, Any]:
+        signature_text = self._metadata("signature")
+        try:
+            signature = json.loads(signature_text) if signature_text else {}
+        except json.JSONDecodeError:
+            signature = {"invalid": True}
+        progress = self.progress()
+        return {
+            "state_db": str(self.path),
+            "database_bytes": self.path.stat().st_size if self.path.exists() else 0,
+            "signature": signature if isinstance(signature, Mapping) else {},
+            **progress,
+        }
+
+    def record_page(self, offset: int, limit: int, rows: list[Mapping[str, Any]]) -> bool:
         clean_offset = max(0, int(offset))
         clean_limit = max(1, int(limit))
+        fingerprint = self._page_fingerprint(rows)
         with self.connection:
+            duplicate = self.connection.execute(
+                "SELECT page_offset FROM pages WHERE fingerprint = ? AND page_offset != ? LIMIT 1",
+                (fingerprint, clean_offset),
+            ).fetchone()
+            if rows and duplicate is not None:
+                self._set_metadata("scan_complete", "1")
+                self._set_metadata("stop_reason", "repeated_page")
+                self._set_metadata("stop_offset", str(clean_offset))
+                self._set_metadata("repeated_page_offset", str(int(duplicate["page_offset"])))
+                self._set_metadata("last_updated_at", str(int(time.time())))
+                return False
             self.connection.execute("DELETE FROM rows WHERE page_offset = ?", (clean_offset,))
             self.connection.execute(
-                "INSERT OR REPLACE INTO pages(page_offset, page_limit, row_count, saved_at) VALUES (?, ?, ?, ?)",
-                (clean_offset, clean_limit, len(rows), int(time.time())),
+                "INSERT OR REPLACE INTO pages(page_offset, page_limit, row_count, fingerprint, saved_at) VALUES (?, ?, ?, ?, ?)",
+                (clean_offset, clean_limit, len(rows), fingerprint, int(time.time())),
             )
             self.connection.executemany(
                 """
@@ -154,6 +207,16 @@ class LeaderboardStateStore:
             )
             if len(rows) < clean_limit:
                 self._set_metadata("scan_complete", "1")
+                self._set_metadata("stop_reason", "end_of_results")
+            else:
+                self._set_metadata("stop_reason", "")
+            self._set_metadata("last_updated_at", str(int(time.time())))
+        return True
+
+    @staticmethod
+    def _page_fingerprint(rows: list[Mapping[str, Any]]) -> str:
+        canonical = json.dumps(list(rows), default=str, separators=(",", ":"), sort_keys=True)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def candidate_count(self, filters: Mapping[str, Optional[float]]) -> int:
         where, values = self._where(filters, require_mdd=False)
@@ -184,6 +247,7 @@ class LeaderboardStateStore:
                     "UPDATE rows SET mdd_status = 'error', mdd_attempts = mdd_attempts + 1, mdd_error = ? WHERE id = ?",
                     (str(error or "MDD unavailable")[:512], int(row_id)),
                 )
+                self._set_metadata("last_updated_at", str(int(time.time())))
             return
 
         summary = self._mdd_summary(payload)
@@ -212,6 +276,7 @@ class LeaderboardStateStore:
                     int(row_id),
                 ),
             )
+            self._set_metadata("last_updated_at", str(int(time.time())))
 
     @staticmethod
     def _mdd_summary(payload: Mapping[str, Any]) -> Dict[str, Any]:

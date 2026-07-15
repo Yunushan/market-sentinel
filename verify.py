@@ -5,6 +5,7 @@ import compileall
 import importlib
 import importlib.metadata
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,36 @@ REQUIRED_IMPORTS = {
     "cryptography": "cryptography",
     "eth-account": "eth_account",
     "eth-abi": "eth_abi",
+}
+
+
+IMPLEMENTED_ADAPTER_FIXTURE_TESTS = {
+    "polymarket": ("polymarket", "test_polymarket_adapter.py"),
+    "kalshi": ("kalshi", "test_kalshi_adapter.py"),
+    "predictit": ("predictit", "test_predictit_adapter.py"),
+    "manifold": ("manifold", "test_manifold_adapter.py"),
+    "metaculus": ("metaculus", "test_metaculus_adapter.py"),
+    "limitless_exchange": ("limitless_exchange", "test_limitless_adapter.py"),
+    "sx_bet": ("sx_bet", "test_sx_bet_adapter.py"),
+    "azuro": ("azuro", "test_azuro_adapter.py"),
+    "augur": ("augur", "test_legacy_web3_adapters.py"),
+    "omen": ("omen", "test_legacy_web3_adapters.py"),
+    "zeitgeist": ("zeitgeist", "test_legacy_web3_adapters.py"),
+    "myriad_markets": ("myriad_markets", "test_additional_official_adapters.py"),
+    "xo_market": ("xo_market", "test_additional_official_adapters.py"),
+    "opinion_labs": ("opinion_labs", "test_additional_official_adapters.py"),
+    "gemini_titan": ("gemini", "test_additional_official_adapters.py"),
+    "predict_fun": ("predict_fun", "test_additional_official_adapters.py"),
+    "betfair_exchange": ("betfair_exchange", "test_additional_official_adapters.py"),
+}
+
+
+SECRET_HYGIENE_PATTERNS = {
+    "common access token": re.compile(r"\b(?:ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,})"),
+    "private key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+    "credentialed URL": re.compile(r"https?://[^\s/@]+:[^\s/@]+@"),
+    "private network address": re.compile(r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})\b"),
+    "hardcoded authorization or cookie": re.compile(r"(?i)(?:['\"]authorization['\"]|['\"]cookie['\"])\s*:\s*['\"][^'\"{}]{12,}['\"]"),
 }
 
 
@@ -231,6 +262,60 @@ def run_blockers_doc_check() -> None:
     print("[ok] blockers documentation")
 
 
+def run_goal_completion_audit_check() -> None:
+    path = ROOT / "docs" / "GOAL_COMPLETION_AUDIT.md"
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    required_fragments = (
+        "# Goal Completion Audit",
+        "## Local Requirement Evidence",
+        "## Polymarket Evidence Tiers",
+        "### Observed Public-Live Evidence",
+        "## Open External Evidence Gates",
+        "python verify.py --frontend-build --frontend-live-smoke",
+        "does not promote a tier based only on local fixtures",
+    )
+    missing = [fragment for fragment in required_fragments if fragment not in text]
+    if missing:
+        raise SystemExit("Goal completion audit is missing: " + ", ".join(missing))
+    print("[ok] goal completion audit")
+
+
+def _secret_hygiene_source_paths() -> list[Path]:
+    paths = [ROOT / name for name in ("app.py", "web_api.py", "market_sentinel_cli.py", "data/config.example.json")]
+    for directory, patterns in (
+        (ROOT / "core", ("*.py",)),
+        (ROOT / "market_adapters", ("*.py",)),
+        (ROOT / "polymarket", ("*.py",)),
+        (ROOT / "scripts", ("*.py",)),
+        (ROOT / "frontend" / "src", ("*.ts", "*.tsx")),
+    ):
+        for pattern in patterns:
+            paths.extend(directory.rglob(pattern))
+    return sorted(path for path in paths if path.is_file())
+
+
+def _secret_hygiene_violations(paths: list[Path]) -> list[str]:
+    violations: list[str] = []
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        try:
+            label = str(path.relative_to(ROOT))
+        except ValueError:
+            label = str(path)
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            for label_name, pattern in SECRET_HYGIENE_PATTERNS.items():
+                if pattern.search(line):
+                    violations.append(f"{label}:{line_number}: {label_name}")
+    return violations
+
+
+def run_secret_hygiene_check() -> None:
+    violations = _secret_hygiene_violations(_secret_hygiene_source_paths())
+    if violations:
+        raise SystemExit("Secret hygiene check failed: " + "; ".join(violations))
+    print("[ok] secret hygiene")
+
+
 def run_fixture_check() -> None:
     fixture_root = ROOT / "tests" / "fixtures"
     fixture_paths = sorted(fixture_root.glob("**/*.json"))
@@ -310,6 +395,37 @@ def run_fixture_check() -> None:
     if missing:
         raise SystemExit("Missing required offline fixtures: " + ", ".join(missing))
     print(f"[ok] offline fixtures ({len(fixture_paths)} files)")
+
+
+def run_adapter_fixture_coverage_check() -> None:
+    from market_adapters import MARKET_IDS, VERIFIED_BLOCKERS
+
+    implemented = set(MARKET_IDS) - set(VERIFIED_BLOCKERS)
+    mapped = set(IMPLEMENTED_ADAPTER_FIXTURE_TESTS)
+    if implemented != mapped:
+        missing = sorted(implemented - mapped)
+        unexpected = sorted(mapped - implemented)
+        details = []
+        if missing:
+            details.append("missing mappings: " + ", ".join(missing))
+        if unexpected:
+            details.append("unexpected mappings: " + ", ".join(unexpected))
+        raise SystemExit("Implemented adapter fixture coverage is incomplete: " + "; ".join(details))
+
+    fixture_root = ROOT / "tests" / "fixtures"
+    missing_evidence = []
+    for market_id, (fixture_dir, test_name) in IMPLEMENTED_ADAPTER_FIXTURE_TESTS.items():
+        directory = fixture_root / fixture_dir
+        test_path = ROOT / "tests" / test_name
+        if not any(directory.glob("*.json")):
+            missing_evidence.append(f"{market_id}: fixture directory {directory.relative_to(ROOT)}")
+        if not test_path.is_file():
+            missing_evidence.append(f"{market_id}: test file tests/{test_name}")
+        elif fixture_dir not in test_path.read_text(encoding="utf-8"):
+            missing_evidence.append(f"{market_id}: tests/{test_name} does not reference fixture directory {fixture_dir}")
+    if missing_evidence:
+        raise SystemExit("Implemented adapter fixture evidence is missing: " + "; ".join(missing_evidence))
+    print(f"[ok] implemented adapter fixture coverage ({len(implemented)} markets)")
 
 
 def run_polymarket_live_report_schema_check() -> None:
@@ -1020,7 +1136,10 @@ def main() -> None:
     run_config_example_check()
     run_readme_matrix_check()
     run_blockers_doc_check()
+    run_goal_completion_audit_check()
+    run_secret_hygiene_check()
     run_fixture_check()
+    run_adapter_fixture_coverage_check()
     run_polymarket_live_report_schema_check()
     run_polymarket_live_report_replay_check()
     run_polymarket_live_report_review_bundle_check()

@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app import tkinter_smoke_payload
 from core.models import AppConfig
 from market_adapters import MARKET_IDS
+from scripts import verify_live_validation_report_smoke as live_smoke
 from web_api import app_state_payload
 
 
@@ -181,7 +183,15 @@ class FinalParityTests(unittest.TestCase):
         self.assertIn("POLYMARKET_LEADERBOARD_PAGE_SIZE = 50", web_api_source)
         self.assertIn('type="text"', app_source)
         self.assertIn("no local 1,000,000-row cap", readme)
+        self.assertIn("source_scope_note", web_api_source)
+        self.assertIn("source_enumeration_complete", web_api_source)
+        self.assertIn("Scan ended:", app_source)
+        self.assertIn("completion reason", readme)
         self.assertIn("polymarket-leaderboard", cli_source)
+        self.assertIn("polymarket-leaderboard-status", cli_source)
+        self.assertIn("polymarket-leaderboard-status", readme)
+        self.assertIn("polymarket-leaderboard-export", cli_source)
+        self.assertIn("polymarket-leaderboard-export", readme)
         self.assertIn('market-sentinel = "market_sentinel_cli:main"', pyproject)
 
     def test_verify_frontend_build_uses_windows_npm_command(self) -> None:
@@ -201,6 +211,7 @@ class FinalParityTests(unittest.TestCase):
         self.assertIn("TemporaryDirectory", smoke_source)
         self.assertIn("ignore_cleanup_errors=True", smoke_source)
         self.assertIn("BrowserStartupError", smoke_source)
+        self.assertIn("BrowserRenderError", smoke_source)
         self.assertIn("--disable-extensions", smoke_source)
         self.assertIn("--headless", smoke_source)
         self.assertIn("browser_smoke", smoke_source)
@@ -210,7 +221,26 @@ class FinalParityTests(unittest.TestCase):
         self.assertIn("secretPresent", smoke_source)
         self.assertIn("duplicate_import", smoke_source)
         self.assertIn("decision_ledger", smoke_source)
+        self.assertIn("transient_shell", smoke_source)
+        self.assertIn('"Failed to fetch"', smoke_source)
+        self.assertIn("wait_for_state_api", smoke_source)
         self.assertIn("python verify.py --frontend-build --frontend-live-smoke", readme)
+
+    def test_live_validation_browser_smoke_retries_a_transient_state_timeout(self) -> None:
+        with patch.object(
+            live_smoke,
+            "request_json",
+            side_effect=[TimeoutError("temporary startup timeout"), (200, {"ready": True})],
+        ) as request_json:
+            self.assertEqual(
+                live_smoke.wait_for_state_api(
+                    "http://127.0.0.1:1",
+                    timeout_seconds=1,
+                    retry_interval_seconds=0,
+                ),
+                {"ready": True},
+            )
+        self.assertEqual(request_json.call_count, 2)
 
     def test_polymarket_credential_runbook_is_documented_and_no_funded_actions(self) -> None:
         verify_source = (ROOT / "verify.py").read_text(encoding="utf-8")

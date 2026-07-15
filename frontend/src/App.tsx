@@ -671,8 +671,9 @@ export default function App() {
       setLeaderboard(payload);
       const warning = payload.warnings.length ? ` ${payload.warnings[0]}` : "";
       const cache = payload.analytics_cache.enabled ? ` Audit cache entries: ${payload.analytics_cache.entries}.` : "";
+      const completion = ` Scan ended: ${payload.completion_reason.replaceAll("_", " ")}. ${payload.source_scope_note}`;
       setAnalyticsMessage(
-        `Loaded ${payload.counts.returned} trader row(s) from ${payload.counts.scanned} scanned rows; computed MDD for ${payload.counts.mdd_computed}.${cache}${warning}`
+        `Loaded ${payload.counts.returned} trader row(s) from ${payload.counts.scanned} scanned rows; computed MDD for ${payload.counts.mdd_computed}.${cache}${completion}${warning}`
       );
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
@@ -2336,6 +2337,9 @@ function PolymarketAnalyticsView({
               <Metric label="Filtered" value={leaderboard.counts.filtered} />
               <Metric label="Scanned" value={leaderboard.counts.scanned} />
               <Metric label="MDD computed" value={leaderboard.counts.mdd_computed} />
+            </div>
+            <div className={`info-banner ${leaderboard.source_enumeration_complete ? "" : "warn"}`}>
+              Scan ended: {leaderboard.completion_reason.replaceAll("_", " ")}. {leaderboard.source_scope_note}
             </div>
             <div className={`info-banner ${leaderboard.mdd_available ? "" : "warn"}`}>{leaderboard.mdd_note}</div>
             {leaderboard.rate_limit.limited ? <div className="info-banner warn">Polymarket rate limit reached; retry after the upstream backoff window.</div> : null}

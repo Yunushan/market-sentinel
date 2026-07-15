@@ -34,7 +34,7 @@ A local multi-market prediction-market command center for:
 - Search public Polymarket profiles by username/pseudonym and return proxy wallets for tracking or copy setup
 - Load public leaderboard rows and rank them by PnL USD, volume USD, or computed ROI %
 - The default ROI view returns the top 100 rows from 500 scanned public leaderboard rows; returned rows, scanned rows, and MDD scan rows have no local 1,000,000-row cap and accept `all`, `unlimited`, `0`, or `-1` for explicit no-cap scans
-- An unlimited run enumerates every row the public leaderboard endpoint exposes for the selected period/category. It is not evidence that the endpoint contains every Polymarket account ever created, inactive, hidden, or omitted by upstream ranking rules.
+- An unlimited run reports an explicit completion reason: `end_of_results`, `repeated_page`, `scan_limit_reached`, or `cancelled`. Only `end_of_results` means the selected public leaderboard pagination ended; none of those outcomes proves that the endpoint contains every Polymarket account ever created, inactive, hidden, or omitted by upstream ranking rules.
 - Min/max filters are available for PnL USD, volume USD, and ROI %
 - MDD USD/% v2 can be computed from a public-data historical equity curve: closed-position realized PnL, public activity/trade capital basis, and the current open-position snapshot
 - MDD v2 supports min/max filters, MDD sorting, pagination controls for closed positions/activity/trades/open positions, and an optional `equity_base_usd` override
@@ -332,6 +332,7 @@ python -m market_sentinel_cli polymarket-leaderboard \
   --compute-mdd --fast-scan --mdd-scan unlimited --max-mdd-pct 20 \
   --scan-retry-attempts 10 --scan-retry-delay 60 \
   --state-db data/polymarket-best-roi-mdd20.sqlite3 --resume \
+  --resume-on-failure --resume-backoff-seconds 60 \
   --format csv --output data/polymarket-best-roi-mdd20.csv
 ```
 
@@ -360,12 +361,21 @@ market-sentinel paper order --market polymarket --contract TOKEN --side BUY --si
 market-sentinel dependencies
 market-sentinel polymarket-user-search --query trader
 market-sentinel polymarket-user-mdd --wallet 0x... --mode fast
+market-sentinel polymarket-leaderboard-status --state-db data/polymarket-best-roi-mdd20.sqlite3 --pid-file polymarket-scan.pid
+market-sentinel polymarket-leaderboard-export --state-db data/polymarket-best-roi-mdd20.sqlite3 --require-mdd --max-mdd-pct 20 --format csv --output data/polymarket-current-mdd20.csv
 market-sentinel polymarket-readiness
+market-sentinel polymarket-live-reports list
+market-sentinel polymarket-live-reports import --report-file live-auth-report.json --label "authenticated read"
+market-sentinel polymarket-live-reports review REPORT_KEY --format markdown --output review.md
+market-sentinel polymarket-live-decisions list
+market-sentinel polymarket-promotion-proposal snapshots list
+market-sentinel paper marks refresh
+market-sentinel paper marks clear-selected --market polymarket --contract TOKEN_ID
 market-sentinel polymarket-mdd-cache list
 market-sentinel serve --host 127.0.0.1 --port 8765
 ```
 
-Commands that mutate config or paper state write through the same atomic config storage as the GUI. Most commands return JSON to stdout and support `--output file.json` plus `--compact`; `polymarket-leaderboard` can emit CSV or JSON. Unlimited scans run until the public leaderboard API returns no more rows, a rate limit stops the run, or the process is cancelled; use finite `--scanned` and `--mdd-scan` values for normal interactive jobs. For long VPS scans, use `--state-db path.sqlite3 --resume` plus retry flags: every fetched page, normalized row, and completed MDD audit is committed to SQLite, so a transient SSL/API failure only loses the current page batch and a later invocation resumes from the durable state. The CSV/JSON output is streamed from SQLite rather than rebuilding all rows in RAM. `--checkpoint` remains available as a lightweight JSONL checkpoint for shorter scans, but cannot be combined with `--state-db`. Progress logs on stderr include timestamp, PID, running status, elapsed time, phase, percent, scan rate, MDD rate, and ETA when a finite limit is known.
+Commands that mutate config or paper state write through the same atomic config storage as the GUI. Most commands return JSON to stdout and support `--output file.json` plus `--compact`; `polymarket-leaderboard` can emit CSV or JSON. `paper marks` persists CLI-only computed marks in an atomic sidecar beside the selected config (or `--marks-file`) so refresh, show, and clear work across separate CLI processes; it contains no credentials and is ignored by Git. `polymarket-live-reports`, `polymarket-live-decisions`, and `polymarket-promotion-proposal` expose the same local redacted report/review/decision/proposal artifacts as Live Safety; they never derive credentials, perform network actions, or place orders, and Markdown is available only for existing review exports. Unlimited scans run until the public leaderboard API returns no more rows, a repeated full page is detected, a rate limit stops the run, or the process is cancelled; use finite `--scanned` and `--mdd-scan` values for normal interactive jobs. For long VPS scans, use `--state-db path.sqlite3 --resume` plus retry flags: every fetched page, normalized row, and completed MDD audit is committed to SQLite, so a transient SSL/API failure only loses the current page batch and a later invocation resumes from the durable state. Add `--resume-on-failure` to keep a `nohup` scan alive after transient Polymarket HTTP/SSL failures; it resumes SQLite state after exponential backoff, with `--resume-max-restarts 0` meaning retry until interrupted. Run `market-sentinel polymarket-leaderboard-status --state-db path.sqlite3 --pid-file polymarket-scan.pid` at any time for a read-only JSON status with rows/pages, MDD done/error/pending counts, next offset, timestamps, stop reason, saved scan signature, and optional PID-file liveness. Use `market-sentinel polymarket-leaderboard-export --state-db path.sqlite3 --require-mdd --max-mdd-pct 20 --format csv --output current.csv` to write a sorted partial result snapshot without rerunning API or MDD calls; its JSON output identifies whether the export is still partial. A repeated page is recorded as `stop_reason=repeated_page`; it is an upstream pagination boundary, not proof that every Polymarket account exists in the public leaderboard. The CSV/JSON output is streamed from SQLite rather than rebuilding all rows in RAM. `--checkpoint` remains available as a lightweight JSONL checkpoint for shorter scans, but cannot be combined with `--state-db`. Progress logs on stderr include timestamp, PID, running status, elapsed time, phase, percent, scan rate, MDD rate, and ETA when a finite limit is known.
 
 For a strict public-data ROI/MDD screen, `--max-mdd-pct 20` filters to successful public-data MDD calculations at or below 20%. Fast MDD is a public historical-equity approximation, not independently verified account-equity MDD: public deposits/withdrawals, unresolved historical marks, fees, and records outside the selected fetch windows can change the true result. Use `--mdd-mode mark_replay --mdd-include-accounting` for deeper sampled reconciliation, inspect the exported `mdd_method`, `mdd_pct_basis`, `mdd_source`, and warnings, and treat results as candidates for manual due diligence.
 

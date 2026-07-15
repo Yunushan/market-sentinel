@@ -848,6 +848,53 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(captured_pages, [(0, 1, page)])
         self.assertEqual(progress[-1]["scanned"], 1)
 
+    def test_leaderboard_scanner_stops_on_a_repeated_full_page(self) -> None:
+        page = [
+            {"rank": index + 1, "proxyWallet": f"0x{index:040x}", "pnl": str(index), "volume": "100"}
+            for index in range(50)
+        ]
+        progress = []
+        warnings = []
+        summary = {}
+
+        with patch("web_api.data_api.get_leaderboard", return_value=page) as mock_get:
+            rows, cancelled = _fetch_polymarket_leaderboard_scan_rows(
+                scan_limit=None,
+                retain_rows=True,
+                remote_sort="PNL",
+                direction="DESC",
+                period="all",
+                category="OVERALL",
+                scan_concurrency=1,
+                is_cancelled=lambda: False,
+                emit_progress=lambda _phase, **values: progress.append(values),
+                warnings=warnings,
+                scan_summary=summary,
+            )
+
+        self.assertFalse(cancelled)
+        self.assertEqual(mock_get.call_count, 2)
+        self.assertEqual(rows, page)
+        self.assertEqual(summary["completion_reason"], "repeated_page")
+        self.assertFalse(summary["source_enumeration_complete"])
+        self.assertTrue(any("repeated" in warning for warning in warnings))
+        self.assertTrue(any("repeated" in item.get("message", "") for item in progress))
+
+    def test_leaderboard_payload_marks_a_repeated_page_as_incomplete_source_enumeration(self) -> None:
+        page = [
+            {"rank": index + 1, "proxyWallet": f"0x{index:040x}", "pnl": str(index), "volume": "100"}
+            for index in range(50)
+        ]
+
+        with patch("web_api.data_api.get_leaderboard", return_value=page) as mock_get:
+            payload = polymarket_leaderboard_payload({"limit": ["all"], "scan_limit": ["unlimited"]})
+
+        self.assertEqual(mock_get.call_count, 2)
+        self.assertEqual(payload["counts"]["scanned"], 50)
+        self.assertEqual(payload["completion_reason"], "repeated_page")
+        self.assertFalse(payload["source_enumeration_complete"])
+        self.assertIn("public Polymarket leaderboard", payload["source_scope_note"])
+
     def test_polymarket_leaderboard_payload_resumes_from_checkpoint_rows(self) -> None:
         checkpoint_rows = [{"rank": 1, "proxyWallet": WALLET, "pnl": "10", "volume": "100"}]
         page_callbacks = []
@@ -893,6 +940,9 @@ class WebApiTests(unittest.TestCase):
         self.assertFalse(payload["limit_unlimited"])
         self.assertFalse(payload["scan_limit_unlimited"])
         self.assertFalse(payload["mdd_scan_limit_unlimited"])
+        self.assertEqual(payload["completion_reason"], "end_of_results")
+        self.assertTrue(payload["source_enumeration_complete"])
+        self.assertIn("do not establish coverage", payload["source_scope_note"])
         mock_get.assert_called_once()
         self.assertEqual(mock_get.call_args.kwargs["limit"], 50)
 
@@ -950,6 +1000,9 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["counts"]["returned"], 52)
         self.assertEqual(payload["counts"]["scanned"], 52)
         self.assertEqual(payload["counts"]["mdd_computed"], 52)
+        self.assertEqual(payload["completion_reason"], "end_of_results")
+        self.assertTrue(payload["source_enumeration_complete"])
+        self.assertIn("every Polymarket account", payload["source_scope_note"])
 
     def test_polymarket_user_mdd_payload_computes_usd_and_percentage_drawdown(self) -> None:
         with patch(

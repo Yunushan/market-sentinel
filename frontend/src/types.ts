@@ -495,6 +495,9 @@ export interface PolymarketLeaderboardPayload {
   source: string;
   source_sort: string;
   ranking_scope: string;
+  completion_reason: string;
+  source_enumeration_complete: boolean;
+  source_scope_note: string;
   mdd_available: boolean;
   mdd_method: string;
   mdd_pct_basis: string;

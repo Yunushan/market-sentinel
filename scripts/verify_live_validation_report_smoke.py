@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Tuple
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import websocket
@@ -27,6 +27,7 @@ from web_api import ReactGuiHandler, ReactGuiServer  # noqa: E402
 DEFAULT_FRONTEND_DIR = ROOT / "frontend" / "dist"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_RENDER_TIMEOUT_SECONDS = 60
+DEFAULT_SERVER_READY_TIMEOUT_SECONDS = 45
 SEED_SECRET = "browser-smoke-secret"
 
 SEEDED_REPORT: Dict[str, Any] = {
@@ -86,6 +87,10 @@ class BrowserStartupError(RuntimeError):
     pass
 
 
+class BrowserRenderError(RuntimeError):
+    pass
+
+
 class SmokeReactGuiHandler(ReactGuiHandler):
     def log_message(self, format: str, *args: Any) -> None:
         return
@@ -131,6 +136,37 @@ def request_raw(base_url: str, path: str, *, method: str = "GET") -> Tuple[int, 
             return response.status, response.read()
     except HTTPError as exc:
         return exc.code, exc.read()
+
+
+def wait_for_state_api(
+    base_url: str,
+    *,
+    timeout_seconds: int = DEFAULT_SERVER_READY_TIMEOUT_SECONDS,
+    retry_interval_seconds: float = 0.25,
+) -> Dict[str, Any]:
+    """Wait for the temporary server to finish its first state response.
+
+    The server socket is available before the first request has completed its
+    config and report-store initialization. A transient accept/read timeout is
+    therefore a startup condition, not evidence that the smoke route failed.
+    """
+
+    deadline = time.monotonic() + max(1, int(timeout_seconds))
+    last_error = "no response"
+    while True:
+        try:
+            status, state = request_json(base_url, "/api/state")
+            if status == 200 and isinstance(state, dict):
+                return state
+            last_error = f"HTTP {status}: {state}"
+        except (OSError, TimeoutError, URLError, ValueError) as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        if time.monotonic() >= deadline:
+            raise SystemExit(
+                "Live Safety browser smoke state API did not become ready within "
+                f"{max(1, int(timeout_seconds))} seconds: {last_error}"
+            )
+        time.sleep(max(0.0, retry_interval_seconds))
 
 
 def find_browser(explicit_path: str = "") -> str:
@@ -272,11 +308,14 @@ def _browser_dom_check_once(
                         raise SystemExit("Live Safety browser smoke DOM leaked the seeded secret.")
                     if not value.get("missing"):
                         return value
+                    transient_shell = "API loading" in str(value.get("textSnippet") or "") or "Failed to fetch" in str(value.get("textSnippet") or "")
                     if (
-                        reload_attempts < 2
+                        reload_attempts < 3
                         and time.monotonic() >= next_reload_at
-                        and int(value.get("htmlLength") or 0) < 1000
-                        and int(value.get("textLength") or 0) == 0
+                        and (
+                            (int(value.get("htmlLength") or 0) < 1000 and int(value.get("textLength") or 0) == 0)
+                            or transient_shell
+                        )
                     ):
                         reload_attempts += 1
                         next_reload_at = time.monotonic() + 10
@@ -284,7 +323,7 @@ def _browser_dom_check_once(
                 time.sleep(0.25)
             missing = last_value.get("missing") if isinstance(last_value, dict) else []
             detail = json.dumps(last_value, sort_keys=True) if last_value else "{}"
-            raise SystemExit("Live Safety browser smoke DOM is missing: " + ", ".join(str(item) for item in missing) + f"; last={detail}")
+            raise BrowserRenderError("Live Safety browser smoke DOM is missing: " + ", ".join(str(item) for item in missing) + f"; last={detail}")
         finally:
             try:
                 ws.close()
@@ -316,7 +355,7 @@ def browser_dom_check(browser_path: str, url: str, profile_dir: Path, *, timeout
                 headless_arg=headless_arg,
                 timeout_seconds=timeout_seconds,
             )
-        except BrowserStartupError as exc:
+        except (BrowserStartupError, BrowserRenderError) as exc:
             errors.append(str(exc))
     raise SystemExit("Headless browser failed to start for DOM smoke: " + " ".join(errors))
 
@@ -350,6 +389,7 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
         thread: threading.Thread | None = None
         try:
             server, thread, base_url = start_server(args.host, args.port, config_path, frontend_dir)
+            wait_for_state_api(base_url)
             status, stored = request_json(
                 base_url,
                 "/api/polymarket/live-validation/reports",

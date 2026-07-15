@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from core.storage import load_config
 
 import market_sentinel_cli
+from polymarket.http_client import PolymarketHTTPError
+from polymarket.leaderboard_state import LeaderboardStateStore
 
 
 def run_cli_silent(args: list[str]) -> int:
@@ -113,6 +117,172 @@ class MarketSentinelCliTests(unittest.TestCase):
         self.assertIn("scan_rate=", line)
         self.assertIn("eta=", line)
         self.assertIn("Scanning leaderboard rows 100/1000.", line)
+
+    def test_disk_backed_leaderboard_can_resume_after_a_transient_http_failure(self) -> None:
+        parser = market_sentinel_cli.build_parser()
+        args = parser.parse_args(
+            [
+                "polymarket-leaderboard",
+                "--state-db",
+                "data/leaderboard.sqlite3",
+                "--resume-on-failure",
+                "--resume-backoff-seconds",
+                "1",
+                "--quiet",
+            ]
+        )
+        transient_error = PolymarketHTTPError("ssl eof", service="data", method="GET", url="https://data-api.polymarket.com")
+
+        with patch("market_sentinel_cli._run_disk_backed_polymarket_leaderboard", side_effect=[transient_error, 0]) as mock_run, patch(
+            "market_sentinel_cli.time.sleep"
+        ) as mock_sleep:
+            exit_code = market_sentinel_cli.run_polymarket_leaderboard(args)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(mock_run.call_count, 2)
+        self.assertTrue(args.resume)
+        mock_sleep.assert_called_once_with(1.0)
+
+    def test_resume_on_failure_requires_disk_backed_state(self) -> None:
+        self.assertEqual(run_cli_silent(["polymarket-leaderboard", "--resume-on-failure", "--quiet"]), 1)
+
+    def test_live_validation_cli_covers_local_report_review_workflows(self) -> None:
+        parser = market_sentinel_cli.build_parser()
+        commands = {
+            ("polymarket-live-reports", "list"): "run_polymarket_live_reports_list",
+            ("polymarket-live-reports", "store"): "run_polymarket_live_reports_store",
+            ("polymarket-live-reports", "review", "report-key", "--format", "markdown"): "run_polymarket_live_reports_review",
+            ("polymarket-live-decisions", "list"): "run_polymarket_live_decisions_list",
+            ("polymarket-live-decisions", "record", "--report-key", "report-key", "--payload-hash", "payload", "--target-tier", "credential_live_verified", "--decision", "rejected", "--reviewer-note", "no evidence", "--review-bundle-hash", "bundle"): "run_polymarket_live_decisions_record",
+            ("polymarket-promotion-proposal", "show"): "run_polymarket_live_proposal_show",
+            ("polymarket-promotion-proposal", "snapshots", "diff", "snapshot-key"): "run_polymarket_live_snapshots_diff",
+        }
+
+        for command, expected in commands.items():
+            with self.subTest(command=command):
+                args = parser.parse_args(list(command))
+                self.assertEqual(args.func.__name__, expected)
+
+    def test_live_validation_cli_lists_reports_and_writes_markdown_review(self) -> None:
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli.polymarket_live_validation_reports_payload", return_value={"entries": []}), patch("sys.stdout", stdout):
+            exit_code = market_sentinel_cli.main(["polymarket-live-reports", "list", "--compact"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(json.loads(stdout.getvalue()), {"entries": []})
+
+        stdout = io.StringIO()
+        review = {"bundle": {"review": "safe"}}
+        with patch("market_sentinel_cli.polymarket_live_validation_report_review_payload", return_value=review), patch(
+            "market_sentinel_cli.live_validation_report_review_markdown", return_value="# Review\n"
+        ), patch("sys.stdout", stdout):
+            exit_code = market_sentinel_cli.main(
+                ["polymarket-live-reports", "review", "report-key", "--format", "markdown"]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stdout.getvalue(), "# Review\n")
+
+    def test_paper_marks_cli_refreshes_durable_sidecar_and_supports_mark_commands(self) -> None:
+        parser = market_sentinel_cli.build_parser()
+        commands = {
+            ("paper", "marks", "refresh"): "run_paper_marks_refresh",
+            ("paper", "marks", "refresh-selected", "--market", "kalshi", "--contract", "KX"): "run_paper_marks_refresh_selected",
+            ("paper", "marks", "clear"): "run_paper_marks_clear",
+            ("paper", "marks", "clear-selected", "--market", "kalshi", "--contract", "KX"): "run_paper_marks_clear_selected",
+        }
+        for command, expected in commands.items():
+            with self.subTest(command=command):
+                self.assertEqual(parser.parse_args(list(command)).func.__name__, expected)
+
+        cfg = SimpleNamespace(paper_trades=[])
+        rows = [{"market_id": "kalshi", "contract_id": "KX", "net_size": 1.0}]
+        marks = {("kalshi", "KX"): {"mark_price": 0.61, "source": "bid", "marked_at": 123}}
+        with tempfile.TemporaryDirectory() as tmp:
+            marks_path = Path(tmp) / "marks.json"
+            stdout = io.StringIO()
+            with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+                "market_sentinel_cli.paper_position_rows", return_value=rows
+            ), patch("market_sentinel_cli.refresh_paper_marks", return_value=(marks, [])), patch(
+                "market_sentinel_cli.paper_payload", return_value={"summary": {"marked": 1}}
+            ), patch("sys.stdout", stdout):
+                exit_code = market_sentinel_cli.main(["paper", "marks", "refresh", "--marks-file", str(marks_path)])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(json.loads(stdout.getvalue())["paper"]["summary"]["marked"], 1)
+            self.assertEqual(market_sentinel_cli._load_paper_marks(marks_path), marks)
+
+    def test_leaderboard_status_reads_existing_state_without_starting_a_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "leaderboard.sqlite3"
+            pid_file = Path(tmp) / "scan.pid"
+            pid_file.write_text(f"{os.getpid()}\n", encoding="utf-8")
+            store = LeaderboardStateStore(state_path)
+            try:
+                store.prepare({"remote_sort": "PNL", "direction": "DESC", "period": "all", "category": "OVERALL"}, resume=False)
+                store.record_page(
+                    0,
+                    50,
+                    [{"rank": 1, "display_name": "leader", "wallet": "0x" + "1" * 40, "pnl_usd": 10.0, "volume_usd": 100.0, "roi_pct": 10.0, "trade_count": 1, "raw": {}}],
+                )
+            finally:
+                store.close()
+
+            stdout = io.StringIO()
+            with patch("sys.stdout", stdout):
+                exit_code = market_sentinel_cli.main(
+                    ["polymarket-leaderboard-status", "--state-db", str(state_path), "--pid-file", str(pid_file), "--compact"]
+                )
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(payload["rows"], 1)
+            self.assertEqual(payload["pages"], 1)
+            self.assertEqual(payload["mdd_pending"], 1)
+            self.assertEqual(payload["signature"]["remote_sort"], "PNL")
+            self.assertEqual(payload["process"]["status"], "running")
+            self.assertEqual(payload["process"]["pid"], os.getpid())
+
+    def test_leaderboard_export_streams_partial_completed_mdd_rows_without_scanning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "leaderboard.sqlite3"
+            store = LeaderboardStateStore(state_path)
+            try:
+                store.prepare({"remote_sort": "PNL", "direction": "DESC", "period": "all", "category": "OVERALL"}, resume=False)
+                store.record_page(
+                    0,
+                    2,
+                    [
+                        {"rank": 1, "display_name": "eligible", "wallet": "0x" + "1" * 40, "pnl_usd": 20.0, "volume_usd": 100.0, "roi_pct": 20.0, "trade_count": 1, "raw": {}},
+                        {"rank": 2, "display_name": "pending", "wallet": "0x" + "2" * 40, "pnl_usd": 10.0, "volume_usd": 100.0, "roi_pct": 10.0, "trade_count": 1, "raw": {}},
+                    ],
+                )
+                row = next(store.iter_mdd_candidates({}, sort="roi_pct", direction="DESC", limit=1))
+                store.set_mdd(row["id"], {"mdd_usd": 5.0, "mdd_pct": 10.0, "mdd_method": "test", "mdd_pct_basis": "test"})
+            finally:
+                store.close()
+
+            stdout = io.StringIO()
+            with patch("sys.stdout", stdout):
+                exit_code = market_sentinel_cli.main(
+                    [
+                        "polymarket-leaderboard-export",
+                        "--state-db",
+                        str(state_path),
+                        "--require-mdd",
+                        "--max-mdd-pct",
+                        "20",
+                        "--format",
+                        "json",
+                    ]
+                )
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(payload["partial"])
+            self.assertEqual(payload["counts"]["returned"], 1)
+            self.assertEqual(payload["rows"][0]["display_name"], "eligible")
+            self.assertEqual(payload["counts"]["mdd_pending"], 1)
 
     def test_polymarket_leaderboard_cli_checkpoints_and_resumes_pages(self) -> None:
         payload = {
@@ -292,6 +462,8 @@ class MarketSentinelCliTests(unittest.TestCase):
             self.assertEqual(payload["counts"]["returned"], 1)
             self.assertEqual(payload["rows"][0]["mdd_pct"], 10.0)
             self.assertNotIn("points", payload["rows"][0])
+            self.assertEqual(payload["completion_reason"], "end_of_results")
+            self.assertTrue(payload["source_enumeration_complete"])
 
     def test_config_and_market_cli_update_persisted_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

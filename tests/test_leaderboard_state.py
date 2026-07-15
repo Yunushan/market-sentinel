@@ -8,6 +8,38 @@ from polymarket.leaderboard_state import LeaderboardStateStore
 
 
 class LeaderboardStateStoreTests(unittest.TestCase):
+    def test_repeated_page_stops_a_durable_unlimited_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LeaderboardStateStore(Path(tmp) / "leaderboard.sqlite3")
+            try:
+                store.prepare({"remote_sort": "PNL", "direction": "DESC", "period": "all", "category": "OVERALL"}, resume=False)
+                page = [
+                    {
+                        "rank": 1,
+                        "display_name": "leader",
+                        "wallet": "0x" + "1" * 40,
+                        "pnl_usd": 20.0,
+                        "volume_usd": 100.0,
+                        "roi_pct": 20.0,
+                        "trade_count": 3,
+                        "raw": {"rank": 1},
+                    }
+                ]
+
+                self.assertTrue(store.record_page(0, 1, page))
+                self.assertFalse(store.record_page(1, 1, page))
+
+                progress = store.progress()
+                self.assertEqual(progress["rows"], 1)
+                self.assertEqual(progress["pages"], 1)
+                self.assertEqual(progress["mdd_pending"], 1)
+                self.assertTrue(progress["scan_complete"])
+                self.assertEqual(progress["stop_reason"], "repeated_page")
+                self.assertTrue(progress["started_at"])
+                self.assertTrue(progress["last_updated_at"])
+            finally:
+                store.close()
+
     def test_mdd_state_keeps_export_provenance_without_point_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = LeaderboardStateStore(Path(tmp) / "leaderboard.sqlite3")

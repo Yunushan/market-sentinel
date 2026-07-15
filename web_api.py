@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import mimetypes
 import os
@@ -1976,7 +1977,8 @@ def _fetch_polymarket_leaderboard_scan_rows(
     is_cancelled: Callable[[], bool],
     emit_progress: Callable[..., None],
     warnings: List[str],
-    page_callback: Optional[Callable[[int, int, List[Dict[str, Any]]], None]] = None,
+    page_callback: Optional[Callable[[int, int, List[Dict[str, Any]]], Optional[bool]]] = None,
+    scan_summary: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], bool]:
     raw_rows: List[Dict[str, Any]] = [dict(row) for row in (initial_rows or [])]
     scanned_count = max(len(raw_rows), int(initial_scanned or 0))
@@ -1989,6 +1991,8 @@ def _fetch_polymarket_leaderboard_scan_rows(
     concurrency = max(1, int(scan_concurrency or 1))
     retry_attempts = max(1, int(scan_retry_attempts or 1))
     retry_delay = max(0.0, float(scan_retry_delay_seconds or 0.0))
+    seen_page_fingerprints: set[str] = set()
+    completion_reason = "scan_limit_reached" if scan_limit is not None else "upstream_exhausted"
 
     def fetch_page(page_offset: int, page_limit: int) -> List[Dict[str, Any]]:
         for attempt in range(1, retry_attempts + 1):
@@ -2026,6 +2030,7 @@ def _fetch_polymarket_leaderboard_scan_rows(
     while scan_limit is None or scanned_count < scan_limit:
         if is_cancelled():
             cancelled = True
+            completion_reason = "cancelled"
             warnings.append("Leaderboard scan cancelled by user.")
             break
 
@@ -2069,17 +2074,37 @@ def _fetch_polymarket_leaderboard_scan_rows(
             page = pages_by_offset.get(page_offset) or []
             if page_callback is not None:
                 try:
-                    page_callback(page_offset, page_limit, page)
+                    accepted = page_callback(page_offset, page_limit, page)
                 except Exception as exc:
                     warnings.append(f"Leaderboard checkpoint callback failed at offset {page_offset}: {exc}")
                     raise
+                if accepted is False:
+                    completion_reason = "repeated_page"
+                    warning = f"Leaderboard scan stopped at offset {page_offset}: upstream returned a page already stored at an earlier offset."
+                    warnings.append(warning)
+                    emit_progress("leaderboard", scanned=scanned_count, message=warning)
+                    stop_after_batch = True
+                    break
             if not page:
+                completion_reason = "end_of_results"
                 stop_after_batch = True
                 break
+            page_fingerprint = hashlib.sha256(
+                json.dumps(page, default=str, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            ).hexdigest()
+            if page_fingerprint in seen_page_fingerprints:
+                completion_reason = "repeated_page"
+                warning = f"Leaderboard scan stopped at offset {page_offset}: upstream repeated a previously returned full page."
+                warnings.append(warning)
+                emit_progress("leaderboard", scanned=scanned_count, message=warning)
+                stop_after_batch = True
+                break
+            seen_page_fingerprints.add(page_fingerprint)
             scanned_count += len(page)
             if retain_rows:
                 raw_rows.extend(page)
             if len(page) < page_limit:
+                completion_reason = "end_of_results"
                 stop_after_batch = True
                 break
 
@@ -2091,11 +2116,19 @@ def _fetch_polymarket_leaderboard_scan_rows(
         )
         if is_cancelled():
             cancelled = True
+            completion_reason = "cancelled"
             warnings.append("Leaderboard scan cancelled by user.")
             break
         if stop_after_batch:
             break
 
+    if scan_summary is not None:
+        scan_summary.update(
+            {
+                "completion_reason": completion_reason,
+                "source_enumeration_complete": completion_reason == "end_of_results",
+            }
+        )
     return _limit_slice(raw_rows, scan_limit), cancelled
 
 
@@ -2105,7 +2138,7 @@ def polymarket_leaderboard_payload(
     cancel_check: Optional[Callable[[], bool]] = None,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     initial_raw_rows: Optional[List[Mapping[str, Any]]] = None,
-    leaderboard_page_callback: Optional[Callable[[int, int, List[Dict[str, Any]]], None]] = None,
+    leaderboard_page_callback: Optional[Callable[[int, int, List[Dict[str, Any]]], Optional[bool]]] = None,
 ) -> Dict[str, Any]:
     query = params or {}
     sort = _query_value(query, "sort", "roi_pct").lower()
@@ -2258,6 +2291,7 @@ def polymarket_leaderboard_payload(
 
     remote_sort = LEADERBOARD_SORTS[sort]
     checkpoint_rows = [dict(row) for row in (initial_raw_rows or [])]
+    scan_summary: Dict[str, Any] = {}
     raw_rows, leaderboard_cancelled = _fetch_polymarket_leaderboard_scan_rows(
         scan_limit=scan_limit,
         scan_start_offset=scan_start_offset,
@@ -2273,6 +2307,7 @@ def polymarket_leaderboard_payload(
         emit_progress=emit_progress,
         warnings=warnings,
         page_callback=leaderboard_page_callback,
+        scan_summary=scan_summary,
     )
     cancelled = cancelled or leaderboard_cancelled
 
@@ -2529,6 +2564,12 @@ def polymarket_leaderboard_payload(
         "cancelled": cancelled,
         "source_sort": remote_sort,
         "ranking_scope": "computed_from_scanned_public_leaderboard_rows_with_optional_public_data_mdd_v2",
+        "completion_reason": str(scan_summary.get("completion_reason") or "unknown"),
+        "source_enumeration_complete": bool(scan_summary.get("source_enumeration_complete")),
+        "source_scope_note": (
+            "Results cover only rows exposed by the public Polymarket leaderboard for the selected period and category; "
+            "they do not establish coverage of every Polymarket account."
+        ),
         "search_strategy": (
             "fast_roi_candidates_then_adaptive_mdd_filter"
             if fast_scan and mdd_requested and sort == "roi_pct"

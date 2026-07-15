@@ -27,6 +27,10 @@ frontend/*.tsbuildinfo
 
 # Local config/state
 data/config.json
+data/polymarket_live_validation_reports.json
+data/polymarket_live_validation_decisions.json
+data/polymarket_live_validation_promotion_proposal_snapshots.json
+data/config.paper-marks.json
 
 .DS_Store
 Thumbs.db

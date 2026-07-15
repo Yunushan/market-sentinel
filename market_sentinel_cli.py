@@ -7,6 +7,7 @@ import importlib.metadata as importlib_metadata
 import json
 import os
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -16,8 +17,15 @@ from urllib import request as urllib_request
 
 from core.storage import DEFAULT_CONFIG_PATH, load_config, save_config
 from market_adapters import build_default_registry
-from polymarket.http_client import PolymarketRateLimitError
+from polymarket.http_client import PolymarketHTTPError, PolymarketRateLimitError
 from polymarket.leaderboard_state import LeaderboardStateStore
+from polymarket.live_reports import (
+    live_validation_coverage_promotion_proposal_markdown,
+    live_validation_promotion_proposal_snapshot_diff_markdown,
+    live_validation_promotion_proposal_snapshot_markdown,
+    live_validation_report_decisions_markdown,
+    live_validation_report_review_markdown,
+)
 from web_api import (
     DEFAULT_FRONTEND_DIR,
     LEADERBOARD_SORTS,
@@ -43,11 +51,25 @@ from web_api import (
     paper_order_from_payload,
     paper_order_impact,
     paper_payload,
+    paper_position_rows,
     paper_quote_limit_payload,
     paper_quote_payload,
     polymarket_clob_readiness_payload,
     polymarket_leaderboard_payload,
     polymarket_live_validation_payload,
+    polymarket_live_validation_decision_store_payload,
+    polymarket_live_validation_decisions_payload,
+    polymarket_live_validation_promotion_proposal_payload,
+    polymarket_live_validation_promotion_proposal_snapshot_diff_payload,
+    polymarket_live_validation_promotion_proposal_snapshot_payload,
+    polymarket_live_validation_promotion_proposal_snapshot_purge_payload,
+    polymarket_live_validation_promotion_proposal_snapshot_store_payload,
+    polymarket_live_validation_promotion_proposal_snapshots_payload,
+    polymarket_live_validation_report_payload,
+    polymarket_live_validation_report_purge_payload,
+    polymarket_live_validation_report_review_payload,
+    polymarket_live_validation_report_store_payload,
+    polymarket_live_validation_reports_payload,
     polymarket_mdd_cache_health_payload,
     polymarket_mdd_cache_payload,
     polymarket_mdd_cache_purge_payload,
@@ -58,6 +80,8 @@ from web_api import (
     position_refill_payload,
     refresh_alert_price,
     refresh_all_alert_prices,
+    refresh_paper_marks,
+    refresh_selected_paper_mark,
     run_server,
     attach_polymarket_mdd_audit_cache,
     normalize_polymarket_leaderboard_row,
@@ -182,6 +206,18 @@ def _write_json(payload: Mapping[str, Any], *, output: Optional[str] = "-", comp
 
 def _write_command_payload(args: argparse.Namespace, payload: Mapping[str, Any]) -> int:
     _write_json(payload, output=getattr(args, "output", "-"), compact=bool(getattr(args, "compact", False)))
+    return 0
+
+
+def _write_text_command(args: argparse.Namespace, value: str) -> int:
+    stream, should_close = _open_output(getattr(args, "output", "-"))
+    try:
+        stream.write(value)
+        if not value.endswith("\n"):
+            stream.write("\n")
+    finally:
+        if should_close:
+            stream.close()
     return 0
 
 
@@ -403,6 +439,24 @@ def _disk_backed_mdd_options(args: argparse.Namespace) -> Dict[str, Any]:
     }
 
 
+def _leaderboard_filter_values(args: argparse.Namespace) -> Dict[str, Optional[float]]:
+    return {
+        key: _cli_optional_float(getattr(args, key, ""))
+        for key in (
+            "min_pnl_usd",
+            "max_pnl_usd",
+            "min_volume_usd",
+            "max_volume_usd",
+            "min_roi_pct",
+            "max_roi_pct",
+            "min_mdd_usd",
+            "max_mdd_usd",
+            "min_mdd_pct",
+            "max_mdd_pct",
+        )
+    }
+
+
 def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
     if args.checkpoint:
         raise ValueError("Use either --checkpoint or --state-db. The SQLite state database is already resumable.")
@@ -418,10 +472,7 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
     scan_limit = _cli_optional_limit(args.scanned, 500)
     returned_limit = _cli_optional_limit(args.returned, 100)
     mdd_scan_limit = _cli_optional_limit(args.mdd_scan, 100)
-    filters = {key: _cli_optional_float(getattr(args, key)) for key in (
-        "min_pnl_usd", "max_pnl_usd", "min_volume_usd", "max_volume_usd", "min_roi_pct", "max_roi_pct",
-        "min_mdd_usd", "max_mdd_usd", "min_mdd_pct", "max_mdd_pct",
-    )}
+    filters = _leaderboard_filter_values(args)
     mdd_requested = bool(args.compute_mdd) or sort in {"mdd_usd", "mdd_pct"} or any(
         filters[key] is not None for key in ("min_mdd_usd", "max_mdd_usd", "min_mdd_pct", "max_mdd_pct")
     )
@@ -477,9 +528,9 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
             )
 
         if not state["scan_complete"] and (scan_limit is None or state["rows"] < scan_limit):
-            def save_page(offset: int, _limit: int, page: List[Dict[str, Any]]) -> None:
+            def save_page(offset: int, _limit: int, page: List[Dict[str, Any]]) -> bool:
                 normalized = [normalize_polymarket_leaderboard_row(row, offset + index + 1) for index, row in enumerate(page)]
-                store.record_page(offset, _limit, normalized)
+                return store.record_page(offset, _limit, normalized)
 
             _fetch_polymarket_leaderboard_scan_rows(
                 scan_limit=scan_limit,
@@ -583,6 +634,12 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
             "disk_backed": True,
             "state_db": str(state_path),
             "state": final_state,
+            "completion_reason": final_state["stop_reason"] or ("scan_limit_reached" if scan_limit is not None else "unknown"),
+            "source_enumeration_complete": final_state["stop_reason"] == "end_of_results",
+            "source_scope_note": (
+                "Results cover only rows exposed by the public Polymarket leaderboard for the selected period and category; "
+                "they do not establish coverage of every Polymarket account."
+            ),
             "source": "polymarket_data_api_leaderboard",
             "source_sort": remote_sort,
             "ranking_scope": "computed_from_scanned_public_leaderboard_rows_with_durable_local_state",
@@ -598,7 +655,7 @@ def _run_disk_backed_polymarket_leaderboard(args: argparse.Namespace) -> int:
         if not args.quiet:
             print(
                 f"[{_log_timestamp()} pid={os.getpid()} status=done elapsed={_format_elapsed(time.monotonic() - started_at)} phase=done] "
-                f"Done: returned={returned} filtered={qualified} scanned={final_state['rows']} mdd_computed={final_state['mdd_done']} warnings={len(warnings)} state_db={state_path}",
+                f"Done: returned={returned} filtered={qualified} scanned={final_state['rows']} mdd_computed={final_state['mdd_done']} completion={payload['completion_reason']} warnings={len(warnings)} state_db={state_path}",
                 file=sys.stderr,
             )
         return 0
@@ -736,7 +793,31 @@ def _progress_printer(enabled: bool, *, started_at: Optional[float] = None):
 
 def run_polymarket_leaderboard(args: argparse.Namespace) -> int:
     if str(getattr(args, "state_db", "") or "").strip():
+        if bool(getattr(args, "resume_on_failure", False)):
+            max_restarts = _cli_clamp_int(getattr(args, "resume_max_restarts", 0), 0, 0, 1_000_000)
+            base_delay = max(1.0, min(_cli_optional_float(getattr(args, "resume_backoff_seconds", 60)) or 60.0, 3600.0))
+            restart = 0
+            while True:
+                try:
+                    return _run_disk_backed_polymarket_leaderboard(args)
+                except PolymarketHTTPError as exc:
+                    restart += 1
+                    if max_restarts and restart > max_restarts:
+                        raise
+                    delay = min(base_delay * (2 ** min(restart - 1, 6)), 3600.0)
+                    if not args.quiet:
+                        limit_label = "unlimited" if max_restarts == 0 else str(max_restarts)
+                        print(
+                            f"[{_log_timestamp()} pid={os.getpid()} status=retrying phase=resume restart={restart}/{limit_label} "
+                            f"delay={delay:g}s] Transient Polymarket API failure: {exc}. Resuming durable state after backoff.",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    args.resume = True
+                    time.sleep(delay)
         return _run_disk_backed_polymarket_leaderboard(args)
+    if bool(getattr(args, "resume_on_failure", False)):
+        raise ValueError("--resume-on-failure requires --state-db so the next attempt has durable scan state.")
 
     started_at = time.monotonic()
     params = build_polymarket_leaderboard_params(args)
@@ -802,6 +883,116 @@ def run_polymarket_leaderboard(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     return 0
+
+
+def run_polymarket_leaderboard_status(args: argparse.Namespace) -> int:
+    state_path = Path(args.state_db).expanduser()
+    if not state_path.is_file():
+        raise FileNotFoundError(f"Leaderboard state database does not exist: {state_path}")
+    store = LeaderboardStateStore(state_path)
+    try:
+        payload = store.status()
+        payload["process"] = _leaderboard_process_status(getattr(args, "pid_file", ""))
+        return _write_command_payload(args, payload)
+    finally:
+        store.close()
+
+
+def _leaderboard_process_status(pid_file_value: Any) -> Dict[str, Any]:
+    text = str(pid_file_value or "").strip()
+    if not text:
+        return {"checked": False, "status": "not_checked"}
+    path = Path(text).expanduser()
+    result: Dict[str, Any] = {"checked": True, "pid_file": str(path)}
+    if not path.is_file():
+        result["status"] = "missing"
+        return result
+    try:
+        pid = int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        result["status"] = "invalid"
+        return result
+    if pid <= 0:
+        result["status"] = "invalid"
+        return result
+    result["pid"] = pid
+    if os.name == "nt":
+        import ctypes
+
+        process_query_limited_information = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(process_query_limited_information, False, pid)
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            result["status"] = "running"
+            return result
+        error_code = ctypes.get_last_error()
+        result["status"] = "not_running" if error_code == 87 else "unknown"
+        return result
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        result["status"] = "not_running"
+    except PermissionError:
+        result["status"] = "unknown"
+    except OSError:
+        result["status"] = "unknown"
+    else:
+        result["status"] = "running"
+    return result
+
+
+def run_polymarket_leaderboard_export(args: argparse.Namespace) -> int:
+    state_path = Path(args.state_db).expanduser()
+    if not state_path.is_file():
+        raise FileNotFoundError(f"Leaderboard state database does not exist: {state_path}")
+    sort = SORT_ALIASES.get(str(args.sort or "roi_pct").strip().lower(), "roi_pct")
+    direction = str(args.direction or "DESC").upper()
+    returned_limit = _cli_optional_limit(args.returned, 100)
+    filters = _leaderboard_filter_values(args)
+    require_mdd = bool(args.require_mdd) or sort in {"mdd_usd", "mdd_pct"} or any(
+        filters[key] is not None for key in ("min_mdd_usd", "max_mdd_usd", "min_mdd_pct", "max_mdd_pct")
+    )
+    store = LeaderboardStateStore(state_path)
+    try:
+        state = store.progress()
+        qualified = store.result_count(filters, require_mdd=require_mdd)
+        returned = min(qualified, returned_limit) if returned_limit is not None else qualified
+        completion_reason = state["stop_reason"] or ("in_progress" if not state["scan_complete"] else "unknown")
+        payload: Dict[str, Any] = {
+            "counts": {
+                "returned": returned,
+                "filtered": qualified,
+                "scanned": state["rows"],
+                "mdd_computed": state["mdd_done"],
+                "mdd_errors": state["mdd_errors"],
+                "mdd_pending": state["mdd_pending"],
+            },
+            "sort": sort,
+            "direction": direction,
+            "limit": returned_limit,
+            "limit_unlimited": returned_limit is None,
+            "require_mdd": require_mdd,
+            "partial": not state["scan_complete"] or (require_mdd and state["mdd_pending"] > 0),
+            "completion_reason": completion_reason,
+            "state": state,
+            "state_db": str(state_path),
+            "exported_at": int(time.time()),
+            "source": "polymarket_data_api_leaderboard_durable_state",
+            "ranking_scope": "computed_from_currently_saved_public_leaderboard_rows",
+            "source_scope_note": (
+                "This export contains only rows currently saved from the public Polymarket leaderboard for the selected period and category; "
+                "it does not establish coverage of every Polymarket account."
+            ),
+        }
+        _write_streamed_leaderboard_payload(
+            payload,
+            store.iter_results(filters, require_mdd=require_mdd, sort=sort, direction=direction, limit=returned_limit),
+            output_format=args.format,
+            output=args.output,
+        )
+        return 0
+    finally:
+        store.close()
 
 
 def run_health(args: argparse.Namespace) -> int:
@@ -1079,8 +1270,82 @@ def run_copy_preview(args: argparse.Namespace) -> int:
     return _write_command_payload(args, copy_preview_payload(cfg, _registry(), payload))
 
 
+def _paper_marks_path(args: argparse.Namespace) -> Path:
+    configured = str(getattr(args, "marks_file", "") or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    config_path = _config_path(args)
+    return config_path.with_name(f"{config_path.stem}.paper-marks.json")
+
+
+def _load_paper_marks(path: Path) -> Dict[tuple[str, str], Dict[str, Any]]:
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    entries = payload.get("marks") if isinstance(payload, Mapping) else None
+    if not isinstance(entries, list):
+        return {}
+    marks: Dict[tuple[str, str], Dict[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        market_id = str(entry.get("market_id") or "").strip().lower()
+        contract_id = str(entry.get("contract_id") or "").strip()
+        try:
+            mark_price = float(entry.get("mark_price"))
+            marked_at = int(entry.get("marked_at"))
+        except (TypeError, ValueError):
+            continue
+        if market_id and contract_id:
+            marks[(market_id, contract_id)] = {
+                "mark_price": mark_price,
+                "source": str(entry.get("source") or "unknown"),
+                "marked_at": marked_at,
+            }
+    return marks
+
+
+def _active_paper_marks(cfg: Any, marks: Mapping[tuple[str, str], Dict[str, Any]]) -> Dict[tuple[str, str], Dict[str, Any]]:
+    active = {(str(row["market_id"]), str(row["contract_id"])) for row in paper_position_rows(cfg.paper_trades)}
+    return {key: dict(value) for key, value in marks.items() if key in active}
+
+
+def _save_paper_marks(path: Path, marks: Mapping[tuple[str, str], Mapping[str, Any]]) -> None:
+    payload = {
+        "version": 1,
+        "marks": [
+            {
+                "market_id": market_id,
+                "contract_id": contract_id,
+                "mark_price": value.get("mark_price"),
+                "source": value.get("source"),
+                "marked_at": value.get("marked_at"),
+            }
+            for (market_id, contract_id), value in sorted(marks.items())
+        ],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
 def run_paper_show(args: argparse.Namespace) -> int:
-    return _write_command_payload(args, paper_payload(_load_cfg(args)))
+    cfg = _load_cfg(args)
+    marks = _active_paper_marks(cfg, _load_paper_marks(_paper_marks_path(args)))
+    return _write_command_payload(args, paper_payload(cfg, marks))
 
 
 def run_paper_quote(args: argparse.Namespace) -> int:
@@ -1104,7 +1369,9 @@ def run_paper_order(args: argparse.Namespace) -> int:
     cfg = _load_cfg(args)
     result = submit_paper_order(cfg, _registry(), _order_payload(args))
     _save_cfg(args, cfg)
-    return _write_command_payload(args, {**result, "paper": paper_payload(cfg)})
+    marks = _active_paper_marks(cfg, _load_paper_marks(_paper_marks_path(args)))
+    _save_paper_marks(_paper_marks_path(args), marks)
+    return _write_command_payload(args, {**result, "paper": paper_payload(cfg, marks)})
 
 
 def run_paper_use_history(args: argparse.Namespace) -> int:
@@ -1119,7 +1386,52 @@ def run_paper_clear_history(args: argparse.Namespace) -> int:
     cfg = _load_cfg(args)
     cfg.paper_trades = []
     _save_cfg(args, cfg)
-    return _write_command_payload(args, paper_payload(cfg))
+    _save_paper_marks(_paper_marks_path(args), {})
+    return _write_command_payload(args, paper_payload(cfg, {}))
+
+
+def run_paper_marks_refresh(args: argparse.Namespace) -> int:
+    cfg = _load_cfg(args)
+    rows = paper_position_rows(cfg.paper_trades)
+    path = _paper_marks_path(args)
+    marks, problems = refresh_paper_marks(cfg, _registry(), rows, _active_paper_marks(cfg, _load_paper_marks(path)))
+    _save_paper_marks(path, marks)
+    return _write_command_payload(
+        args,
+        {"paper": paper_payload(cfg, marks), "problems": problems, "message": f"Marked {len(marks)}/{len(rows)} paper positions."},
+    )
+
+
+def run_paper_marks_refresh_selected(args: argparse.Namespace) -> int:
+    cfg = _load_cfg(args)
+    path = _paper_marks_path(args)
+    marks = refresh_selected_paper_mark(
+        cfg,
+        _registry(),
+        args.market,
+        args.contract,
+        _active_paper_marks(cfg, _load_paper_marks(path)),
+    )
+    _save_paper_marks(path, marks)
+    return _write_command_payload(args, {"paper": paper_payload(cfg, marks), "message": "Selected paper exposure mark refreshed."})
+
+
+def run_paper_marks_clear(args: argparse.Namespace) -> int:
+    cfg = _load_cfg(args)
+    _save_paper_marks(_paper_marks_path(args), {})
+    return _write_command_payload(args, {"paper": paper_payload(cfg, {}), "message": "Paper exposure marks cleared."})
+
+
+def run_paper_marks_clear_selected(args: argparse.Namespace) -> int:
+    cfg = _load_cfg(args)
+    path = _paper_marks_path(args)
+    marks = _active_paper_marks(cfg, _load_paper_marks(path))
+    marks.pop((str(args.market).strip().lower(), str(args.contract).strip()), None)
+    _save_paper_marks(path, marks)
+    return _write_command_payload(
+        args,
+        {"paper": paper_payload(cfg, marks), "message": f"Selected paper exposure mark cleared: {args.market}:{args.contract}"},
+    )
 
 
 def _project_root() -> Path:
@@ -1304,6 +1616,134 @@ def run_polymarket_mdd_cache_purge(args: argparse.Namespace) -> int:
     return _write_command_payload(args, polymarket_mdd_cache_purge_payload(payload))
 
 
+def _require_live_validation_report(key: str) -> Dict[str, Any]:
+    payload = polymarket_live_validation_report_payload(key)
+    if payload is None:
+        raise ValueError(f"Unknown live validation report: {key}")
+    return payload
+
+
+def _require_live_validation_review(key: str) -> Dict[str, Any]:
+    payload = polymarket_live_validation_report_review_payload(key)
+    if payload is None:
+        raise ValueError(f"Unknown live validation report: {key}")
+    return payload
+
+
+def _write_live_validation_format(args: argparse.Namespace, payload: Mapping[str, Any], markdown: str) -> int:
+    if args.format == "markdown":
+        return _write_text_command(args, markdown)
+    return _write_command_payload(args, payload)
+
+
+def run_polymarket_live_reports_list(args: argparse.Namespace) -> int:
+    return _write_command_payload(args, polymarket_live_validation_reports_payload(include_payload=bool(args.include_payload)))
+
+
+def run_polymarket_live_reports_open(args: argparse.Namespace) -> int:
+    return _write_command_payload(args, _require_live_validation_report(args.key))
+
+
+def run_polymarket_live_reports_store(args: argparse.Namespace) -> int:
+    payload: Dict[str, Any] = {
+        "label": args.label or "",
+        "source": args.source or "",
+        "allow_duplicate": bool(args.allow_duplicate),
+    }
+    if args.report_file:
+        path = Path(args.report_file).expanduser()
+        payload["report_json"] = path.read_text(encoding="utf-8")
+        payload["source_file"] = str(path)
+    return _write_command_payload(args, polymarket_live_validation_report_store_payload(_load_cfg(args), payload))
+
+
+def run_polymarket_live_reports_delete(args: argparse.Namespace) -> int:
+    return _write_command_payload(args, polymarket_live_validation_report_purge_payload({"key": args.key}))
+
+
+def run_polymarket_live_reports_export(args: argparse.Namespace) -> int:
+    return _write_command_payload(args, _require_live_validation_report(args.key))
+
+
+def run_polymarket_live_reports_review(args: argparse.Namespace) -> int:
+    payload = _require_live_validation_review(args.key)
+    return _write_live_validation_format(args, payload, live_validation_report_review_markdown(payload["bundle"]))
+
+
+def run_polymarket_live_decisions_list(args: argparse.Namespace) -> int:
+    params = {"report_key": [args.report_key]} if args.report_key else None
+    return _write_command_payload(args, polymarket_live_validation_decisions_payload(params))
+
+
+def run_polymarket_live_decisions_record(args: argparse.Namespace) -> int:
+    payload = {
+        "report_key": args.report_key,
+        "payload_hash": args.payload_hash,
+        "target_tier": args.target_tier,
+        "decision": args.decision,
+        "reviewer_note": args.reviewer_note,
+        "review_bundle_hash": args.review_bundle_hash,
+        "reviewer": args.reviewer or "",
+    }
+    return _write_command_payload(args, polymarket_live_validation_decision_store_payload(payload))
+
+
+def run_polymarket_live_decisions_export(args: argparse.Namespace) -> int:
+    params = {"report_key": [args.report_key]} if args.report_key else None
+    payload = polymarket_live_validation_decisions_payload(params)
+    return _write_live_validation_format(args, payload, live_validation_report_decisions_markdown(payload))
+
+
+def _live_validation_proposal(args: argparse.Namespace) -> Dict[str, Any]:
+    params = {"target_tier": [args.target_tier]} if getattr(args, "target_tier", "") else None
+    return polymarket_live_validation_promotion_proposal_payload(params)
+
+
+def run_polymarket_live_proposal_show(args: argparse.Namespace) -> int:
+    return _write_command_payload(args, _live_validation_proposal(args))
+
+
+def run_polymarket_live_proposal_export(args: argparse.Namespace) -> int:
+    payload = _live_validation_proposal(args)
+    return _write_live_validation_format(args, payload, live_validation_coverage_promotion_proposal_markdown(payload))
+
+
+def _require_live_validation_snapshot(key: str) -> Dict[str, Any]:
+    payload = polymarket_live_validation_promotion_proposal_snapshot_payload(key)
+    if payload is None:
+        raise ValueError(f"Unknown promotion proposal snapshot: {key}")
+    return payload
+
+
+def run_polymarket_live_snapshots_list(args: argparse.Namespace) -> int:
+    return _write_command_payload(args, polymarket_live_validation_promotion_proposal_snapshots_payload())
+
+
+def run_polymarket_live_snapshots_store(args: argparse.Namespace) -> int:
+    payload = {"target_tier": args.target_tier or "", "label": args.label or "", "source": args.source or "cli"}
+    return _write_command_payload(args, polymarket_live_validation_promotion_proposal_snapshot_store_payload(payload))
+
+
+def run_polymarket_live_snapshots_open(args: argparse.Namespace) -> int:
+    return _write_command_payload(args, _require_live_validation_snapshot(args.key))
+
+
+def run_polymarket_live_snapshots_diff(args: argparse.Namespace) -> int:
+    payload = polymarket_live_validation_promotion_proposal_snapshot_diff_payload(args.key)
+    if payload is None:
+        raise ValueError(f"Unknown promotion proposal snapshot: {args.key}")
+    return _write_live_validation_format(args, payload, live_validation_promotion_proposal_snapshot_diff_markdown(payload))
+
+
+def run_polymarket_live_snapshots_delete(args: argparse.Namespace) -> int:
+    return _write_command_payload(args, polymarket_live_validation_promotion_proposal_snapshot_purge_payload({"key": args.key}))
+
+
+def run_polymarket_live_snapshots_export(args: argparse.Namespace) -> int:
+    payload = _require_live_validation_snapshot(args.key)
+    return _write_live_validation_format(args, payload, live_validation_promotion_proposal_snapshot_markdown(payload))
+
+
 def run_serve(args: argparse.Namespace) -> int:
     run_server(args.host, int(args.port), _config_path(args), Path(args.frontend_dir).expanduser())
     return 0
@@ -1359,6 +1799,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     leaderboard.add_argument("--checkpoint", default="", help="Append fetched leaderboard pages to this JSONL checkpoint file.")
     leaderboard.add_argument("--resume", action="store_true", help="Resume --checkpoint or --state-db from its saved scan state.")
+    leaderboard.add_argument(
+        "--resume-on-failure",
+        action="store_true",
+        help="For --state-db scans, retry transient Polymarket API failures and resume the saved state automatically.",
+    )
+    leaderboard.add_argument(
+        "--resume-max-restarts",
+        default="0",
+        help="Maximum automatic resume attempts; 0 means retry until interrupted. Requires --resume-on-failure.",
+    )
+    leaderboard.add_argument(
+        "--resume-backoff-seconds",
+        default="60",
+        help="Initial automatic resume delay; doubles per failure up to one hour. Requires --resume-on-failure.",
+    )
     leaderboard.add_argument("--checkpoint-fsync-every", type=int, default=20, help="Flush checkpoint data to disk every N pages.")
     leaderboard.add_argument("--mdd-concurrency", default="")
     leaderboard.add_argument("--mdd-stop-on-limit", action="store_true", default=None)
@@ -1377,6 +1832,40 @@ def build_parser() -> argparse.ArgumentParser:
     leaderboard.add_argument("--output", "-o", default="-", help="Output file path, or - for stdout.")
     leaderboard.add_argument("--quiet", action="store_true", help="Suppress progress and summary messages on stderr.")
     leaderboard.set_defaults(func=run_polymarket_leaderboard)
+
+    leaderboard_status = subparsers.add_parser(
+        "polymarket-leaderboard-status",
+        aliases=["leaderboard-status"],
+        help="Read durable Polymarket leaderboard scan status without starting or changing a scan.",
+    )
+    leaderboard_status.add_argument("--state-db", required=True, help="Existing SQLite state database created by polymarket-leaderboard.")
+    leaderboard_status.add_argument("--pid-file", default="", help="Optional PID file, such as one written by `echo $! > polymarket-scan.pid`.")
+    _add_json_output_args(leaderboard_status)
+    leaderboard_status.set_defaults(func=run_polymarket_leaderboard_status)
+
+    leaderboard_export = subparsers.add_parser(
+        "polymarket-leaderboard-export",
+        aliases=["leaderboard-export"],
+        help="Export current durable leaderboard rows without starting, resuming, or changing a scan.",
+    )
+    leaderboard_export.add_argument("--state-db", required=True, help="Existing SQLite state database created by polymarket-leaderboard.")
+    leaderboard_export.add_argument("--sort", default="roi_pct", help="roi_pct, pnl_usd, volume_usd, mdd_pct, or mdd_usd.")
+    leaderboard_export.add_argument("--direction", default="DESC", choices=["ASC", "DESC"])
+    leaderboard_export.add_argument("--returned", "--limit", default="unlimited", help="Rows to export; use unlimited, all, 0, or -1 for no local cap.")
+    leaderboard_export.add_argument("--require-mdd", action="store_true", help="Export only rows with completed MDD calculations.")
+    leaderboard_export.add_argument("--min-pnl-usd", default="")
+    leaderboard_export.add_argument("--max-pnl-usd", default="")
+    leaderboard_export.add_argument("--min-volume-usd", default="")
+    leaderboard_export.add_argument("--max-volume-usd", default="")
+    leaderboard_export.add_argument("--min-roi-pct", default="")
+    leaderboard_export.add_argument("--max-roi-pct", default="")
+    leaderboard_export.add_argument("--min-mdd-usd", default="")
+    leaderboard_export.add_argument("--max-mdd-usd", default="")
+    leaderboard_export.add_argument("--min-mdd-pct", default="")
+    leaderboard_export.add_argument("--max-mdd-pct", default="")
+    leaderboard_export.add_argument("--format", choices=["csv", "json"], default="csv")
+    leaderboard_export.add_argument("--output", "-o", default="-", help="Output file path, or - for stdout.")
+    leaderboard_export.set_defaults(func=run_polymarket_leaderboard_export)
 
     health = subparsers.add_parser("health", parents=[common], help="Print API/app health and route metadata.")
     health.add_argument("--frontend-dir", type=Path, default=DEFAULT_FRONTEND_DIR)
@@ -1548,6 +2037,7 @@ def build_parser() -> argparse.ArgumentParser:
     paper = subparsers.add_parser("paper", parents=[common], help="Paper trading state, quotes, impact, and orders.")
     paper_sub = paper.add_subparsers(dest="paper_command", required=True)
     paper_show = paper_sub.add_parser("show", parents=[common], help="Show paper history and positions.")
+    paper_show.add_argument("--marks-file", default="", help="Persistent CLI paper-mark sidecar; defaults beside --config.")
     _add_json_output_args(paper_show)
     paper_show.set_defaults(func=run_paper_show)
     paper_quote = paper_sub.add_parser("quote", parents=[common], help="Fetch a quote/orderbook for a contract.")
@@ -1581,6 +2071,7 @@ def build_parser() -> argparse.ArgumentParser:
     paper_order.add_argument("--limit-price", default=None)
     paper_order.add_argument("--metadata", action="append", type=_split_key_value, default=[])
     paper_order.add_argument("--json", default=None)
+    paper_order.add_argument("--marks-file", default="", help="Persistent CLI paper-mark sidecar; defaults beside --config.")
     _add_json_output_args(paper_order)
     paper_order.set_defaults(func=run_paper_order)
     paper_history = paper_sub.add_parser("use-history", parents=[common], help="Return an order form payload from a paper history record.")
@@ -1593,8 +2084,31 @@ def build_parser() -> argparse.ArgumentParser:
     _add_json_output_args(paper_position)
     paper_position.set_defaults(func=run_paper_use_position)
     paper_clear = paper_sub.add_parser("clear-history", parents=[common], help="Clear paper history.")
+    paper_clear.add_argument("--marks-file", default="", help="Persistent CLI paper-mark sidecar; defaults beside --config.")
     _add_json_output_args(paper_clear)
     paper_clear.set_defaults(func=run_paper_clear_history)
+    paper_marks = paper_sub.add_parser("marks", parents=[common], help="Refresh or clear durable CLI paper-position marks.")
+    paper_marks_sub = paper_marks.add_subparsers(dest="paper_marks_command", required=True)
+    paper_marks_refresh = paper_marks_sub.add_parser("refresh", parents=[common], help="Refresh marks for all open paper positions.")
+    paper_marks_refresh.add_argument("--marks-file", default="", help="Persistent CLI paper-mark sidecar; defaults beside --config.")
+    _add_json_output_args(paper_marks_refresh)
+    paper_marks_refresh.set_defaults(func=run_paper_marks_refresh)
+    paper_marks_selected = paper_marks_sub.add_parser("refresh-selected", parents=[common], help="Refresh one open paper-position mark.")
+    paper_marks_selected.add_argument("--market", required=True)
+    paper_marks_selected.add_argument("--contract", required=True)
+    paper_marks_selected.add_argument("--marks-file", default="", help="Persistent CLI paper-mark sidecar; defaults beside --config.")
+    _add_json_output_args(paper_marks_selected)
+    paper_marks_selected.set_defaults(func=run_paper_marks_refresh_selected)
+    paper_marks_clear = paper_marks_sub.add_parser("clear", parents=[common], help="Clear all durable CLI paper-position marks.")
+    paper_marks_clear.add_argument("--marks-file", default="", help="Persistent CLI paper-mark sidecar; defaults beside --config.")
+    _add_json_output_args(paper_marks_clear)
+    paper_marks_clear.set_defaults(func=run_paper_marks_clear)
+    paper_marks_clear_selected = paper_marks_sub.add_parser("clear-selected", parents=[common], help="Clear one durable CLI paper-position mark.")
+    paper_marks_clear_selected.add_argument("--market", required=True)
+    paper_marks_clear_selected.add_argument("--contract", required=True)
+    paper_marks_clear_selected.add_argument("--marks-file", default="", help="Persistent CLI paper-mark sidecar; defaults beside --config.")
+    _add_json_output_args(paper_marks_clear_selected)
+    paper_marks_clear_selected.set_defaults(func=run_paper_marks_clear_selected)
 
     deps = subparsers.add_parser("dependencies", parents=[common], aliases=["deps"], help="Check local dependency install status.")
     deps.add_argument("--latest", action="store_true", help="Also query PyPI for latest versions.")
@@ -1630,6 +2144,117 @@ def build_parser() -> argparse.ArgumentParser:
     readiness = subparsers.add_parser("polymarket-readiness", parents=[common], help="Show Polymarket CLOB/live-validation readiness.")
     _add_json_output_args(readiness)
     readiness.set_defaults(func=run_polymarket_readiness)
+
+    live_reports = subparsers.add_parser(
+        "polymarket-live-reports",
+        parents=[common],
+        help="Manage local redacted Polymarket live-validation reports without placing orders.",
+    )
+    live_reports_sub = live_reports.add_subparsers(dest="live_reports_command", required=True)
+    live_reports_list = live_reports_sub.add_parser("list", parents=[common], help="List stored redacted live-validation reports.")
+    live_reports_list.add_argument("--include-payload", action="store_true")
+    _add_json_output_args(live_reports_list)
+    live_reports_list.set_defaults(func=run_polymarket_live_reports_list)
+    live_reports_open = live_reports_sub.add_parser("open", parents=[common], help="Open one stored live-validation report.")
+    live_reports_open.add_argument("key")
+    _add_json_output_args(live_reports_open)
+    live_reports_open.set_defaults(func=run_polymarket_live_reports_open)
+    live_reports_store = live_reports_sub.add_parser(
+        "store",
+        aliases=["import", "snapshot"],
+        parents=[common],
+        help="Store a local readiness snapshot or import a redacted report JSON file.",
+    )
+    live_reports_store.add_argument("--report-file", default="", help="Existing report JSON to validate and import.")
+    live_reports_store.add_argument("--label", default="")
+    live_reports_store.add_argument("--source", default="")
+    live_reports_store.add_argument("--allow-duplicate", action="store_true")
+    _add_json_output_args(live_reports_store)
+    live_reports_store.set_defaults(func=run_polymarket_live_reports_store)
+    live_reports_delete = live_reports_sub.add_parser("delete", parents=[common], help="Delete one stored live-validation report.")
+    live_reports_delete.add_argument("key")
+    _add_json_output_args(live_reports_delete)
+    live_reports_delete.set_defaults(func=run_polymarket_live_reports_delete)
+    live_reports_export = live_reports_sub.add_parser("export", parents=[common], help="Export one stored report as JSON.")
+    live_reports_export.add_argument("key")
+    _add_json_output_args(live_reports_export)
+    live_reports_export.set_defaults(func=run_polymarket_live_reports_export)
+    live_reports_review = live_reports_sub.add_parser("review", parents=[common], help="Export a redacted report review bundle.")
+    live_reports_review.add_argument("key")
+    live_reports_review.add_argument("--format", choices=["json", "markdown"], default="json")
+    _add_json_output_args(live_reports_review)
+    live_reports_review.set_defaults(func=run_polymarket_live_reports_review)
+
+    live_decisions = subparsers.add_parser(
+        "polymarket-live-decisions",
+        parents=[common],
+        help="Inspect or record local live-validation promotion decisions without automatic promotion.",
+    )
+    live_decisions_sub = live_decisions.add_subparsers(dest="live_decisions_command", required=True)
+    live_decisions_list = live_decisions_sub.add_parser("list", parents=[common])
+    live_decisions_list.add_argument("--report-key", default="")
+    _add_json_output_args(live_decisions_list)
+    live_decisions_list.set_defaults(func=run_polymarket_live_decisions_list)
+    live_decisions_record = live_decisions_sub.add_parser("record", parents=[common], help="Record a guarded human review decision.")
+    live_decisions_record.add_argument("--report-key", required=True)
+    live_decisions_record.add_argument("--payload-hash", required=True)
+    live_decisions_record.add_argument("--target-tier", required=True)
+    live_decisions_record.add_argument("--decision", required=True, choices=["accepted", "rejected"])
+    live_decisions_record.add_argument("--reviewer-note", required=True)
+    live_decisions_record.add_argument("--review-bundle-hash", required=True)
+    live_decisions_record.add_argument("--reviewer", default="")
+    _add_json_output_args(live_decisions_record)
+    live_decisions_record.set_defaults(func=run_polymarket_live_decisions_record)
+    live_decisions_export = live_decisions_sub.add_parser("export", parents=[common], help="Export the decision ledger.")
+    live_decisions_export.add_argument("--report-key", default="")
+    live_decisions_export.add_argument("--format", choices=["json", "markdown"], default="json")
+    _add_json_output_args(live_decisions_export)
+    live_decisions_export.set_defaults(func=run_polymarket_live_decisions_export)
+
+    live_proposal = subparsers.add_parser(
+        "polymarket-promotion-proposal",
+        parents=[common],
+        help="Inspect local read-only Polymarket coverage promotion proposals and snapshots.",
+    )
+    live_proposal_sub = live_proposal.add_subparsers(dest="live_proposal_command", required=True)
+    live_proposal_show = live_proposal_sub.add_parser("show", parents=[common])
+    live_proposal_show.add_argument("--target-tier", default="")
+    _add_json_output_args(live_proposal_show)
+    live_proposal_show.set_defaults(func=run_polymarket_live_proposal_show)
+    live_proposal_export = live_proposal_sub.add_parser("export", parents=[common])
+    live_proposal_export.add_argument("--target-tier", default="")
+    live_proposal_export.add_argument("--format", choices=["json", "markdown"], default="json")
+    _add_json_output_args(live_proposal_export)
+    live_proposal_export.set_defaults(func=run_polymarket_live_proposal_export)
+    live_snapshots = live_proposal_sub.add_parser("snapshots", parents=[common], help="Manage read-only promotion-proposal snapshots.")
+    live_snapshots_sub = live_snapshots.add_subparsers(dest="live_snapshots_command", required=True)
+    live_snapshots_list = live_snapshots_sub.add_parser("list", parents=[common])
+    _add_json_output_args(live_snapshots_list)
+    live_snapshots_list.set_defaults(func=run_polymarket_live_snapshots_list)
+    live_snapshots_store = live_snapshots_sub.add_parser("store", parents=[common])
+    live_snapshots_store.add_argument("--target-tier", default="")
+    live_snapshots_store.add_argument("--label", default="")
+    live_snapshots_store.add_argument("--source", default="cli")
+    _add_json_output_args(live_snapshots_store)
+    live_snapshots_store.set_defaults(func=run_polymarket_live_snapshots_store)
+    live_snapshots_open = live_snapshots_sub.add_parser("open", parents=[common])
+    live_snapshots_open.add_argument("key")
+    _add_json_output_args(live_snapshots_open)
+    live_snapshots_open.set_defaults(func=run_polymarket_live_snapshots_open)
+    live_snapshots_diff = live_snapshots_sub.add_parser("diff", parents=[common])
+    live_snapshots_diff.add_argument("key")
+    live_snapshots_diff.add_argument("--format", choices=["json", "markdown"], default="json")
+    _add_json_output_args(live_snapshots_diff)
+    live_snapshots_diff.set_defaults(func=run_polymarket_live_snapshots_diff)
+    live_snapshots_delete = live_snapshots_sub.add_parser("delete", parents=[common])
+    live_snapshots_delete.add_argument("key")
+    _add_json_output_args(live_snapshots_delete)
+    live_snapshots_delete.set_defaults(func=run_polymarket_live_snapshots_delete)
+    live_snapshots_export = live_snapshots_sub.add_parser("export", parents=[common])
+    live_snapshots_export.add_argument("key")
+    live_snapshots_export.add_argument("--format", choices=["json", "markdown"], default="json")
+    _add_json_output_args(live_snapshots_export)
+    live_snapshots_export.set_defaults(func=run_polymarket_live_snapshots_export)
 
     mdd_cache = subparsers.add_parser("polymarket-mdd-cache", parents=[common], help="Inspect or purge cached Polymarket MDD audits.")
     mdd_cache_sub = mdd_cache.add_subparsers(dest="mdd_cache_command", required=True)
