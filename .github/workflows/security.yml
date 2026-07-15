@@ -51,7 +51,7 @@ jobs:
 
       - name: Checkout
         if: steps.dependency_graph.outputs.enabled == 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Review dependency changes
         if: steps.dependency_graph.outputs.enabled == 'true'
@@ -70,7 +70,7 @@ jobs:
       security-events: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
