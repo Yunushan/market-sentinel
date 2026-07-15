@@ -20,9 +20,12 @@ class ProjectMetadataTests(unittest.TestCase):
         frontend_package = (ROOT / "frontend" / "package.json").read_text(encoding="utf-8")
         name = data["project"]["name"]
 
+        self.assertEqual(data["build-system"]["requires"], ["setuptools>=77"])
         self.assertEqual(name, PROJECT_NAME)
         self.assertNotIn("_", name)
         self.assertEqual(data["project"]["requires-python"], ">=3.10")
+        self.assertEqual(data["project"]["license"], "MIT")
+        self.assertEqual(data["project"]["license-files"], ["LICENSE"])
         self.assertIn("Programming Language :: Python :: 3.15", data["project"]["classifiers"])
         self.assertIn("Programming Language :: Python :: 3.16", data["project"]["classifiers"])
         self.assertIn('"name": "market-sentinel-react-gui"', frontend_package)
@@ -64,6 +67,23 @@ class ProjectMetadataTests(unittest.TestCase):
             for value in forbidden:
                 with self.subTest(path=path.name, value=value):
                     self.assertNotIn(value, text)
+
+    def test_source_distribution_manifest_keeps_verification_inputs(self) -> None:
+        manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+
+        for fragment in (
+            "recursive-include .github",
+            "recursive-include assets",
+            "recursive-include data",
+            "recursive-include docs",
+            "recursive-include frontend",
+            "recursive-include scripts",
+            "recursive-include tests",
+            "prune frontend/dist",
+            "prune frontend/node_modules",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, manifest)
 
 
 if __name__ == "__main__":

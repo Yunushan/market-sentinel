@@ -16,12 +16,15 @@ Jobs:
 - Forward Python compatibility checks through the moving latest stable `3.x` runner; this avoids prerelease runner failures while still following future stable Python releases above 3.16 as GitHub Actions publishes them.
 - Enterprise Linux smoke checks through RHEL UBI 8/9/10, a RHEL 7-era manylinux2014 ABI container, and Rocky Linux 8/9/10 containers.
 - Windows 11 ARM hosted compatibility checks with Python `3.12` x64, matching the currently available wheel support for the project's transitive dependencies.
-- An opt-in Windows 10 self-hosted job, enabled only when repository variable `ENABLE_WINDOWS_10_SELF_HOSTED=true` and a self-hosted runner labelled `windows-10` are available.
+- An opt-in Windows 10 self-hosted job, enabled only when repository variable `ENABLE_WINDOWS_10_SELF_HOSTED=true` and a self-hosted runner labelled `windows-10` are available. `.github/actionlint.yaml` declares that intentional custom label so workflow linting remains strict for all other runner names.
 - Mobile web smoke checks for Android 14/15/16 and iOS 15/16/18/26 user-agent and viewport profiles against the built React UI.
 - Tkinter fallback smoke test with `python app.py --smoke-test`.
 - Full project verification with `python verify.py`.
+- Enforced branch-coverage floors of 65% for the full Python application and
+  74% for the headless/backend surface. The verifier measures both and fails on
+  regression.
 - React production build with Node.js `24`.
-- Python wheel and source distribution build.
+- Python wheel and source distribution build, explicit artifact-content verification, and an installed-wheel CLI, metadata, registry, and adapter import smoke from outside the source tree. `MANIFEST.in` keeps the source archive's fixtures, config, docs, frontend source, scripts, workflows, and visual assets while excluding generated frontend/build directories.
 - Short-retention artifacts for the frontend bundle and Python distributions.
 
 The workflow uses read-only repository permissions by default and cancels stale runs on the same ref.
@@ -50,7 +53,7 @@ Release jobs:
 - Validate release tag shape.
 - Validate that `pyproject.toml` project version matches the release tag.
 - Verify Python, Tkinter fallback, and project checks across the supported release range, including macOS `14`, macOS `15`, macOS `26`, and forward compatibility through future stable `3.x` releases when those interpreters are available.
-- Build Python wheel/source distribution.
+- Build Python wheel/source distribution and smoke-install the exact wheel before upload.
 - Build React production assets.
 - Package `frontend/dist` as a zip file.
 - Build a Windows x64 PyInstaller executable package.
@@ -74,7 +77,7 @@ The normal verifier runs `python scripts/verify_platform_support.py` to ensure p
    python verify.py
    ```
 
-2. Make sure `[project].version` in `pyproject.toml` matches the release tag you plan to publish.
+2. Make sure `[project].version` in `pyproject.toml` matches the release tag you plan to publish. `python verify.py` rejects reusing a tag that points to an older commit and requires an untagged version to be newer than the latest repository release tag. CI/release checkouts use full history (`fetch-depth: 0`), and local shallow clones must fetch complete history and tags before verification.
 
 3. Build frontend dependencies in an environment where npm can complete:
 

@@ -5,6 +5,7 @@ import compileall
 import importlib
 import importlib.metadata
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -32,16 +33,22 @@ REQUIRED_IMPORTS = {
     "py-clob-client": "py_clob_client",
     "packaging": "packaging",
     "pytest": "pytest",
+    "coverage": "coverage",
     "cryptography": "cryptography",
     "eth-account": "eth_account",
     "eth-abi": "eth_abi",
 }
+
+MIN_TOTAL_BRANCH_COVERAGE = 65.0
+MIN_BACKEND_BRANCH_COVERAGE = 74.0
+BACKEND_COVERAGE_INCLUDE = "core/*,market_adapters/*,polymarket/*,web_api.py,market_sentinel_cli.py"
 
 
 IMPLEMENTED_ADAPTER_FIXTURE_TESTS = {
     "polymarket": ("polymarket", "test_polymarket_adapter.py"),
     "kalshi": ("kalshi", "test_kalshi_adapter.py"),
     "predictit": ("predictit", "test_predictit_adapter.py"),
+    "crypto_com_predict": ("crypto_com_predict", "test_crypto_com_predict_adapter.py"),
     "manifold": ("manifold", "test_manifold_adapter.py"),
     "metaculus": ("metaculus", "test_metaculus_adapter.py"),
     "limitless_exchange": ("limitless_exchange", "test_limitless_adapter.py"),
@@ -146,6 +153,8 @@ def run_adapter_catalog_check() -> None:
 
 def run_project_metadata_check() -> None:
     data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    if data.get("build-system", {}).get("requires") != ["setuptools>=77"]:
+        raise SystemExit("pyproject.toml build-system must require setuptools>=77 for PEP 639 metadata.")
     name = data.get("project", {}).get("name")
     if name != PROJECT_NAME:
         raise SystemExit(f"pyproject.toml project name must be {PROJECT_NAME!r}; got {name!r}.")
@@ -153,6 +162,10 @@ def run_project_metadata_check() -> None:
         raise SystemExit("pyproject.toml project name must use dashes, not underscores.")
     if data.get("project", {}).get("requires-python") != ">=3.10":
         raise SystemExit("pyproject.toml requires-python must allow Python >=3.10 without an artificial upper cap.")
+    if data.get("project", {}).get("license") != "MIT":
+        raise SystemExit("pyproject.toml project.license must use the SPDX expression MIT.")
+    if data.get("project", {}).get("license-files") != ["LICENSE"]:
+        raise SystemExit("pyproject.toml project.license-files must include LICENSE.")
     classifiers = set(data.get("project", {}).get("classifiers", []))
     for classifier in ("Programming Language :: Python :: 3.15", "Programming Language :: Python :: 3.16"):
         if classifier not in classifiers:
@@ -187,6 +200,87 @@ def run_project_metadata_check() -> None:
             if value in text:
                 raise SystemExit(f"Old project branding {value!r} remains in {path.relative_to(ROOT)}.")
     print("[ok] project metadata")
+
+
+def validate_release_version_history(
+    project_version: str,
+    release_tags: list[str],
+    head_tags: list[str],
+) -> str:
+    from packaging.version import InvalidVersion, Version
+
+    try:
+        candidate = Version(str(project_version or "").strip())
+    except InvalidVersion as exc:
+        raise SystemExit(f"pyproject.toml project.version is not a valid release version: {project_version!r}.") from exc
+    if not str(project_version or "").strip() or candidate.local is not None:
+        raise SystemExit("pyproject.toml project.version must be a public release version without a local suffix.")
+
+    parsed_tags: list[tuple[Version, str]] = []
+    for tag in release_tags:
+        clean_tag = str(tag or "").strip()
+        if not clean_tag.startswith("v"):
+            continue
+        try:
+            parsed_tags.append((Version(clean_tag[1:]), clean_tag))
+        except InvalidVersion:
+            continue
+
+    expected_tag = f"v{project_version}"
+    normalized_head_tags = {str(tag or "").strip() for tag in head_tags}
+    all_tag_names = {tag for _, tag in parsed_tags}
+    if expected_tag in all_tag_names:
+        if expected_tag not in normalized_head_tags:
+            raise SystemExit(
+                f"pyproject.toml project.version {project_version} reuses existing tag {expected_tag} "
+                "on an older commit. Bump the project version before release."
+            )
+        return expected_tag
+
+    if parsed_tags:
+        latest_version, latest_tag = max(parsed_tags, key=lambda item: item[0])
+        if candidate <= latest_version:
+            raise SystemExit(
+                f"pyproject.toml project.version {project_version} must be newer than latest release "
+                f"{latest_tag} while HEAD is untagged."
+            )
+    return expected_tag
+
+
+def run_release_version_check() -> None:
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    project_version = str(data.get("project", {}).get("version") or "").strip()
+    git_metadata = ROOT / ".git"
+    if not git_metadata.exists():
+        expected_tag = validate_release_version_history(project_version, [], [])
+        print(f"[ok] release version {project_version} (expected tag {expected_tag}; git history unavailable)")
+        return
+
+    def git_lines(*args: str) -> list[str]:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            raise SystemExit(f"Could not inspect release tags with git: {detail or 'unknown git error'}")
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+    shallow_state = git_lines("rev-parse", "--is-shallow-repository")
+    if shallow_state != ["false"]:
+        raise SystemExit(
+            "Release version verification requires complete git tag history. "
+            "Fetch full history and tags before running verify.py."
+        )
+    release_tags = git_lines("tag", "--list", "v*")
+    head_tags = git_lines("tag", "--points-at", "HEAD")
+    expected_tag = validate_release_version_history(project_version, release_tags, head_tags)
+    state = "tagged HEAD" if expected_tag in head_tags else "next unreleased version"
+    print(f"[ok] release version {project_version} ({state}; expected tag {expected_tag})")
 
 
 def run_config_example_check() -> None:
@@ -822,25 +916,7 @@ def run_gui_integration_check() -> None:
 
     registry = build_default_registry()
     cfg = AppConfig()
-    implemented_markets = {
-        "polymarket",
-        "kalshi",
-        "predictit",
-        "manifold",
-        "metaculus",
-        "limitless_exchange",
-        "sx_bet",
-        "azuro",
-        "augur",
-        "omen",
-        "zeitgeist",
-        "myriad_markets",
-        "xo_market",
-        "opinion_labs",
-        "gemini_titan",
-        "predict_fun",
-        "betfair_exchange",
-    }
+    implemented_markets = set(IMPLEMENTED_ADAPTER_FIXTURE_TESTS)
     choices = [market_choice_label(meta) for meta in registry.list_metadata()]
     choice_market_ids = {market_id_from_choice(choice) for choice in choices}
     if choice_market_ids != set(MARKET_IDS):
@@ -946,6 +1022,11 @@ def run_ci_cd_workflow_check() -> None:
             "python -m pip install --no-cache-dir -r requirements.txt",
             "python verify.py",
             "npm run build",
+            "Smoke install built wheel",
+            "--force-reinstall --no-deps",
+            "License-Expression",
+            "fetch-depth: 0",
+            "scripts/verify_python_dist_artifacts.py",
         ),
         ROOT / ".github" / "workflows" / "release.yml": (
             "workflow_dispatch:",
@@ -965,6 +1046,11 @@ def run_ci_cd_workflow_check() -> None:
             "windows-dist",
             "sha256sum * > SHA256SUMS.txt",
             "gh release create",
+            "Smoke install built wheel",
+            "--force-reinstall --no-deps",
+            "License-Expression",
+            "fetch-depth: 0",
+            "scripts/verify_python_dist_artifacts.py",
         ),
         ROOT / ".github" / "workflows" / "security.yml": (
             "actions/dependency-review-action@v5",
@@ -977,6 +1063,16 @@ def run_ci_cd_workflow_check() -> None:
             "package-ecosystem: github-actions",
             "package-ecosystem: pip",
             "package-ecosystem: npm",
+        ),
+        ROOT / ".github" / "actionlint.yaml": (
+            "self-hosted-runner:",
+            "windows-10",
+        ),
+        ROOT / "scripts" / "verify_python_dist_artifacts.py": (
+            "REQUIRED_WHEEL_MEMBERS",
+            "REQUIRED_SDIST_MEMBERS",
+            "License-Expression",
+            "frontend/node_modules/",
         ),
         ROOT / "docs" / "CI_CD.md": (
             "Release Process",
@@ -1101,10 +1197,47 @@ def run_unit_tests() -> None:
     test_count = suite.countTestCases()
     if test_count == 0:
         raise SystemExit("No unit tests discovered under tests/.")
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
-    if not result.wasSuccessful():
-        raise SystemExit(1)
-    print(f"[ok] unit tests ({test_count} tests)")
+    coverage_file = ROOT / ".coverage"
+    env = dict(os.environ)
+    env["COVERAGE_FILE"] = str(coverage_file)
+    commands = (
+        [sys.executable, "-m", "coverage", "erase"],
+        [
+            sys.executable,
+            "-m",
+            "coverage",
+            "run",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests",
+            "-v",
+        ],
+        [
+            sys.executable,
+            "-m",
+            "coverage",
+            "report",
+            f"--fail-under={MIN_TOTAL_BRANCH_COVERAGE:g}",
+        ],
+        [
+            sys.executable,
+            "-m",
+            "coverage",
+            "report",
+            f"--include={BACKEND_COVERAGE_INCLUDE}",
+            f"--fail-under={MIN_BACKEND_BRANCH_COVERAGE:g}",
+        ],
+    )
+    for command in commands:
+        result = subprocess.run(command, cwd=ROOT, env=env)
+        if result.returncode != 0:
+            raise SystemExit(result.returncode)
+    print(
+        f"[ok] unit tests ({test_count} tests); branch coverage "
+        f">= {MIN_TOTAL_BRANCH_COVERAGE:g}% overall and >= {MIN_BACKEND_BRANCH_COVERAGE:g}% backend"
+    )
 
 
 def main() -> None:
@@ -1133,6 +1266,7 @@ def main() -> None:
     run_compile_check()
     run_adapter_catalog_check()
     run_project_metadata_check()
+    run_release_version_check()
     run_config_example_check()
     run_readme_matrix_check()
     run_blockers_doc_check()

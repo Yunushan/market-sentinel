@@ -73,6 +73,11 @@ class CiCdWorkflowTests(unittest.TestCase):
             "npm run build",
             "npm install --no-audit --no-fund",
             "python -m build",
+            "Smoke install built wheel",
+            "--force-reinstall --no-deps",
+            "License-Expression",
+            "fetch-depth: 0",
+            "scripts/verify_python_dist_artifacts.py",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, text)
@@ -120,6 +125,11 @@ class CiCdWorkflowTests(unittest.TestCase):
             "gh release create",
             "gh release upload",
             "--target \"${GITHUB_SHA}\"",
+            "Smoke install built wheel",
+            "--force-reinstall --no-deps",
+            "License-Expression",
+            "fetch-depth: 0",
+            "scripts/verify_python_dist_artifacts.py",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, text)
@@ -154,6 +164,12 @@ class CiCdWorkflowTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, dependabot)
         self.assertNotIn("labels:", dependabot)
+
+    def test_actionlint_knows_the_intentional_windows_10_runner_label(self) -> None:
+        text = (ROOT / ".github" / "actionlint.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("self-hosted-runner:", text)
+        self.assertIn("windows-10", text)
 
     def test_ci_cd_docs_describe_release_operations(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

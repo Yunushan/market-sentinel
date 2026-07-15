@@ -87,17 +87,6 @@ VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
             "https://www.nadex.com/learning/how-to-trade-event-contracts/",
         ],
     },
-    "crypto_com_predict": {
-        "reason": (
-            "Verified 2026-05-26: Crypto.com Prediction/CDNA is a regulated event-contract product, but "
-            "the published Crypto.com exchange API docs do not provide prediction-market-specific discovery, "
-            "contract, orderbook, or order endpoints for this app."
-        ),
-        "references": [
-            "https://crypto.com/en/prediction/",
-            "https://help.crypto.com/en/articles/3511424-api/",
-        ],
-    },
     "hyperliquid": {
         "reason": (
             "Verified 2026-05-26: Hyperliquid exposes HyperCore trading primitives, but this app does not "
@@ -356,6 +345,7 @@ def build_default_registry() -> AdapterRegistry:
         registry.register_metadata(metadata)
     from .azuro import AzuroAdapter
     from .betfair import BetfairExchangeAdapter
+    from .crypto_com_predict import CryptoComPredictAdapter
     from .gemini import GeminiPredictionAdapter
     from .kalshi import KalshiAdapter
     from .legacy_web3 import AugurAdapter, OmenAdapter, ZeitgeistAdapter
@@ -375,6 +365,7 @@ def build_default_registry() -> AdapterRegistry:
         PolymarketAdapter,
         KalshiAdapter,
         PredictItAdapter,
+        CryptoComPredictAdapter,
         ManifoldAdapter,
         MetaculusAdapter,
         LimitlessAdapter,
@@ -393,6 +384,7 @@ def build_default_registry() -> AdapterRegistry:
     registry.register_adapter(PolymarketAdapter, replace=True)
     registry.register_adapter(KalshiAdapter, replace=True)
     registry.register_adapter(PredictItAdapter, replace=True)
+    registry.register_adapter(CryptoComPredictAdapter, replace=True)
     registry.register_adapter(ManifoldAdapter, replace=True)
     registry.register_adapter(MetaculusAdapter, replace=True)
     registry.register_adapter(LimitlessAdapter, replace=True)

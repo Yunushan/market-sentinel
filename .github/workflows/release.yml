@@ -48,6 +48,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Resolve release inputs
         id: release
@@ -120,6 +122,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -145,6 +149,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -166,6 +172,29 @@ jobs:
       - name: Build Python distributions
         run: python -m build
 
+      - name: Smoke install built wheel
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          python scripts/verify_python_dist_artifacts.py --dist-dir dist --expected-version "${EXPECTED_VERSION}"
+          python -m pip install --no-cache-dir --force-reinstall --no-deps "dist/market_sentinel-${EXPECTED_VERSION}-py3-none-any.whl"
+          smoke_dir="$(mktemp -d)"
+          cd "${smoke_dir}"
+          market-sentinel --help >/dev/null
+          python - <<'PY'
+          import os
+          from importlib.metadata import metadata, version
+          from market_adapters import CryptoComPredictAdapter, build_default_registry
+
+          assert version("market-sentinel") == os.environ["EXPECTED_VERSION"]
+          package_metadata = metadata("market-sentinel")
+          assert package_metadata["License-Expression"] == "MIT"
+          assert package_metadata.get_all("License-File") == ["LICENSE"]
+          assert len(build_default_registry().list_market_ids()) == 41
+          assert CryptoComPredictAdapter().market_id == "crypto_com_predict"
+          PY
+
       - name: Upload Python distributions
         uses: actions/upload-artifact@v7
         with:
@@ -185,6 +214,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -236,6 +267,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -306,6 +339,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Download Python distributions
         uses: actions/download-artifact@v8

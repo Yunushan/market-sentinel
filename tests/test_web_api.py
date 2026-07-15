@@ -245,7 +245,10 @@ class WebApiTests(unittest.TestCase):
             with urlopen(request, timeout=5) as response:
                 return response.status, json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
-            return exc.code, json.loads(exc.read().decode("utf-8"))
+            try:
+                return exc.code, json.loads(exc.read().decode("utf-8"))
+            finally:
+                exc.close()
 
     def _request_raw(self, base_url: str, path: str) -> tuple[int, dict[str, str], bytes]:
         request = Request(f"{base_url}{path}", method="GET")
@@ -253,7 +256,10 @@ class WebApiTests(unittest.TestCase):
             with urlopen(request, timeout=5) as response:
                 return response.status, dict(response.headers), response.read()
         except HTTPError as exc:
-            return exc.code, dict(exc.headers), exc.read()
+            try:
+                return exc.code, dict(exc.headers), exc.read()
+            finally:
+                exc.close()
 
     def test_markets_payload_merges_catalog_with_local_enablement(self) -> None:
         cfg = AppConfig()
@@ -2257,6 +2263,7 @@ class WebApiTests(unittest.TestCase):
                     self.assertEqual(missing["error"]["code"], "not_found")
                 finally:
                     server.shutdown()
+                    server.server_close()
                     thread.join(timeout=5)
 
     def test_polymarket_live_validation_report_route_returns_schema_error_without_storing(self) -> None:
@@ -2298,6 +2305,7 @@ class WebApiTests(unittest.TestCase):
                     self.assertEqual(stored["stored"]["schema_validation"]["mode"], "strict_cli")
                 finally:
                     server.shutdown()
+                    server.server_close()
                     thread.join(timeout=5)
 
     def test_polymarket_coverage_route_includes_guarded_report_promotion_inventory(self) -> None:
@@ -2345,6 +2353,7 @@ class WebApiTests(unittest.TestCase):
                     self.assertEqual(authenticated_category["coverage_levels"]["funded_live_verified"], "blocked")
                 finally:
                     server.shutdown()
+                    server.server_close()
                     thread.join(timeout=5)
 
     def test_api_error_payload_uses_structured_shape_and_redacts_detail_keys(self) -> None:

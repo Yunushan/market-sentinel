@@ -1,0 +1,16 @@
+include .env.example
+include GOAL.md
+include LICENSE
+include README.md
+include requirements*.txt
+include *.bat
+include marketsentinel.png
+recursive-include .github *.yml *.yaml
+recursive-include assets *.ico *.png *.svg
+recursive-include data *.json
+recursive-include docs *.md
+recursive-include frontend *.css *.html *.json *.png *.ts *.tsx
+recursive-include scripts *.py
+recursive-include tests *.json *.py
+prune frontend/dist
+prune frontend/node_modules

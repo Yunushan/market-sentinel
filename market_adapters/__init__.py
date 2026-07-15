@@ -4,6 +4,7 @@ from .azuro import AzuroAdapter
 from .base import MarketAdapter
 from .betfair import BetfairExchangeAdapter
 from .catalog import MARKET_CATALOG, MARKET_IDS, get_market_metadata
+from .crypto_com_predict import CryptoComPredictAdapter
 from .errors import MarketAdapterError, MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
 from .gemini import GeminiPredictionAdapter
 from .kalshi import KalshiAdapter
@@ -39,6 +40,7 @@ __all__ = [
     "AugurAdapter",
     "AzuroAdapter",
     "BetfairExchangeAdapter",
+    "CryptoComPredictAdapter",
     "GeminiPredictionAdapter",
     "MARKET_CATALOG",
     "MARKET_IDS",

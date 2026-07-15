@@ -1,0 +1,29 @@
+{
+  "data": [
+    {
+      "id": "de31a348-1968-4480-bab6-f81d2b57f493",
+      "symbol": "ELECT-CA-GOV-2026-DEM",
+      "title": "Democratic",
+      "status": "active",
+      "yes": "0.63",
+      "no": "0.43",
+      "chance": "63.00",
+      "payout_per_100": "158.73",
+      "market_type": {
+        "name": "moneyline",
+        "title": "Winner",
+        "period": "full"
+      }
+    },
+    {
+      "id": "82f6c47c-5f7a-40fb-9b46-e2c0cf57d333",
+      "symbol": "ELECT-CA-GOV-2026-REP",
+      "title": "Republican",
+      "status": "active",
+      "yes": "0.37",
+      "no": "0.67",
+      "chance": "37.00",
+      "payout_per_100": "270.27"
+    }
+  ]
+}

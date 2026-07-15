@@ -8,6 +8,12 @@ from market_adapters import MARKET_IDS, VERIFIED_BLOCKERS
 
 
 class VerifierCoverageTests(unittest.TestCase):
+    def test_branch_coverage_policy_has_overall_and_backend_floors(self) -> None:
+        self.assertGreaterEqual(verify.MIN_TOTAL_BRANCH_COVERAGE, 65.0)
+        self.assertGreaterEqual(verify.MIN_BACKEND_BRANCH_COVERAGE, 74.0)
+        self.assertIn("web_api.py", verify.BACKEND_COVERAGE_INCLUDE)
+        self.assertIn("market_sentinel_cli.py", verify.BACKEND_COVERAGE_INCLUDE)
+
     def test_implemented_adapter_fixture_mapping_matches_the_catalog(self) -> None:
         implemented = set(MARKET_IDS) - set(VERIFIED_BLOCKERS)
         self.assertEqual(set(verify.IMPLEMENTED_ADAPTER_FIXTURE_TESTS), implemented)

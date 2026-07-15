@@ -9,6 +9,7 @@ from market_adapters import (
     AugurAdapter,
     AzuroAdapter,
     BetfairExchangeAdapter,
+    CryptoComPredictAdapter,
     GeminiPredictionAdapter,
     KalshiAdapter,
     LimitlessAdapter,
@@ -70,6 +71,7 @@ IMPLEMENTED_MARKETS = {
     "gemini_titan",
     "predict_fun",
     "betfair_exchange",
+    "crypto_com_predict",
 }
 VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)
 
@@ -120,6 +122,8 @@ class AdapterFoundationTests(unittest.TestCase):
         self.assertIsInstance(registry.create("kalshi"), KalshiAdapter)
         self.assertEqual(registry.get_metadata("predictit").display_name, "PredictIt")
         self.assertIsInstance(registry.create("predictit"), PredictItAdapter)
+        self.assertEqual(registry.get_metadata("crypto_com_predict").display_name, "Crypto.com Predict / CDNA")
+        self.assertIsInstance(registry.create("crypto_com_predict"), CryptoComPredictAdapter)
         self.assertEqual(registry.get_metadata("manifold").display_name, "Manifold Markets")
         self.assertIsInstance(registry.create("manifold"), ManifoldAdapter)
         self.assertEqual(registry.get_metadata("metaculus").display_name, "Metaculus")

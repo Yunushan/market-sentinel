@@ -1,0 +1,21 @@
+{
+  "data": [
+    {
+      "id": "7aab6b9f-38b7-4b54-a14a-0b32b83d3348",
+      "title": "Who will win the California governor election?",
+      "kind": "ELECT",
+      "type": "league",
+      "event_date": "2026-11-03T00:00:00Z",
+      "status": "active",
+      "contracts_count": 2,
+      "metadata": {
+        "state": "California"
+      }
+    }
+  ],
+  "pagination": {
+    "limit": 10,
+    "next_cursor": null,
+    "has_more": false
+  }
+}

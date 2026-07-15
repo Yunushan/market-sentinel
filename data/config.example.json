@@ -95,10 +95,14 @@
     "crypto_com_predict": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "crypto_com_predict_api_base_url": "https://data-api.crypto.com/api/v1/predictions",
+        "credential_env_vars": [
+          "CRYPTO_COM_PREDICTIONS_API_KEY"
+        ],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: published Crypto.com exchange APIs do not expose prediction-market-specific discovery, contract, orderbook, or order endpoints for CDNA/Predict."
+        "min_request_interval_seconds": 0.6,
+        "notes": "Official anonymous read-only event, contract, and price access is implemented. An API key is optional for licensed tiers. Live trading, copy trading, and full orderbook depth are unsupported."
       }
     },
     "draftkings_predictions": {

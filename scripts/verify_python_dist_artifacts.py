@@ -1,0 +1,121 @@
+from __future__ import annotations
+
+import argparse
+import tarfile
+from email.parser import BytesParser
+from pathlib import Path
+from zipfile import ZipFile
+
+
+REQUIRED_WHEEL_MEMBERS = {
+    "market_sentinel_cli.py",
+    "market_adapters/crypto_com_predict.py",
+    "market_adapters/registry.py",
+    "polymarket/leaderboard_state.py",
+}
+
+REQUIRED_SDIST_MEMBERS = {
+    ".github/actionlint.yaml",
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml",
+    "MANIFEST.in",
+    "assets/marketsentinel.svg",
+    "data/config.example.json",
+    "docs/BLOCKERS.md",
+    "frontend/package-lock.json",
+    "frontend/package.json",
+    "frontend/src/App.tsx",
+    "requirements.txt",
+    "scripts/verify_polymarket_live.py",
+    "tests/fixtures/crypto_com_predict/events.json",
+    "tests/fixtures/crypto_com_predict/contracts.json",
+    "tests/fixtures/crypto_com_predict/price.json",
+    "tests/test_crypto_com_predict_adapter.py",
+}
+
+
+def _single_artifact(dist_dir: Path, pattern: str, label: str) -> Path:
+    matches = sorted(path for path in dist_dir.glob(pattern) if path.is_file())
+    if len(matches) != 1:
+        names = ", ".join(path.name for path in matches) or "none"
+        raise SystemExit(f"Expected exactly one {label} matching {pattern!r}; found {names}.")
+    return matches[0]
+
+
+def _missing(required: set[str], actual: set[str]) -> list[str]:
+    return sorted(required - actual)
+
+
+def verify_wheel(path: Path, expected_version: str) -> None:
+    dist_info = f"market_sentinel-{expected_version}.dist-info"
+    metadata_name = f"{dist_info}/METADATA"
+    entry_points_name = f"{dist_info}/entry_points.txt"
+    with ZipFile(path) as archive:
+        names = set(archive.namelist())
+        required = REQUIRED_WHEEL_MEMBERS | {metadata_name, entry_points_name, f"{dist_info}/licenses/LICENSE"}
+        missing = _missing(required, names)
+        if missing:
+            raise SystemExit(f"Wheel {path.name} is missing required members: {', '.join(missing)}")
+
+        metadata = BytesParser().parsebytes(archive.read(metadata_name))
+        expected_fields = {
+            "Name": "market-sentinel",
+            "Version": expected_version,
+            "Requires-Python": ">=3.10",
+            "License-Expression": "MIT",
+        }
+        for key, expected in expected_fields.items():
+            actual = metadata.get(key)
+            if actual != expected:
+                raise SystemExit(
+                    f"Wheel {path.name} metadata {key} is {actual!r}; expected {expected!r}."
+                )
+        if metadata.get_all("License-File") != ["LICENSE"]:
+            raise SystemExit(f"Wheel {path.name} must declare LICENSE exactly once.")
+        if "market-sentinel = market_sentinel_cli:main" not in archive.read(entry_points_name).decode("utf-8"):
+            raise SystemExit(f"Wheel {path.name} is missing the market-sentinel CLI entry point.")
+
+
+def verify_sdist(path: Path, expected_version: str) -> None:
+    prefix = f"market_sentinel-{expected_version}/"
+    with tarfile.open(path, "r:gz") as archive:
+        names = {name.replace("\\", "/") for name in archive.getnames()}
+    relative_names = {name[len(prefix) :] for name in names if name.startswith(prefix)}
+    missing = _missing(REQUIRED_SDIST_MEMBERS, relative_names)
+    if missing:
+        raise SystemExit(f"Source distribution {path.name} is missing: {', '.join(missing)}")
+    forbidden_fragments = (
+        "/__pycache__/",
+        "frontend/dist/",
+        "frontend/node_modules/",
+        ".coverage",
+        ".tmp/",
+    )
+    forbidden = sorted(
+        name for name in relative_names if any(fragment in name for fragment in forbidden_fragments)
+    )
+    if forbidden:
+        raise SystemExit(
+            f"Source distribution {path.name} contains generated/private artifacts: {', '.join(forbidden[:10])}"
+        )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Verify built MarketSentinel wheel and sdist contents.")
+    parser.add_argument("--dist-dir", type=Path, default=Path("dist"))
+    parser.add_argument("--expected-version", required=True)
+    args = parser.parse_args()
+
+    dist_dir = args.dist_dir.resolve()
+    if not dist_dir.is_dir():
+        raise SystemExit(f"Distribution directory does not exist: {dist_dir}")
+    version = str(args.expected_version or "").strip()
+    wheel = _single_artifact(dist_dir, f"market_sentinel-{version}-*.whl", "wheel")
+    sdist = _single_artifact(dist_dir, f"market_sentinel-{version}.tar.gz", "source distribution")
+    verify_wheel(wheel, version)
+    verify_sdist(sdist, version)
+    print(f"[ok] Python distributions ({wheel.name}, {sdist.name})")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,13 @@
+{
+  "data": {
+    "symbol": "ELECT-CA-GOV-2026-DEM",
+    "title": "Democratic",
+    "status": "active",
+    "bid": "0.43",
+    "ask": "0.63",
+    "mid": "0.53",
+    "probability": "63.00",
+    "spread": "0.20",
+    "updated_at": "2026-07-15T12:00:00Z"
+  }
+}

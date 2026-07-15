@@ -80,6 +80,21 @@ PREDICTIT_CAPABILITIES = MarketCapabilities(
     region_limited=True,
 )
 
+CRYPTO_COM_PREDICT_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    alerts=True,
+    paper_trading=True,
+    live_trading=False,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=False,
+    region_limited=False,
+)
+
 LIMITLESS_CAPABILITIES = MarketCapabilities(
     market_discovery=True,
     event_listing=True,
@@ -317,6 +332,11 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="crypto_com_predict",
         display_name="Crypto.com Predict / CDNA",
         homepage_url="https://crypto.com",
+        description=(
+            "Official Crypto.com Predictions Market Data API adapter for anonymous event discovery, "
+            "contracts, prices, alerts, and dry-run orders."
+        ),
+        capabilities=CRYPTO_COM_PREDICT_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="hyperliquid",

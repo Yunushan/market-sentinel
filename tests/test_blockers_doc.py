@@ -40,6 +40,7 @@ IMPLEMENTED_MARKETS = {
     "gemini_titan",
     "predict_fun",
     "betfair_exchange",
+    "crypto_com_predict",
 }
 VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)
 

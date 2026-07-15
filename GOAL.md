@@ -111,11 +111,11 @@ This project is not 100% feature-complete across every listed market. The comple
 Current catalog snapshot:
 
 - Total markets: 41
-- Implemented or partially implemented adapters: 17
-- Verified-blocked/stub adapters: 24
-- Alerts supported: 16 yes, 25 no
-- Read-only price data supported: 16 yes, 25 no
-- Paper trading supported: 15 yes, 26 no
+- Implemented or partially implemented adapters: 18
+- Verified-blocked/stub adapters: 23
+- Alerts supported: 17 yes, 24 no
+- Read-only price data supported: 17 yes, 24 no
+- Paper trading supported: 16 yes, 25 no
 - Live trading supported: 11 guarded/off by default, 30 no
 - Copy trading supported: 1 yes, 40 no
 
@@ -215,6 +215,13 @@ These articles completed the catalog, adapter architecture, verification, docs, 
 - Article 78 Secret and Private-Endpoint Hygiene Gate: scope complete; `verify.py` now rejects common hardcoded token/private-key formats, credentialed URLs, non-loopback private-network addresses, and literal authorization/cookie values across application sources while allowing explicit localhost development endpoints; regression tests and the completion audit cover the security constraint.
 - Article 79 Full Local Live-Safety CLI Parity: scope complete; Linux/Windows CLI now exposes local redacted live-validation report import/list/open/export/review/delete, guarded decision-ledger list/record/export, and read-only promotion-proposal/snapshot list/store/open/diff/export/delete workflows without credential derivation, network calls, or funded actions; runtime artifact files are ignored, docs and CLI regression tests cover the commands.
 - Article 80 Durable CLI Paper-Mark Parity: scope complete; Linux/Windows CLI now exposes paper mark refresh, selected refresh, clear, and selected clear commands backed by an atomic local sidecar so marks persist across CLI processes and feed `paper show`; the sidecar contains no credentials, is Git-ignored, and has parser/persistence regression coverage and documentation.
+- Article 81 Enforced Branch-Coverage Readiness Gate: scope complete; `python verify.py` now measures branch coverage for every test run and fails below 65% across the complete Python application or 74% across the headless/backend surface, with the coverage runtime declared in package requirements and policy regression tests and CI documentation.
+- Article 82 Crypto.com Predictions Market Data Adapter: scope complete; the stale verified blocker was removed after Crypto.com published its official API, and anonymous event/search/contract/price reads, alerts, dry-run paper orders, optional licensed-key handling, rate/license diagnostics, offline fixtures, registry/config integration, and explicit market-data-only safety errors are covered by tests and docs.
+- Article 83 Release Version Lineage Gate: scope complete; the project is prepared as version `1.0.9`, and `verify.py` now rejects invalid/local-only versions, shallow tag histories, reuse of an existing release tag on an older commit, and untagged versions that are not newer than the latest semver tag; CI/release checkouts fetch full history and focused regression tests and release documentation enforce the contract.
+- Article 84 Modern Package License Metadata: scope complete; package metadata now uses the SPDX `MIT` expression and explicit `LICENSE` file declaration required by current setuptools, removing the deprecated license-table warning and locking the format into project metadata tests and `verify.py`.
+- Article 85 Installed Distribution Smoke Gate: scope complete; CI and release workflows now install the exact built wheel, run its CLI from outside the source tree, verify package version and PEP 639 license metadata, construct the 41-market registry, and import the newly promoted Crypto.com adapter before artifacts can be uploaded.
+- Article 86 Strict Workflow Lint Configuration: scope complete; Actionlint now recognizes only the intentional custom `windows-10` self-hosted runner label through `.github/actionlint.yaml`, allowing all workflows to lint cleanly while retaining unknown-runner detection for other labels.
+- Article 87 Reproducible Python Distribution Contents: scope complete; `MANIFEST.in` now includes the source, fixtures, config, docs, frontend source, scripts, workflows, and assets required to reproduce repository verification while pruning generated directories, and CI/release run `scripts/verify_python_dist_artifacts.py` to enforce wheel metadata/entry points and wheel/sdist content before installation or upload.
 
 ## Active continuation goals
 

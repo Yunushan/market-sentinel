@@ -454,7 +454,7 @@ API hardening:
 
 This matrix describes current application adapter support. Verified-blocked markets appear in the GUI and config, but their market-specific operations intentionally return clear unsupported-feature messages until official access, entitlements, or documented automation terms make support safe to add. Verified-blocked rows were checked against currently available official docs/pages.
 
-Article 35 re-audited verified-blocked markets on 2026-05-26 and did not promote any blocked market. Context Markets is sunset, Hyperliquid outcome metadata is still not production-safe for this adapter, Thales needs chain-specific AMM/wallet safeguards and fixtures, and Smarkets/CME still require approval, data-use permission, or licensed entitlements before support can be added.
+Article 35 re-audited verified-blocked markets on 2026-05-26 and did not promote any blocked market. A 2026-07-15 follow-up promoted Crypto.com Predict/CDNA after Crypto.com published its official Predictions Market Data API. Context Markets remains sunset, Hyperliquid outcome metadata is still not production-safe for this adapter, Thales needs chain-specific AMM/wallet safeguards and fixtures, and Smarkets/CME still require approval, data-use permission, or licensed entitlements before support can be added.
 
 | Market | Adapter | Alerts | Read-only data | Paper trading | Live trading | Copy trading | API required | Credentials required | Region/KYC limitation |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -468,7 +468,7 @@ Article 35 re-audited verified-blocked markets on 2026-05-26 and did not promote
 | ForecastEx (`forecastex`) | Verified blocked | No | No | No | No | No | Required | Exchange/broker account required | Region/KYC limited |
 | CME Group Prediction Markets (`cme_prediction_markets`) | Verified blocked | No | No | No | No | No | Required | Broker/data entitlement required | Region/KYC limited |
 | Nadex (`nadex`) | Verified blocked | No | No | No | No | No | Required | Exchange account required | Region/KYC limited |
-| Crypto.com Predict / CDNA (`crypto_com_predict`) | Verified blocked | No | No | No | No | No | Required | Crypto.com account required | Region/KYC limited |
+| Crypto.com Predict / CDNA (`crypto_com_predict`) | Implemented | Yes | Yes | Yes | No | No | Required | Optional API key | Not KYC limited |
 | Hyperliquid (`hyperliquid`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
 | Myriad Markets (`myriad_markets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Optional API key | Jurisdiction varies |
 | Context V2 (`context_v2`) | Verified blocked | No | No | No | No | No | Required | API credentials required | Jurisdiction varies |
@@ -520,6 +520,7 @@ This runs:
 - frontend build readiness checks; the build is skipped unless `frontend/node_modules` exists
 - optional Live Safety report-history browser smoke checks when `--frontend-live-smoke` is supplied
 - offline unit tests for config/storage, API wrapper parsing, alert crossing, copy-trade percentage sizing, and wallet activity de-duplication
+- enforced branch-coverage floors of 65% across the full Python application and 74% across the headless/backend surface; `python verify.py` fails when either floor regresses
 
 Pytest is included in `requirements.txt`; run the pytest suite directly with:
 ```bash
@@ -557,7 +558,7 @@ If `frontend/node_modules` is missing, the normal verifier records frontend buil
 GitHub Actions workflows live under `.github/workflows`:
 - `ci.yml` runs Python verification across Ubuntu, macOS `14`/`15`/`26`, and hosted Windows with Python `3.10` through `3.14`, runs a moving latest stable `3.x` compatibility lane for future Python releases, smoke checks RHEL UBI 8/9/10, a RHEL 7-era manylinux2014 ABI container, Rocky Linux 8/9/10, hosted Windows 11 ARM with Python `3.12` x64 dependency wheels, mobile web profiles for Android 14/15/16 and iOS 15/16/18/26, includes an opt-in self-hosted Windows 10 job gated by `ENABLE_WINDOWS_10_SELF_HOSTED=true`, builds the React frontend with Node.js `24`, and builds Python distributions.
 - `security.yml` runs CodeQL analysis and runs dependency review only when GitHub dependency graph is enabled.
-- `release.yml` publishes tagged releases (`v*.*.*`) with Python package artifacts, a zipped React production bundle, Windows x64 portable/installer packages, and SHA256 checksums.
+- `release.yml` publishes tagged releases (`v*.*.*`) with Python package artifacts, a zipped React production bundle, Windows x64 portable/installer packages, and SHA256 checksums. Local verification rejects reusing an existing release tag from a newer commit and requires an untagged project version to be newer than the latest tag.
 
 Dependabot is configured in `.github/dependabot.yml` for GitHub Actions, Python, and frontend npm dependency updates.
 

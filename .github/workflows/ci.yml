@@ -47,6 +47,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -83,6 +85,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up future Python
         uses: actions/setup-python@v6
@@ -140,6 +144,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Verify in Enterprise Linux container
         shell: bash
@@ -196,6 +202,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -227,6 +235,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -255,6 +265,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -301,6 +313,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -336,6 +350,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -345,8 +361,31 @@ jobs:
       - name: Build Python distribution
         run: |
           python -m pip install --no-cache-dir --upgrade pip
+          python -m pip install --no-cache-dir -r requirements.txt
           python -m pip install --no-cache-dir build
           python -m build
+
+      - name: Smoke install built wheel
+        shell: bash
+        run: |
+          expected_version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          python scripts/verify_python_dist_artifacts.py --dist-dir dist --expected-version "${expected_version}"
+          python -m pip install --no-cache-dir --force-reinstall --no-deps "dist/market_sentinel-${expected_version}-py3-none-any.whl"
+          smoke_dir="$(mktemp -d)"
+          cd "${smoke_dir}"
+          market-sentinel --help >/dev/null
+          EXPECTED_VERSION="${expected_version}" python - <<'PY'
+          import os
+          from importlib.metadata import metadata, version
+          from market_adapters import CryptoComPredictAdapter, build_default_registry
+
+          assert version("market-sentinel") == os.environ["EXPECTED_VERSION"]
+          package_metadata = metadata("market-sentinel")
+          assert package_metadata["License-Expression"] == "MIT"
+          assert package_metadata.get_all("License-File") == ["LICENSE"]
+          assert len(build_default_registry().list_market_ids()) == 41
+          assert CryptoComPredictAdapter().market_id == "crypto_com_predict"
+          PY
 
       - name: Upload Python distributions
         uses: actions/upload-artifact@v7
