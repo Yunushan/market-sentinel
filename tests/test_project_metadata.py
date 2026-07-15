@@ -24,11 +24,18 @@ class ProjectMetadataTests(unittest.TestCase):
         self.assertEqual(name, PROJECT_NAME)
         self.assertNotIn("_", name)
         self.assertEqual(data["project"]["requires-python"], ">=3.10")
-        self.assertEqual(data["project"]["license"], "MIT")
+        self.assertEqual(data["project"]["license"], "0BSD")
         self.assertEqual(data["project"]["license-files"], ["LICENSE"])
         self.assertIn("Programming Language :: Python :: 3.15", data["project"]["classifiers"])
         self.assertIn("Programming Language :: Python :: 3.16", data["project"]["classifiers"])
         self.assertIn('"name": "market-sentinel-react-gui"', frontend_package)
+
+    def test_license_file_uses_bsd_zero_clause_text(self) -> None:
+        text = (ROOT / "LICENSE").read_text(encoding="utf-8")
+
+        self.assertTrue(text.startswith("BSD Zero Clause License\n"))
+        self.assertIn("Permission to use, copy, modify, and/or distribute this software", text)
+        self.assertIn('THE SOFTWARE IS PROVIDED "AS IS"', text)
 
     def test_user_facing_project_title_uses_marketsentinel_brand(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

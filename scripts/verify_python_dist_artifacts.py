@@ -18,6 +18,7 @@ REQUIRED_SDIST_MEMBERS = {
     ".github/actionlint.yaml",
     ".github/workflows/ci.yml",
     ".github/workflows/release.yml",
+    "LICENSE",
     "MANIFEST.in",
     "assets/marketsentinel.svg",
     "data/config.example.json",
@@ -33,6 +34,13 @@ REQUIRED_SDIST_MEMBERS = {
     "tests/test_crypto_com_predict_adapter.py",
 }
 
+EXPECTED_LICENSE_EXPRESSION = "0BSD"
+REQUIRED_LICENSE_FRAGMENTS = (
+    "BSD Zero Clause License",
+    "Permission to use, copy, modify, and/or distribute this software",
+    'THE SOFTWARE IS PROVIDED "AS IS"',
+)
+
 
 def _single_artifact(dist_dir: Path, pattern: str, label: str) -> Path:
     matches = sorted(path for path in dist_dir.glob(pattern) if path.is_file())
@@ -46,13 +54,20 @@ def _missing(required: set[str], actual: set[str]) -> list[str]:
     return sorted(required - actual)
 
 
+def _verify_license_text(text: str, label: str) -> None:
+    missing = [fragment for fragment in REQUIRED_LICENSE_FRAGMENTS if fragment not in text]
+    if missing:
+        raise SystemExit(f"{label} does not contain the expected BSD Zero Clause License text.")
+
+
 def verify_wheel(path: Path, expected_version: str) -> None:
     dist_info = f"market_sentinel-{expected_version}.dist-info"
     metadata_name = f"{dist_info}/METADATA"
     entry_points_name = f"{dist_info}/entry_points.txt"
+    license_name = f"{dist_info}/licenses/LICENSE"
     with ZipFile(path) as archive:
         names = set(archive.namelist())
-        required = REQUIRED_WHEEL_MEMBERS | {metadata_name, entry_points_name, f"{dist_info}/licenses/LICENSE"}
+        required = REQUIRED_WHEEL_MEMBERS | {metadata_name, entry_points_name, license_name}
         missing = _missing(required, names)
         if missing:
             raise SystemExit(f"Wheel {path.name} is missing required members: {', '.join(missing)}")
@@ -62,7 +77,7 @@ def verify_wheel(path: Path, expected_version: str) -> None:
             "Name": "market-sentinel",
             "Version": expected_version,
             "Requires-Python": ">=3.10",
-            "License-Expression": "MIT",
+            "License-Expression": EXPECTED_LICENSE_EXPRESSION,
         }
         for key, expected in expected_fields.items():
             actual = metadata.get(key)
@@ -72,6 +87,7 @@ def verify_wheel(path: Path, expected_version: str) -> None:
                 )
         if metadata.get_all("License-File") != ["LICENSE"]:
             raise SystemExit(f"Wheel {path.name} must declare LICENSE exactly once.")
+        _verify_license_text(archive.read(license_name).decode("utf-8"), f"Wheel {path.name} LICENSE")
         if "market-sentinel = market_sentinel_cli:main" not in archive.read(entry_points_name).decode("utf-8"):
             raise SystemExit(f"Wheel {path.name} is missing the market-sentinel CLI entry point.")
 
@@ -80,10 +96,17 @@ def verify_sdist(path: Path, expected_version: str) -> None:
     prefix = f"market_sentinel-{expected_version}/"
     with tarfile.open(path, "r:gz") as archive:
         names = {name.replace("\\", "/") for name in archive.getnames()}
-    relative_names = {name[len(prefix) :] for name in names if name.startswith(prefix)}
-    missing = _missing(REQUIRED_SDIST_MEMBERS, relative_names)
-    if missing:
-        raise SystemExit(f"Source distribution {path.name} is missing: {', '.join(missing)}")
+        relative_names = {name[len(prefix) :] for name in names if name.startswith(prefix)}
+        missing = _missing(REQUIRED_SDIST_MEMBERS, relative_names)
+        if missing:
+            raise SystemExit(f"Source distribution {path.name} is missing: {', '.join(missing)}")
+        license_file = archive.extractfile(f"{prefix}LICENSE")
+        if license_file is None:
+            raise SystemExit(f"Source distribution {path.name} is missing LICENSE content.")
+        _verify_license_text(
+            license_file.read().decode("utf-8"),
+            f"Source distribution {path.name} LICENSE",
+        )
     forbidden_fragments = (
         "/__pycache__/",
         "frontend/dist/",

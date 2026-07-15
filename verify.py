@@ -188,10 +188,21 @@ def run_project_metadata_check() -> None:
         raise SystemExit("pyproject.toml project name must use dashes, not underscores.")
     if data.get("project", {}).get("requires-python") != ">=3.10":
         raise SystemExit("pyproject.toml requires-python must allow Python >=3.10 without an artificial upper cap.")
-    if data.get("project", {}).get("license") != "MIT":
-        raise SystemExit("pyproject.toml project.license must use the SPDX expression MIT.")
+    if data.get("project", {}).get("license") != "0BSD":
+        raise SystemExit("pyproject.toml project.license must use the SPDX expression 0BSD.")
     if data.get("project", {}).get("license-files") != ["LICENSE"]:
         raise SystemExit("pyproject.toml project.license-files must include LICENSE.")
+    license_text = (ROOT / "LICENSE").read_text(encoding="utf-8")
+    required_license_fragments = (
+        "BSD Zero Clause License",
+        "Permission to use, copy, modify, and/or distribute this software",
+        'THE SOFTWARE IS PROVIDED "AS IS"',
+    )
+    missing_license_fragments = [
+        fragment for fragment in required_license_fragments if fragment not in license_text
+    ]
+    if missing_license_fragments:
+        raise SystemExit("LICENSE must contain the BSD Zero Clause License text only.")
     classifiers = set(data.get("project", {}).get("classifiers", []))
     for classifier in ("Programming Language :: Python :: 3.15", "Programming Language :: Python :: 3.16"):
         if classifier not in classifiers:

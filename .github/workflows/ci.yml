@@ -381,7 +381,7 @@ jobs:
 
           assert version("market-sentinel") == os.environ["EXPECTED_VERSION"]
           package_metadata = metadata("market-sentinel")
-          assert package_metadata["License-Expression"] == "MIT"
+          assert package_metadata["License-Expression"] == "0BSD"
           assert package_metadata.get_all("License-File") == ["LICENSE"]
           assert len(build_default_registry().list_market_ids()) == 41
           assert CryptoComPredictAdapter().market_id == "crypto_com_predict"

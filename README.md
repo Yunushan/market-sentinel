@@ -611,3 +611,6 @@ In-app checks:
 - `polymarket/` – API wrappers + websocket client + trading wrapper
 - `core/` – config models + storage helpers
 - `data/` – local config and cache
+
+## License
+MarketSentinel is licensed under the BSD Zero Clause License (`0BSD`). See [LICENSE](LICENSE).
