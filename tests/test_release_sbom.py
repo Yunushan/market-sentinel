@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
-from scripts.generate_release_sbom import build_sbom
+from scripts.generate_release_sbom import build_sbom, created_at
 
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 class ReleaseSbomTests(unittest.TestCase):
+    def test_created_at_uses_utc_timestamp_compatibly(self) -> None:
+        with patch.dict("os.environ", {"SOURCE_DATE_EPOCH": "0"}, clear=False):
+            self.assertEqual(created_at(), "1970-01-01T00:00:00Z")
+
     def test_sbom_contains_project_and_locked_dependencies(self) -> None:
         version = next(
             line.split('"', 2)[1]

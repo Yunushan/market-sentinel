@@ -5,7 +5,7 @@ import hashlib
 import json
 import os
 import re
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,8 +27,8 @@ def spdx_id(name: str, version: str) -> str:
 def created_at() -> str:
     source_date_epoch = os.environ.get("SOURCE_DATE_EPOCH")
     if source_date_epoch and source_date_epoch.isdigit():
-        return datetime.fromtimestamp(int(source_date_epoch), tz=UTC).isoformat().replace("+00:00", "Z")
-    return datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+        return datetime.fromtimestamp(int(source_date_epoch), tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def locked_python_packages(lock_path: Path) -> list[tuple[str, str]]:
