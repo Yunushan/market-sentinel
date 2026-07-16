@@ -1121,8 +1121,8 @@ def run_ci_cd_workflow_check() -> None:
             "scripts/verify_python_dist_artifacts.py",
         ),
         ROOT / ".github" / "workflows" / "security.yml": (
-            "Detect dependency graph support",
-            "DEPENDENCY_REVIEW_ENABLED",
+            "actions/dependency-review-action",
+            "fail-on-severity: high",
             "security-events: write",
         ),
         ROOT / ".github" / "dependabot.yml": (

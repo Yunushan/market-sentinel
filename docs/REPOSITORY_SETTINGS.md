@@ -19,10 +19,7 @@ Protect `main` with:
 1. Enable dependency graph, Dependabot alerts, Dependabot security updates,
    secret scanning, and push protection.
 2. Enable private vulnerability reporting.
-3. Set `DEPENDENCY_REVIEW_ENABLED=true` only if a temporary compatibility
-   exception is necessary; production pull requests should have dependency
-   graph support enabled.
-4. Review and merge or close the active Dependabot pull requests after CI.
+3. Review and merge or close the active Dependabot pull requests after CI.
 
 ## Release environment
 
