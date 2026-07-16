@@ -33,21 +33,6 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - name: Detect dependency graph support
-        id: dependency_graph
-        env:
-          GH_TOKEN: ${{ github.token }}
-          DEPENDENCY_REVIEW_ENABLED: ${{ vars.DEPENDENCY_REVIEW_ENABLED }}
-        shell: bash
-        run: |
-          graph_status="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.security_and_analysis.dependency_graph.status // "unknown"' 2>/dev/null || echo unknown)"
-          if [ "${DEPENDENCY_REVIEW_ENABLED}" = "true" ] || [ "${graph_status}" = "enabled" ]; then
-            echo "Dependency graph available; dependency_graph=${graph_status}."
-          else
-            echo "::error::Dependency review requires GitHub dependency graph support. Enable it in repository settings or set DEPENDENCY_REVIEW_ENABLED=true only for a documented compatibility exception. dependency_graph=${graph_status}."
-            exit 1
-          fi
-
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 

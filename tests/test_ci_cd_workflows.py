@@ -175,8 +175,7 @@ class CiCdWorkflowTests(unittest.TestCase):
         dependabot = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
 
         for fragment in (
-            "Detect dependency graph support",
-            "DEPENDENCY_REVIEW_ENABLED",
+            "actions/dependency-review-action",
             "security-events: write",
             "fail-on-severity: high",
         ):

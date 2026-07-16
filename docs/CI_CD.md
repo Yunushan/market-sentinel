@@ -41,12 +41,11 @@ Runs on pushes, pull requests, weekly schedule, and manual dispatch.
 
 Jobs:
 
-- Dependency review on pull requests; it fails closed if GitHub dependency graph
-  is unavailable, unless a documented repository-level compatibility exception
-  sets `DEPENDENCY_REVIEW_ENABLED=true`.
+- Dependency review on pull requests; GitHub Dependency Graph must be enabled
+  in the repository settings and high-severity dependency changes fail the job.
 - CodeQL analysis for Python and JavaScript/TypeScript.
 
-The CodeQL job is the only job with `security-events: write`; all other jobs use least-privilege read permissions unless they need more. After dependency graph is enabled, dependency review will run normally and fail on high-severity dependency changes. If GitHub's repository metadata API cannot report dependency graph status, set repository variable `DEPENDENCY_REVIEW_ENABLED=true` to force the check.
+The CodeQL job is the only job with `security-events: write`; all other jobs use least-privilege read permissions unless they need more. Dependency review runs with the pull-request permissions required by GitHub's action and fails on high-severity dependency changes.
 
 ### Release
 
