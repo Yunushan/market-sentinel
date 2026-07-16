@@ -7,6 +7,7 @@ import threading
 import tempfile
 import unittest
 import zipfile
+from http import HTTPStatus
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -46,6 +47,7 @@ from web_api import (
     delete_wallet_watch,
     health_payload,
     history_refill_payload,
+    is_loopback_host,
     live_preflight_payload,
     live_safety_payload,
     markets_payload,
@@ -213,13 +215,14 @@ class WebApiTests(unittest.TestCase):
             archive.writestr("positions.csv", positions_csv)
         return buffer.getvalue()
 
-    def _serve_api(self, config_path: Path, frontend_dir: Path):
+    def _serve_api(self, config_path: Path, frontend_dir: Path, *, api_token: str = ""):
         server = ReactGuiServer(
             ("127.0.0.1", 0),
             ReactGuiHandler,
             config_path=config_path,
             frontend_dir=frontend_dir,
             adapter_registry=FakeRegistry(FakePaperAdapter()),
+            api_token=api_token,
         )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -250,8 +253,15 @@ class WebApiTests(unittest.TestCase):
             finally:
                 exc.close()
 
-    def _request_raw(self, base_url: str, path: str) -> tuple[int, dict[str, str], bytes]:
-        request = Request(f"{base_url}{path}", method="GET")
+    def _request_raw(
+        self,
+        base_url: str,
+        path: str,
+        *,
+        method: str = "GET",
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, dict[str, str], bytes]:
+        request = Request(f"{base_url}{path}", headers=headers or {}, method=method)
         try:
             with urlopen(request, timeout=5) as response:
                 return response.status, dict(response.headers), response.read()
@@ -260,6 +270,58 @@ class WebApiTests(unittest.TestCase):
                 return exc.code, dict(exc.headers), exc.read()
             finally:
                 exc.close()
+
+    def test_loopback_detection_and_remote_server_token_gate(self) -> None:
+        self.assertTrue(is_loopback_host("127.0.0.1"))
+        self.assertTrue(is_loopback_host("::1"))
+        self.assertTrue(is_loopback_host("localhost"))
+        self.assertFalse(is_loopback_host("0.0.0.0"))
+        self.assertFalse(is_loopback_host("192.0.2.10"))
+
+        with self.assertRaisesRegex(ValueError, "non-loopback"):
+            ReactGuiServer(("0.0.0.0", 0), ReactGuiHandler)
+
+    def test_api_token_and_cors_allowlist_are_enforced(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "frontend"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            server, thread, base_url = self._serve_api(root / "config.json", frontend_dir, api_token="test-token")
+            try:
+                status, payload = self._request_json(base_url, "/api/health")
+                self.assertEqual(status, HTTPStatus.UNAUTHORIZED)
+                self.assertEqual(payload["error"]["code"], "api_token_required")
+
+                status, payload = self._request_json(
+                    base_url,
+                    "/api/health",
+                    headers={"Authorization": "Bearer test-token"},
+                )
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(payload["status"], "ok")
+
+                status, payload = self._request_json(
+                    base_url,
+                    "/api/health",
+                    headers={"Origin": "https://untrusted.example", "Authorization": "Bearer test-token"},
+                )
+                self.assertEqual(status, HTTPStatus.FORBIDDEN)
+                self.assertEqual(payload["error"]["code"], "cors_origin_forbidden")
+
+                status, headers, _ = self._request_raw(
+                    base_url,
+                    "/api/health",
+                    method="OPTIONS",
+                    headers={"Origin": "http://127.0.0.1:5173"},
+                )
+                self.assertEqual(status, HTTPStatus.NO_CONTENT)
+                self.assertEqual(headers.get("Access-Control-Allow-Origin"), "http://127.0.0.1:5173")
+                self.assertNotEqual(headers.get("Access-Control-Allow-Origin"), "*")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
 
     def test_markets_payload_merges_catalog_with_local_enablement(self) -> None:
         cfg = AppConfig()

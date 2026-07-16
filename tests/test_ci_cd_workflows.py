@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from verify import workflow_action_minimum_issues
+from verify import workflow_action_pin_issues
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -36,7 +36,8 @@ class CiCdWorkflowTests(unittest.TestCase):
             "python app.py --smoke-test",
             "python verify.py",
             "python -m pip install --no-cache-dir --upgrade pip",
-            "python -m pip install --no-cache-dir -r requirements.txt",
+            "python -m pip install --no-cache-dir --require-hashes -r requirements.lock",
+            "python -m pip install --no-cache-dir --no-deps -e .",
             "scripts/ci_enterprise_linux_smoke.py",
             "RHEL 8 UBI / Python 3.12",
             "RHEL 9 UBI / Python 3.12",
@@ -85,14 +86,14 @@ class CiCdWorkflowTests(unittest.TestCase):
         self.assertNotIn("windows-latest", text)
         self.assertEqual(
             [],
-            workflow_action_minimum_issues(
+            workflow_action_pin_issues(
                 text,
                 {
-                    "actions/checkout": 7,
-                    "actions/setup-python": 6,
-                    "actions/setup-node": 7,
-                    "actions/upload-artifact": 7,
-                    "actions/download-artifact": 8,
+                    "actions/checkout": (7, "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"),
+                    "actions/setup-python": (6, "ece7cb06caefa5fff74198d8649806c4678c61a1"),
+                    "actions/setup-node": (7, "820762786026740c76f36085b0efc47a31fe5020"),
+                    "actions/upload-artifact": (7, "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
+                    "actions/download-artifact": (8, "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"),
                 },
             ),
         )
@@ -109,7 +110,8 @@ class CiCdWorkflowTests(unittest.TestCase):
             "python verify.py",
             "PIP_NO_CACHE_DIR",
             "python -m pip install --no-cache-dir --upgrade pip",
-            "python -m pip install --no-cache-dir -r requirements.txt",
+            "python -m pip install --no-cache-dir --require-hashes -r requirements.lock",
+            "python -m pip install --no-cache-dir --no-deps -e .",
             "python -m build",
             "Validate package version matches release tag",
             "Python compatibility",
@@ -121,7 +123,7 @@ class CiCdWorkflowTests(unittest.TestCase):
             "macos-26",
             "windows-2025-vs2026",
             "requirements-build.txt",
-            "requirements.txt",
+            "requirements.lock",
             "pyproject.toml",
             "dotnet tool install --global wix --version 6.0.2",
             'Expected WiX Toolset 6.0.2',
@@ -130,6 +132,14 @@ class CiCdWorkflowTests(unittest.TestCase):
             "Windows x64 MSI installer",
             'node-version: "24"',
             "sha256sum * > SHA256SUMS.txt",
+            "Generate SPDX SBOM",
+            "scripts/generate_release_sbom.py",
+            "actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3",
+            "attestations: write",
+            "id-token: write",
+            "Enforce Windows code-signing policy",
+            "REQUIRE_WINDOWS_CODE_SIGNING",
+            "scripts/sign_windows_release.py",
             "gh release create",
             "gh release upload",
             "--target \"${GITHUB_SHA}\"",
@@ -147,14 +157,15 @@ class CiCdWorkflowTests(unittest.TestCase):
         self.assertNotIn("windows-latest", text)
         self.assertEqual(
             [],
-            workflow_action_minimum_issues(
+            workflow_action_pin_issues(
                 text,
                 {
-                    "actions/checkout": 7,
-                    "actions/setup-python": 6,
-                    "actions/setup-node": 7,
-                    "actions/upload-artifact": 7,
-                    "actions/download-artifact": 8,
+                    "actions/checkout": (7, "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"),
+                    "actions/setup-python": (6, "ece7cb06caefa5fff74198d8649806c4678c61a1"),
+                    "actions/setup-node": (7, "820762786026740c76f36085b0efc47a31fe5020"),
+                    "actions/upload-artifact": (7, "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
+                    "actions/download-artifact": (8, "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"),
+                    "actions/attest-build-provenance": (3, "43d14bc2b83dec42d39ecae14e916627a18bb661"),
                 },
             ),
         )
@@ -174,13 +185,13 @@ class CiCdWorkflowTests(unittest.TestCase):
 
         self.assertEqual(
             [],
-            workflow_action_minimum_issues(
+            workflow_action_pin_issues(
                 security,
                 {
-                    "actions/checkout": 7,
-                    "actions/dependency-review-action": 5,
-                    "github/codeql-action/init": 4,
-                    "github/codeql-action/analyze": 4,
+                    "actions/checkout": (7, "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"),
+                    "actions/dependency-review-action": (5, "a1d282b36b6f3519aa1f3fc636f609c47dddb294"),
+                    "github/codeql-action/init": (4, "eec0bff2f6c15bf3f1e8a0152f94d17664a06a06"),
+                    "github/codeql-action/analyze": (4, "eec0bff2f6c15bf3f1e8a0152f94d17664a06a06"),
                 },
             ),
         )
@@ -196,24 +207,24 @@ class CiCdWorkflowTests(unittest.TestCase):
                 self.assertIn(fragment, dependabot)
         self.assertNotIn("labels:", dependabot)
 
-    def test_action_policy_accepts_upgrades_and_rejects_downgrades(self) -> None:
-        minimums = {
-            "actions/checkout": 7,
-            "actions/setup-node": 7,
+    def test_action_policy_accepts_reviewed_pins_and_rejects_drift(self) -> None:
+        expected = {
+            "actions/checkout": (7, "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"),
+            "actions/setup-node": (7, "820762786026740c76f36085b0efc47a31fe5020"),
         }
-        future = """
-        - uses: actions/checkout@v8
-        - uses: actions/setup-node@v9 # future major
+        reviewed = """
+        - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         """
-        outdated = """
-        - uses: actions/checkout@v7
-        - uses: actions/setup-node@v6
+        drifted = """
+        - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         """
 
-        self.assertEqual([], workflow_action_minimum_issues(future, minimums))
+        self.assertEqual([], workflow_action_pin_issues(reviewed, expected))
         self.assertEqual(
-            ["actions/setup-node requires v7+; found v6"],
-            workflow_action_minimum_issues(outdated, minimums),
+            ["actions/setup-node requires # v7; found # v6"],
+            workflow_action_pin_issues(drifted, expected),
         )
 
     def test_actionlint_knows_the_intentional_windows_10_runner_label(self) -> None:
@@ -250,7 +261,8 @@ class CiCdWorkflowTests(unittest.TestCase):
             "SHA256SUMS.txt",
             "release environment",
             "branch protection",
-            "No custom release secrets are required",
+            "Windows code-signing credentials are required",
+            "docs/PRODUCTION_OPERATIONS.md",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, docs)

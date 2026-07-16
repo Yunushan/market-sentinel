@@ -263,8 +263,13 @@ source .venv/bin/activate  # (macOS/Linux)
 
 ### 2) Install deps
 ```bash
-pip install -r requirements.txt
+pip install --require-hashes -r requirements.lock
+pip install --no-deps -e .
 ```
+
+`requirements.lock` is the reviewed, hash-protected production dependency set.
+Regenerate it only as part of an intentional dependency update with
+`python -m piptools compile --generate-hashes --strip-extras --output-file requirements.lock pyproject.toml`.
 
 ### 3) (Optional) set up LIVE trading credentials
 Copy `.env.example` to `.env` and fill values:
@@ -557,12 +562,12 @@ If `frontend/node_modules` is missing, the normal verifier records frontend buil
 
 GitHub Actions workflows live under `.github/workflows`:
 - `ci.yml` runs Python verification across Ubuntu, macOS `14`/`15`/`26`, and hosted Windows with Python `3.10` through `3.14`, runs a moving latest stable `3.x` compatibility lane for future Python releases, smoke checks RHEL UBI 8/9/10, a RHEL 7-era manylinux2014 ABI container, Rocky Linux 8/9/10, hosted Windows 11 ARM with Python `3.12` x64 dependency wheels, mobile web profiles for Android 14/15/16 and iOS 15/16/18/26, includes an opt-in self-hosted Windows 10 job gated by `ENABLE_WINDOWS_10_SELF_HOSTED=true`, builds the React frontend with Node.js `24`, and builds Python distributions.
-- `security.yml` runs CodeQL analysis and runs dependency review only when GitHub dependency graph is enabled.
-- `release.yml` publishes tagged releases (`v*.*.*`) with Python package artifacts, a zipped React production bundle, Windows x64 portable/installer packages, and SHA256 checksums. Local verification rejects reusing an existing release tag from a newer commit and requires an untagged project version to be newer than the latest tag.
+- `security.yml` runs CodeQL analysis and requires dependency review on pull requests once the repository dependency graph is enabled.
+- `release.yml` publishes tagged releases (`v*.*.*`) with Python package artifacts, a zipped React production bundle, Windows x64 portable/installer packages, SHA256 checksums, an SPDX SBOM, and GitHub build-provenance attestations. Local verification rejects reusing an existing release tag from a newer commit and requires an untagged project version to be newer than the latest tag.
 
 Dependabot is configured in `.github/dependabot.yml` for GitHub Actions, Python, and frontend npm dependency updates.
 
-See `docs/CI_CD.md` for the release process, recommended branch protection, release environment setup, and strict frontend build verification.
+See `docs/CI_CD.md` for the release process, recommended branch protection, release environment setup, and strict frontend build verification. See `docs/PRODUCTION_OPERATIONS.md` for hardened Linux deployment and `docs/REPOSITORY_SETTINGS.md` for required GitHub controls.
 
 In-app checks:
 - **About -> Check versions** compares installed dependency versions with PyPI.

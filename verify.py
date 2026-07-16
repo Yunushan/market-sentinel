@@ -43,30 +43,31 @@ MIN_TOTAL_BRANCH_COVERAGE = 65.0
 MIN_BACKEND_BRANCH_COVERAGE = 74.0
 BACKEND_COVERAGE_INCLUDE = "core/*,market_adapters/*,polymarket/*,web_api.py,market_sentinel_cli.py"
 
-WORKFLOW_ACTION_MINIMUM_MAJORS = {
+WORKFLOW_ACTION_PINS = {
     ".github/workflows/ci.yml": {
-        "actions/checkout": 7,
-        "actions/setup-python": 6,
-        "actions/setup-node": 7,
-        "actions/upload-artifact": 7,
-        "actions/download-artifact": 8,
+        "actions/checkout": (7, "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"),
+        "actions/setup-python": (6, "ece7cb06caefa5fff74198d8649806c4678c61a1"),
+        "actions/setup-node": (7, "820762786026740c76f36085b0efc47a31fe5020"),
+        "actions/upload-artifact": (7, "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
+        "actions/download-artifact": (8, "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"),
     },
     ".github/workflows/release.yml": {
-        "actions/checkout": 7,
-        "actions/setup-python": 6,
-        "actions/setup-node": 7,
-        "actions/upload-artifact": 7,
-        "actions/download-artifact": 8,
+        "actions/checkout": (7, "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"),
+        "actions/setup-python": (6, "ece7cb06caefa5fff74198d8649806c4678c61a1"),
+        "actions/setup-node": (7, "820762786026740c76f36085b0efc47a31fe5020"),
+        "actions/upload-artifact": (7, "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
+        "actions/download-artifact": (8, "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"),
+        "actions/attest-build-provenance": (3, "43d14bc2b83dec42d39ecae14e916627a18bb661"),
     },
     ".github/workflows/security.yml": {
-        "actions/checkout": 7,
-        "actions/dependency-review-action": 5,
-        "github/codeql-action/init": 4,
-        "github/codeql-action/analyze": 4,
+        "actions/checkout": (7, "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"),
+        "actions/dependency-review-action": (5, "a1d282b36b6f3519aa1f3fc636f609c47dddb294"),
+        "github/codeql-action/init": (4, "eec0bff2f6c15bf3f1e8a0152f94d17664a06a06"),
+        "github/codeql-action/analyze": (4, "eec0bff2f6c15bf3f1e8a0152f94d17664a06a06"),
     },
 }
 WORKFLOW_ACTION_REF_RE = re.compile(
-    r"(?m)^\s*(?:-\s*)?uses:\s*['\"]?([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)@v(\d+)['\"]?\s*(?:#.*)?$"
+    r"(?m)^\s*(?:-\s*)?uses:\s*['\"]?([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)@([0-9a-f]{40})['\"]?\s*#\s*v(\d+)\s*$"
 )
 
 
@@ -1012,24 +1013,25 @@ def run_launch_ux_check() -> None:
     print("[ok] launch UX")
 
 
-def workflow_action_minimum_issues(
+def workflow_action_pin_issues(
     text: str,
-    minimum_majors: dict[str, int],
+    expected_actions: Mapping[str, Tuple[int, str]],
 ) -> list[str]:
-    observed: dict[str, list[int]] = {}
-    for action, major_text in WORKFLOW_ACTION_REF_RE.findall(text):
-        observed.setdefault(action, []).append(int(major_text))
+    observed: dict[str, list[Tuple[str, int]]] = {}
+    for action, revision, major_text in WORKFLOW_ACTION_REF_RE.findall(text):
+        observed.setdefault(action, []).append((revision, int(major_text)))
 
     issues: list[str] = []
-    for action, minimum_major in minimum_majors.items():
-        majors = observed.get(action)
-        if not majors:
-            issues.append(f"{action}@v{minimum_major}+ is missing")
+    for action, (expected_major, expected_revision) in expected_actions.items():
+        references = observed.get(action)
+        if not references:
+            issues.append(f"{action} must be pinned to a 40-character SHA with a # v{expected_major} comment")
             continue
-        outdated = sorted({major for major in majors if major < minimum_major})
-        if outdated:
-            found = ", ".join(f"v{major}" for major in outdated)
-            issues.append(f"{action} requires v{minimum_major}+; found {found}")
+        for revision, major in references:
+            if major != expected_major:
+                issues.append(f"{action} requires # v{expected_major}; found # v{major}")
+            if revision != expected_revision:
+                issues.append(f"{action} must use reviewed SHA {expected_revision}; found {revision}")
     return issues
 
 
@@ -1075,7 +1077,8 @@ def run_ci_cd_workflow_check() -> None:
             '"3.x"',
             "PIP_NO_CACHE_DIR",
             "python -m pip install --no-cache-dir --upgrade pip",
-            "python -m pip install --no-cache-dir -r requirements.txt",
+            "python -m pip install --no-cache-dir --require-hashes -r requirements.lock",
+            "python -m pip install --no-cache-dir --no-deps -e .",
             "python verify.py",
             "npm run build",
             "Smoke install built wheel",
@@ -1097,10 +1100,19 @@ def run_ci_cd_workflow_check() -> None:
             "windows-2025-vs2026",
             "PIP_NO_CACHE_DIR",
             "python -m pip install --no-cache-dir --upgrade pip",
-            "python -m pip install --no-cache-dir -r requirements.txt",
+            "python -m pip install --no-cache-dir --require-hashes -r requirements.lock",
+            "python -m pip install --no-cache-dir --no-deps -e .",
             "scripts/build_windows_release.py",
             "windows-dist",
             "sha256sum * > SHA256SUMS.txt",
+            "Generate SPDX SBOM",
+            "scripts/generate_release_sbom.py",
+            "actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3",
+            "attestations: write",
+            "id-token: write",
+            "Enforce Windows code-signing policy",
+            "REQUIRE_WINDOWS_CODE_SIGNING",
+            "scripts/sign_windows_release.py",
             "gh release create",
             "Smoke install built wheel",
             "--force-reinstall --no-deps",
@@ -1128,12 +1140,53 @@ def run_ci_cd_workflow_check() -> None:
             "License-Expression",
             "frontend/node_modules/",
         ),
+        ROOT / "scripts" / "verify_dependency_lock.py": (
+            "requirements.lock",
+            "hash protected",
+            "direct dependency",
+        ),
+        ROOT / "scripts" / "generate_release_sbom.py": (
+            "SPDX-2.3",
+            "requirements.lock",
+            "package-lock.json",
+        ),
+        ROOT / "scripts" / "sign_windows_release.py": (
+            "signtool",
+            "WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64",
+            "WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD",
+        ),
+        ROOT / "deploy" / "systemd" / "market-sentinel-web.service": (
+            "--host 127.0.0.1",
+            "NoNewPrivileges=true",
+            "ProtectSystem=strict",
+            "verify_service_health.py",
+        ),
+        ROOT / "deploy" / "caddy" / "Caddyfile.example": (
+            "basic_auth",
+            "X-Market-Sentinel-Token",
+            "127.0.0.1:8765",
+        ),
+        ROOT / "SECURITY.md": (
+            "Report a vulnerability",
+            "loopback-only",
+        ),
+        ROOT / "docs" / "PRODUCTION_OPERATIONS.md": (
+            "Incident response",
+            "Restore drill",
+            "Funded production acceptance",
+        ),
+        ROOT / "docs" / "REPOSITORY_SETTINGS.md": (
+            "Required review from Code Owners",
+            "secret scanning",
+            "REQUIRE_WINDOWS_CODE_SIGNING=true",
+        ),
         ROOT / "docs" / "CI_CD.md": (
             "Release Process",
             "python verify.py --frontend-build",
             "Windows Release Packages",
             "docs/PLATFORM_SUPPORT.md",
-            "No custom release secrets are required",
+            "Windows code-signing credentials are required",
+            "docs/PRODUCTION_OPERATIONS.md",
         ),
         ROOT / "docs" / "PLATFORM_SUPPORT.md": (
             "Windows",
@@ -1154,9 +1207,9 @@ def run_ci_cd_workflow_check() -> None:
         if missing:
             raise SystemExit(f"{path.relative_to(ROOT)} is missing CI/CD fragments: {', '.join(missing)}")
 
-    for relative_path, minimum_majors in WORKFLOW_ACTION_MINIMUM_MAJORS.items():
+    for relative_path, expected_actions in WORKFLOW_ACTION_PINS.items():
         path = ROOT / relative_path
-        issues = workflow_action_minimum_issues(path.read_text(encoding="utf-8"), minimum_majors)
+        issues = workflow_action_pin_issues(path.read_text(encoding="utf-8"), expected_actions)
         if issues:
             raise SystemExit(f"{relative_path} has invalid action versions: {'; '.join(issues)}")
     result = subprocess.run(
@@ -1167,6 +1220,14 @@ def run_ci_cd_workflow_check() -> None:
     )
     if result.returncode != 0:
         raise SystemExit("Platform support claim check failed:\n" + (result.stdout + result.stderr).strip())
+    result = subprocess.run(
+        [sys.executable, "scripts/verify_dependency_lock.py"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise SystemExit("Dependency lock check failed:\n" + (result.stdout + result.stderr).strip())
     print("[ok] CI/CD workflows")
 
 

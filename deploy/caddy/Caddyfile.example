@@ -1,0 +1,20 @@
+# Replace analytics.example.com before use. Caddy obtains and renews TLS
+# certificates automatically when DNS and ports 80/443 point at this host.
+analytics.example.com {
+    encode zstd gzip
+    basic_auth {
+        operator {$MARKET_SENTINEL_CADDY_PASSWORD_HASH}
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        -Server
+    }
+
+    reverse_proxy 127.0.0.1:8765 {
+        header_up X-Market-Sentinel-Token {$MARKET_SENTINEL_API_TOKEN}
+    }
+}

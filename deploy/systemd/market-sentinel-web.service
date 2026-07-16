@@ -1,0 +1,33 @@
+[Unit]
+Description=MarketSentinel local web API
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=market-sentinel
+Group=market-sentinel
+WorkingDirectory=/opt/market-sentinel
+EnvironmentFile=-/etc/market-sentinel/market-sentinel.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/market-sentinel/.venv/bin/python -m web_api --host 127.0.0.1 --port 8765 --config /var/lib/market-sentinel/config.json --frontend-dir /opt/market-sentinel/frontend/dist
+ExecStartPost=/opt/market-sentinel/.venv/bin/python /opt/market-sentinel/scripts/verify_service_health.py --retries 20 --retry-delay 1
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/market-sentinel
+
+[Install]
+WantedBy=multi-user.target

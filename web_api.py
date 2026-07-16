@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import hashlib
+import ipaddress
 import json
 import mimetypes
 import os
@@ -11,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, cast
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 from urllib.parse import parse_qs, unquote, urlparse
 
 from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, UIDesign, WalletWatch
@@ -3325,11 +3327,33 @@ class ReactGuiServer(ThreadingHTTPServer):
         config_path: Path = DEFAULT_CONFIG_PATH,
         frontend_dir: Path = DEFAULT_FRONTEND_DIR,
         adapter_registry: Optional[AdapterRegistry] = None,
+        api_token: str = "",
+        allowed_origins: Optional[Sequence[str]] = None,
     ) -> None:
+        bind_host = str(server_address[0]).strip()
+        is_loopback = is_loopback_host(bind_host)
+        token = str(api_token or "").strip()
+        if not is_loopback and not token:
+            raise ValueError("A non-loopback React GUI bind requires a non-empty API token.")
         super().__init__(server_address, request_handler_class)
+        self.bind_host = bind_host
+        self.is_loopback = is_loopback
+        self.api_token = token
         self.config_path = config_path
         self.frontend_dir = frontend_dir
         self.adapter_registry = adapter_registry or build_default_registry()
+        default_origins = {
+            f"http://{self.bind_host}:{self.server_address[1]}",
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+            "http://127.0.0.1:4173",
+            "http://localhost:4173",
+        }
+        self.allowed_origins = {
+            str(origin).strip().rstrip("/")
+            for origin in (allowed_origins or default_origins)
+            if str(origin).strip()
+        }
         self.paper_position_marks: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self.alert_price_state: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self.wallet_recent_activity: List[Dict[str, Any]] = []
@@ -3344,11 +3368,16 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
     server_version = "PredictionMarketReactGui/0.1"
 
     def do_OPTIONS(self) -> None:
+        if not self._origin_is_allowed():
+            self._send_error(HTTPStatus.FORBIDDEN, "cors_origin_forbidden", "Request origin is not allowed.")
+            return
         self.send_response(HTTPStatus.NO_CONTENT)
         self._send_cors_headers()
         self.end_headers()
 
     def do_GET(self) -> None:
+        if not self._require_authorized_request():
+            return
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/"):
             self._handle_api_get(parsed.path, parsed.query)
@@ -3356,12 +3385,18 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self._serve_static(parsed.path)
 
     def do_PATCH(self) -> None:
+        if not self._require_authorized_request():
+            return
         self._handle_mutation("PATCH")
 
     def do_POST(self) -> None:
+        if not self._require_authorized_request():
+            return
         self._handle_mutation("POST")
 
     def do_DELETE(self) -> None:
+        if not self._require_authorized_request():
+            return
         self._handle_mutation("DELETE")
 
     def log_message(self, fmt: str, *args: Any) -> None:
@@ -3376,6 +3411,26 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
 
     def _save_config(self, cfg: AppConfig) -> None:
         save_config(cfg, self.app_server.config_path)
+
+    def _origin_is_allowed(self) -> bool:
+        origin = str(self.headers.get("Origin") or "").strip().rstrip("/")
+        return not origin or origin in self.app_server.allowed_origins
+
+    def _require_authorized_request(self) -> bool:
+        if not self._origin_is_allowed():
+            self._send_error(HTTPStatus.FORBIDDEN, "cors_origin_forbidden", "Request origin is not allowed.")
+            return False
+        expected = self.app_server.api_token
+        if not expected:
+            return True
+        presented = str(self.headers.get("X-Market-Sentinel-Token") or "").strip()
+        authorization = str(self.headers.get("Authorization") or "").strip()
+        if authorization.lower().startswith("bearer "):
+            presented = authorization[7:].strip()
+        if hmac.compare_digest(presented, expected):
+            return True
+        self._send_error(HTTPStatus.UNAUTHORIZED, "api_token_required", "A valid API token is required for this server.")
+        return False
 
     def _handle_api_get(self, path: str, query: str = "") -> None:
         try:
@@ -4075,13 +4130,46 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self._send_json(status, api_error_payload(status, code, message, details))
 
     def _send_cors_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = str(self.headers.get("Origin") or "").strip().rstrip("/")
+        if origin and origin in self.app_server.allowed_origins:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, PATCH, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Market-Sentinel-Token")
 
 
-def run_server(host: str, port: int, config_path: Path, frontend_dir: Path) -> None:
-    server = ReactGuiServer((host, port), ReactGuiHandler, config_path=config_path, frontend_dir=frontend_dir)
+def is_loopback_host(host: str) -> bool:
+    normalized = str(host or "").strip().lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def run_server(
+    host: str,
+    port: int,
+    config_path: Path,
+    frontend_dir: Path,
+    *,
+    api_token: str = "",
+    allow_remote: bool = False,
+    allowed_origins: Optional[Sequence[str]] = None,
+) -> None:
+    if not is_loopback_host(host) and not allow_remote:
+        raise ValueError(
+            "Refusing a non-loopback bind without --allow-remote. Keep the default loopback bind and use a TLS reverse proxy."
+        )
+    server = ReactGuiServer(
+        (host, port),
+        ReactGuiHandler,
+        config_path=config_path,
+        frontend_dir=frontend_dir,
+        api_token=api_token,
+        allowed_origins=allowed_origins,
+    )
     print(f"React GUI API listening on http://{host}:{port}")
     if (frontend_dir / "index.html").exists():
         print(f"Serving built React GUI from {frontend_dir}")
@@ -4103,8 +4191,32 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--frontend-dir", type=Path, default=DEFAULT_FRONTEND_DIR)
+    parser.add_argument(
+        "--api-token",
+        default=os.environ.get("MARKET_SENTINEL_API_TOKEN", ""),
+        help="Required for non-loopback binds. Defaults to MARKET_SENTINEL_API_TOKEN.",
+    )
+    parser.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="Acknowledge a non-loopback bind. Requires --api-token or MARKET_SENTINEL_API_TOKEN.",
+    )
+    parser.add_argument(
+        "--allow-origin",
+        action="append",
+        default=None,
+        help="Additional browser Origin allowed for CORS. Repeat as needed; wildcard origins are never accepted.",
+    )
     args = parser.parse_args()
-    run_server(args.host, args.port, args.config, args.frontend_dir)
+    run_server(
+        args.host,
+        args.port,
+        args.config,
+        args.frontend_dir,
+        api_token=args.api_token,
+        allow_remote=args.allow_remote,
+        allowed_origins=args.allow_origin,
+    )
 
 
 if __name__ == "__main__":

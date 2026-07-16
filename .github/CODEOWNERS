@@ -1,0 +1,7 @@
+# Production-sensitive paths require repository owner review.
+* @Yunushan
+/polymarket/ @Yunushan
+/market_adapters/ @Yunushan
+/.github/ @Yunushan
+/deploy/ @Yunushan
+/requirements.lock @Yunushan

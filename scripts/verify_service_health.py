@@ -1,0 +1,48 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import time
+from urllib.error import URLError
+from urllib.request import Request, urlopen
+
+
+def check_health(url: str, token: str, timeout: float) -> dict:
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = Request(url, headers=headers, method="GET")
+    with urlopen(request, timeout=timeout) as response:
+        if response.status != 200:
+            raise RuntimeError(f"health endpoint returned HTTP {response.status}")
+        payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(payload, dict) or payload.get("status") != "ok":
+        raise RuntimeError("health endpoint did not report status=ok")
+    return payload
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Check the local MarketSentinel web API health endpoint.")
+    parser.add_argument("--url", default="http://127.0.0.1:8765/api/health")
+    parser.add_argument("--token", default=os.environ.get("MARKET_SENTINEL_API_TOKEN", ""))
+    parser.add_argument("--timeout", type=float, default=5.0)
+    parser.add_argument("--retries", type=int, default=12)
+    parser.add_argument("--retry-delay", type=float, default=1.0)
+    args = parser.parse_args()
+
+    last_error: Exception | None = None
+    for attempt in range(1, max(1, args.retries) + 1):
+        try:
+            payload = check_health(args.url, args.token, args.timeout)
+            print(f"[ok] service health on attempt {attempt}: {payload.get('message', 'ok')}")
+            return 0
+        except (OSError, URLError, RuntimeError, json.JSONDecodeError) as exc:
+            last_error = exc
+            if attempt < max(1, args.retries):
+                time.sleep(max(0.0, args.retry_delay))
+    raise SystemExit(f"Service health check failed after {args.retries} attempts: {last_error}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
