@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from core.models import AppConfig, CopyTradeSettings, MarketConfig, PaperTradeRecord, PriceAlert, WalletWatch
-from core.storage import CONFIG_PATH_ENV, default_config_path, load_config, save_config
+from core.storage import CONFIG_PATH_ENV, ConfigLoadError, default_config_path, load_config, save_config
 from market_adapters import MARKET_IDS
 from polymarket.util import is_wallet_address, normalize_wallet
 
@@ -134,18 +134,13 @@ class CoreModelTests(unittest.TestCase):
         self.assertTrue(loaded.enabled)
         self.assertEqual(loaded.settings, {"api_key_env": "KALSHI_API_KEY"})
 
-    def test_corrupt_config_returns_defaults(self) -> None:
+    def test_corrupt_config_fails_closed_and_preserves_the_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "config.json"
             path.write_text("{not-json", encoding="utf-8")
-            loaded = load_config(path)
-
-        self.assertEqual(loaded.alerts, [])
-        self.assertEqual(loaded.wallets, [])
-        self.assertEqual(loaded.theme, "light")
-        self.assertEqual(loaded.ui_design, "aurora_2026")
-        self.assertEqual(loaded.selected_market_id, "polymarket")
-        self.assertEqual(set(loaded.markets), set(MARKET_IDS))
+            with self.assertRaisesRegex(ConfigLoadError, "Configuration file cannot be loaded"):
+                load_config(path)
+            self.assertEqual(path.read_text(encoding="utf-8"), "{not-json")
 
     def test_default_config_path_can_use_environment_override(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -14,7 +14,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, WalletWatch
-from core.storage import load_config, save_config
+from core.storage import ConfigLoadError, load_config, save_config
 from market_adapters.base import MarketAdapter
 from market_adapters.types import (
     MarketCapabilities,
@@ -81,6 +81,10 @@ from web_api import (
     refresh_alert_price,
     ReactGuiHandler,
     ReactGuiServer,
+    _normalize_allowed_origin,
+    _safe_attachment_filename,
+    _safe_http_header_value,
+    run_server,
     submit_paper_order,
     update_wallet_watch,
     wallets_payload,
@@ -280,6 +284,23 @@ class WebApiTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "non-loopback"):
             ReactGuiServer(("0.0.0.0", 0), ReactGuiHandler)
+
+    def test_server_refuses_to_start_with_a_corrupt_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.json"
+            config_path.write_text("{not-json", encoding="utf-8")
+
+            with self.assertRaises(ConfigLoadError):
+                run_server("127.0.0.1", 0, config_path, root / "dist")
+
+    def test_dynamic_http_header_values_cannot_inject_response_headers(self) -> None:
+        injected = 'report.csv\r\nSet-Cookie: compromised=true\n'
+
+        self.assertEqual(_safe_http_header_value(injected), "report.csvSet-Cookie: compromised=true")
+        self.assertEqual(_safe_attachment_filename('report".csv\r\nX-Test: injected'), "report.csvX-Test: injected")
+        self.assertEqual(_normalize_allowed_origin("https://console.example\r\nX-Test: injected"), "")
+        self.assertEqual(_normalize_allowed_origin("https://console.example/"), "https://console.example")
 
     def test_api_token_and_cors_allowlist_are_enforced(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -178,6 +178,9 @@ class CiCdWorkflowTests(unittest.TestCase):
             "actions/dependency-review-action",
             "security-events: write",
             "fail-on-severity: high",
+            "Frontend dependency audit",
+            "npm ci --ignore-scripts",
+            "npm audit --omit=dev --audit-level=high",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, security)
@@ -188,6 +191,7 @@ class CiCdWorkflowTests(unittest.TestCase):
                 security,
                 {
                     "actions/checkout": (7, "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"),
+                    "actions/setup-node": (7, "820762786026740c76f36085b0efc47a31fe5020"),
                     "actions/dependency-review-action": (5, "a1d282b36b6f3519aa1f3fc636f609c47dddb294"),
                     "github/codeql-action/init": (4, "eec0bff2f6c15bf3f1e8a0152f94d17664a06a06"),
                     "github/codeql-action/analyze": (4, "eec0bff2f6c15bf3f1e8a0152f94d17664a06a06"),

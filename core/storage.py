@@ -12,6 +12,10 @@ from .models import AppConfig
 CONFIG_PATH_ENV = "PREDICTION_MARKET_CONFIG_PATH"
 
 
+class ConfigLoadError(RuntimeError):
+    """Raised when an existing configuration file cannot be loaded safely."""
+
+
 def default_config_path() -> Path:
     configured_path = os.environ.get(CONFIG_PATH_ENV)
     if configured_path:
@@ -28,9 +32,10 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     try:
         data: Dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
         return AppConfig.from_dict(data)
-    except Exception:
-        # If config is corrupted, don't crash; return defaults.
-        return AppConfig()
+    except Exception as exc:
+        raise ConfigLoadError(
+            f"Configuration file cannot be loaded: {path}. The file was left unchanged; restore it from a backup or replace it with data/config.example.json."
+        ) from exc
 
 
 def save_config(cfg: AppConfig, path: Path = DEFAULT_CONFIG_PATH) -> None:
