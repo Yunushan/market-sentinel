@@ -31,6 +31,13 @@ commits. Keep `.github/CODEOWNERS` current before enabling that policy.
    secret scanning, and push protection.
 2. Enable private vulnerability reporting.
 3. Review and merge or close the active Dependabot pull requests after CI.
+4. In `Actions` -> `General`, allow selected actions only, permit GitHub-owned
+   actions, and keep SHA pinning required. The checked-in workflows use only
+   SHA-pinned `actions/*` and `github/*` actions; do not broaden this policy
+   without reviewing the new action's provenance and permissions.
+5. Enable non-provider secret-pattern scanning when GitHub makes that control
+   available for the repository plan. It complements, but does not replace,
+   secret scanning push protection and the source-level secret hygiene gate.
 
 ## Release environment
 
