@@ -27,6 +27,8 @@ class ProductionOperationsTests(unittest.TestCase):
             "--config /var/lib/market-sentinel/config.json",
             "--frontend-dir /opt/market-sentinel/frontend/dist",
             "verify_service_health.py",
+            "StartLimitIntervalSec=5min",
+            "StartLimitBurst=5",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, unit)
@@ -61,6 +63,9 @@ class ProductionOperationsTests(unittest.TestCase):
             "PrivateDevices=true",
             "ProtectSystem=strict",
             "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+            "StartLimitIntervalSec=5min",
+            "StartLimitBurst=5",
+            "TimeoutStartSec=30",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, health_unit)
