@@ -10,7 +10,7 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from polymarket import bridge, clob_auth, clob_rest, data_api, gamma, relayer
+from polymarket import bridge, clob_auth, clob_rest, data_api, gamma, relayer, ws_market, ws_sports, ws_user
 from polymarket.analytics_cache import (
     POLYMARKET_MDD_AUDIT_KIND,
     load_analytics_cache,
@@ -1653,6 +1653,171 @@ class PolymarketApiWrapperTests(unittest.TestCase):
         self.assertEqual(subscription["markets"], ["condition-1"])
         self.assertEqual(subscription["auth"]["secret"], "secret-value")
         self.assertNotIn("secret-value", str(result))
+
+    def test_user_websocket_probe_tolerates_a_missing_reply_and_closes_connection(self) -> None:
+        class SilentConnection:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def send(self, message: str) -> None:
+                return None
+
+            def recv(self) -> str:
+                raise TimeoutError("no reply")
+
+            def close(self) -> None:
+                self.closed = True
+
+        connection = SilentConnection()
+        result = probe_user_websocket(
+            {"apiKey": "key", "secret": "secret", "passphrase": "pass"},
+            connection_factory=lambda *_args, **_kwargs: connection,
+        )
+
+        self.assertTrue(result["connected"])
+        self.assertTrue(result["subscription_sent"])
+        self.assertFalse(result["received_message"])
+        self.assertEqual(result["message_sample_type"], "")
+        self.assertTrue(connection.closed)
+
+    def test_market_websocket_dispatches_valid_messages_and_queues_subscription_changes(self) -> None:
+        events = []
+        created = []
+
+        class FakeThread:
+            def __init__(self, *args, **kwargs) -> None:
+                return None
+
+            def start(self) -> None:
+                return None
+
+        class FakeWebSocketApp:
+            def __init__(self, url, *, on_open, on_message, on_error, on_close) -> None:
+                self.url = url
+                self.sent = []
+                self._on_open = on_open
+                self._on_message = on_message
+                self._on_error = on_error
+                self._on_close = on_close
+                created.append(self)
+
+            def send(self, message: str) -> None:
+                self.sent.append(message)
+
+            def close(self) -> None:
+                return None
+
+            def run_forever(self) -> None:
+                self._on_open(self)
+                self._on_message(self, "PING")
+                self._on_message(self, '{"event":"book"}')
+                self._on_message(self, "not-json")
+                self._on_error(self, RuntimeError("test error"))
+                self._on_close(self, 1000, "normal")
+
+        client = ws_market.MarketWSClient(
+            ["asset-1"],
+            events.append,
+            custom_feature_enabled=True,
+            url_base="wss://example.test/base/",
+        )
+        with patch.object(ws_market, "WebSocketApp", FakeWebSocketApp), patch.object(
+            ws_market.threading, "Thread", FakeThread
+        ):
+            client._connect_once()
+
+        self.assertEqual(created[0].url, "wss://example.test/base/ws/market")
+        self.assertEqual(json.loads(created[0].sent[0]), {
+            "assets_ids": ["asset-1"],
+            "type": "market",
+            "custom_feature_enabled": True,
+        })
+        self.assertEqual(events, [{"event": "book"}])
+
+        client.subscribe(["asset-2"])
+        self.assertEqual(json.loads(client._outbox.get_nowait()), {
+            "assets_ids": ["asset-2"],
+            "operation": "subscribe",
+            "custom_feature_enabled": True,
+        })
+        client.unsubscribe(["asset-1"])
+        self.assertEqual(json.loads(client._outbox.get_nowait()), {
+            "assets_ids": ["asset-1"],
+            "operation": "unsubscribe",
+            "custom_feature_enabled": True,
+        })
+        self.assertEqual(client._token_ids, {"asset-2"})
+
+    def test_user_and_sports_websocket_clients_dispatch_events_and_protocol_pings(self) -> None:
+        user_events = []
+        sports_events = []
+        user_created = []
+        sports_created = []
+
+        class FakeThread:
+            def __init__(self, *args, **kwargs) -> None:
+                return None
+
+            def start(self) -> None:
+                return None
+
+        class UserWebSocketApp:
+            def __init__(self, url, *, on_open, on_message) -> None:
+                self.url = url
+                self.sent = []
+                self._on_open = on_open
+                self._on_message = on_message
+                user_created.append(self)
+
+            def send(self, message: str) -> None:
+                self.sent.append(message)
+
+            def close(self) -> None:
+                return None
+
+            def run_forever(self) -> None:
+                self._on_open(self)
+                self._on_message(self, "PONG")
+                self._on_message(self, '{"event":"trade"}')
+                self._on_message(self, "not-json")
+
+        class SportsWebSocketApp:
+            def __init__(self, url, *, on_message) -> None:
+                self.url = url
+                self.sent = []
+                self._on_message = on_message
+                sports_created.append(self)
+
+            def send(self, message: str) -> None:
+                self.sent.append(message)
+
+            def close(self) -> None:
+                return None
+
+            def run_forever(self) -> None:
+                self._on_message(self, "ping")
+                self._on_message(self, '{"event":"score"}')
+                self._on_message(self, "not-json")
+
+        user = ws_user.UserWSClient(
+            {"apiKey": "key", "secret": "secret", "passphrase": "pass"},
+            ["condition-1"],
+            user_events.append,
+            url_base="wss://example.test/base/",
+        )
+        sports = ws_sports.SportsWSClient(sports_events.append, url_base="wss://sports.example.test/base/")
+        with patch.object(ws_user, "WebSocketApp", UserWebSocketApp), patch.object(
+            ws_user.threading, "Thread", FakeThread
+        ), patch.object(ws_sports, "WebSocketApp", SportsWebSocketApp):
+            user._connect_once()
+            sports._connect_once()
+
+        self.assertEqual(user_created[0].url, "wss://example.test/base/ws/user")
+        self.assertEqual(json.loads(user_created[0].sent[0])["markets"], ["condition-1"])
+        self.assertEqual(user_events, [{"event": "trade"}])
+        self.assertEqual(sports_created[0].url, "wss://sports.example.test/base/ws")
+        self.assertEqual(sports_created[0].sent, ["pong"])
+        self.assertEqual(sports_events, [{"event": "score"}])
 
     def test_polymarket_official_api_coverage_manifest_uses_truthful_tiered_status(self) -> None:
         coverage = polymarket_official_api_coverage()
