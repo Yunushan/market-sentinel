@@ -4,6 +4,8 @@ import io
 import hashlib
 import json
 import sqlite3
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -14,6 +16,12 @@ from scripts.restore_state_backup import restore_backup, verify_backup
 
 
 class StateBackupTests(unittest.TestCase):
+    def test_restore_utility_runs_when_invoked_as_a_script_path(self) -> None:
+        script = Path(__file__).resolve().parent.parent / "scripts" / "restore_state_backup.py"
+        result = subprocess.run([sys.executable, str(script), "--help"], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Verify or restore", result.stdout)
+
     def test_backup_verification_and_restore_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

@@ -9,7 +9,10 @@ from typing import Any, Callable
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
-from scripts.verify_service_health import check_health
+if __package__:
+    from scripts.verify_service_health import check_health
+else:  # Supports the documented `python /path/to/scripts/verify_production_deployment.py` invocation.
+    from verify_service_health import check_health
 
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]

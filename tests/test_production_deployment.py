@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from scripts.verify_production_deployment import check_loopback, check_public_proxy, check_systemd
@@ -26,6 +28,12 @@ class _Response:
 
 
 class ProductionDeploymentTests(unittest.TestCase):
+    def test_verifier_runs_when_invoked_as_a_script_path(self) -> None:
+        script = Path(__file__).resolve().parent.parent / "scripts" / "verify_production_deployment.py"
+        result = subprocess.run([sys.executable, str(script), "--help"], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("production deployment evidence", result.stdout)
+
     def test_systemd_checks_require_active_and_enabled_units(self) -> None:
         def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
             if args[1] == "show":

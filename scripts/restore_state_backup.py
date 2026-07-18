@@ -8,7 +8,10 @@ import tarfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from scripts.backup_state import SCHEMA_VERSION, _sha256
+if __package__:
+    from scripts.backup_state import SCHEMA_VERSION, _sha256
+else:  # Supports the documented `python /path/to/scripts/restore_state_backup.py` invocation.
+    from backup_state import SCHEMA_VERSION, _sha256
 
 
 def _mkdir_private(path: Path) -> None:
