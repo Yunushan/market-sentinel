@@ -27,6 +27,8 @@ class ProductionOperationsTests(unittest.TestCase):
             "--config /var/lib/market-sentinel/config.json",
             "--frontend-dir /opt/market-sentinel/frontend/dist",
             "verify_service_health.py",
+            "StartLimitIntervalSec=5min",
+            "StartLimitBurst=5",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, unit)
@@ -39,9 +41,19 @@ class ProductionOperationsTests(unittest.TestCase):
         self.assertIn("basic_auth", proxy)
         self.assertIn("X-Market-Sentinel-Token", proxy)
         self.assertIn("127.0.0.1:8765", proxy)
+        self.assertIn("Content-Security-Policy", proxy)
+        self.assertIn("default-src 'self'", proxy)
+        self.assertIn("object-src 'none'", proxy)
+        self.assertIn("frame-ancestors 'none'", proxy)
+        self.assertIn("Permissions-Policy", proxy)
+        self.assertIn("Cross-Origin-Opener-Policy", proxy)
+        self.assertIn("Cross-Origin-Resource-Policy", proxy)
         self.assertIn("Report a vulnerability", security)
         self.assertIn("Team production policy", repository_settings)
         self.assertIn("secret scanning", repository_settings)
+        self.assertIn("Python package build", repository_settings)
+        self.assertIn("Frontend dependency audit", repository_settings)
+        self.assertIn("Release` workflow", repository_settings)
         self.assertIn("* @Yunushan", codeowners)
 
     def test_systemd_health_timer_performs_periodic_loopback_checks(self) -> None:
@@ -54,12 +66,28 @@ class ProductionOperationsTests(unittest.TestCase):
             "PrivateDevices=true",
             "ProtectSystem=strict",
             "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+            "StartLimitIntervalSec=5min",
+            "StartLimitBurst=5",
+            "TimeoutStartSec=30",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, health_unit)
         self.assertIn("OnUnitActiveSec=1min", timer)
         self.assertIn("Persistent=true", timer)
         self.assertIn("Unit=market-sentinel-health.service", timer)
+
+    def test_gitignore_excludes_generated_analytics_artifacts(self) -> None:
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        for fragment in (
+            "data/polymarket_analytics_cache.json",
+            "data/*.sqlite*",
+            "data/*.jsonl",
+            "data/*.csv",
+            "data/*.log",
+            "data/*.pid",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, gitignore)
 
 
 if __name__ == "__main__":

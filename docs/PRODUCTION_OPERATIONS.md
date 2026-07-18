@@ -11,7 +11,8 @@ regional restrictions.
 - Keep `web_api.py` bound to `127.0.0.1`; do not publish port `8765` in a
   firewall, Docker mapping, or cloud security group.
 - Serve browser access through a TLS reverse proxy with authentication. The
-  provided Caddy example supplies Basic Auth, TLS, security headers, and the
+  provided Caddy example supplies Basic Auth, TLS, a restrictive browser
+  content-security policy, cross-origin and permissions headers, and the
   upstream API token.
 - Run under the dedicated `market-sentinel` user. Use `/var/lib/market-sentinel`
   for state and a root-owned `/etc/market-sentinel/market-sentinel.env` for
@@ -66,7 +67,12 @@ The web and health units use strict systemd sandboxes, private device and
 hostname/clock namespaces, restricted network address families, and a root-owned
 environment file. The web unit has a strict read-only `doctor` preflight before
 startup and a startup health check; the timer runs a separate loopback health
-check every minute. Review `systemd-analyze security market-sentinel-web` and
+check every minute. Both units limit start failures to five attempts in five
+minutes, and the health unit times out after 30 seconds. A start-limit hit is an
+operator action item rather than a signal to retry continuously; inspect
+`journalctl -u market-sentinel-web` or `journalctl -u market-sentinel-health`
+and use `systemctl reset-failed` only after correcting the cause. Review
+`systemd-analyze security market-sentinel-web` and
 `systemd-analyze security market-sentinel-health` after installation and tighten
 any setting that does not prevent normal operation on the chosen distribution.
 
