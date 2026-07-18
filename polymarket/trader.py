@@ -28,6 +28,15 @@ class TraderConfig:
     host: str = CLOB_API
 
 
+def _order_side(side: str) -> Any:
+    normalized = str(side or "").strip().upper()
+    if normalized == "BUY":
+        return BUY
+    if normalized == "SELL":
+        return SELL
+    raise ValueError("Polymarket order side must be BUY or SELL.")
+
+
 class PolymarketTrader:
     """
     Thin wrapper around Polymarket's official py-clob-client.
@@ -92,8 +101,7 @@ class PolymarketTrader:
     ) -> Dict[str, Any]:
         if OrderArgs is None or OrderType is None:
             raise RuntimeError("py-clob-client missing order types.")
-        s = side.upper()
-        side_const = BUY if s == "BUY" else SELL
+        side_const = _order_side(side)
         order = OrderArgs(token_id=token_id, price=float(price), size=float(size), side=side_const)
         signed = self.client.create_order(order)
 
@@ -110,8 +118,7 @@ class PolymarketTrader:
     ) -> Dict[str, Any]:
         if MarketOrderArgs is None or OrderType is None:
             raise RuntimeError("py-clob-client missing market order types.")
-        s = side.upper()
-        side_const = BUY if s == "BUY" else SELL
+        side_const = _order_side(side)
         mo = MarketOrderArgs(token_id=token_id, amount=float(amount), side=side_const, order_type=getattr(OrderType, tif, OrderType.FOK))
         signed = self.client.create_market_order(mo)
         order_type = getattr(OrderType, tif, None) or OrderType.FOK
