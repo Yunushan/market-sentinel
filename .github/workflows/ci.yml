@@ -347,6 +347,7 @@ jobs:
     name: Python package build
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: ${{ always() }}
     needs:
       - python
       - future-python
@@ -355,6 +356,33 @@ jobs:
       - frontend
       - mobile-web
     steps:
+      - name: Enforce required CI jobs
+        env:
+          PYTHON_RESULT: ${{ needs.python.result }}
+          FUTURE_PYTHON_RESULT: ${{ needs.future-python.result }}
+          ENTERPRISE_LINUX_RESULT: ${{ needs.enterprise-linux.result }}
+          WINDOWS_11_RESULT: ${{ needs.windows-11.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          MOBILE_WEB_RESULT: ${{ needs.mobile-web.result }}
+        shell: bash
+        run: |
+          failed=0
+          for entry in \
+            "python:${PYTHON_RESULT}" \
+            "future-python:${FUTURE_PYTHON_RESULT}" \
+            "enterprise-linux:${ENTERPRISE_LINUX_RESULT}" \
+            "windows-11:${WINDOWS_11_RESULT}" \
+            "frontend:${FRONTEND_RESULT}" \
+            "mobile-web:${MOBILE_WEB_RESULT}"; do
+            job="${entry%%:*}"
+            result="${entry#*:}"
+            if [ "${result}" != "success" ]; then
+              echo "Required CI job ${job} finished with ${result}."
+              failed=1
+            fi
+          done
+          exit "${failed}"
+
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
