@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import hmac
 import hashlib
+import importlib.metadata as importlib_metadata
 import ipaddress
 import json
 import mimetypes
 import os
 import posixpath
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http import HTTPStatus
@@ -15,6 +17,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 from urllib.parse import parse_qs, unquote, urlparse
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 compatibility.
+    import tomli as tomllib
 
 from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, UIDesign, WalletWatch
 from core.storage import DEFAULT_CONFIG_PATH, load_config, save_config
@@ -97,7 +104,8 @@ from polymarket.ws_user import build_user_subscription
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_FRONTEND_DIR = PROJECT_ROOT / "frontend" / "dist"
-API_VERSION = "0.1.0"
+PROJECT_NAME = "market-sentinel"
+HASHED_FRONTEND_ASSET_RE = re.compile(r"-[A-Za-z0-9_-]{8,}\.[^.]+$")
 MAX_JSON_BODY_BYTES = 1_000_000
 PYTHON_GUI_COMMAND = "python app.py"
 PYTHON_GUI_SCRIPT = "run_gui.bat"
@@ -118,12 +126,64 @@ def _safe_attachment_filename(value: Any) -> str:
     return filename or "download"
 
 
+def static_cache_control(target: Path, frontend_dir: Path) -> str:
+    """Avoid stale SPA shells while allowing immutable content-hashed assets."""
+    try:
+        relative_path = target.relative_to(frontend_dir).as_posix()
+    except ValueError:
+        return "no-store"
+    if relative_path == "index.html":
+        return "no-store"
+    if relative_path.startswith("assets/") and HASHED_FRONTEND_ASSET_RE.search(target.name):
+        return "public, max-age=31536000, immutable"
+    return "no-cache, max-age=0, must-revalidate"
+
+
+def project_version() -> str:
+    """Return installed distribution metadata, with a source-checkout fallback."""
+    try:
+        return importlib_metadata.version(PROJECT_NAME)
+    except importlib_metadata.PackageNotFoundError:
+        pass
+    try:
+        data = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    except Exception:
+        return "unknown"
+    return str(data.get("project", {}).get("version") or "unknown")
+
+
 def _normalize_allowed_origin(value: Any) -> str:
-    """Keep configured CORS origins header-safe before storing them."""
+    """Accept only a canonical HTTP(S) browser origin without credentials or paths."""
     origin = str(value).strip().rstrip("/")
     if not origin or origin != _safe_http_header_value(origin):
         return ""
-    return origin
+    parsed = urlparse(origin)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or "*" in parsed.netloc
+    ):
+        return ""
+    canonical = f"{parsed.scheme}://{parsed.netloc}"
+    return canonical if origin == canonical else ""
+
+
+def configured_allowed_origins(cli_origins: Optional[Sequence[str]] = None) -> List[str]:
+    """Return normalized CORS origins from explicit flags and protected service env."""
+    values = [str(origin) for origin in (cli_origins or [])]
+    values.extend(os.environ.get("MARKET_SENTINEL_ALLOWED_ORIGINS", "").split(","))
+    origins: List[str] = []
+    for value in values:
+        normalized = _normalize_allowed_origin(value)
+        if normalized and normalized not in origins:
+            origins.append(normalized)
+    return origins
 
 
 API_ROUTES = {
@@ -869,7 +929,7 @@ def health_payload(config_path: Path = DEFAULT_CONFIG_PATH, frontend_dir: Path =
     frontend_index = frontend_dir / "index.html"
     return {
         "status": "ok",
-        "api_version": API_VERSION,
+        "api_version": project_version(),
         "mode": "parallel",
         "python_gui_available": True,
         "python_gui_command": PYTHON_GUI_COMMAND,
@@ -4101,6 +4161,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self._send_cors_headers()
         self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", static_cache_control(target, frontend_dir))
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -4119,6 +4180,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self._send_cors_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Connection", "close")
         self.end_headers()
@@ -4131,6 +4193,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self._send_cors_headers()
         self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
         if filename:
             safe_name = _safe_attachment_filename(filename)
             self.send_header("Content-Disposition", f'attachment; filename="{safe_name}"')
@@ -4238,7 +4301,7 @@ def main() -> None:
         args.frontend_dir,
         api_token=args.api_token,
         allow_remote=args.allow_remote,
-        allowed_origins=args.allow_origin,
+        allowed_origins=configured_allowed_origins(args.allow_origin),
     )
 
 

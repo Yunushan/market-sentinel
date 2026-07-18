@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.metadata as importlib_metadata
 import json
 import io
 import os
@@ -43,6 +44,7 @@ from web_api import (
     copy_payload,
     copy_preview_payload,
     copy_trade_preview_from_activity,
+    configured_allowed_origins,
     delete_alert,
     delete_wallet_watch,
     health_payload,
@@ -75,6 +77,7 @@ from web_api import (
     polymarket_mdd_export_payload,
     polymarket_user_mdd_payload,
     polymarket_user_search_payload,
+    project_version,
     position_refill_payload,
     poll_wallet_activity,
     refresh_selected_paper_mark,
@@ -84,6 +87,7 @@ from web_api import (
     _normalize_allowed_origin,
     _safe_attachment_filename,
     _safe_http_header_value,
+    static_cache_control,
     run_server,
     submit_paper_order,
     update_wallet_watch,
@@ -284,6 +288,19 @@ class WebApiTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "non-loopback"):
             ReactGuiServer(("0.0.0.0", 0), ReactGuiHandler)
+
+    def test_configured_allowed_origins_merges_cli_and_environment_values(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"MARKET_SENTINEL_ALLOWED_ORIGINS": "https://analytics.example.com/, invalid, https://ops.example.com/path"},
+            clear=False,
+        ):
+            origins = configured_allowed_origins(["https://console.example", "https://console.example"])
+
+        self.assertEqual(
+            origins,
+            ["https://console.example", "https://analytics.example.com"],
+        )
 
     def test_server_refuses_to_start_with_a_corrupt_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1536,6 +1553,7 @@ class WebApiTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertIn("text/csv", headers["Content-Type"])
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
         self.assertIn(b"summary,", body)
         self.assertIn(WALLET.encode("utf-8"), body)
 
@@ -1849,9 +1867,11 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(len(paper_position_rows(loaded.paper_trades)), 1)
 
     def test_health_payload_documents_parallel_gui_contract(self) -> None:
-        payload = health_payload(Path("local-config.json"), Path("frontend-dist"))
+        with patch("web_api.project_version", return_value="9.8.7"):
+            payload = health_payload(Path("local-config.json"), Path("frontend-dist"))
 
         self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["api_version"], "9.8.7")
         self.assertEqual(payload["mode"], "parallel")
         self.assertTrue(payload["python_gui_available"])
         self.assertEqual(payload["python_gui_command"], "python app.py")
@@ -1880,6 +1900,16 @@ class WebApiTests(unittest.TestCase):
         self.assertIn("/api/polymarket/live-validation/reports", payload["routes"]["POST"])
         self.assertIn("/api/polymarket/users/mdd/cache/{key}", payload["routes"]["DELETE"])
         self.assertIn("/api/polymarket/live-validation/reports/{key}", payload["routes"]["DELETE"])
+
+    def test_project_version_uses_distribution_metadata_then_source_metadata(self) -> None:
+        with patch("web_api.importlib_metadata.version", return_value="2.3.4"):
+            self.assertEqual(project_version(), "2.3.4")
+
+        with patch(
+            "web_api.importlib_metadata.version",
+            side_effect=importlib_metadata.PackageNotFoundError,
+        ):
+            self.assertRegex(project_version(), r"^\d+\.\d+\.\d+")
 
     def test_polymarket_clob_readiness_payload_redacts_credentials(self) -> None:
         cfg = AppConfig()
@@ -2524,14 +2554,18 @@ class WebApiTests(unittest.TestCase):
             asset_dir.mkdir(parents=True)
             (frontend_dir / "index.html").write_text("<html><body>React app</body></html>", encoding="utf-8")
             (asset_dir / "app.js").write_text("console.log('ok');", encoding="utf-8")
+            (asset_dir / "app-abcdefgh.js").write_text("console.log('immutable');", encoding="utf-8")
 
             server, thread, base_url = self._serve_api(config_path, frontend_dir)
             try:
                 root_status, root_headers, root_body = self._request_raw(base_url, "/")
                 asset_status, asset_headers, asset_body = self._request_raw(base_url, "/assets/app.js")
-                fallback_status, _fallback_headers, fallback_body = self._request_raw(base_url, "/settings/live-safety")
+                hashed_asset_status, hashed_asset_headers, hashed_asset_body = self._request_raw(
+                    base_url, "/assets/app-abcdefgh.js"
+                )
+                fallback_status, fallback_headers, fallback_body = self._request_raw(base_url, "/settings/live-safety")
                 traversal_status, _traversal_headers, traversal_body = self._request_raw(base_url, "/%2e%2e/README.md")
-                health_status, health = self._request_json(base_url, "/api/health")
+                health_status, health_headers, health_body = self._request_raw(base_url, "/api/health")
             finally:
                 server.shutdown()
                 server.server_close()
@@ -2539,16 +2573,29 @@ class WebApiTests(unittest.TestCase):
 
         self.assertEqual(root_status, 200)
         self.assertIn("text/html", root_headers["Content-Type"])
+        self.assertEqual(root_headers.get("Cache-Control"), "no-store")
         self.assertIn(b"React app", root_body)
         self.assertEqual(asset_status, 200)
         self.assertIn("javascript", asset_headers["Content-Type"])
+        self.assertEqual(asset_headers.get("Cache-Control"), "no-cache, max-age=0, must-revalidate")
         self.assertEqual(asset_body, b"console.log('ok');")
+        self.assertEqual(hashed_asset_status, 200)
+        self.assertEqual(hashed_asset_headers.get("Cache-Control"), "public, max-age=31536000, immutable")
+        self.assertEqual(hashed_asset_body, b"console.log('immutable');")
         self.assertEqual(fallback_status, 200)
+        self.assertEqual(fallback_headers.get("Cache-Control"), "no-store")
         self.assertIn(b"React app", fallback_body)
         self.assertEqual(traversal_status, 200)
         self.assertIn(b"React app", traversal_body)
         self.assertEqual(health_status, 200)
+        self.assertEqual(health_headers.get("Cache-Control"), "no-store")
+        health = json.loads(health_body.decode("utf-8"))
         self.assertTrue(health["frontend_build_available"])
+
+    def test_static_cache_control_rejects_files_outside_frontend_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.assertEqual(static_cache_control(root / "outside.js", root / "dist"), "no-store")
 
     def test_app_state_payload_combines_initial_react_gui_state(self) -> None:
         cfg = AppConfig()

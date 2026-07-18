@@ -1092,6 +1092,8 @@ def run_ci_cd_workflow_check() -> None:
             "environment: release",
             "contents: write",
             "Validate package version matches release tag",
+            "Require release commit to be reachable from protected main",
+            "git merge-base --is-ancestor \"${GITHUB_SHA}\" \"origin/main\"",
             "Python compatibility",
             '"3.x"',
             "Build Windows EXE and MSI",

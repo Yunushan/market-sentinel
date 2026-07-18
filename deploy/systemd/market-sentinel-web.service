@@ -10,6 +10,8 @@ Type=simple
 User=market-sentinel
 Group=market-sentinel
 WorkingDirectory=/opt/market-sentinel
+StateDirectory=market-sentinel
+StateDirectoryMode=0700
 EnvironmentFile=-/etc/market-sentinel/market-sentinel.env
 Environment=PYTHONUNBUFFERED=1
 ExecStartPre=/opt/market-sentinel/.venv/bin/python -m market_sentinel_cli doctor --strict --compact --config /var/lib/market-sentinel/config.json --frontend-dir /opt/market-sentinel/frontend/dist
