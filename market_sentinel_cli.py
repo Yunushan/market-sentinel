@@ -15,7 +15,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, TextI
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
-from core.storage import DEFAULT_CONFIG_PATH, load_config, save_config
+from core.storage import ConfigLoadError, DEFAULT_CONFIG_PATH, load_config, save_config
 from market_adapters import build_default_registry
 from polymarket.http_client import PolymarketHTTPError, PolymarketRateLimitError
 from polymarket.leaderboard_state import LeaderboardStateStore
@@ -999,6 +999,145 @@ def run_health(args: argparse.Namespace) -> int:
     return _write_command_payload(args, health_payload(_config_path(args), Path(args.frontend_dir).expanduser()))
 
 
+def _nearest_existing_parent(path: Path) -> Path:
+    current = path.expanduser()
+    while not current.exists() and current != current.parent:
+        current = current.parent
+    return current
+
+
+def doctor_payload(
+    config_path: Path = DEFAULT_CONFIG_PATH,
+    frontend_dir: Path = DEFAULT_FRONTEND_DIR,
+    *,
+    check_latest: bool = False,
+) -> Dict[str, Any]:
+    """Build a redacted, read-only operational readiness report for CLI deployments."""
+    config_path = config_path.expanduser()
+    frontend_dir = frontend_dir.expanduser()
+    checks: List[Dict[str, Any]] = []
+    cfg = None
+
+    try:
+        cfg = load_config(config_path)
+        checks.append(
+            {
+                "name": "configuration",
+                "status": "pass",
+                "message": "Configuration loaded safely.",
+                "path": str(config_path),
+            }
+        )
+    except ConfigLoadError as exc:
+        checks.append(
+            {
+                "name": "configuration",
+                "status": "fail",
+                "message": str(exc),
+                "path": str(config_path),
+            }
+        )
+
+    storage_parent = _nearest_existing_parent(config_path.parent)
+    if storage_parent.exists() and os.access(storage_parent, os.W_OK):
+        checks.append(
+            {
+                "name": "configuration_storage",
+                "status": "pass",
+                "message": "Configuration storage parent is writable.",
+                "path": str(storage_parent),
+            }
+        )
+    else:
+        checks.append(
+            {
+                "name": "configuration_storage",
+                "status": "fail",
+                "message": "Configuration storage parent is not writable.",
+                "path": str(storage_parent),
+            }
+        )
+
+    dependencies = _dependency_rows(latest=check_latest)
+    missing = [row["package"] for row in dependencies if row["status"] == "missing"]
+    outdated = [row["package"] for row in dependencies if row["status"] == "outdated"]
+    dependency_status = "fail" if missing else ("warn" if outdated else "pass")
+    checks.append(
+        {
+            "name": "dependencies",
+            "status": dependency_status,
+            "message": (
+                f"Missing dependencies: {', '.join(missing)}."
+                if missing
+                else f"Outdated dependencies: {', '.join(outdated)}."
+                if outdated
+                else "Required dependencies are installed."
+            ),
+            "checked_latest": check_latest,
+            "missing": missing,
+            "outdated": outdated,
+        }
+    )
+
+    health = health_payload(config_path, frontend_dir)
+    frontend_available = bool(health.get("frontend_build_available"))
+    checks.append(
+        {
+            "name": "frontend_build",
+            "status": "pass" if frontend_available else "warn",
+            "message": "React production build is available." if frontend_available else "React production build is unavailable; the Tkinter fallback remains available.",
+            "path": str(frontend_dir),
+        }
+    )
+
+    if cfg is not None:
+        try:
+            live_safety = live_safety_payload(cfg, _registry())
+            armed = live_safety.get("status") == "armed"
+            checks.append(
+                {
+                    "name": "live_trading_safety",
+                    "status": "warn" if armed else "pass",
+                    "message": "Live trading is armed; confirm operational monitoring is active." if armed else "Live trading is not armed.",
+                    "selected_market_id": live_safety.get("selected_market_id"),
+                    "blockers": list(live_safety.get("blockers") or []),
+                }
+            )
+        except Exception as exc:
+            checks.append(
+                {
+                    "name": "live_trading_safety",
+                    "status": "fail",
+                    "message": f"Live-safety inspection failed: {exc}",
+                }
+            )
+
+    counts = {status: sum(1 for check in checks if check["status"] == status) for status in ("pass", "warn", "fail")}
+    status = "error" if counts["fail"] else "warning" if counts["warn"] else "ok"
+    return {
+        "status": status,
+        "generated_at": int(time.time()),
+        "config_path": str(config_path),
+        "frontend_dir": str(frontend_dir),
+        "checks": checks,
+        "counts": counts,
+        "source": "market_sentinel_cli_doctor_v1",
+        "scope_note": "This report validates local configuration and runtime prerequisites only; it does not establish release approval, native-platform certification, or funded-market verification.",
+    }
+
+
+def run_doctor(args: argparse.Namespace) -> int:
+    payload = doctor_payload(
+        _config_path(args),
+        Path(args.frontend_dir),
+        check_latest=bool(args.check_latest),
+    )
+    _write_command_payload(args, payload)
+    if payload["counts"]["fail"] or (args.strict and payload["counts"]["warn"]):
+        return 1
+    return 0
+
+
 def run_state(args: argparse.Namespace) -> int:
     cfg = _load_cfg(args)
     payload = app_state_payload(
@@ -1871,6 +2010,13 @@ def build_parser() -> argparse.ArgumentParser:
     health.add_argument("--frontend-dir", type=Path, default=DEFAULT_FRONTEND_DIR)
     _add_json_output_args(health)
     health.set_defaults(func=run_health)
+
+    doctor = subparsers.add_parser("doctor", parents=[common], help="Run read-only local configuration and runtime readiness checks.")
+    doctor.add_argument("--frontend-dir", type=Path, default=DEFAULT_FRONTEND_DIR)
+    doctor.add_argument("--check-latest", action="store_true", help="Also check installed dependency versions against PyPI.")
+    doctor.add_argument("--strict", action="store_true", help="Exit non-zero when warnings are present, such as an armed live-trading configuration.")
+    _add_json_output_args(doctor)
+    doctor.set_defaults(func=run_doctor)
 
     state = subparsers.add_parser("state", parents=[common], help="Print the full headless app state.")
     state.add_argument("--frontend-dir", type=Path, default=DEFAULT_FRONTEND_DIR)
