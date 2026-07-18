@@ -108,6 +108,22 @@ class ProductionDeploymentTests(unittest.TestCase):
                 self.assertEqual(output.stat().st_mode & 0o777, 0o600)
             self.assertFalse(list(output.parent.glob("*.tmp")))
 
+    @unittest.skipUnless(os.name == "posix", "symlink safety is verified on POSIX hosts")
+    def test_evidence_output_ignores_a_predictable_temp_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "evidence" / "deployment.json"
+            output.parent.mkdir()
+            protected = Path(tmp) / "protected.txt"
+            protected.write_text("do not overwrite", encoding="utf-8")
+            predictable = output.parent / f".{output.name}.{os.getpid()}.tmp"
+            predictable.symlink_to(protected)
+
+            write_evidence(output, {"status": "ok", "checks": []})
+
+            self.assertEqual(protected.read_text(encoding="utf-8"), "do not overwrite")
+            self.assertTrue(predictable.is_symlink())
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["status"], "ok")
+
     def test_verifier_fails_when_evidence_output_cannot_be_written(self) -> None:
         stdout = io.StringIO()
         with (

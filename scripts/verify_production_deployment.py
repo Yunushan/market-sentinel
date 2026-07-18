@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import subprocess
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -195,16 +196,17 @@ def check_public_proxy(
 def write_evidence(path: Path, payload: dict[str, Any]) -> None:
     """Atomically persist redacted deployment evidence with private permissions."""
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(temporary_name)
     try:
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            if os.name == "posix":
+                os.fchmod(handle.fileno(), 0o600)
             json.dump(payload, handle, sort_keys=True)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-        os.chmod(path, 0o600)
     except OSError:
         try:
             temporary.unlink(missing_ok=True)
