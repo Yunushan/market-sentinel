@@ -22,7 +22,7 @@ from tkinter import ttk, messagebox, filedialog
 from dotenv import load_dotenv
 
 from core.models import AppConfig, MarketConfig, PaperTradeRecord, PriceAlert, WalletWatch, CopyTradeSettings
-from core.storage import load_config, save_config
+from core.storage import ConfigLoadError, load_config, save_config
 from market_adapters import build_default_registry
 from market_adapters.base import MarketAdapter
 from market_adapters.errors import MarketConfigurationError, UnsupportedFeatureError
@@ -4763,7 +4763,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     set_windows_app_id(APP_ID)
-    app = App()
+    try:
+        app = App()
+    except ConfigLoadError as exc:
+        message = str(exc)
+        print(f"error: {message}", file=sys.stderr)
+        try:
+            messagebox.showerror("MarketSentinel configuration error", message)
+        except tk.TclError:
+            pass
+        return 1
     app.mainloop()
     return 0
 

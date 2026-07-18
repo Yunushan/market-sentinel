@@ -15,9 +15,11 @@ from app import (
     extract_slug,
     market_choice_label,
     market_id_from_choice,
+    main,
     safe_float,
 )
 from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, WalletWatch
+from core.storage import ConfigLoadError
 from market_adapters import MARKET_IDS, build_default_registry
 from market_adapters.errors import MarketConfigurationError
 from market_adapters.types import (
@@ -373,6 +375,18 @@ class FakeRegistry:
 
 
 class AppLogicTests(unittest.TestCase):
+    def test_main_reports_unreadable_configuration_without_starting_gui(self) -> None:
+        error = ConfigLoadError("Configuration file cannot be loaded: config.json")
+
+        with (
+            patch("app.set_windows_app_id"),
+            patch("app.App", side_effect=error),
+            patch("app.messagebox.showerror") as show_error,
+        ):
+            self.assertEqual(main([]), 1)
+
+        show_error.assert_called_once_with("MarketSentinel configuration error", str(error))
+
     def test_slug_and_float_helpers(self) -> None:
         self.assertEqual(
             extract_slug("https://polymarket.com/event/some-market?tid=123#details"),
