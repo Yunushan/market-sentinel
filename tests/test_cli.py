@@ -618,6 +618,50 @@ class MarketSentinelCliTests(unittest.TestCase):
                 self.assertEqual(market_sentinel_cli._installed_version("websocket-client"), "1.9.0")
                 mock_import.assert_called_with("websocket")
 
+    def test_doctor_cli_reports_readiness_and_strict_warnings(self) -> None:
+        safe_live_safety = {"status": "disabled", "selected_market_id": "polymarket", "blockers": ["live trading disabled"]}
+        armed_live_safety = {"status": "armed", "selected_market_id": "polymarket", "blockers": []}
+        dependencies = [{"package": "requests", "status": "ok"}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            with patch("market_sentinel_cli._dependency_rows", return_value=dependencies), patch(
+                "market_sentinel_cli.health_payload",
+                return_value={"frontend_build_available": True},
+            ), patch("market_sentinel_cli.live_safety_payload", return_value=safe_live_safety):
+                stdout = io.StringIO()
+                with patch("sys.stdout", stdout):
+                    exit_code = market_sentinel_cli.main(["doctor", "--config", str(config_path), "--frontend-dir", tmp])
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["counts"], {"fail": 0, "pass": 5, "warn": 0})
+            self.assertEqual(payload["checks"][-1]["name"], "live_trading_safety")
+
+            with patch("market_sentinel_cli._dependency_rows", return_value=dependencies), patch(
+                "market_sentinel_cli.health_payload",
+                return_value={"frontend_build_available": True},
+            ), patch("market_sentinel_cli.live_safety_payload", return_value=armed_live_safety):
+                self.assertEqual(run_cli_silent(["doctor", "--strict", "--config", str(config_path), "--frontend-dir", tmp]), 1)
+
+    def test_doctor_cli_reports_corrupt_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text("{not-json", encoding="utf-8")
+            stdout = io.StringIO()
+            with patch("market_sentinel_cli._dependency_rows", return_value=[]), patch(
+                "market_sentinel_cli.health_payload",
+                return_value={"frontend_build_available": True},
+            ), patch("sys.stdout", stdout):
+                exit_code = market_sentinel_cli.main(["doctor", "--config", str(config_path), "--frontend-dir", tmp])
+
+        self.assertEqual(exit_code, 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["checks"][0]["name"], "configuration")
+        self.assertEqual(payload["checks"][0]["status"], "fail")
+
     def test_full_app_cli_command_groups_are_registered(self) -> None:
         parser = market_sentinel_cli.build_parser()
         stdout = io.StringIO()
@@ -627,7 +671,7 @@ class MarketSentinelCliTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, 0)
         help_text = stdout.getvalue()
-        for command in ("config", "markets", "alerts", "wallets", "copy", "paper", "dependencies", "serve"):
+        for command in ("doctor", "config", "markets", "alerts", "wallets", "copy", "paper", "dependencies", "serve"):
             self.assertIn(command, help_text)
 
 
