@@ -5,6 +5,8 @@ import base64
 import json
 import os
 import subprocess
+import time
+from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.error import HTTPError
 from urllib.parse import urljoin, urlparse
@@ -32,13 +34,29 @@ REQUIRED_PROXY_HEADERS = (
     "cross-origin-opener-policy",
     "cross-origin-resource-policy",
 )
+BACKUP_MAX_AGE_SECONDS = 26 * 60 * 60
+BACKUP_MAX_FUTURE_SKEW_SECONDS = 5 * 60
 
 
 def _run_command(args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, capture_output=True, text=True, check=False, timeout=15)
+    environment = {**os.environ, "LC_ALL": "C", "TZ": "UTC"}
+    return subprocess.run(args, capture_output=True, text=True, check=False, timeout=15, env=environment)
 
 
-def check_systemd(runner: CommandRunner = _run_command) -> list[dict[str, Any]]:
+def _systemd_timestamp_seconds(value: str) -> float:
+    normalized = value.strip()
+    for pattern in ("%a %Y-%m-%d %H:%M:%S UTC", "%a %Y-%m-%d %H:%M:%S.%f UTC"):
+        try:
+            return datetime.strptime(normalized, pattern).replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            continue
+    raise ValueError(f"invalid systemd UTC timestamp: {normalized or 'missing'}")
+
+
+def check_systemd(
+    runner: CommandRunner = _run_command,
+    clock: Callable[[], float] = time.time,
+) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     for unit in REQUIRED_UNITS:
         for command in ("is-active", "is-enabled"):
@@ -57,18 +75,33 @@ def check_systemd(runner: CommandRunner = _run_command) -> list[dict[str, Any]]:
             "market-sentinel-backup.service",
             "--property=Result",
             "--property=ExecMainStatus",
-            "--property=ExecMainStartTimestampMonotonic",
+            "--property=ExecMainExitTimestamp",
             "--value",
         ]
     )
     values = [value.strip() for value in completion.stdout.splitlines()]
-    result, exit_status, started_at = (values + ["", "", ""])[:3]
-    completed = completion.returncode == 0 and result == "success" and exit_status == "0" and started_at not in {"", "0"}
+    result, exit_status, completed_at = (values + ["", "", ""])[:3]
+    try:
+        backup_age_seconds = clock() - _systemd_timestamp_seconds(completed_at)
+    except ValueError:
+        backup_age_seconds = float("inf")
+    completed = (
+        completion.returncode == 0
+        and result == "success"
+        and exit_status == "0"
+        and completed_at not in {"", "n/a"}
+        and backup_age_seconds >= -BACKUP_MAX_FUTURE_SKEW_SECONDS
+        and backup_age_seconds <= BACKUP_MAX_AGE_SECONDS
+    )
     checks.append(
         {
-            "name": "systemd_last_success_market-sentinel-backup.service",
+            "name": "systemd_recent_success_market-sentinel-backup.service",
             "status": "pass" if completed else "fail",
-            "detail": f"result={result or 'unknown'}; exit_status={exit_status or 'unknown'}; started_at={started_at or 'unknown'}",
+            "detail": (
+                f"result={result or 'unknown'}; exit_status={exit_status or 'unknown'}; "
+                f"completed_at={completed_at or 'unknown'}; backup_age_seconds={backup_age_seconds:.0f}; "
+                f"max_age_seconds={BACKUP_MAX_AGE_SECONDS}; max_future_skew_seconds={BACKUP_MAX_FUTURE_SKEW_SECONDS}"
+            ),
         }
     )
     return checks
@@ -134,7 +167,7 @@ def main() -> int:
     parser.add_argument(
         "--public-basic-password-env",
         default="MARKET_SENTINEL_PUBLIC_BASIC_PASSWORD",
-        help="Environment variable containing the optional public Basic Auth password.",
+        help="Environment variable containing the required public Basic Auth password when --public-url is set.",
     )
     args = parser.parse_args()
 

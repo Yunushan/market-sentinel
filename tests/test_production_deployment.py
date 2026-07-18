@@ -35,15 +35,37 @@ class ProductionDeploymentTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("production deployment evidence", result.stdout)
 
-    def test_systemd_checks_require_active_and_enabled_units(self) -> None:
+    def test_systemd_checks_require_active_enabled_and_recent_backup(self) -> None:
         def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
             if args[1] == "show":
-                return subprocess.CompletedProcess(args, 0, "success\n0\n123\n", "")
+                return subprocess.CompletedProcess(args, 0, "success\n0\nThu 1970-01-01 00:16:39 UTC\n", "")
             return subprocess.CompletedProcess(args, 0, "active\n", "")
 
-        checks = check_systemd(runner)
+        checks = check_systemd(runner, clock=lambda: 1000.0)
         self.assertEqual(len(checks), 7)
         self.assertTrue(all(check["status"] == "pass" for check in checks))
+
+    def test_systemd_check_rejects_a_stale_backup(self) -> None:
+        def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+            if args[1] == "show":
+                return subprocess.CompletedProcess(args, 0, "success\n0\nThu 1970-01-01 00:00:01 UTC\n", "")
+            return subprocess.CompletedProcess(args, 0, "active\n", "")
+
+        checks = check_systemd(runner, clock=lambda: 1_000_000.0)
+        backup = checks[-1]
+        self.assertEqual(backup["status"], "fail")
+        self.assertIn("backup_age_seconds=999999", backup["detail"])
+
+    def test_systemd_check_rejects_an_impossibly_future_backup_timestamp(self) -> None:
+        def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+            if args[1] == "show":
+                return subprocess.CompletedProcess(args, 0, "success\n0\nThu 1970-01-01 00:23:20 UTC\n", "")
+            return subprocess.CompletedProcess(args, 0, "active\n", "")
+
+        checks = check_systemd(runner, clock=lambda: 1000.0)
+        backup = checks[-1]
+        self.assertEqual(backup["status"], "fail")
+        self.assertIn("backup_age_seconds=-400", backup["detail"])
 
     def test_loopback_checks_expected_version(self) -> None:
         with patch("scripts.verify_production_deployment.check_health", return_value={"api_version": "1.0.10"}):
