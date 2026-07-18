@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 from typing import Any, Callable
+from urllib.error import HTTPError
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
@@ -91,11 +92,19 @@ def check_public_proxy(
     parsed = urlparse(url)
     if parsed.scheme != "https" or not parsed.netloc:
         raise ValueError("public URL must be an absolute https URL")
+    if not username or not password:
+        raise ValueError("public proxy verification requires non-empty Basic Auth credentials")
     health_url = urljoin(url.rstrip("/") + "/", "api/health")
+    try:
+        with urlopen(Request(health_url, headers={"Accept": "application/json"}, method="GET"), timeout=timeout):
+            raise RuntimeError("unauthenticated public proxy request was accepted")
+    except HTTPError as exc:
+        if exc.code != 401:
+            raise RuntimeError(f"unauthenticated public proxy request returned HTTP {exc.code}, expected 401") from exc
+
     headers = {"Accept": "application/json"}
-    if username or password:
-        encoded = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
-        headers["Authorization"] = f"Basic {encoded}"
+    encoded = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    headers["Authorization"] = f"Basic {encoded}"
     with urlopen(Request(health_url, headers=headers, method="GET"), timeout=timeout) as response:
         payload = json.loads(response.read().decode("utf-8"))
         header_names = {name.lower() for name in response.headers}
