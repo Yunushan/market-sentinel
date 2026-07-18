@@ -7,6 +7,8 @@ import os
 import subprocess
 import time
 from datetime import datetime, timezone
+from pathlib import Path
+from stat import S_IFDIR, S_IFREG, S_IMODE, S_ISDIR, S_ISREG
 from typing import Any, Callable
 from urllib.error import HTTPError
 from urllib.parse import urljoin, urlparse
@@ -36,6 +38,11 @@ REQUIRED_PROXY_HEADERS = (
 )
 BACKUP_MAX_AGE_SECONDS = 26 * 60 * 60
 BACKUP_MAX_FUTURE_SKEW_SECONDS = 5 * 60
+REQUIRED_PRIVATE_PATHS = (
+    (Path("/etc/market-sentinel/market-sentinel.env"), S_IFREG, True),
+    (Path("/var/lib/market-sentinel"), S_IFDIR, False),
+    (Path("/var/lib/market-sentinel-backups"), S_IFDIR, False),
+)
 
 
 def _run_command(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -51,6 +58,33 @@ def _systemd_timestamp_seconds(value: str) -> float:
         except ValueError:
             continue
     raise ValueError(f"invalid systemd UTC timestamp: {normalized or 'missing'}")
+
+
+def check_filesystem_permissions(
+    stat_reader: Callable[[Path], object] = lambda path: path.stat(),
+) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+    for path, expected_type, require_root_owner in REQUIRED_PRIVATE_PATHS:
+        try:
+            metadata = stat_reader(path)
+            mode = int(getattr(metadata, "st_mode"))
+            owner = int(getattr(metadata, "st_uid"))
+            valid_type = S_ISREG(mode) if expected_type == S_IFREG else S_ISDIR(mode)
+            private = S_IMODE(mode) & 0o077 == 0
+            owner_valid = not require_root_owner or owner == 0
+            passed = valid_type and private and owner_valid
+            detail = f"mode={S_IMODE(mode):04o}; uid={owner}; expected={'file' if expected_type == S_IFREG else 'directory'}"
+        except OSError as exc:
+            passed = False
+            detail = str(exc)
+        checks.append(
+            {
+                "name": f"filesystem_private_{path.name}",
+                "status": "pass" if passed else "fail",
+                "detail": detail,
+            }
+        )
+    return checks
 
 
 def check_systemd(
@@ -175,6 +209,7 @@ def main() -> int:
     try:
         if not args.skip_systemd:
             checks.extend(check_systemd())
+            checks.extend(check_filesystem_permissions())
         checks.append(check_loopback(args.loopback_url, args.token, args.timeout, args.expected_version))
         if args.public_url:
             password = os.environ.get(args.public_basic_password_env, "")
