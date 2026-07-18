@@ -13,7 +13,9 @@ from unittest.mock import patch
 from polymarket import bridge, clob_auth, clob_rest, data_api, gamma, relayer
 from polymarket.analytics_cache import (
     POLYMARKET_MDD_AUDIT_KIND,
+    load_analytics_cache,
     load_analytics_artifact,
+    save_analytics_cache,
     mdd_payload_to_csv,
     store_analytics_artifact,
 )
@@ -135,6 +137,29 @@ class PolymarketApiWrapperTests(unittest.TestCase):
         payload, metadata = loaded
         self.assertEqual(payload["wallet"], "0x2")
         self.assertTrue(metadata["hit"])
+
+    def test_analytics_cache_atomically_saves_and_quarantines_invalid_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "analytics-cache.json"
+            save_analytics_cache({"entries": {"one": {"kind": "test"}}}, cache_path)
+            self.assertEqual(load_analytics_cache(cache_path)["entries"]["one"]["kind"], "test")
+            self.assertFalse(list(cache_path.parent.glob("*.tmp")))
+
+            cache_path.write_text("{ not valid json", encoding="utf-8")
+            self.assertEqual(load_analytics_cache(cache_path)["entries"], {})
+            self.assertFalse(cache_path.exists())
+            backups = list(cache_path.parent.glob("analytics-cache.json.corrupt-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_text(encoding="utf-8"), "{ not valid json")
+
+    def test_analytics_cache_does_not_quarantine_a_directory_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "cache-directory"
+            cache_path.mkdir()
+
+            self.assertEqual(load_analytics_cache(cache_path)["entries"], {})
+            self.assertTrue(cache_path.is_dir())
+            self.assertFalse(list(cache_path.parent.glob("cache-directory.corrupt-*")))
 
     def test_mdd_payload_to_csv_exports_summary_and_points(self) -> None:
         csv_text = mdd_payload_to_csv(
