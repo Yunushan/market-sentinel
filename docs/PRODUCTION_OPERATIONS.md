@@ -133,14 +133,18 @@ It does not place orders, contact market APIs, or enable any live feature.
 export MARKET_SENTINEL_PUBLIC_BASIC_USER="operator"
 export MARKET_SENTINEL_PUBLIC_BASIC_PASSWORD="the-existing-caddy-password"
 
-/opt/market-sentinel/.venv/bin/python /opt/market-sentinel/scripts/verify_production_deployment.py \
+sudo --preserve-env=MARKET_SENTINEL_PUBLIC_BASIC_USER,MARKET_SENTINEL_PUBLIC_BASIC_PASSWORD \
+  /opt/market-sentinel/.venv/bin/python /opt/market-sentinel/scripts/verify_production_deployment.py \
   --expected-version <RELEASE_VERSION> \
   --public-url https://analytics.example.com
 ```
 
 Keep the password only in the environment. Do not pass it on the command line
 or store the generated JSON output with credentials. Save the JSON result with
-the release-change record and repeat it after every restore drill. For a
+the release-change record and repeat it after every restore drill. The command
+uses `sudo` because it verifies the root-owned service environment file; it
+preserves only the two explicitly named Basic Auth variables for the public
+proxy check. For a
 loopback-only staging host, omit `--public-url`; the script will still validate
 the local service and timer.
 
