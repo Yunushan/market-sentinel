@@ -144,7 +144,9 @@ comma-separated.
 ## Release acceptance
 
 Before deploying a new release, verify its GitHub Actions run, checksum file,
-SPDX SBOM, and build-provenance attestation. Confirm the release tag matches
+SPDX SBOM, and build-provenance attestation. The release workflow rejects a tag
+unless its target commit is already reachable from protected `main`; do not
+publish from an unmerged feature branch. Confirm the release tag matches
 `pyproject.toml`, install only from `requirements.lock`, and perform a staged
 loopback deployment before public proxy cutover.
 

@@ -114,6 +114,8 @@ class CiCdWorkflowTests(unittest.TestCase):
             "python -m pip install --no-cache-dir --no-deps -e .",
             "python -m build",
             "Validate package version matches release tag",
+            "Require release commit to be reachable from protected main",
+            "git merge-base --is-ancestor \"${GITHUB_SHA}\" \"origin/main\"",
             "Python compatibility",
             '"3.x"',
             "npm run build",
