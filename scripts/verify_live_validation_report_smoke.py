@@ -126,7 +126,10 @@ def request_json(base_url: str, path: str, *, method: str = "GET", payload: Dict
         with urlopen(request, timeout=10) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
-        return exc.code, json.loads(exc.read().decode("utf-8"))
+        try:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+        finally:
+            exc.close()
 
 
 def request_raw(base_url: str, path: str, *, method: str = "GET") -> Tuple[int, bytes]:
@@ -135,7 +138,10 @@ def request_raw(base_url: str, path: str, *, method: str = "GET") -> Tuple[int, 
         with urlopen(request, timeout=10) as response:
             return response.status, response.read()
     except HTTPError as exc:
-        return exc.code, exc.read()
+        try:
+            return exc.code, exc.read()
+        finally:
+            exc.close()
 
 
 def wait_for_state_api(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import sys
@@ -127,6 +128,30 @@ class ProductionDeploymentTests(unittest.TestCase):
                 check_public_proxy("https://analytics.example.com", "operator", "secret", 1.0, "1.0.11")
         with self.assertRaisesRegex(ValueError, "absolute https"):
             check_public_proxy("http://analytics.example.com", "", "", 1.0)
+
+    def test_public_proxy_closes_the_unauthenticated_error_response(self) -> None:
+        headers = {
+            "Strict-Transport-Security": "max-age=31536000",
+            "Content-Security-Policy": "default-src 'self'",
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+            "Referrer-Policy": "no-referrer",
+            "Permissions-Policy": "camera=()",
+            "Cross-Origin-Opener-Policy": "same-origin",
+            "Cross-Origin-Resource-Policy": "same-origin",
+            "Cache-Control": "no-store",
+        }
+        body = io.BytesIO(b'{"error":"unauthorized"}')
+        unauthenticated = HTTPError("https://analytics.example.com/api/health", 401, "Unauthorized", {}, body)
+        with patch(
+            "scripts.verify_production_deployment.urlopen",
+            side_effect=[unauthenticated, _Response(headers, {"status": "ok", "api_version": "1.0.10"})],
+        ):
+            self.assertEqual(
+                check_public_proxy("https://analytics.example.com", "operator", "secret", 1.0, "1.0.10")["status"],
+                "pass",
+            )
+        self.assertTrue(body.closed)
 
 
 if __name__ == "__main__":

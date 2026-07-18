@@ -42,6 +42,7 @@ REQUIRED_IMPORTS = {
 MIN_TOTAL_BRANCH_COVERAGE = 65.0
 MIN_BACKEND_BRANCH_COVERAGE = 74.0
 BACKEND_COVERAGE_INCLUDE = "core/*,market_adapters/*,polymarket/*,web_api.py,market_sentinel_cli.py"
+RESOURCE_WARNING_POLICY = "error::ResourceWarning"
 
 WORKFLOW_ACTION_PINS = {
     ".github/workflows/ci.yml": {
@@ -1328,6 +1329,8 @@ def run_unit_tests() -> None:
     coverage_file = ROOT / ".coverage"
     env = dict(os.environ)
     env["COVERAGE_FILE"] = str(coverage_file)
+    existing_warnings = env.get("PYTHONWARNINGS", "").strip()
+    env["PYTHONWARNINGS"] = ",".join(filter(None, (existing_warnings, RESOURCE_WARNING_POLICY)))
     commands = (
         [sys.executable, "-m", "coverage", "erase"],
         [
