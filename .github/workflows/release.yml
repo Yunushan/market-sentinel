@@ -286,6 +286,60 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Verify protected Windows signing configuration
+        env:
+          REQUIRE_WINDOWS_CODE_SIGNING: ${{ vars.REQUIRE_WINDOWS_CODE_SIGNING }}
+          WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64 }}
+          WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD }}
+          WINDOWS_CODE_SIGNING_TIMESTAMP_URL: ${{ vars.WINDOWS_CODE_SIGNING_TIMESTAMP_URL }}
+        shell: pwsh
+        run: |
+          $missing = [System.Collections.Generic.List[string]]::new()
+          if ($env:REQUIRE_WINDOWS_CODE_SIGNING -cne "true") {
+            $missing.Add("repository or release-environment variable REQUIRE_WINDOWS_CODE_SIGNING=true")
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64)) {
+            $missing.Add("release-environment secret WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64")
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD)) {
+            $missing.Add("release-environment secret WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD")
+          }
+
+          if ($missing.Count -eq 0) {
+            try {
+              $certificateBytes = [Convert]::FromBase64String($env:WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64)
+              $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                $certificateBytes,
+                $env:WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD,
+                [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
+              )
+              if (-not $certificate.HasPrivateKey) {
+                $missing.Add("a PFX certificate with a private key")
+              }
+              $certificate.Dispose()
+            } catch {
+              $missing.Add("a valid password-protected PFX in WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64")
+            }
+          }
+
+          $timestampUrl = if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODE_SIGNING_TIMESTAMP_URL)) {
+            "https://timestamp.digicert.com"
+          } else {
+            $env:WINDOWS_CODE_SIGNING_TIMESTAMP_URL
+          }
+          try {
+            $timestampUri = [System.Uri]$timestampUrl
+            if (-not $timestampUri.IsAbsoluteUri -or $timestampUri.Scheme -cne "https") {
+              throw "timestamp URL must use HTTPS"
+            }
+          } catch {
+            $missing.Add("an HTTPS WINDOWS_CODE_SIGNING_TIMESTAMP_URL")
+          }
+
+          if ($missing.Count -gt 0) {
+            throw "Protected release signing preflight failed. Configure: " + ($missing -join "; ")
+          }
+
       - name: Download frontend bundle
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -325,12 +379,6 @@ jobs:
             --tag "${{ needs.metadata.outputs.tag_name }}" `
             --frontend-zip "release-inputs/release-frontend-dist.zip" `
             --output-dir "release-assets"
-
-      - name: Enforce Windows code-signing policy
-        if: vars.REQUIRE_WINDOWS_CODE_SIGNING != 'true'
-        shell: pwsh
-        run: |
-          throw "Protected releases require repository variable REQUIRE_WINDOWS_CODE_SIGNING=true and code-signing secrets in the release environment."
 
       - name: Sign Windows release packages
         env:

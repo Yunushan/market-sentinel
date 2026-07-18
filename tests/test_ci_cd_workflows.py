@@ -141,8 +141,12 @@ class CiCdWorkflowTests(unittest.TestCase):
             "actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3",
             "attestations: write",
             "id-token: write",
-            "Enforce Windows code-signing policy",
+            "Verify protected Windows signing configuration",
             "REQUIRE_WINDOWS_CODE_SIGNING",
+            "WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64",
+            "WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD",
+            "X509Certificate2",
+            "EphemeralKeySet",
             "scripts/sign_windows_release.py",
             "gh release create",
             "gh release upload",
@@ -159,6 +163,10 @@ class CiCdWorkflowTests(unittest.TestCase):
         self.assertNotIn("cache-dependency-path", text)
         self.assertNotIn("macos-latest", text)
         self.assertNotIn("windows-latest", text)
+        self.assertLess(
+            text.index("Verify protected Windows signing configuration"),
+            text.index("Download frontend bundle"),
+        )
         self.assertEqual(
             [],
             workflow_action_pin_issues(
