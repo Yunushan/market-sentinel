@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import tempfile
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -41,8 +42,10 @@ def load_analytics_cache(path: Optional[Path | str] = None) -> Dict[str, Any]:
     try:
         raw = json.loads(target.read_text(encoding="utf-8"))
     except Exception:
+        _quarantine_invalid_cache(target)
         return _empty_cache()
     if not isinstance(raw, dict):
+        _quarantine_invalid_cache(target)
         return _empty_cache()
     entries = raw.get("entries")
     if not isinstance(entries, dict):
@@ -56,10 +59,31 @@ def load_analytics_cache(path: Optional[Path | str] = None) -> Dict[str, Any]:
 def save_analytics_cache(cache: Mapping[str, Any], path: Optional[Path | str] = None) -> Path:
     target = analytics_cache_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f"{target.name}.tmp")
-    tmp.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(target)
+    data = json.dumps(cache, indent=2, sort_keys=True) + "\n"
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
     return target
+
+
+def _quarantine_invalid_cache(target: Path) -> Optional[Path]:
+    """Preserve a malformed cache without making cache recovery fatal."""
+    if not target.is_file():
+        return None
+    backup = target.with_name(f"{target.name}.corrupt-{time.time_ns()}")
+    try:
+        os.replace(target, backup)
+    except OSError:
+        return None
+    return backup
 
 
 def analytics_cache_summary(path: Optional[Path | str] = None, *, enabled: bool = False) -> Dict[str, Any]:
