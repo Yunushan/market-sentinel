@@ -94,6 +94,21 @@ class ProductionDeploymentTests(unittest.TestCase):
             self.assertEqual(check["status"], "fail")
             self.assertIn("symbolic-link", check["detail"])
 
+    @unittest.skipUnless(os.name == "posix", "symbolic-link safety is verified on POSIX hosts")
+    def test_evidence_output_rejects_a_symlinked_ancestor_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trusted = root / "trusted"
+            trusted.mkdir()
+            linked = root / "service-controlled-link"
+            linked.symlink_to(trusted, target_is_directory=True)
+            metadata = SimpleNamespace(st_mode=0o040700, st_uid=0)
+
+            check = check_evidence_output_directory(linked / "nested" / "deployment.json", lambda path: metadata)
+
+            self.assertEqual(check["status"], "fail")
+            self.assertIn(str(linked), check["detail"])
+
     def test_systemd_check_rejects_a_stale_backup(self) -> None:
         def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
             if args[1] == "show":
