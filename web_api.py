@@ -9,6 +9,7 @@ import json
 import mimetypes
 import os
 import posixpath
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http import HTTPStatus
@@ -104,6 +105,7 @@ from polymarket.ws_user import build_user_subscription
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_FRONTEND_DIR = PROJECT_ROOT / "frontend" / "dist"
 PROJECT_NAME = "market-sentinel"
+HASHED_FRONTEND_ASSET_RE = re.compile(r"-[A-Za-z0-9_-]{8,}\.[^.]+$")
 MAX_JSON_BODY_BYTES = 1_000_000
 PYTHON_GUI_COMMAND = "python app.py"
 PYTHON_GUI_SCRIPT = "run_gui.bat"
@@ -122,6 +124,19 @@ def _safe_attachment_filename(value: Any) -> str:
     """Return a quoted Content-Disposition filename without header delimiters."""
     filename = _safe_http_header_value(value).replace('"', "").strip()
     return filename or "download"
+
+
+def static_cache_control(target: Path, frontend_dir: Path) -> str:
+    """Avoid stale SPA shells while allowing immutable content-hashed assets."""
+    try:
+        relative_path = target.relative_to(frontend_dir).as_posix()
+    except ValueError:
+        return "no-store"
+    if relative_path == "index.html":
+        return "no-store"
+    if relative_path.startswith("assets/") and HASHED_FRONTEND_ASSET_RE.search(target.name):
+        return "public, max-age=31536000, immutable"
+    return "no-cache, max-age=0, must-revalidate"
 
 
 def project_version() -> str:
@@ -4146,6 +4161,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self._send_cors_headers()
         self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", static_cache_control(target, frontend_dir))
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)

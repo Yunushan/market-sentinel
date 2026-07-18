@@ -87,6 +87,7 @@ from web_api import (
     _normalize_allowed_origin,
     _safe_attachment_filename,
     _safe_http_header_value,
+    static_cache_control,
     run_server,
     submit_paper_order,
     update_wallet_watch,
@@ -2553,12 +2554,16 @@ class WebApiTests(unittest.TestCase):
             asset_dir.mkdir(parents=True)
             (frontend_dir / "index.html").write_text("<html><body>React app</body></html>", encoding="utf-8")
             (asset_dir / "app.js").write_text("console.log('ok');", encoding="utf-8")
+            (asset_dir / "app-abcdefgh.js").write_text("console.log('immutable');", encoding="utf-8")
 
             server, thread, base_url = self._serve_api(config_path, frontend_dir)
             try:
                 root_status, root_headers, root_body = self._request_raw(base_url, "/")
                 asset_status, asset_headers, asset_body = self._request_raw(base_url, "/assets/app.js")
-                fallback_status, _fallback_headers, fallback_body = self._request_raw(base_url, "/settings/live-safety")
+                hashed_asset_status, hashed_asset_headers, hashed_asset_body = self._request_raw(
+                    base_url, "/assets/app-abcdefgh.js"
+                )
+                fallback_status, fallback_headers, fallback_body = self._request_raw(base_url, "/settings/live-safety")
                 traversal_status, _traversal_headers, traversal_body = self._request_raw(base_url, "/%2e%2e/README.md")
                 health_status, health_headers, health_body = self._request_raw(base_url, "/api/health")
             finally:
@@ -2568,11 +2573,17 @@ class WebApiTests(unittest.TestCase):
 
         self.assertEqual(root_status, 200)
         self.assertIn("text/html", root_headers["Content-Type"])
+        self.assertEqual(root_headers.get("Cache-Control"), "no-store")
         self.assertIn(b"React app", root_body)
         self.assertEqual(asset_status, 200)
         self.assertIn("javascript", asset_headers["Content-Type"])
+        self.assertEqual(asset_headers.get("Cache-Control"), "no-cache, max-age=0, must-revalidate")
         self.assertEqual(asset_body, b"console.log('ok');")
+        self.assertEqual(hashed_asset_status, 200)
+        self.assertEqual(hashed_asset_headers.get("Cache-Control"), "public, max-age=31536000, immutable")
+        self.assertEqual(hashed_asset_body, b"console.log('immutable');")
         self.assertEqual(fallback_status, 200)
+        self.assertEqual(fallback_headers.get("Cache-Control"), "no-store")
         self.assertIn(b"React app", fallback_body)
         self.assertEqual(traversal_status, 200)
         self.assertIn(b"React app", traversal_body)
@@ -2580,6 +2591,11 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(health_headers.get("Cache-Control"), "no-store")
         health = json.loads(health_body.decode("utf-8"))
         self.assertTrue(health["frontend_build_available"])
+
+    def test_static_cache_control_rejects_files_outside_frontend_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.assertEqual(static_cache_control(root / "outside.js", root / "dist"), "no-store")
 
     def test_app_state_payload_combines_initial_react_gui_state(self) -> None:
         cfg = AppConfig()
