@@ -46,6 +46,27 @@ def check_systemd(runner: CommandRunner = _run_command) -> list[dict[str, Any]]:
                     "detail": (result.stdout or result.stderr).strip(),
                 }
             )
+    completion = runner(
+        [
+            "systemctl",
+            "show",
+            "market-sentinel-backup.service",
+            "--property=Result",
+            "--property=ExecMainStatus",
+            "--property=ExecMainStartTimestampMonotonic",
+            "--value",
+        ]
+    )
+    values = [value.strip() for value in completion.stdout.splitlines()]
+    result, exit_status, started_at = (values + ["", "", ""])[:3]
+    completed = completion.returncode == 0 and result == "success" and exit_status == "0" and started_at not in {"", "0"}
+    checks.append(
+        {
+            "name": "systemd_last_success_market-sentinel-backup.service",
+            "status": "pass" if completed else "fail",
+            "detail": f"result={result or 'unknown'}; exit_status={exit_status or 'unknown'}; started_at={started_at or 'unknown'}",
+        }
+    )
     return checks
 
 

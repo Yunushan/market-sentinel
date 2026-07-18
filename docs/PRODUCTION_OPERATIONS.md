@@ -59,6 +59,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now market-sentinel-web
 sudo systemctl enable --now market-sentinel-health.timer
 sudo systemctl enable --now market-sentinel-backup.timer
+sudo systemctl start market-sentinel-backup.service
 sudo systemctl status market-sentinel-web
 sudo systemctl status market-sentinel-health.timer
 sudo systemctl status market-sentinel-backup.timer
@@ -121,6 +122,8 @@ After a deployment, collect a read-only verification record from the VPS. It
 checks the systemd web service and health timer, validates the loopback health
 endpoint and release version, and, when given a public URL, validates the
 authenticated HTTPS proxy response, cache policy, and browser security headers.
+It also requires a successfully completed initial backup service run; enable the
+timer and run that service once before collecting deployment evidence.
 It does not place orders, contact market APIs, or enable any live feature.
 
 ```bash
