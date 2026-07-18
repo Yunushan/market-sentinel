@@ -28,7 +28,7 @@ class _Response:
 class ProductionDeploymentTests(unittest.TestCase):
     def test_systemd_checks_require_active_and_enabled_units(self) -> None:
         checks = check_systemd(lambda args: subprocess.CompletedProcess(args, 0, "active\n", ""))
-        self.assertEqual(len(checks), 4)
+        self.assertEqual(len(checks), 6)
         self.assertTrue(all(check["status"] == "pass" for check in checks))
 
     def test_loopback_checks_expected_version(self) -> None:

@@ -13,7 +13,11 @@ from scripts.verify_service_health import check_health
 
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
-REQUIRED_UNITS = ("market-sentinel-web.service", "market-sentinel-health.timer")
+REQUIRED_UNITS = (
+    "market-sentinel-web.service",
+    "market-sentinel-health.timer",
+    "market-sentinel-backup.timer",
+)
 REQUIRED_PROXY_HEADERS = (
     "strict-transport-security",
     "content-security-policy",

@@ -1,0 +1,33 @@
+[Unit]
+Description=MarketSentinel offline state backup
+After=market-sentinel-web.service
+ConditionPathIsDirectory=/var/lib/market-sentinel
+
+[Service]
+Type=oneshot
+User=market-sentinel
+Group=market-sentinel
+WorkingDirectory=/opt/market-sentinel
+StateDirectory=market-sentinel-backups
+StateDirectoryMode=0700
+ExecStart=/opt/market-sentinel/.venv/bin/python /opt/market-sentinel/scripts/backup_state.py --source /var/lib/market-sentinel --destination /var/lib/market-sentinel-backups --retain 14
+TimeoutStartSec=5min
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateNetwork=true
+ProtectClock=true
+ProtectHostname=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadOnlyPaths=/var/lib/market-sentinel
+ReadWritePaths=/var/lib/market-sentinel-backups
