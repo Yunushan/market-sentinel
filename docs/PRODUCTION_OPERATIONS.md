@@ -123,8 +123,8 @@ checks the systemd web service and health timer, validates the loopback health
 endpoint and release version, and, when given a public URL, proves that an
 unauthenticated request receives `401` before validating the authenticated HTTPS
 proxy response, cache policy, and browser security headers.
-It also requires a successfully completed initial backup service run; enable the
-timer and run that service once before collecting deployment evidence.
+It also requires a successful backup completed within the last 26 hours; enable
+the timer and run the service once before collecting deployment evidence.
 It does not place orders, contact market APIs, or enable any live feature.
 
 ```bash

@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import subprocess
+import time
 from typing import Any, Callable
 from urllib.error import HTTPError
 from urllib.parse import urljoin, urlparse
@@ -32,13 +33,17 @@ REQUIRED_PROXY_HEADERS = (
     "cross-origin-opener-policy",
     "cross-origin-resource-policy",
 )
+BACKUP_MAX_AGE_SECONDS = 26 * 60 * 60
 
 
 def _run_command(args: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, capture_output=True, text=True, check=False, timeout=15)
 
 
-def check_systemd(runner: CommandRunner = _run_command) -> list[dict[str, Any]]:
+def check_systemd(
+    runner: CommandRunner = _run_command,
+    clock: Callable[[], float] = time.time,
+) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     for unit in REQUIRED_UNITS:
         for command in ("is-active", "is-enabled"):
@@ -57,18 +62,32 @@ def check_systemd(runner: CommandRunner = _run_command) -> list[dict[str, Any]]:
             "market-sentinel-backup.service",
             "--property=Result",
             "--property=ExecMainStatus",
-            "--property=ExecMainStartTimestampMonotonic",
+            "--property=ExecMainExitTimestampUSec",
             "--value",
         ]
     )
     values = [value.strip() for value in completion.stdout.splitlines()]
-    result, exit_status, started_at = (values + ["", "", ""])[:3]
-    completed = completion.returncode == 0 and result == "success" and exit_status == "0" and started_at not in {"", "0"}
+    result, exit_status, completed_at_us = (values + ["", "", ""])[:3]
+    try:
+        backup_age_seconds = max(0.0, clock() - (int(completed_at_us) / 1_000_000))
+    except ValueError:
+        backup_age_seconds = float("inf")
+    completed = (
+        completion.returncode == 0
+        and result == "success"
+        and exit_status == "0"
+        and completed_at_us not in {"", "0"}
+        and backup_age_seconds <= BACKUP_MAX_AGE_SECONDS
+    )
     checks.append(
         {
-            "name": "systemd_last_success_market-sentinel-backup.service",
+            "name": "systemd_recent_success_market-sentinel-backup.service",
             "status": "pass" if completed else "fail",
-            "detail": f"result={result or 'unknown'}; exit_status={exit_status or 'unknown'}; started_at={started_at or 'unknown'}",
+            "detail": (
+                f"result={result or 'unknown'}; exit_status={exit_status or 'unknown'}; "
+                f"completed_at_us={completed_at_us or 'unknown'}; backup_age_seconds={backup_age_seconds:.0f}; "
+                f"max_age_seconds={BACKUP_MAX_AGE_SECONDS}"
+            ),
         }
     )
     return checks
