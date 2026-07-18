@@ -119,11 +119,37 @@ def _safe_attachment_filename(value: Any) -> str:
 
 
 def _normalize_allowed_origin(value: Any) -> str:
-    """Keep configured CORS origins header-safe before storing them."""
+    """Accept only a canonical HTTP(S) browser origin without credentials or paths."""
     origin = str(value).strip().rstrip("/")
     if not origin or origin != _safe_http_header_value(origin):
         return ""
-    return origin
+    parsed = urlparse(origin)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or "*" in parsed.netloc
+    ):
+        return ""
+    canonical = f"{parsed.scheme}://{parsed.netloc}"
+    return canonical if origin == canonical else ""
+
+
+def configured_allowed_origins(cli_origins: Optional[Sequence[str]] = None) -> List[str]:
+    """Return normalized CORS origins from explicit flags and protected service env."""
+    values = [str(origin) for origin in (cli_origins or [])]
+    values.extend(os.environ.get("MARKET_SENTINEL_ALLOWED_ORIGINS", "").split(","))
+    origins: List[str] = []
+    for value in values:
+        normalized = _normalize_allowed_origin(value)
+        if normalized and normalized not in origins:
+            origins.append(normalized)
+    return origins
 
 
 API_ROUTES = {
@@ -4240,7 +4266,7 @@ def main() -> None:
         args.frontend_dir,
         api_token=args.api_token,
         allow_remote=args.allow_remote,
-        allowed_origins=args.allow_origin,
+        allowed_origins=configured_allowed_origins(args.allow_origin),
     )
 
 

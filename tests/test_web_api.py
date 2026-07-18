@@ -43,6 +43,7 @@ from web_api import (
     copy_payload,
     copy_preview_payload,
     copy_trade_preview_from_activity,
+    configured_allowed_origins,
     delete_alert,
     delete_wallet_watch,
     health_payload,
@@ -284,6 +285,19 @@ class WebApiTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "non-loopback"):
             ReactGuiServer(("0.0.0.0", 0), ReactGuiHandler)
+
+    def test_configured_allowed_origins_merges_cli_and_environment_values(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"MARKET_SENTINEL_ALLOWED_ORIGINS": "https://analytics.example.com/, invalid, https://ops.example.com/path"},
+            clear=False,
+        ):
+            origins = configured_allowed_origins(["https://console.example", "https://console.example"])
+
+        self.assertEqual(
+            origins,
+            ["https://console.example", "https://analytics.example.com"],
+        )
 
     def test_server_refuses_to_start_with_a_corrupt_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -38,6 +38,7 @@ class ProductionOperationsTests(unittest.TestCase):
         security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
         repository_settings = (ROOT / "docs" / "REPOSITORY_SETTINGS.md").read_text(encoding="utf-8")
         codeowners = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
+        service_environment = (ROOT / "deploy" / "systemd" / "market-sentinel.env.example").read_text(encoding="utf-8")
         self.assertIn("basic_auth", proxy)
         self.assertIn("X-Market-Sentinel-Token", proxy)
         self.assertIn("127.0.0.1:8765", proxy)
@@ -54,6 +55,7 @@ class ProductionOperationsTests(unittest.TestCase):
         self.assertIn("Python package build", repository_settings)
         self.assertIn("Frontend dependency audit", repository_settings)
         self.assertIn("Release` workflow", repository_settings)
+        self.assertIn("MARKET_SENTINEL_ALLOWED_ORIGINS", service_environment)
         self.assertIn("* @Yunushan", codeowners)
 
     def test_systemd_health_timer_performs_periodic_loopback_checks(self) -> None:

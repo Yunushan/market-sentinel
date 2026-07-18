@@ -85,12 +85,17 @@ example hostname. Set these protected Caddy environment values:
 ```bash
 MARKET_SENTINEL_API_TOKEN="$(openssl rand -hex 32)"
 MARKET_SENTINEL_CADDY_PASSWORD_HASH="$(caddy hash-password --plaintext 'replace-this-password')"
+MARKET_SENTINEL_ALLOWED_ORIGINS="https://analytics.example.com"
 ```
 
 Use the same `MARKET_SENTINEL_API_TOKEN` in
 `/etc/market-sentinel/market-sentinel.env`. Configure DNS and permit only ports
 80/443 to Caddy. Keep 8765 private. Test the public hostname, the TLS renewal
-path, and authenticated browser flow before enabling any live feature.
+path, and authenticated browser flow before enabling any live feature. Set
+`MARKET_SENTINEL_ALLOWED_ORIGINS` in that protected environment file to the exact
+public Caddy origin; it must match the replaced Caddy hostname, omit any path,
+and must not use a wildcard. Multiple separately trusted origins are
+comma-separated.
 
 ## Monitoring and recovery
 
