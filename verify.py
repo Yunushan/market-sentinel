@@ -1118,6 +1118,7 @@ def run_ci_cd_workflow_check() -> None:
             "WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD",
             "X509Certificate2",
             "EphemeralKeySet",
+            "certificate base64 contains internal whitespace",
             "scripts/sign_windows_release.py",
             "gh release create",
             "Smoke install built wheel",

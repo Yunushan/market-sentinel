@@ -307,7 +307,11 @@ jobs:
 
           if ($missing.Count -eq 0) {
             try {
-              $certificateBytes = [Convert]::FromBase64String($env:WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64)
+              $encodedCertificate = $env:WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64.Trim()
+              if ($encodedCertificate -match "\s") {
+                throw "certificate base64 contains internal whitespace"
+              }
+              $certificateBytes = [Convert]::FromBase64String($encodedCertificate)
               $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
                 $certificateBytes,
                 $env:WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD,
