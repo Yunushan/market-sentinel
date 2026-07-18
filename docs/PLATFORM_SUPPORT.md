@@ -48,3 +48,26 @@ python scripts/verify_platform_support.py --require-full
 ```
 
 The strict gate is expected to fail until Windows 10, RHEL/Rocky desktop runners with Tkinter, BSD, generic Unix beyond Linux/macOS, Solaris, native Android, native iOS, and additional Linux distribution evidence exists. That failure is intentional: it prevents MarketSentinel from advertising 100% platform test coverage before the required runners, packaging, and mobile architecture exist.
+
+## Collecting Host Evidence
+
+When a required hosted, VM, or self-hosted target is available, run the
+collector from a clean checkout after installing the locked dependencies. It
+runs real dependency, Tkinter-smoke, and project-verification commands while
+discarding their output so the JSON record cannot contain environment values or
+credential-bearing logs:
+
+```bash
+python scripts/collect_platform_evidence.py \
+  --platform "FreeBSD 14.2" \
+  --output platform-evidence-freebsd-14.2.json \
+  --include-frontend-build
+```
+
+The collector returns nonzero when any check fails and writes the result
+atomically. Its record includes the project version and, when Git metadata is
+available, the exact commit tested; it never retains command output. Evidence
+records are review inputs only: do not change a support claim or enable
+`--require-full` based on an unreviewed record. A platform can be promoted only
+after an operator verifies the host identity, source revision, clean dependency
+installation, command results, and applicable release/install path.
