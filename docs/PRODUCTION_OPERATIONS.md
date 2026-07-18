@@ -53,11 +53,16 @@ Install the systemd unit and validate it:
 sudo install -m 0644 deploy/systemd/market-sentinel-web.service /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/market-sentinel-health.service /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/market-sentinel-health.timer /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/market-sentinel-backup.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/market-sentinel-backup.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now market-sentinel-web
 sudo systemctl enable --now market-sentinel-health.timer
+sudo systemctl enable --now market-sentinel-backup.timer
+sudo systemctl start market-sentinel-backup.service
 sudo systemctl status market-sentinel-web
 sudo systemctl status market-sentinel-health.timer
+sudo systemctl status market-sentinel-backup.timer
 sudo journalctl -u market-sentinel-web -f
 /opt/market-sentinel/.venv/bin/python /opt/market-sentinel/scripts/verify_service_health.py
 /opt/market-sentinel/.venv/bin/market-sentinel doctor --strict --config /var/lib/market-sentinel/config.json --frontend-dir /opt/market-sentinel/frontend/dist
@@ -80,6 +85,16 @@ The web unit manages `/var/lib/market-sentinel` with `StateDirectory` and mode
 state directory. The initial install command remains useful for inspecting
 ownership before the first start.
 
+The backup timer runs a local, network-isolated state backup each day with a
+14-artifact retention limit. It writes archives and SHA-256 manifests only to
+`/var/lib/market-sentinel-backups`, owned by the service account and separate
+from the live state directory. Place `/var/lib` on encrypted storage or change
+the backup destination to an encrypted mounted volume before using this in
+production. SQLite state databases are captured with SQLite's online backup API
+instead of copying WAL sidecar files. The archive intentionally excludes
+`/etc/market-sentinel` and its credentials; protect and back up that root-owned
+configuration through the host's secret-management and configuration process.
+
 ## TLS and browser access
 
 Install Caddy from its official package repository, copy
@@ -101,6 +116,31 @@ public Caddy origin; it must match the replaced Caddy hostname, omit any path,
 and must not use a wildcard. Multiple separately trusted origins are
 comma-separated.
 
+## Deployment evidence
+
+After a deployment, collect a read-only verification record from the VPS. It
+checks the systemd web service and health timer, validates the loopback health
+endpoint and release version, and, when given a public URL, validates the
+authenticated HTTPS proxy response, cache policy, and browser security headers.
+It also requires a successfully completed initial backup service run; enable the
+timer and run that service once before collecting deployment evidence.
+It does not place orders, contact market APIs, or enable any live feature.
+
+```bash
+export MARKET_SENTINEL_PUBLIC_BASIC_USER="operator"
+export MARKET_SENTINEL_PUBLIC_BASIC_PASSWORD="the-existing-caddy-password"
+
+/opt/market-sentinel/.venv/bin/python /opt/market-sentinel/scripts/verify_production_deployment.py \
+  --expected-version <RELEASE_VERSION> \
+  --public-url https://analytics.example.com
+```
+
+Keep the password only in the environment. Do not pass it on the command line
+or store the generated JSON output with credentials. Save the JSON result with
+the release-change record and repeat it after every restore drill. For a
+loopback-only staging host, omit `--public-url`; the script will still validate
+the local service and timer.
+
 ## Monitoring and recovery
 
 - Health: `market-sentinel-health.timer` polls `GET /api/health` through
@@ -116,12 +156,26 @@ comma-separated.
   alert on restart loops, authentication failures, failed safety preflights,
   and API rate-limit errors.
 - Backups: back up `/var/lib/market-sentinel` daily with encryption and tested
-  retention. The directory contains local configuration, paper records, and
-  redacted live-validation reports. Do not back up `.env` files to shared or
-  unencrypted storage.
-- Restore drill: quarterly, restore a backup into an isolated host, start the
-  service loopback-only, run the health check, and confirm no live trading is
-  enabled by restored configuration.
+  retention. `market-sentinel-backup.timer` performs an integrity-manifested
+  daily archive with 14 retained copies. The directory contains local
+  configuration, paper records, and redacted live-validation reports. Do not
+  back up `.env` files to shared or unencrypted storage.
+- Restore drill: quarterly, select an archive from
+  `/var/lib/market-sentinel-backups`, verify it, then restore it only into a
+  new empty directory on an isolated host:
+
+  ```bash
+  /opt/market-sentinel/.venv/bin/python /opt/market-sentinel/scripts/restore_state_backup.py \
+    --archive /var/lib/market-sentinel-backups/<archive>.tar.gz
+  /opt/market-sentinel/.venv/bin/python /opt/market-sentinel/scripts/restore_state_backup.py \
+    --archive /var/lib/market-sentinel-backups/<archive>.tar.gz \
+    --destination /var/lib/market-sentinel-restore-drill
+  ```
+
+  The restore command rejects checksum mismatches, unsafe archive paths,
+  archive bombs beyond its stated safety limits, and nonempty destinations.
+  Start the service loopback-only from the restored state, run the health
+  check, and confirm no live trading is enabled by restored configuration.
 - Configuration recovery: an existing malformed `config.json` now fails closed
   and is never silently replaced with defaults. Preserve that file for
   investigation, restore the most recent verified backup to

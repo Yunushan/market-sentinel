@@ -1,0 +1,11 @@
+[Unit]
+Description=Run MarketSentinel state backup daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=15min
+Unit=market-sentinel-backup.service
+
+[Install]
+WantedBy=timers.target

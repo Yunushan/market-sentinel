@@ -80,6 +80,26 @@ class ProductionOperationsTests(unittest.TestCase):
         self.assertIn("Persistent=true", timer)
         self.assertIn("Unit=market-sentinel-health.service", timer)
 
+    def test_systemd_backup_timer_keeps_offline_backups_hardened(self) -> None:
+        backup_unit = (ROOT / "deploy" / "systemd" / "market-sentinel-backup.service").read_text(encoding="utf-8")
+        timer = (ROOT / "deploy" / "systemd" / "market-sentinel-backup.timer").read_text(encoding="utf-8")
+        for fragment in (
+            "User=market-sentinel",
+            "StateDirectory=market-sentinel-backups",
+            "backup_state.py --source /var/lib/market-sentinel --destination /var/lib/market-sentinel-backups --retain 14",
+            "PrivateNetwork=true",
+            "NoNewPrivileges=true",
+            "ProtectSystem=strict",
+            "ReadOnlyPaths=/var/lib/market-sentinel",
+            "ReadWritePaths=/var/lib/market-sentinel-backups",
+            "RestrictAddressFamilies=AF_UNIX",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, backup_unit)
+        self.assertIn("OnCalendar=daily", timer)
+        self.assertIn("Persistent=true", timer)
+        self.assertIn("Unit=market-sentinel-backup.service", timer)
+
     def test_gitignore_excludes_generated_analytics_artifacts(self) -> None:
         gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
         for fragment in (
