@@ -3,16 +3,20 @@
 These controls are configured in GitHub, not source control. An administrator
 must enable them before treating a release as production-ready.
 
-## Main branch
+## Solo-maintainer main branch
 
 Protect `main` with:
 
-1. Required pull requests and at least one approving review.
-2. Required review from Code Owners.
-3. Dismiss stale approvals on new commits.
-4. Required successful `CI`, `Security`, and release-validation checks.
-5. No force pushes, no branch deletion, and no direct administrator bypass for
+1. Required successful `CI`, `Security`, and release-validation checks.
+2. No force pushes, no branch deletion, and no direct administrator bypass for
    normal releases.
+3. Required conversation resolution and linear history.
+
+## Team production policy
+
+When an independent maintainer is available, additionally require at least one
+approving review, Code Owner review, and dismissal of stale approvals on new
+commits. Keep `.github/CODEOWNERS` current before enabling that policy.
 
 ## Security and automation
 

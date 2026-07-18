@@ -134,6 +134,8 @@ class CiCdWorkflowTests(unittest.TestCase):
             "sha256sum * > SHA256SUMS.txt",
             "Generate SPDX SBOM",
             "scripts/generate_release_sbom.py",
+            "Verify final release assets",
+            "scripts/verify_release_assets.py",
             "actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3",
             "attestations: write",
             "id-token: write",

@@ -438,6 +438,14 @@ jobs:
           - \`SHA256SUMS.txt\`
           EOF
 
+      - name: Verify final release assets
+        shell: bash
+        run: |
+          python scripts/verify_release_assets.py \
+            --asset-dir release-assets \
+            --version "${{ needs.metadata.outputs.version }}" \
+            --tag "${{ needs.metadata.outputs.tag_name }}"
+
       - name: Attest release assets
         uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
         with:
