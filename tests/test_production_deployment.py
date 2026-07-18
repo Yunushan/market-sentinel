@@ -38,7 +38,7 @@ class ProductionDeploymentTests(unittest.TestCase):
     def test_systemd_checks_require_active_enabled_and_recent_backup(self) -> None:
         def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
             if args[1] == "show":
-                return subprocess.CompletedProcess(args, 0, "success\n0\n999000000\n", "")
+                return subprocess.CompletedProcess(args, 0, "success\n0\nThu 1970-01-01 00:16:39 UTC\n", "")
             return subprocess.CompletedProcess(args, 0, "active\n", "")
 
         checks = check_systemd(runner, clock=lambda: 1000.0)
@@ -48,7 +48,7 @@ class ProductionDeploymentTests(unittest.TestCase):
     def test_systemd_check_rejects_a_stale_backup(self) -> None:
         def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
             if args[1] == "show":
-                return subprocess.CompletedProcess(args, 0, "success\n0\n1000000\n", "")
+                return subprocess.CompletedProcess(args, 0, "success\n0\nThu 1970-01-01 00:00:01 UTC\n", "")
             return subprocess.CompletedProcess(args, 0, "active\n", "")
 
         checks = check_systemd(runner, clock=lambda: 1_000_000.0)
@@ -59,7 +59,7 @@ class ProductionDeploymentTests(unittest.TestCase):
     def test_systemd_check_rejects_an_impossibly_future_backup_timestamp(self) -> None:
         def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
             if args[1] == "show":
-                return subprocess.CompletedProcess(args, 0, "success\n0\n1400000000\n", "")
+                return subprocess.CompletedProcess(args, 0, "success\n0\nThu 1970-01-01 00:23:20 UTC\n", "")
             return subprocess.CompletedProcess(args, 0, "active\n", "")
 
         checks = check_systemd(runner, clock=lambda: 1000.0)

@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.error import HTTPError
 from urllib.parse import urljoin, urlparse
@@ -38,7 +39,18 @@ BACKUP_MAX_FUTURE_SKEW_SECONDS = 5 * 60
 
 
 def _run_command(args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, capture_output=True, text=True, check=False, timeout=15)
+    environment = {**os.environ, "LC_ALL": "C", "TZ": "UTC"}
+    return subprocess.run(args, capture_output=True, text=True, check=False, timeout=15, env=environment)
+
+
+def _systemd_timestamp_seconds(value: str) -> float:
+    normalized = value.strip()
+    for pattern in ("%a %Y-%m-%d %H:%M:%S UTC", "%a %Y-%m-%d %H:%M:%S.%f UTC"):
+        try:
+            return datetime.strptime(normalized, pattern).replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            continue
+    raise ValueError(f"invalid systemd UTC timestamp: {normalized or 'missing'}")
 
 
 def check_systemd(
@@ -63,21 +75,21 @@ def check_systemd(
             "market-sentinel-backup.service",
             "--property=Result",
             "--property=ExecMainStatus",
-            "--property=ExecMainExitTimestampUSec",
+            "--property=ExecMainExitTimestamp",
             "--value",
         ]
     )
     values = [value.strip() for value in completion.stdout.splitlines()]
-    result, exit_status, completed_at_us = (values + ["", "", ""])[:3]
+    result, exit_status, completed_at = (values + ["", "", ""])[:3]
     try:
-        backup_age_seconds = clock() - (int(completed_at_us) / 1_000_000)
+        backup_age_seconds = clock() - _systemd_timestamp_seconds(completed_at)
     except ValueError:
         backup_age_seconds = float("inf")
     completed = (
         completion.returncode == 0
         and result == "success"
         and exit_status == "0"
-        and completed_at_us not in {"", "0"}
+        and completed_at not in {"", "n/a"}
         and backup_age_seconds >= -BACKUP_MAX_FUTURE_SKEW_SECONDS
         and backup_age_seconds <= BACKUP_MAX_AGE_SECONDS
     )
@@ -87,7 +99,7 @@ def check_systemd(
             "status": "pass" if completed else "fail",
             "detail": (
                 f"result={result or 'unknown'}; exit_status={exit_status or 'unknown'}; "
-                f"completed_at_us={completed_at_us or 'unknown'}; backup_age_seconds={backup_age_seconds:.0f}; "
+                f"completed_at={completed_at or 'unknown'}; backup_age_seconds={backup_age_seconds:.0f}; "
                 f"max_age_seconds={BACKUP_MAX_AGE_SECONDS}; max_future_skew_seconds={BACKUP_MAX_FUTURE_SKEW_SECONDS}"
             ),
         }
