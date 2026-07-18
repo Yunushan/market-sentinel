@@ -6,6 +6,7 @@ import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from scripts.verify_production_deployment import check_loopback, check_public_proxy, check_systemd
 
@@ -62,11 +63,30 @@ class ProductionDeploymentTests(unittest.TestCase):
             "Cross-Origin-Resource-Policy": "same-origin",
             "Cache-Control": "no-store",
         }
-        with patch("scripts.verify_production_deployment.urlopen", return_value=_Response(headers, {"status": "ok", "api_version": "1.0.10"})):
+        unauthenticated = HTTPError("https://analytics.example.com/api/health", 401, "Unauthorized", {}, None)
+        with patch(
+            "scripts.verify_production_deployment.urlopen",
+            side_effect=[unauthenticated, _Response(headers, {"status": "ok", "api_version": "1.0.10"})],
+        ):
             self.assertEqual(
                 check_public_proxy("https://analytics.example.com", "operator", "secret", 1.0, "1.0.10")["status"],
                 "pass",
             )
+        with self.assertRaisesRegex(ValueError, "Basic Auth credentials"):
+            check_public_proxy("https://analytics.example.com", "", "secret", 1.0)
+        with patch("scripts.verify_production_deployment.urlopen", return_value=_Response(headers, {"status": "ok", "api_version": "1.0.10"})):
+            with self.assertRaisesRegex(RuntimeError, "unauthenticated public proxy request was accepted"):
+                check_public_proxy("https://analytics.example.com", "operator", "secret", 1.0)
+        with patch(
+            "scripts.verify_production_deployment.urlopen",
+            side_effect=HTTPError("https://analytics.example.com/api/health", 403, "Forbidden", {}, None),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 403, expected 401"):
+                check_public_proxy("https://analytics.example.com", "operator", "secret", 1.0)
+        with patch(
+            "scripts.verify_production_deployment.urlopen",
+            side_effect=[unauthenticated, _Response(headers, {"status": "ok", "api_version": "1.0.10"})],
+        ):
             with self.assertRaisesRegex(RuntimeError, "expected 1.0.11"):
                 check_public_proxy("https://analytics.example.com", "operator", "secret", 1.0, "1.0.11")
         with self.assertRaisesRegex(ValueError, "absolute https"):

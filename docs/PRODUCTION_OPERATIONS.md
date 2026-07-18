@@ -120,8 +120,9 @@ comma-separated.
 
 After a deployment, collect a read-only verification record from the VPS. It
 checks the systemd web service and health timer, validates the loopback health
-endpoint and release version, and, when given a public URL, validates the
-authenticated HTTPS proxy response, cache policy, and browser security headers.
+endpoint and release version, and, when given a public URL, proves that an
+unauthenticated request receives `401` before validating the authenticated HTTPS
+proxy response, cache policy, and browser security headers.
 It also requires a successfully completed initial backup service run; enable the
 timer and run that service once before collecting deployment evidence.
 It does not place orders, contact market APIs, or enable any live feature.
