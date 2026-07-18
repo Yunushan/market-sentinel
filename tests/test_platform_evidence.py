@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.collect_platform_evidence import collect_evidence, write_evidence
 
@@ -63,6 +64,21 @@ class PlatformEvidenceTests(unittest.TestCase):
             linked.symlink_to(target, target_is_directory=True)
             with self.assertRaisesRegex(ValueError, "symbolic-link"):
                 write_evidence(linked / "platform-evidence.json", {"status": "ok"})
+
+    @unittest.skipUnless(os.name == "posix", "symbolic-link safety is verified on POSIX hosts")
+    def test_allows_a_platform_temp_directory_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.mkdir()
+            temp_alias = root / "platform-temp"
+            temp_alias.symlink_to(target, target_is_directory=True)
+            output = temp_alias / "platform-evidence.json"
+
+            with patch("scripts.collect_platform_evidence.tempfile.gettempdir", return_value=str(temp_alias)):
+                write_evidence(output, {"status": "ok"})
+
+            self.assertEqual({"status": "ok"}, json.loads(output.read_text(encoding="utf-8")))
 
 
 if __name__ == "__main__":

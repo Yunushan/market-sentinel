@@ -125,7 +125,16 @@ def collect_evidence(
 def write_evidence(path: Path, payload: dict[str, Any]) -> None:
     if not path.parent.is_dir():
         raise ValueError(f"evidence parent directory does not exist: {path.parent}")
-    symlinked_component = next((item for item in (path.parent, *path.parent.parents) if item.is_symlink()), None)
+    # macOS exposes its normal temporary directory beneath /var, a system symlink.
+    # Allow only symlinks that are ancestors of the platform-selected temp root; all
+    # user-selected symlink components in an evidence destination remain rejected.
+    temp_root = Path(tempfile.gettempdir()).absolute()
+    trusted_symlinks = {item for item in (temp_root, *temp_root.parents) if item.is_symlink()}
+    output_parent = path.parent.absolute()
+    symlinked_component = next(
+        (item for item in (output_parent, *output_parent.parents) if item.is_symlink() and item not in trusted_symlinks),
+        None,
+    )
     if symlinked_component is not None:
         raise ValueError(f"evidence output path contains symbolic-link component: {symlinked_component}")
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
