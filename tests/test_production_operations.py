@@ -76,6 +76,19 @@ class ProductionOperationsTests(unittest.TestCase):
         self.assertIn("Persistent=true", timer)
         self.assertIn("Unit=market-sentinel-health.service", timer)
 
+    def test_gitignore_excludes_generated_analytics_artifacts(self) -> None:
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        for fragment in (
+            "data/polymarket_analytics_cache.json",
+            "data/*.sqlite*",
+            "data/*.jsonl",
+            "data/*.csv",
+            "data/*.log",
+            "data/*.pid",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, gitignore)
+
 
 if __name__ == "__main__":
     unittest.main()
