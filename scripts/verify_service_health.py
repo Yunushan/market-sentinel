@@ -19,6 +19,9 @@ def check_health(url: str, token: str, timeout: float) -> dict:
         payload = json.loads(response.read().decode("utf-8"))
     if not isinstance(payload, dict) or payload.get("status") != "ok":
         raise RuntimeError("health endpoint did not report status=ok")
+    version = payload.get("api_version")
+    if not isinstance(version, str) or not version.strip() or version == "unknown":
+        raise RuntimeError("health endpoint did not report a usable api_version")
     return payload
 
 
@@ -35,7 +38,10 @@ def main() -> int:
     for attempt in range(1, max(1, args.retries) + 1):
         try:
             payload = check_health(args.url, args.token, args.timeout)
-            print(f"[ok] service health on attempt {attempt}: {payload.get('message', 'ok')}")
+            print(
+                f"[ok] service health on attempt {attempt}: "
+                f"version={payload['api_version']}; {payload.get('message', 'ok')}"
+            )
             return 0
         except (OSError, URLError, RuntimeError, json.JSONDecodeError) as exc:
             last_error = exc
