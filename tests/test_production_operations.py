@@ -51,6 +51,9 @@ class ProductionOperationsTests(unittest.TestCase):
         self.assertIn("Report a vulnerability", security)
         self.assertIn("Team production policy", repository_settings)
         self.assertIn("secret scanning", repository_settings)
+        self.assertIn("Python package build", repository_settings)
+        self.assertIn("Frontend dependency audit", repository_settings)
+        self.assertIn("Release` workflow", repository_settings)
         self.assertIn("* @Yunushan", codeowners)
 
     def test_systemd_health_timer_performs_periodic_loopback_checks(self) -> None:
