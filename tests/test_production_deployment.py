@@ -14,6 +14,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 
 from scripts.verify_production_deployment import (
+    check_evidence_output_directory,
     check_filesystem_permissions,
     check_loopback,
     check_public_proxy,
@@ -70,6 +71,29 @@ class ProductionDeploymentTests(unittest.TestCase):
         environment = check_filesystem_permissions(lambda path: paths[path.name])[0]
         self.assertEqual(environment["status"], "fail")
 
+    def test_evidence_output_requires_a_private_root_owned_parent_directory(self) -> None:
+        output = Path("/var/lib/market-sentinel-deployment-evidence") / "deployment.json"
+        metadata = SimpleNamespace(st_mode=0o040700, st_uid=0)
+        self.assertEqual(check_evidence_output_directory(output, lambda path: metadata)["status"], "pass")
+
+        untrusted = SimpleNamespace(st_mode=0o040700, st_uid=123)
+        self.assertEqual(check_evidence_output_directory(output, lambda path: untrusted)["status"], "fail")
+
+    @unittest.skipUnless(os.name == "posix", "symbolic-link safety is verified on POSIX hosts")
+    def test_evidence_output_rejects_a_symlinked_parent_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trusted = root / "trusted"
+            trusted.mkdir()
+            linked = root / "service-controlled-link"
+            linked.symlink_to(trusted, target_is_directory=True)
+            metadata = SimpleNamespace(st_mode=0o040700, st_uid=0)
+
+            check = check_evidence_output_directory(linked / "deployment.json", lambda path: metadata)
+
+            self.assertEqual(check["status"], "fail")
+            self.assertIn("symbolic-link", check["detail"])
+
     def test_systemd_check_rejects_a_stale_backup(self) -> None:
         def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
             if args[1] == "show":
@@ -101,6 +125,7 @@ class ProductionDeploymentTests(unittest.TestCase):
     def test_evidence_output_is_atomic_json_with_private_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "evidence" / "deployment.json"
+            output.parent.mkdir()
             write_evidence(output, {"status": "ok", "checks": [{"name": "loopback", "status": "pass"}]})
 
             self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["status"], "ok")
@@ -133,6 +158,10 @@ class ProductionDeploymentTests(unittest.TestCase):
                 ["verify_production_deployment.py", "--skip-systemd", "--output", "deployment.json"],
             ),
             patch("scripts.verify_production_deployment.check_loopback", return_value={"name": "loopback_health", "status": "pass"}),
+            patch(
+                "scripts.verify_production_deployment.check_evidence_output_directory",
+                return_value={"name": "filesystem_private_evidence", "status": "pass"},
+            ),
             patch("scripts.verify_production_deployment.write_evidence", side_effect=OSError("disk unavailable")),
             contextlib.redirect_stdout(stdout),
         ):
