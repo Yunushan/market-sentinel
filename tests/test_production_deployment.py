@@ -110,6 +110,7 @@ class ProductionDeploymentTests(unittest.TestCase):
     def test_evidence_output_is_atomic_json_with_private_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "evidence" / "deployment.json"
+            output.parent.mkdir()
             write_evidence(output, {"status": "ok", "checks": [{"name": "loopback", "status": "pass"}]})
 
             self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["status"], "ok")

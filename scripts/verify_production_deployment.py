@@ -209,8 +209,7 @@ def check_public_proxy(
 
 
 def write_evidence(path: Path, payload: dict[str, Any]) -> None:
-    """Atomically persist redacted deployment evidence with private permissions."""
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    """Atomically persist redacted deployment evidence in a pre-validated directory."""
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     temporary = Path(temporary_name)
     try:
