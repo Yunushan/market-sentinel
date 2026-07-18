@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.metadata as importlib_metadata
 import json
 import io
 import os
@@ -76,6 +77,7 @@ from web_api import (
     polymarket_mdd_export_payload,
     polymarket_user_mdd_payload,
     polymarket_user_search_payload,
+    project_version,
     position_refill_payload,
     poll_wallet_activity,
     refresh_selected_paper_mark,
@@ -1864,9 +1866,11 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(len(paper_position_rows(loaded.paper_trades)), 1)
 
     def test_health_payload_documents_parallel_gui_contract(self) -> None:
-        payload = health_payload(Path("local-config.json"), Path("frontend-dist"))
+        with patch("web_api.project_version", return_value="9.8.7"):
+            payload = health_payload(Path("local-config.json"), Path("frontend-dist"))
 
         self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["api_version"], "9.8.7")
         self.assertEqual(payload["mode"], "parallel")
         self.assertTrue(payload["python_gui_available"])
         self.assertEqual(payload["python_gui_command"], "python app.py")
@@ -1895,6 +1899,16 @@ class WebApiTests(unittest.TestCase):
         self.assertIn("/api/polymarket/live-validation/reports", payload["routes"]["POST"])
         self.assertIn("/api/polymarket/users/mdd/cache/{key}", payload["routes"]["DELETE"])
         self.assertIn("/api/polymarket/live-validation/reports/{key}", payload["routes"]["DELETE"])
+
+    def test_project_version_uses_distribution_metadata_then_source_metadata(self) -> None:
+        with patch("web_api.importlib_metadata.version", return_value="2.3.4"):
+            self.assertEqual(project_version(), "2.3.4")
+
+        with patch(
+            "web_api.importlib_metadata.version",
+            side_effect=importlib_metadata.PackageNotFoundError,
+        ):
+            self.assertRegex(project_version(), r"^\d+\.\d+\.\d+")
 
     def test_polymarket_clob_readiness_payload_redacts_credentials(self) -> None:
         cfg = AppConfig()

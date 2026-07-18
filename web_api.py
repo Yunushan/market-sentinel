@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hmac
 import hashlib
+import importlib.metadata as importlib_metadata
 import ipaddress
 import json
 import mimetypes
@@ -15,6 +16,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 from urllib.parse import parse_qs, unquote, urlparse
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 compatibility.
+    import tomli as tomllib
 
 from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, UIDesign, WalletWatch
 from core.storage import DEFAULT_CONFIG_PATH, load_config, save_config
@@ -97,7 +103,7 @@ from polymarket.ws_user import build_user_subscription
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_FRONTEND_DIR = PROJECT_ROOT / "frontend" / "dist"
-API_VERSION = "0.1.0"
+PROJECT_NAME = "market-sentinel"
 MAX_JSON_BODY_BYTES = 1_000_000
 PYTHON_GUI_COMMAND = "python app.py"
 PYTHON_GUI_SCRIPT = "run_gui.bat"
@@ -116,6 +122,19 @@ def _safe_attachment_filename(value: Any) -> str:
     """Return a quoted Content-Disposition filename without header delimiters."""
     filename = _safe_http_header_value(value).replace('"', "").strip()
     return filename or "download"
+
+
+def project_version() -> str:
+    """Return installed distribution metadata, with a source-checkout fallback."""
+    try:
+        return importlib_metadata.version(PROJECT_NAME)
+    except importlib_metadata.PackageNotFoundError:
+        pass
+    try:
+        data = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    except Exception:
+        return "unknown"
+    return str(data.get("project", {}).get("version") or "unknown")
 
 
 def _normalize_allowed_origin(value: Any) -> str:
@@ -895,7 +914,7 @@ def health_payload(config_path: Path = DEFAULT_CONFIG_PATH, frontend_dir: Path =
     frontend_index = frontend_dir / "index.html"
     return {
         "status": "ok",
-        "api_version": API_VERSION,
+        "api_version": project_version(),
         "mode": "parallel",
         "python_gui_available": True,
         "python_gui_command": PYTHON_GUI_COMMAND,
