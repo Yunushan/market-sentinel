@@ -14,6 +14,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 
 from scripts.verify_production_deployment import (
+    check_evidence_output_directory,
     check_filesystem_permissions,
     check_loopback,
     check_public_proxy,
@@ -69,6 +70,14 @@ class ProductionDeploymentTests(unittest.TestCase):
         paths["market-sentinel.env"] = SimpleNamespace(st_mode=0o100640, st_uid=123)
         environment = check_filesystem_permissions(lambda path: paths[path.name])[0]
         self.assertEqual(environment["status"], "fail")
+
+    def test_evidence_output_requires_a_private_root_owned_parent_directory(self) -> None:
+        output = Path("/var/lib/market-sentinel-deployment-evidence") / "deployment.json"
+        metadata = SimpleNamespace(st_mode=0o040700, st_uid=0)
+        self.assertEqual(check_evidence_output_directory(output, lambda path: metadata)["status"], "pass")
+
+        untrusted = SimpleNamespace(st_mode=0o040700, st_uid=123)
+        self.assertEqual(check_evidence_output_directory(output, lambda path: untrusted)["status"], "fail")
 
     def test_systemd_check_rejects_a_stale_backup(self) -> None:
         def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -133,6 +142,10 @@ class ProductionDeploymentTests(unittest.TestCase):
                 ["verify_production_deployment.py", "--skip-systemd", "--output", "deployment.json"],
             ),
             patch("scripts.verify_production_deployment.check_loopback", return_value={"name": "loopback_health", "status": "pass"}),
+            patch(
+                "scripts.verify_production_deployment.check_evidence_output_directory",
+                return_value={"name": "filesystem_private_evidence", "status": "pass"},
+            ),
             patch("scripts.verify_production_deployment.write_evidence", side_effect=OSError("disk unavailable")),
             contextlib.redirect_stdout(stdout),
         ):

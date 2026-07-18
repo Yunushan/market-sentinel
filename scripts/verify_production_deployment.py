@@ -64,28 +64,43 @@ def _systemd_timestamp_seconds(value: str) -> float:
 def check_filesystem_permissions(
     stat_reader: Callable[[Path], object] = lambda path: path.stat(),
 ) -> list[dict[str, Any]]:
-    checks: list[dict[str, Any]] = []
-    for path, expected_type, require_root_owner in REQUIRED_PRIVATE_PATHS:
-        try:
-            metadata = stat_reader(path)
-            mode = int(getattr(metadata, "st_mode"))
-            owner = int(getattr(metadata, "st_uid"))
-            valid_type = S_ISREG(mode) if expected_type == S_IFREG else S_ISDIR(mode)
-            private = S_IMODE(mode) & 0o077 == 0
-            owner_valid = not require_root_owner or owner == 0
-            passed = valid_type and private and owner_valid
-            detail = f"mode={S_IMODE(mode):04o}; uid={owner}; expected={'file' if expected_type == S_IFREG else 'directory'}"
-        except OSError as exc:
-            passed = False
-            detail = str(exc)
-        checks.append(
-            {
-                "name": f"filesystem_private_{path.name}",
-                "status": "pass" if passed else "fail",
-                "detail": detail,
-            }
-        )
-    return checks
+    return [
+        _check_private_path(path, expected_type, require_root_owner, stat_reader)
+        for path, expected_type, require_root_owner in REQUIRED_PRIVATE_PATHS
+    ]
+
+
+def _check_private_path(
+    path: Path,
+    expected_type: int,
+    require_root_owner: bool,
+    stat_reader: Callable[[Path], object],
+) -> dict[str, Any]:
+    try:
+        metadata = stat_reader(path)
+        mode = int(getattr(metadata, "st_mode"))
+        owner = int(getattr(metadata, "st_uid"))
+        valid_type = S_ISREG(mode) if expected_type == S_IFREG else S_ISDIR(mode)
+        private = S_IMODE(mode) & 0o077 == 0
+        owner_valid = not require_root_owner or owner == 0
+        passed = valid_type and private and owner_valid
+        detail = f"mode={S_IMODE(mode):04o}; uid={owner}; expected={'file' if expected_type == S_IFREG else 'directory'}"
+    except OSError as exc:
+        passed = False
+        detail = str(exc)
+    return {
+        "name": f"filesystem_private_{path.name}",
+        "status": "pass" if passed else "fail",
+        "detail": detail,
+    }
+
+
+def check_evidence_output_directory(
+    output_path: Path,
+    stat_reader: Callable[[Path], object] = lambda path: path.stat(),
+) -> dict[str, Any]:
+    """Require output evidence to live in a private, root-owned existing directory."""
+    return _check_private_path(output_path.parent, S_IFDIR, True, stat_reader)
 
 
 def check_systemd(
@@ -259,11 +274,15 @@ def main() -> int:
     passed = all(check["status"] == "pass" for check in checks)
     evidence = {"status": "ok" if passed else "failed", "checks": checks}
     if args.output:
-        try:
-            write_evidence(args.output, evidence)
-        except OSError as exc:
-            checks.append({"name": "evidence_output", "status": "fail", "detail": str(exc)})
-            evidence = {"status": "failed", "checks": checks}
+        output_directory = check_evidence_output_directory(args.output)
+        checks.append(output_directory)
+        evidence = {"status": "ok" if all(check["status"] == "pass" for check in checks) else "failed", "checks": checks}
+        if output_directory["status"] == "pass":
+            try:
+                write_evidence(args.output, evidence)
+            except OSError as exc:
+                checks.append({"name": "evidence_output", "status": "fail", "detail": str(exc)})
+                evidence = {"status": "failed", "checks": checks}
     print(json.dumps(evidence, sort_keys=True))
     return 0 if evidence["status"] == "ok" else 1
 
