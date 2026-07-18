@@ -166,8 +166,11 @@ def check_public_proxy(
         with urlopen(Request(health_url, headers={"Accept": "application/json"}, method="GET"), timeout=timeout):
             raise RuntimeError("unauthenticated public proxy request was accepted")
     except HTTPError as exc:
-        if exc.code != 401:
-            raise RuntimeError(f"unauthenticated public proxy request returned HTTP {exc.code}, expected 401") from exc
+        try:
+            if exc.code != 401:
+                raise RuntimeError(f"unauthenticated public proxy request returned HTTP {exc.code}, expected 401") from exc
+        finally:
+            exc.close()
 
     headers = {"Accept": "application/json"}
     encoded = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
