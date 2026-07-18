@@ -75,6 +75,10 @@ and use `systemctl reset-failed` only after correcting the cause. Review
 `systemd-analyze security market-sentinel-web` and
 `systemd-analyze security market-sentinel-health` after installation and tighten
 any setting that does not prevent normal operation on the chosen distribution.
+The web unit manages `/var/lib/market-sentinel` with `StateDirectory` and mode
+`0700`, so a normal service start does not depend on a pre-existing writable
+state directory. The initial install command remains useful for inspecting
+ownership before the first start.
 
 ## TLS and browser access
 

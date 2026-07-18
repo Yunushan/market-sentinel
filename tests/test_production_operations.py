@@ -13,6 +13,8 @@ class ProductionOperationsTests(unittest.TestCase):
         for fragment in (
             "--host 127.0.0.1",
             "User=market-sentinel",
+            "StateDirectory=market-sentinel",
+            "StateDirectoryMode=0700",
             "UMask=0077",
             "NoNewPrivileges=true",
             "PrivateDevices=true",
