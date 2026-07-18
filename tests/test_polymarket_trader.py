@@ -38,6 +38,58 @@ class _Client:
         return {"orderID": "order-1"}
 
 
+class _InitializableClient(_Client):
+    instances: list["_InitializableClient"] = []
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__()
+        self.init_args = args
+        self.init_kwargs = kwargs
+        self.api_credentials = None
+        self.__class__.instances.append(self)
+
+    def create_or_derive_api_creds(self):
+        return {"key": "derived"}
+
+    def set_api_creds(self, credentials):
+        self.api_credentials = credentials
+
+
+class _CompatibilityClient:
+    def get_order_by_id(self, order_id):
+        return {"id": order_id}
+
+    def get_orders(self, **filters):
+        return filters
+
+    def cancel_order(self, order_id):
+        return {"cancelled": order_id}
+
+    def cancel_multiple_orders(self, order_ids):
+        return {"cancelled": order_ids}
+
+    def cancel_all_orders(self):
+        return {"cancelled": "all"}
+
+    def cancel_market_orders(self, condition_id):
+        return {"cancelled": condition_id}
+
+    def post_multiple_orders(self, orders, order_type):
+        return {"orders": orders, "type": order_type}
+
+    def get_trades(self, **filters):
+        return filters
+
+    def get_order_status(self, order_id):
+        return {"status": order_id}
+
+    def heartbeat(self):
+        return {"heartbeat": "ok"}
+
+    def get_builder_trades(self, **filters):
+        return filters
+
+
 class PolymarketTraderTests(unittest.TestCase):
     def _trader(self) -> tuple[trader_module.PolymarketTrader, _Client]:
         client = _Client()
@@ -93,6 +145,36 @@ class PolymarketTraderTests(unittest.TestCase):
         self.assertEqual(client.calls[0][1].kwargs["side"], "sdk-sell")
         self.assertEqual(client.calls[0][1].kwargs["order_type"], "GTC")
 
+    def test_initialization_derives_and_sets_l2_credentials(self) -> None:
+        _InitializableClient.instances.clear()
+        config = trader_module.TraderConfig(
+            private_key="0x" + "1" * 64,
+            funder_address="0x" + "2" * 40,
+            signature_type=1,
+            chain_id=137,
+            host="https://example.invalid",
+        )
+        readiness = {"ok": True}
+        with (
+            patch.object(trader_module, "ClobClient", _InitializableClient),
+            patch.object(trader_module, "validate_sdk_trading_readiness", return_value=readiness) as validate,
+        ):
+            instance = trader_module.PolymarketTrader(config)
+
+        client = _InitializableClient.instances[-1]
+        self.assertIs(instance.client, client)
+        self.assertIs(instance.auth_readiness, readiness)
+        validate.assert_called_once_with(
+            private_key=config.private_key,
+            signature_type=1,
+            funder_address=config.funder_address,
+            chain_id=137,
+            host=config.host,
+        )
+        self.assertEqual(client.init_args, (config.host,))
+        self.assertEqual(client.init_kwargs["funder"], config.funder_address)
+        self.assertEqual(client.api_credentials, {"key": "derived"})
+
     def test_call_client_falls_back_after_signature_mismatch(self) -> None:
         instance, _ = self._trader()
 
@@ -114,6 +196,28 @@ class PolymarketTraderTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "does not expose"):
             instance._call_client(("missing_one", "missing_two"))
+
+    def test_compatibility_wrappers_use_alternate_sdk_method_names(self) -> None:
+        instance, _ = self._trader()
+        instance.client = _CompatibilityClient()
+        with patch.object(trader_module, "OrderType", _OrderType):
+            self.assertEqual(instance.get_order("order-1"), {"id": "order-1"})
+            self.assertEqual(instance.get_orders(market="market-1"), {"market": "market-1"})
+            self.assertEqual(instance.cancel_order("order-1"), {"cancelled": "order-1"})
+            self.assertEqual(instance.cancel_orders(["one", "", "two"]), {"cancelled": ["one", "two"]})
+            self.assertEqual(instance.cancel_all_orders(), {"cancelled": "all"})
+            self.assertEqual(instance.cancel_market_orders("condition-1"), {"cancelled": "condition-1"})
+            self.assertEqual(
+                instance.place_multiple_orders((item for item in ("signed-one", "signed-two")), tif="GTC"),
+                {"orders": ["signed-one", "signed-two"], "type": "GTC"},
+            )
+            self.assertEqual(instance.get_trades(asset_id="asset-1"), {"asset_id": "asset-1"})
+            self.assertEqual(instance.get_order_scoring_status("order-1"), {"status": "order-1"})
+            self.assertEqual(instance.send_heartbeat(), {"heartbeat": "ok"})
+            self.assertEqual(
+                instance.get_builder_trades("builder-1", market="market-1"),
+                {"builder_code": "builder-1", "market": "market-1"},
+            )
 
 
 if __name__ == "__main__":

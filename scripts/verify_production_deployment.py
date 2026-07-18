@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import subprocess
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -192,6 +193,28 @@ def check_public_proxy(
     return {"name": "public_https_proxy", "status": "pass", "api_version": payload.get("api_version")}
 
 
+def write_evidence(path: Path, payload: dict[str, Any]) -> None:
+    """Atomically persist redacted deployment evidence with private permissions."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            if os.name == "posix":
+                os.fchmod(handle.fileno(), 0o600)
+            json.dump(payload, handle, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except OSError:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Collect read-only MarketSentinel production deployment evidence.")
     parser.add_argument("--loopback-url", default="http://127.0.0.1:8765/api/health")
@@ -199,6 +222,11 @@ def main() -> int:
     parser.add_argument("--expected-version", default="")
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--skip-systemd", action="store_true")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="Optional path for an atomically written, mode-0600 JSON evidence record.",
+    )
     parser.add_argument("--public-url", default="")
     parser.add_argument("--public-basic-user", default=os.environ.get("MARKET_SENTINEL_PUBLIC_BASIC_USER", ""))
     parser.add_argument(
@@ -229,8 +257,15 @@ def main() -> int:
         checks.append({"name": "deployment_verifier", "status": "fail", "detail": str(exc)})
 
     passed = all(check["status"] == "pass" for check in checks)
-    print(json.dumps({"status": "ok" if passed else "failed", "checks": checks}, sort_keys=True))
-    return 0 if passed else 1
+    evidence = {"status": "ok" if passed else "failed", "checks": checks}
+    if args.output:
+        try:
+            write_evidence(args.output, evidence)
+        except OSError as exc:
+            checks.append({"name": "evidence_output", "status": "fail", "detail": str(exc)})
+            evidence = {"status": "failed", "checks": checks}
+    print(json.dumps(evidence, sort_keys=True))
+    return 0 if evidence["status"] == "ok" else 1
 
 
 if __name__ == "__main__":

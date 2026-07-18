@@ -1,16 +1,26 @@
 from __future__ import annotations
 
+import contextlib
 import io
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from scripts.verify_production_deployment import check_filesystem_permissions, check_loopback, check_public_proxy, check_systemd
+from scripts.verify_production_deployment import (
+    check_filesystem_permissions,
+    check_loopback,
+    check_public_proxy,
+    check_systemd,
+    main,
+    write_evidence,
+)
 
 
 class _Response:
@@ -87,6 +97,50 @@ class ProductionDeploymentTests(unittest.TestCase):
             self.assertEqual(check_loopback("http://127.0.0.1", "", 1.0, "1.0.10")["status"], "pass")
             with self.assertRaisesRegex(RuntimeError, "expected 1.0.11"):
                 check_loopback("http://127.0.0.1", "", 1.0, "1.0.11")
+
+    def test_evidence_output_is_atomic_json_with_private_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "evidence" / "deployment.json"
+            write_evidence(output, {"status": "ok", "checks": [{"name": "loopback", "status": "pass"}]})
+
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["status"], "ok")
+            if os.name == "posix":
+                self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+            self.assertFalse(list(output.parent.glob("*.tmp")))
+
+    @unittest.skipUnless(os.name == "posix", "symlink safety is verified on POSIX hosts")
+    def test_evidence_output_ignores_a_predictable_temp_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "evidence" / "deployment.json"
+            output.parent.mkdir()
+            protected = Path(tmp) / "protected.txt"
+            protected.write_text("do not overwrite", encoding="utf-8")
+            predictable = output.parent / f".{output.name}.{os.getpid()}.tmp"
+            predictable.symlink_to(protected)
+
+            write_evidence(output, {"status": "ok", "checks": []})
+
+            self.assertEqual(protected.read_text(encoding="utf-8"), "do not overwrite")
+            self.assertTrue(predictable.is_symlink())
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["status"], "ok")
+
+    def test_verifier_fails_when_evidence_output_cannot_be_written(self) -> None:
+        stdout = io.StringIO()
+        with (
+            patch.object(
+                sys,
+                "argv",
+                ["verify_production_deployment.py", "--skip-systemd", "--output", "deployment.json"],
+            ),
+            patch("scripts.verify_production_deployment.check_loopback", return_value={"name": "loopback_health", "status": "pass"}),
+            patch("scripts.verify_production_deployment.write_evidence", side_effect=OSError("disk unavailable")),
+            contextlib.redirect_stdout(stdout),
+        ):
+            self.assertEqual(main(), 1)
+
+        evidence = json.loads(stdout.getvalue())
+        self.assertEqual(evidence["status"], "failed")
+        self.assertEqual(evidence["checks"][-1]["name"], "evidence_output")
 
     def test_public_proxy_requires_https_security_headers_and_no_store(self) -> None:
         headers = {
