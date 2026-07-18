@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import secrets
+import sqlite3
 import tarfile
 import tempfile
 from datetime import datetime, timezone
@@ -15,6 +16,7 @@ from typing import Any, Iterator
 BACKUP_PREFIX = "market-sentinel-state-"
 MANIFEST_SUFFIX = ".json"
 SCHEMA_VERSION = 1
+SQLITE_SUFFIXES = (".db", ".sqlite", ".sqlite3")
 
 
 def _utc_now() -> datetime:
@@ -50,6 +52,36 @@ def _iter_regular_files(source: Path) -> Iterator[tuple[Path, PurePosixPath]]:
             if candidate.is_symlink() or not candidate.is_file():
                 raise RuntimeError(f"refusing to back up non-regular file: {candidate}")
             yield candidate, _safe_relative(candidate, source)
+
+
+def _is_sqlite_database(path: Path) -> bool:
+    return path.suffix.lower() in SQLITE_SUFFIXES
+
+
+def _is_sqlite_sidecar(path: Path) -> bool:
+    for suffix in ("-wal", "-shm"):
+        if path.name.endswith(suffix):
+            return Path(path.name[: -len(suffix)]).suffix.lower() in SQLITE_SUFFIXES
+    return False
+
+
+def _snapshot_sqlite(source: Path, staging_path: Path) -> Path:
+    staging_path.parent.mkdir(parents=True, exist_ok=True)
+    source_uri = source.resolve().as_uri() + "?mode=ro"
+    source_connection: sqlite3.Connection | None = None
+    destination_connection: sqlite3.Connection | None = None
+    try:
+        source_connection = sqlite3.connect(source_uri, uri=True, timeout=30)
+        destination_connection = sqlite3.connect(staging_path)
+        source_connection.backup(destination_connection)
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"unable to create a consistent SQLite backup for {source}") from exc
+    finally:
+        if destination_connection is not None:
+            destination_connection.close()
+        if source_connection is not None:
+            source_connection.close()
+    return staging_path
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -104,16 +136,23 @@ def create_backup(source: Path, destination: Path, retain: int = 14) -> dict[str
     file_count = 0
     uncompressed_bytes = 0
     try:
-        with os.fdopen(descriptor, "wb") as raw_handle:
-            with tarfile.open(fileobj=raw_handle, mode="w:gz", format=tarfile.PAX_FORMAT) as archive:
-                for file_path, relative_path in _iter_regular_files(source):
-                    file_count += 1
-                    uncompressed_bytes += file_path.stat().st_size
-                    with file_path.open("rb") as input_handle:
-                        member = archive.gettarinfo(str(file_path), arcname=str(relative_path))
-                        archive.addfile(member, input_handle)
-            raw_handle.flush()
-            os.fsync(raw_handle.fileno())
+        with tempfile.TemporaryDirectory(prefix=".market-sentinel-state-", dir=destination) as staging_name:
+            staging_root = Path(staging_name)
+            with os.fdopen(descriptor, "wb") as raw_handle:
+                with tarfile.open(fileobj=raw_handle, mode="w:gz", format=tarfile.PAX_FORMAT) as archive:
+                    for file_path, relative_path in _iter_regular_files(source):
+                        if _is_sqlite_sidecar(file_path):
+                            continue
+                        archive_source = file_path
+                        if _is_sqlite_database(file_path):
+                            archive_source = _snapshot_sqlite(file_path, staging_root.joinpath(*relative_path.parts))
+                        file_count += 1
+                        uncompressed_bytes += archive_source.stat().st_size
+                        with archive_source.open("rb") as input_handle:
+                            member = archive.gettarinfo(str(archive_source), arcname=str(relative_path))
+                            archive.addfile(member, input_handle)
+                raw_handle.flush()
+                os.fsync(raw_handle.fileno())
         os.chmod(temporary_path, 0o600)
         os.replace(temporary_path, archive_path)
     except Exception:
