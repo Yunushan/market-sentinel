@@ -101,11 +101,12 @@ def check_evidence_output_directory(
 ) -> dict[str, Any]:
     """Require output evidence to live in a private, root-owned existing directory."""
     parent = output_path.parent
-    if parent.is_symlink():
+    symlinked_component = next((path for path in (parent, *parent.parents) if path.is_symlink()), None)
+    if symlinked_component is not None:
         return {
             "name": f"filesystem_private_{parent.name}",
             "status": "fail",
-            "detail": f"refusing symbolic-link evidence directory: {parent}",
+            "detail": f"refusing symbolic-link evidence path component: {symlinked_component}",
         }
     return _check_private_path(parent, S_IFDIR, True, stat_reader)
 
