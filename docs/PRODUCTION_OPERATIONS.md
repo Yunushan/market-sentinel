@@ -50,18 +50,25 @@ Install the systemd unit and validate it:
 
 ```bash
 sudo install -m 0644 deploy/systemd/market-sentinel-web.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/market-sentinel-health.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/market-sentinel-health.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now market-sentinel-web
+sudo systemctl enable --now market-sentinel-health.timer
 sudo systemctl status market-sentinel-web
+sudo systemctl status market-sentinel-health.timer
 sudo journalctl -u market-sentinel-web -f
 /opt/market-sentinel/.venv/bin/python /opt/market-sentinel/scripts/verify_service_health.py
 /opt/market-sentinel/.venv/bin/market-sentinel doctor --strict --config /var/lib/market-sentinel/config.json --frontend-dir /opt/market-sentinel/frontend/dist
 ```
 
-The unit uses restart-on-failure, a strict systemd sandbox, a root-owned
-environment file, and a health check after startup. Review `systemd-analyze
-security market-sentinel-web` after installation and tighten any setting that
-does not prevent normal operation on the chosen distribution.
+The web and health units use strict systemd sandboxes, private device and
+hostname/clock namespaces, restricted network address families, and a root-owned
+environment file. The web unit has a strict read-only `doctor` preflight before
+startup and a startup health check; the timer runs a separate loopback health
+check every minute. Review `systemd-analyze security market-sentinel-web` and
+`systemd-analyze security market-sentinel-health` after installation and tighten
+any setting that does not prevent normal operation on the chosen distribution.
 
 ## TLS and browser access
 
@@ -81,8 +88,10 @@ path, and authenticated browser flow before enabling any live feature.
 
 ## Monitoring and recovery
 
-- Health: poll `GET /api/health` through loopback every minute using
-  `scripts/verify_service_health.py`; alert after two consecutive failures.
+- Health: `market-sentinel-health.timer` polls `GET /api/health` through
+  loopback every minute using `scripts/verify_service_health.py`. Ship failures
+  of `market-sentinel-health.service` from journald to the selected monitoring
+  system and alert after two consecutive failed executions.
 - Startup readiness: run `market-sentinel doctor --strict` against the service
   configuration and production frontend before each deployment and after each
   restore. It fails on corrupt configuration, unwritable storage, or missing

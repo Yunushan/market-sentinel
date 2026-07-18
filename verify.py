@@ -1176,7 +1176,7 @@ def run_ci_cd_workflow_check() -> None:
             "Funded production acceptance",
         ),
         ROOT / "docs" / "REPOSITORY_SETTINGS.md": (
-            "Required review from Code Owners",
+            "Team production policy",
             "secret scanning",
             "REQUIRE_WINDOWS_CODE_SIGNING=true",
         ),

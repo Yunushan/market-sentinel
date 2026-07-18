@@ -15,9 +15,17 @@ class ProductionOperationsTests(unittest.TestCase):
             "User=market-sentinel",
             "UMask=0077",
             "NoNewPrivileges=true",
+            "PrivateDevices=true",
+            "ProtectClock=true",
+            "ProtectHostname=true",
             "ProtectSystem=strict",
             "ProtectHome=true",
+            "RestrictRealtime=true",
+            "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
             "ReadWritePaths=/var/lib/market-sentinel",
+            "ExecStartPre=/opt/market-sentinel/.venv/bin/python -m market_sentinel_cli doctor --strict --compact",
+            "--config /var/lib/market-sentinel/config.json",
+            "--frontend-dir /opt/market-sentinel/frontend/dist",
             "verify_service_health.py",
         ):
             with self.subTest(fragment=fragment):
@@ -27,12 +35,31 @@ class ProductionOperationsTests(unittest.TestCase):
         proxy = (ROOT / "deploy" / "caddy" / "Caddyfile.example").read_text(encoding="utf-8")
         security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
         repository_settings = (ROOT / "docs" / "REPOSITORY_SETTINGS.md").read_text(encoding="utf-8")
+        codeowners = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
         self.assertIn("basic_auth", proxy)
         self.assertIn("X-Market-Sentinel-Token", proxy)
         self.assertIn("127.0.0.1:8765", proxy)
         self.assertIn("Report a vulnerability", security)
-        self.assertIn("Required review from Code Owners", repository_settings)
+        self.assertIn("Team production policy", repository_settings)
         self.assertIn("secret scanning", repository_settings)
+        self.assertIn("* @Yunushan", codeowners)
+
+    def test_systemd_health_timer_performs_periodic_loopback_checks(self) -> None:
+        health_unit = (ROOT / "deploy" / "systemd" / "market-sentinel-health.service").read_text(encoding="utf-8")
+        timer = (ROOT / "deploy" / "systemd" / "market-sentinel-health.timer").read_text(encoding="utf-8")
+        for fragment in (
+            "User=market-sentinel",
+            "verify_service_health.py --retries 2 --retry-delay 5",
+            "NoNewPrivileges=true",
+            "PrivateDevices=true",
+            "ProtectSystem=strict",
+            "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, health_unit)
+        self.assertIn("OnUnitActiveSec=1min", timer)
+        self.assertIn("Persistent=true", timer)
+        self.assertIn("Unit=market-sentinel-health.service", timer)
 
 
 if __name__ == "__main__":

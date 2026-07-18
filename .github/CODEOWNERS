@@ -1,7 +1,3 @@
-# Production-sensitive paths require repository owner review.
+# Ownership map for future team review. A solo-maintainer repository keeps this
+# map without requiring Code Owner review until an independent maintainer exists.
 * @Yunushan
-/polymarket/ @Yunushan
-/market_adapters/ @Yunushan
-/.github/ @Yunushan
-/deploy/ @Yunushan
-/requirements.lock @Yunushan
