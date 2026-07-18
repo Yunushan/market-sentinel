@@ -72,7 +72,9 @@ class ProductionDeploymentTests(unittest.TestCase):
         self.assertEqual(environment["status"], "fail")
 
     def test_evidence_output_requires_a_private_root_owned_parent_directory(self) -> None:
-        output = Path("/var/lib/market-sentinel-deployment-evidence") / "deployment.json"
+        # Do not use /var here: macOS deliberately exposes it as a compatibility
+        # symlink, while this unit test supplies its own directory metadata.
+        output = Path.cwd().resolve() / "market-sentinel-evidence-test" / "deployment.json"
         metadata = SimpleNamespace(st_mode=0o040700, st_uid=0)
         self.assertEqual(check_evidence_output_directory(output, lambda path: metadata)["status"], "pass")
 
