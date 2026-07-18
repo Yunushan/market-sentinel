@@ -29,6 +29,7 @@ BETFAIR_REFERENCES = (
 class BetfairExchangeAdapter(MarketAdapter):
     """Betfair Exchange read-only adapter using the official Exchange API JSON-RPC."""
 
+    live_order_sides = ("BUY", "SELL", "BACK", "LAY")
     metadata = get_market_metadata("betfair_exchange")
 
     def health_check(self) -> Dict[str, Any]:

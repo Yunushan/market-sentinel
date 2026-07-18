@@ -201,6 +201,19 @@ class AdapterRuntimeTests(unittest.TestCase):
             adapter.preflight_live_order(PaperOrderRequest("live_dummy", "contract-1", "BUY", 4.0, 2.0))
         self.assertIn("notional", str(notional_ctx.exception))
 
+    def test_live_preflight_rejects_noncanonical_contracts_and_order_sides(self) -> None:
+        adapter = LiveAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})
+
+        for contract_id in ("", " ", " contract-1", "contract-1 "):
+            with self.subTest(contract_id=repr(contract_id)):
+                with self.assertRaisesRegex(MarketConfigurationError, "canonical contract id"):
+                    adapter.preflight_live_order(PaperOrderRequest("live_dummy", contract_id, "BUY", 1.0, 0.4))
+
+        for side in ("", "buy", "BUY ", "HOLD"):
+            with self.subTest(side=repr(side)):
+                with self.assertRaisesRegex(MarketConfigurationError, "side must be one of: BUY, SELL"):
+                    adapter.preflight_live_order(PaperOrderRequest("live_dummy", "contract-1", side, 1.0, 0.4))
+
     def test_base_adapter_order_market_gate(self) -> None:
         adapter = MarketAdapter()
 
