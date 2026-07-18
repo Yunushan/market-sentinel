@@ -102,9 +102,12 @@ class ProductionOperationsTests(unittest.TestCase):
 
     def test_operations_document_private_root_owned_deployment_evidence(self) -> None:
         operations = (ROOT / "docs" / "PRODUCTION_OPERATIONS.md").read_text(encoding="utf-8")
-        self.assertIn("install -d -o root -g root -m 0700 /var/lib/market-sentinel-deployment-evidence", operations)
+        tmpfiles = (ROOT / "deploy" / "systemd" / "market-sentinel.conf").read_text(encoding="utf-8")
+        self.assertIn("install -m 0644 deploy/systemd/market-sentinel.conf /etc/tmpfiles.d/market-sentinel.conf", operations)
+        self.assertIn("systemd-tmpfiles --create /etc/tmpfiles.d/market-sentinel.conf", operations)
         self.assertIn("/var/lib/market-sentinel-deployment-evidence/deployment-evidence-<RELEASE_VERSION>.json", operations)
         self.assertIn("private root-owned parent directory", operations)
+        self.assertIn("d /var/lib/market-sentinel-deployment-evidence 0700 root root -", tmpfiles)
 
     def test_gitignore_excludes_generated_analytics_artifacts(self) -> None:
         gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")

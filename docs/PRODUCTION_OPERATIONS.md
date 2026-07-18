@@ -25,9 +25,10 @@ regional restrictions.
 ```bash
 sudo useradd --system --home /var/lib/market-sentinel --shell /sbin/nologin market-sentinel
 sudo install -d -o market-sentinel -g market-sentinel -m 0700 /var/lib/market-sentinel
-sudo install -d -o root -g root -m 0700 /var/lib/market-sentinel-deployment-evidence
 sudo install -d -o root -g market-sentinel -m 0750 /etc/market-sentinel
 sudo install -m 0600 deploy/systemd/market-sentinel.env.example /etc/market-sentinel/market-sentinel.env
+sudo install -m 0644 deploy/systemd/market-sentinel.conf /etc/tmpfiles.d/market-sentinel.conf
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/market-sentinel.conf
 
 sudo mkdir -p /opt/market-sentinel
 sudo chown "$USER" /opt/market-sentinel
