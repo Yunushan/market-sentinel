@@ -105,6 +105,27 @@ REACT_DEV_COMMAND = "run_web_gui_dev.bat"
 REACT_DEV_MANUAL_COMMAND = "python web_api.py --host 127.0.0.1 --port 8765 + cd frontend && npm run dev"
 REACT_BUILD_COMMAND = "cd frontend && npm install && npm run build"
 REACT_PROD_COMMAND = "run_web_gui_prod.bat"
+
+
+def _safe_http_header_value(value: Any) -> str:
+    """Remove line separators so untrusted data cannot create extra headers."""
+    return str(value).replace("\r", "").replace("\n", "")
+
+
+def _safe_attachment_filename(value: Any) -> str:
+    """Return a quoted Content-Disposition filename without header delimiters."""
+    filename = _safe_http_header_value(value).replace('"', "").strip()
+    return filename or "download"
+
+
+def _normalize_allowed_origin(value: Any) -> str:
+    """Keep configured CORS origins header-safe before storing them."""
+    origin = str(value).strip().rstrip("/")
+    if not origin or origin != _safe_http_header_value(origin):
+        return ""
+    return origin
+
+
 API_ROUTES = {
     "GET": [
         "/api/health",
@@ -3350,9 +3371,9 @@ class ReactGuiServer(ThreadingHTTPServer):
             "http://localhost:4173",
         }
         self.allowed_origins = {
-            str(origin).strip().rstrip("/")
+            normalized
             for origin in (allowed_origins or default_origins)
-            if str(origin).strip()
+            if (normalized := _normalize_allowed_origin(origin))
         }
         self.paper_position_marks: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self.alert_price_state: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -4111,7 +4132,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self._send_cors_headers()
         self.send_header("Content-Type", content_type)
         if filename:
-            safe_name = str(filename).replace('"', "")
+            safe_name = _safe_attachment_filename(filename)
             self.send_header("Content-Disposition", f'attachment; filename="{safe_name}"')
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Connection", "close")
@@ -4132,7 +4153,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
     def _send_cors_headers(self) -> None:
         origin = str(self.headers.get("Origin") or "").strip().rstrip("/")
         if origin and origin in self.app_server.allowed_origins:
-            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Origin", _safe_http_header_value(origin))
             self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, PATCH, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Market-Sentinel-Token")
@@ -4162,6 +4183,8 @@ def run_server(
         raise ValueError(
             "Refusing a non-loopback bind without --allow-remote. Keep the default loopback bind and use a TLS reverse proxy."
         )
+    # Fail before listening so a corrupt state file cannot silently reset trading settings.
+    load_config(config_path)
     server = ReactGuiServer(
         (host, port),
         ReactGuiHandler,

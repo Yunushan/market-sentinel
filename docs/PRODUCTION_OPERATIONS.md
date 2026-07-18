@@ -92,6 +92,12 @@ path, and authenticated browser flow before enabling any live feature.
 - Restore drill: quarterly, restore a backup into an isolated host, start the
   service loopback-only, run the health check, and confirm no live trading is
   enabled by restored configuration.
+- Configuration recovery: an existing malformed `config.json` now fails closed
+  and is never silently replaced with defaults. Preserve that file for
+  investigation, restore the most recent verified backup to
+  `/var/lib/market-sentinel/config.json`, then run the health check before
+  restarting the service. Do not delete the damaged file until the restored
+  configuration has been verified.
 
 ## Incident response
 

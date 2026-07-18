@@ -43,6 +43,9 @@ Jobs:
 
 - Dependency review on pull requests; GitHub Dependency Graph must be enabled
   in the repository settings and high-severity dependency changes fail the job.
+- A reproducible `npm ci --ignore-scripts` followed by `npm audit --omit=dev
+  --audit-level=high` on every security workflow run. This fails closed for
+  high-severity vulnerabilities in the production frontend dependency tree.
 - CodeQL analysis for Python and JavaScript/TypeScript.
 
 The CodeQL job is the only job with `security-events: write`; all other jobs use least-privilege read permissions unless they need more. Dependency review runs with the pull-request permissions required by GitHub's action and fails on high-severity dependency changes.
