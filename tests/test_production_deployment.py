@@ -56,6 +56,17 @@ class ProductionDeploymentTests(unittest.TestCase):
         self.assertEqual(backup["status"], "fail")
         self.assertIn("backup_age_seconds=999999", backup["detail"])
 
+    def test_systemd_check_rejects_an_impossibly_future_backup_timestamp(self) -> None:
+        def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+            if args[1] == "show":
+                return subprocess.CompletedProcess(args, 0, "success\n0\n1400000000\n", "")
+            return subprocess.CompletedProcess(args, 0, "active\n", "")
+
+        checks = check_systemd(runner, clock=lambda: 1000.0)
+        backup = checks[-1]
+        self.assertEqual(backup["status"], "fail")
+        self.assertIn("backup_age_seconds=-400", backup["detail"])
+
     def test_loopback_checks_expected_version(self) -> None:
         with patch("scripts.verify_production_deployment.check_health", return_value={"api_version": "1.0.10"}):
             self.assertEqual(check_loopback("http://127.0.0.1", "", 1.0, "1.0.10")["status"], "pass")

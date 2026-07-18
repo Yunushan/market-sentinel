@@ -34,6 +34,7 @@ REQUIRED_PROXY_HEADERS = (
     "cross-origin-resource-policy",
 )
 BACKUP_MAX_AGE_SECONDS = 26 * 60 * 60
+BACKUP_MAX_FUTURE_SKEW_SECONDS = 5 * 60
 
 
 def _run_command(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -69,7 +70,7 @@ def check_systemd(
     values = [value.strip() for value in completion.stdout.splitlines()]
     result, exit_status, completed_at_us = (values + ["", "", ""])[:3]
     try:
-        backup_age_seconds = max(0.0, clock() - (int(completed_at_us) / 1_000_000))
+        backup_age_seconds = clock() - (int(completed_at_us) / 1_000_000)
     except ValueError:
         backup_age_seconds = float("inf")
     completed = (
@@ -77,6 +78,7 @@ def check_systemd(
         and result == "success"
         and exit_status == "0"
         and completed_at_us not in {"", "0"}
+        and backup_age_seconds >= -BACKUP_MAX_FUTURE_SKEW_SECONDS
         and backup_age_seconds <= BACKUP_MAX_AGE_SECONDS
     )
     checks.append(
@@ -86,7 +88,7 @@ def check_systemd(
             "detail": (
                 f"result={result or 'unknown'}; exit_status={exit_status or 'unknown'}; "
                 f"completed_at_us={completed_at_us or 'unknown'}; backup_age_seconds={backup_age_seconds:.0f}; "
-                f"max_age_seconds={BACKUP_MAX_AGE_SECONDS}"
+                f"max_age_seconds={BACKUP_MAX_AGE_SECONDS}; max_future_skew_seconds={BACKUP_MAX_FUTURE_SKEW_SECONDS}"
             ),
         }
     )
@@ -153,7 +155,7 @@ def main() -> int:
     parser.add_argument(
         "--public-basic-password-env",
         default="MARKET_SENTINEL_PUBLIC_BASIC_PASSWORD",
-        help="Environment variable containing the optional public Basic Auth password.",
+        help="Environment variable containing the required public Basic Auth password when --public-url is set.",
     )
     args = parser.parse_args()
 
