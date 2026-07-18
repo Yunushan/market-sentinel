@@ -167,6 +167,20 @@ class AzuroAdapterTests(unittest.TestCase):
 
         self.assertIn("disabled", str(ctx.exception))
 
+    def test_live_preflight_rejects_sell_before_credential_or_network_work(self) -> None:
+        adapter = self.make_adapter({"live_trading_enabled": True, "live_trading_confirmed": True})
+
+        with self.assertRaisesRegex(MarketConfigurationError, "one of: BUY"):
+            adapter.preflight_live_order(
+                PaperOrderRequest(
+                    market_id="azuro",
+                    contract_id=f"{GAME_ID}:{CONDITION_ID}:29",
+                    side="SELL",
+                    size=10,
+                    limit_price=1.85,
+                )
+            )
+
     def test_live_order_posts_pre_signed_official_order_payload_when_enabled(self) -> None:
         adapter = self.make_adapter({"live_trading_enabled": True, "live_trading_confirmed": True})
         client_bet_data = {

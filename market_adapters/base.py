@@ -25,6 +25,7 @@ class MarketAdapter:
     """
 
     metadata = MarketMetadata(market_id="base", display_name="Base")
+    live_order_sides = ("BUY", "SELL")
 
     def __init__(
         self,
@@ -110,6 +111,16 @@ class MarketAdapter:
         self.ensure_order_market(order)
         self.ensure_live_trading_enabled(feature_name)
 
+        contract_id = str(order.contract_id or "")
+        if not contract_id.strip() or contract_id != contract_id.strip():
+            raise MarketConfigurationError(f"{self.display_name} live order requires a non-empty canonical contract id.")
+        side = str(order.side or "")
+        allowed_sides = tuple(str(value) for value in self.live_order_sides)
+        if side not in allowed_sides:
+            raise MarketConfigurationError(
+                f"{self.display_name} live order side must be one of: {', '.join(allowed_sides)}."
+            )
+
         size = self._finite_float(order.size, "order size")
         if size <= 0:
             raise MarketConfigurationError(f"{self.display_name} live order size must be positive.")
@@ -141,7 +152,6 @@ class MarketAdapter:
         if self.capabilities.region_limited:
             warnings.append("region_limited")
 
-        side = str(order.side or "").upper()
         preview = f"Would submit live {side} order for {size:g} on {self.display_name} contract {order.contract_id}"
         if limit_price is not None:
             preview += f" at limit {limit_price:g}"
@@ -150,7 +160,7 @@ class MarketAdapter:
             "market_id": self.market_id,
             "display_name": self.display_name,
             "feature": feature_name,
-            "contract_id": str(order.contract_id),
+            "contract_id": contract_id,
             "side": side,
             "size": size,
             "limit_price": limit_price,
