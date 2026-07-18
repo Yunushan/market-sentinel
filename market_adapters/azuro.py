@@ -35,6 +35,7 @@ AZURO_REFERENCES = (
 class AzuroAdapter(MarketAdapter):
     """Azuro adapter using documented V3 backend/feed APIs."""
 
+    live_order_sides = ("BUY",)
     metadata = get_market_metadata("azuro")
 
     def health_check(self) -> Dict[str, Any]:
