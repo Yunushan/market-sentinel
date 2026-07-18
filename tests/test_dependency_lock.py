@@ -19,6 +19,8 @@ class DependencyLockTests(unittest.TestCase):
             "truststore>=0.10.0",
             "websocket-client>=1.7.0",
             "tomli>=2.0.0; python_version < '3.11'",
+            "build==1.5.0",
+            "setuptools==82.0.1",
         ]
         self.assertEqual([], lock_issues(lock.read_text(encoding="utf-8"), dependencies), project.read_text(encoding="utf-8"))
 
@@ -27,6 +29,13 @@ class DependencyLockTests(unittest.TestCase):
         self.assertIn('exceptiongroup==1.3.1 ; python_version < "3.11"', lock)
         self.assertIn("--hash=sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", lock)
         self.assertIn("--hash=sha256:a7a39a3bd276781e98394987d3a5701d0c4edffb633bb7a5144577f82c773598", lock)
+        self.assertIn("--hash=sha256:8d65a2fbf9d2f8352685bc1364177ee3923d6baf5e7f43ea4959d7d8bc326a36", lock)
+
+    def test_lock_includes_hash_pinned_distribution_build_toolchain(self) -> None:
+        lock = (ROOT / "requirements.lock").read_text(encoding="utf-8")
+        self.assertIn("build==1.5.0", lock)
+        self.assertIn("pyproject-hooks==1.2.0", lock)
+        self.assertIn("setuptools==82.0.1", lock)
 
     def test_lock_validation_rejects_unhashed_or_missing_direct_dependency(self) -> None:
         lock = "requests==2.0.0\n"

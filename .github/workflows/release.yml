@@ -175,7 +175,6 @@ jobs:
           python -m pip install --no-cache-dir --upgrade pip
           python -m pip install --no-cache-dir --require-hashes -r requirements.lock
           python -m pip install --no-cache-dir --no-deps -e .
-          python -m pip install --no-cache-dir build
 
       - name: Verify Python and Tkinter fallback
         run: |
@@ -183,7 +182,7 @@ jobs:
           python verify.py
 
       - name: Build Python distributions
-        run: python -m build
+        run: python -m build --no-isolation
 
       - name: Smoke install built wheel
         shell: bash
@@ -361,7 +360,7 @@ jobs:
           python -m pip install --no-cache-dir --upgrade pip
           python -m pip install --no-cache-dir --require-hashes -r requirements.lock
           python -m pip install --no-cache-dir --no-deps -e .
-          python -m pip install --no-cache-dir -r requirements-build.txt
+          python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock
 
       - name: Install WiX Toolset
         shell: pwsh

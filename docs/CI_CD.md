@@ -129,10 +129,13 @@ Dependabot opens grouped weekly pull requests for:
 - Python requirements
 - Frontend npm dependencies
 
-The committed Python lock is regenerated with `pip-compile --generate-hashes`
-only during an intentional dependency update. CI installs it with
-`pip install --require-hashes -r requirements.lock`; frontend CI uses `npm ci`
-from `frontend/package-lock.json`.
+The committed Python lock is regenerated with `pip-compile --allow-unsafe
+--extra build --generate-hashes` only during an intentional dependency update.
+CI installs it with `pip install --require-hashes -r requirements.lock` and
+builds Python distributions with `python -m build --no-isolation`, so the
+build backend and frontend CI's `npm ci` use committed dependency inputs.
+The Windows packaging-only PyInstaller dependency graph is likewise installed
+from hash-protected `requirements-build.lock`.
 
 ## Windows Release Packages
 

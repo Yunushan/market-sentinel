@@ -66,6 +66,9 @@ def main() -> int:
         return 1
     project = tomllib.loads(PROJECT_PATH.read_text(encoding="utf-8"))
     dependencies = list(project.get("project", {}).get("dependencies", []))
+    dependencies.extend(
+        project.get("project", {}).get("optional-dependencies", {}).get("build", [])
+    )
     issues = lock_issues(LOCK_PATH.read_text(encoding="utf-8"), dependencies)
     if issues:
         print("Dependency lock validation failed:", file=sys.stderr)

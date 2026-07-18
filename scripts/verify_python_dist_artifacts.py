@@ -36,6 +36,7 @@ REQUIRED_SDIST_MEMBERS = {
     "frontend/package.json",
     "frontend/src/App.tsx",
     "requirements.lock",
+    "requirements-build.lock",
     "requirements.txt",
     "scripts/verify_dependency_lock.py",
     "scripts/backup_state.py",

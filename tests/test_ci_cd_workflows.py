@@ -72,6 +72,7 @@ class CiCdWorkflowTests(unittest.TestCase):
             "npm run build",
             "npm install --no-audit --no-fund",
             "python -m build",
+            "python -m build --no-isolation",
             "Smoke install built wheel",
             "--force-reinstall --no-deps",
             "License-Expression",
@@ -84,6 +85,7 @@ class CiCdWorkflowTests(unittest.TestCase):
         self.assertNotIn("cache-dependency-path", text)
         self.assertNotIn("macos-latest", text)
         self.assertNotIn("windows-latest", text)
+        self.assertNotIn("python -m pip install --no-cache-dir build", text)
         self.assertEqual(
             [],
             workflow_action_pin_issues(
@@ -113,6 +115,7 @@ class CiCdWorkflowTests(unittest.TestCase):
             "python -m pip install --no-cache-dir --require-hashes -r requirements.lock",
             "python -m pip install --no-cache-dir --no-deps -e .",
             "python -m build",
+            "python -m build --no-isolation",
             "Validate package version matches release tag",
             "Require release commit to be reachable from protected main",
             "git merge-base --is-ancestor \"${GITHUB_SHA}\" \"origin/main\"",
@@ -124,8 +127,9 @@ class CiCdWorkflowTests(unittest.TestCase):
             "macos-15",
             "macos-26",
             "windows-2025-vs2026",
-            "requirements-build.txt",
+            "requirements-build.lock",
             "requirements.lock",
+            "python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock",
             "pyproject.toml",
             "dotnet tool install --global wix --version 6.0.2",
             'Expected WiX Toolset 6.0.2',
@@ -160,6 +164,7 @@ class CiCdWorkflowTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, text)
+        self.assertNotIn("python -m pip install --no-cache-dir build", text)
         self.assertNotIn("cache: pip", text)
         self.assertNotIn("cache-dependency-path", text)
         self.assertNotIn("macos-latest", text)
@@ -182,6 +187,13 @@ class CiCdWorkflowTests(unittest.TestCase):
                 },
             ),
         )
+
+    def test_windows_packaging_lock_is_hash_protected(self) -> None:
+        text = (ROOT / "requirements-build.lock").read_text(encoding="utf-8")
+        self.assertIn("pyinstaller==6.21.0", text)
+        self.assertIn("pyinstaller-hooks-contrib==2026.6", text)
+        self.assertIn("setuptools==83.0.0", text)
+        self.assertIn("--hash=sha256:", text)
 
     def test_security_and_dependabot_automation_are_configured(self) -> None:
         security = (ROOT / ".github" / "workflows" / "security.yml").read_text(encoding="utf-8")
