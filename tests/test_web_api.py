@@ -1536,6 +1536,7 @@ class WebApiTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertIn("text/csv", headers["Content-Type"])
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
         self.assertIn(b"summary,", body)
         self.assertIn(WALLET.encode("utf-8"), body)
 
@@ -2531,7 +2532,7 @@ class WebApiTests(unittest.TestCase):
                 asset_status, asset_headers, asset_body = self._request_raw(base_url, "/assets/app.js")
                 fallback_status, _fallback_headers, fallback_body = self._request_raw(base_url, "/settings/live-safety")
                 traversal_status, _traversal_headers, traversal_body = self._request_raw(base_url, "/%2e%2e/README.md")
-                health_status, health = self._request_json(base_url, "/api/health")
+                health_status, health_headers, health_body = self._request_raw(base_url, "/api/health")
             finally:
                 server.shutdown()
                 server.server_close()
@@ -2548,6 +2549,8 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(traversal_status, 200)
         self.assertIn(b"React app", traversal_body)
         self.assertEqual(health_status, 200)
+        self.assertEqual(health_headers.get("Cache-Control"), "no-store")
+        health = json.loads(health_body.decode("utf-8"))
         self.assertTrue(health["frontend_build_available"])
 
     def test_app_state_payload_combines_initial_react_gui_state(self) -> None:

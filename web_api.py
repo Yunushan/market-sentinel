@@ -4119,6 +4119,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self._send_cors_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Connection", "close")
         self.end_headers()
@@ -4131,6 +4132,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self._send_cors_headers()
         self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
         if filename:
             safe_name = _safe_attachment_filename(filename)
             self.send_header("Content-Disposition", f'attachment; filename="{safe_name}"')
