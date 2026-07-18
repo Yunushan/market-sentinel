@@ -189,7 +189,9 @@ class CiCdWorkflowTests(unittest.TestCase):
         )
 
     def test_windows_packaging_lock_is_hash_protected(self) -> None:
+        source = (ROOT / "requirements-build.txt").read_text(encoding="utf-8")
         text = (ROOT / "requirements-build.lock").read_text(encoding="utf-8")
+        self.assertEqual("pyinstaller==6.21.0\n", source)
         self.assertIn("pyinstaller==6.21.0", text)
         self.assertIn("pyinstaller-hooks-contrib==2026.6", text)
         self.assertIn("setuptools==83.0.0", text)
