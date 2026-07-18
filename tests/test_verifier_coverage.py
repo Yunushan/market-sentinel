@@ -13,6 +13,7 @@ class VerifierCoverageTests(unittest.TestCase):
         self.assertGreaterEqual(verify.MIN_BACKEND_BRANCH_COVERAGE, 74.0)
         self.assertIn("web_api.py", verify.BACKEND_COVERAGE_INCLUDE)
         self.assertIn("market_sentinel_cli.py", verify.BACKEND_COVERAGE_INCLUDE)
+        self.assertEqual(verify.RESOURCE_WARNING_POLICY, "error::ResourceWarning")
 
     def test_implemented_adapter_fixture_mapping_matches_the_catalog(self) -> None:
         implemented = set(MARKET_IDS) - set(VERIFIED_BLOCKERS)
