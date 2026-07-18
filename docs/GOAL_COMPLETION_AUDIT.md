@@ -53,8 +53,8 @@ documents in this directory.
 
 ### Observed Public-Live Evidence
 
-On 2026-07-15, the following public-only command exited successfully from this
-workspace:
+On 2026-07-15 and again on 2026-07-18, the following public-only command
+exited successfully from this workspace:
 
 ```powershell
 python scripts/verify_polymarket_live.py --skip-authenticated-read-checks --timeout 15
