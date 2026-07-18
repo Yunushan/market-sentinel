@@ -136,12 +136,14 @@ export MARKET_SENTINEL_PUBLIC_BASIC_PASSWORD="the-existing-caddy-password"
 sudo --preserve-env=MARKET_SENTINEL_PUBLIC_BASIC_USER,MARKET_SENTINEL_PUBLIC_BASIC_PASSWORD \
   /opt/market-sentinel/.venv/bin/python /opt/market-sentinel/scripts/verify_production_deployment.py \
   --expected-version <RELEASE_VERSION> \
-  --public-url https://analytics.example.com
+  --public-url https://analytics.example.com \
+  --output /var/lib/market-sentinel-backups/deployment-evidence-<RELEASE_VERSION>.json
 ```
 
-Keep the password only in the environment. Do not pass it on the command line
-or store the generated JSON output with credentials. Save the JSON result with
-the release-change record and repeat it after every restore drill. The command
+Keep the password only in the environment. Do not pass it on the command line.
+The generated JSON contains no credentials; `--output` writes it atomically
+with mode `0600` so it can be retained with the release-change record. Repeat
+the verification after every restore drill. The command
 uses `sudo` because it verifies the root-owned service environment file; it
 preserves only the two explicitly named Basic Auth variables for the public
 proxy check. For a

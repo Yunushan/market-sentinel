@@ -192,6 +192,27 @@ def check_public_proxy(
     return {"name": "public_https_proxy", "status": "pass", "api_version": payload.get("api_version")}
 
 
+def write_evidence(path: Path, payload: dict[str, Any]) -> None:
+    """Atomically persist redacted deployment evidence with private permissions."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    except OSError:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Collect read-only MarketSentinel production deployment evidence.")
     parser.add_argument("--loopback-url", default="http://127.0.0.1:8765/api/health")
@@ -199,6 +220,11 @@ def main() -> int:
     parser.add_argument("--expected-version", default="")
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--skip-systemd", action="store_true")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="Optional path for an atomically written, mode-0600 JSON evidence record.",
+    )
     parser.add_argument("--public-url", default="")
     parser.add_argument("--public-basic-user", default=os.environ.get("MARKET_SENTINEL_PUBLIC_BASIC_USER", ""))
     parser.add_argument(
@@ -229,8 +255,15 @@ def main() -> int:
         checks.append({"name": "deployment_verifier", "status": "fail", "detail": str(exc)})
 
     passed = all(check["status"] == "pass" for check in checks)
-    print(json.dumps({"status": "ok" if passed else "failed", "checks": checks}, sort_keys=True))
-    return 0 if passed else 1
+    evidence = {"status": "ok" if passed else "failed", "checks": checks}
+    if args.output:
+        try:
+            write_evidence(args.output, evidence)
+        except OSError as exc:
+            checks.append({"name": "evidence_output", "status": "fail", "detail": str(exc)})
+            evidence = {"status": "failed", "checks": checks}
+    print(json.dumps(evidence, sort_keys=True))
+    return 0 if evidence["status"] == "ok" else 1
 
 
 if __name__ == "__main__":
