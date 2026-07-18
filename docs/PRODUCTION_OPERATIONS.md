@@ -11,7 +11,8 @@ regional restrictions.
 - Keep `web_api.py` bound to `127.0.0.1`; do not publish port `8765` in a
   firewall, Docker mapping, or cloud security group.
 - Serve browser access through a TLS reverse proxy with authentication. The
-  provided Caddy example supplies Basic Auth, TLS, security headers, and the
+  provided Caddy example supplies Basic Auth, TLS, a restrictive browser
+  content-security policy, cross-origin and permissions headers, and the
   upstream API token.
 - Run under the dedicated `market-sentinel` user. Use `/var/lib/market-sentinel`
   for state and a root-owned `/etc/market-sentinel/market-sentinel.env` for
