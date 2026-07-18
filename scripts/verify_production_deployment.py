@@ -100,7 +100,14 @@ def check_evidence_output_directory(
     stat_reader: Callable[[Path], object] = lambda path: path.stat(),
 ) -> dict[str, Any]:
     """Require output evidence to live in a private, root-owned existing directory."""
-    return _check_private_path(output_path.parent, S_IFDIR, True, stat_reader)
+    parent = output_path.parent
+    if parent.is_symlink():
+        return {
+            "name": f"filesystem_private_{parent.name}",
+            "status": "fail",
+            "detail": f"refusing symbolic-link evidence directory: {parent}",
+        }
+    return _check_private_path(parent, S_IFDIR, True, stat_reader)
 
 
 def check_systemd(
