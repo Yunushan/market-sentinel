@@ -4,11 +4,12 @@ import json
 import subprocess
 import sys
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from scripts.verify_production_deployment import check_loopback, check_public_proxy, check_systemd
+from scripts.verify_production_deployment import check_filesystem_permissions, check_loopback, check_public_proxy, check_systemd
 
 
 class _Response:
@@ -44,6 +45,19 @@ class ProductionDeploymentTests(unittest.TestCase):
         checks = check_systemd(runner, clock=lambda: 1000.0)
         self.assertEqual(len(checks), 7)
         self.assertTrue(all(check["status"] == "pass" for check in checks))
+
+    def test_filesystem_check_requires_private_paths_and_root_owned_environment(self) -> None:
+        paths = {
+            "market-sentinel.env": SimpleNamespace(st_mode=0o100600, st_uid=0),
+            "market-sentinel": SimpleNamespace(st_mode=0o040700, st_uid=123),
+            "market-sentinel-backups": SimpleNamespace(st_mode=0o040700, st_uid=123),
+        }
+        checks = check_filesystem_permissions(lambda path: paths[path.name])
+        self.assertTrue(all(check["status"] == "pass" for check in checks))
+
+        paths["market-sentinel.env"] = SimpleNamespace(st_mode=0o100640, st_uid=123)
+        environment = check_filesystem_permissions(lambda path: paths[path.name])[0]
+        self.assertEqual(environment["status"], "fail")
 
     def test_systemd_check_rejects_a_stale_backup(self) -> None:
         def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
