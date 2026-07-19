@@ -134,6 +134,8 @@ class CiCdWorkflowTests(unittest.TestCase):
             "python -m build --no-isolation",
             "Validate package version matches release tag",
             "Require release tag to resolve to workflow commit on protected main",
+            "GITHUB_TOKEN: ${{ github.token }}",
+            "http.https://github.com/.extraheader",
             "scripts/verify_release_provenance.py",
             '--tag "${RELEASE_TAG}"',
             '--commit "${GITHUB_SHA}"',
