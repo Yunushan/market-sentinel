@@ -24,6 +24,7 @@ from scripts.verify_production_deployment import (
     check_systemd,
     _fsync_parent_directory,
     build_evidence,
+    source_identity,
     main,
     write_evidence,
 )
@@ -51,11 +52,48 @@ class ProductionDeploymentTests(unittest.TestCase):
         evidence = build_evidence(
             [{"name": "loopback_health", "status": "pass"}],
             collected_at=datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc),
+            source={
+                "project_version": "1.0.11",
+                "git_revision": "a" * 40,
+                "git_revision_status": "ok",
+            },
         )
 
         self.assertEqual(evidence["schema_version"], 1)
         self.assertEqual(evidence["collected_at"], "2026-07-19T12:00:00Z")
+        self.assertEqual(evidence["source"]["project_version"], "1.0.11")
+        self.assertEqual(evidence["source"]["git_revision"], "a" * 40)
         self.assertEqual(evidence["status"], "ok")
+
+    def test_source_identity_records_only_a_valid_git_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text("[project]\nversion = '1.2.3'\n", encoding="utf-8")
+            with patch(
+                "scripts.verify_production_deployment.subprocess.run",
+                return_value=subprocess.CompletedProcess(["git"], 0, "a" * 40 + "\n", ""),
+            ):
+                identity = source_identity(root)
+
+        self.assertEqual(identity, {
+            "project_version": "1.2.3",
+            "git_revision": "a" * 40,
+            "git_revision_status": "ok",
+        })
+
+    def test_source_identity_does_not_retain_invalid_git_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text("[project]\nversion = '1.2.3'\n", encoding="utf-8")
+            with patch(
+                "scripts.verify_production_deployment.subprocess.run",
+                return_value=subprocess.CompletedProcess(["git"], 0, "credential-like-output\n", ""),
+            ):
+                identity = source_identity(root)
+
+        self.assertEqual(identity["project_version"], "1.2.3")
+        self.assertEqual(identity["git_revision"], "")
+        self.assertEqual(identity["git_revision_status"], "unavailable")
 
     def test_verifier_runs_when_invoked_as_a_script_path(self) -> None:
         script = Path(__file__).resolve().parent.parent / "scripts" / "verify_production_deployment.py"

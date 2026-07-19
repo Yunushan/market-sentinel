@@ -143,7 +143,7 @@ sudo --preserve-env=MARKET_SENTINEL_PUBLIC_BASIC_USER,MARKET_SENTINEL_PUBLIC_BAS
 ```
 
 Keep the password only in the environment. Do not pass it on the command line.
-The generated JSON contains a schema version and UTC collection timestamp but no credentials; `--output` requires an existing,
+The generated JSON contains a schema version, UTC collection timestamp, and source version/revision status but no credentials; `--output` requires an existing,
 private root-owned parent directory, writes atomically with mode `0600`, and
 syncs the replacement directory entry on POSIX so a service account cannot
 replace the release-change record. Repeat
