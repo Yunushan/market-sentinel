@@ -53,7 +53,7 @@ documents in this directory.
 
 ### Observed Public-Live Evidence
 
-On 2026-07-15 and again on 2026-07-18, the following public-only command
+On 2026-07-15, 2026-07-18, and 2026-07-19, the following public-only command
 exited successfully from this workspace:
 
 ```powershell
