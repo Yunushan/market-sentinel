@@ -39,6 +39,7 @@ REQUIRED_PROXY_HEADERS = (
 )
 BACKUP_MAX_AGE_SECONDS = 26 * 60 * 60
 BACKUP_MAX_FUTURE_SKEW_SECONDS = 5 * 60
+EVIDENCE_SCHEMA_VERSION = 1
 REQUIRED_PRIVATE_PATHS = (
     (Path("/etc/market-sentinel/market-sentinel.env"), S_IFREG, True),
     (Path("/var/lib/market-sentinel"), S_IFDIR, False),
@@ -237,6 +238,20 @@ def write_evidence(path: Path, payload: dict[str, Any]) -> None:
         raise
 
 
+def build_evidence(
+    checks: list[dict[str, Any]],
+    *,
+    collected_at: datetime | None = None,
+) -> dict[str, Any]:
+    timestamp = collected_at or datetime.now(timezone.utc)
+    return {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "collected_at": timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "status": "ok" if all(check["status"] == "pass" for check in checks) else "failed",
+        "checks": checks,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Collect read-only MarketSentinel production deployment evidence.")
     parser.add_argument("--loopback-url", default="http://127.0.0.1:8765/api/health")
@@ -278,18 +293,17 @@ def main() -> int:
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
         checks.append({"name": "deployment_verifier", "status": "fail", "detail": str(exc)})
 
-    passed = all(check["status"] == "pass" for check in checks)
-    evidence = {"status": "ok" if passed else "failed", "checks": checks}
+    evidence = build_evidence(checks)
     if args.output:
         output_directory = check_evidence_output_directory(args.output)
         checks.append(output_directory)
-        evidence = {"status": "ok" if all(check["status"] == "pass" for check in checks) else "failed", "checks": checks}
+        evidence = build_evidence(checks)
         if output_directory["status"] == "pass":
             try:
                 write_evidence(args.output, evidence)
             except OSError as exc:
                 checks.append({"name": "evidence_output", "status": "fail", "detail": str(exc)})
-                evidence = {"status": "failed", "checks": checks}
+                evidence = build_evidence(checks)
     print(json.dumps(evidence, sort_keys=True))
     return 0 if evidence["status"] == "ok" else 1
 

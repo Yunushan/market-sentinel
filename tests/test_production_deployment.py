@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from pathlib import Path
 from stat import S_IFREG
@@ -21,6 +22,7 @@ from scripts.verify_production_deployment import (
     check_loopback,
     check_public_proxy,
     check_systemd,
+    build_evidence,
     main,
     write_evidence,
 )
@@ -44,6 +46,16 @@ class _Response:
 
 
 class ProductionDeploymentTests(unittest.TestCase):
+    def test_evidence_includes_a_versioned_utc_collection_timestamp(self) -> None:
+        evidence = build_evidence(
+            [{"name": "loopback_health", "status": "pass"}],
+            collected_at=datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(evidence["schema_version"], 1)
+        self.assertEqual(evidence["collected_at"], "2026-07-19T12:00:00Z")
+        self.assertEqual(evidence["status"], "ok")
+
     def test_verifier_runs_when_invoked_as_a_script_path(self) -> None:
         script = Path(__file__).resolve().parent.parent / "scripts" / "verify_production_deployment.py"
         result = subprocess.run([sys.executable, str(script), "--help"], capture_output=True, text=True, check=False)
