@@ -230,12 +230,25 @@ def write_evidence(path: Path, payload: dict[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        _fsync_parent_directory(path)
     except OSError:
         try:
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
         raise
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    """Persist the directory entry created by the atomic replacement on POSIX hosts."""
+    if os.name != "posix":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path.parent, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def build_evidence(

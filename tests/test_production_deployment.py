@@ -22,6 +22,7 @@ from scripts.verify_production_deployment import (
     check_loopback,
     check_public_proxy,
     check_systemd,
+    _fsync_parent_directory,
     build_evidence,
     main,
     write_evidence,
@@ -178,6 +179,20 @@ class ProductionDeploymentTests(unittest.TestCase):
             if os.name == "posix":
                 self.assertEqual(output.stat().st_mode & 0o777, 0o600)
             self.assertFalse(list(output.parent.glob("*.tmp")))
+
+    def test_evidence_parent_directory_is_synced_on_posix(self) -> None:
+        path = Path("evidence") / "deployment.json"
+        with (
+            patch("scripts.verify_production_deployment.os.name", "posix"),
+            patch("scripts.verify_production_deployment.os.open", return_value=42) as open_directory,
+            patch("scripts.verify_production_deployment.os.fsync") as sync,
+            patch("scripts.verify_production_deployment.os.close") as close,
+        ):
+            _fsync_parent_directory(path)
+
+        open_directory.assert_called_once()
+        sync.assert_called_once_with(42)
+        close.assert_called_once_with(42)
 
     @unittest.skipUnless(os.name == "posix", "symlink safety is verified on POSIX hosts")
     def test_evidence_output_ignores_a_predictable_temp_symlink(self) -> None:

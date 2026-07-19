@@ -144,8 +144,9 @@ sudo --preserve-env=MARKET_SENTINEL_PUBLIC_BASIC_USER,MARKET_SENTINEL_PUBLIC_BAS
 
 Keep the password only in the environment. Do not pass it on the command line.
 The generated JSON contains a schema version and UTC collection timestamp but no credentials; `--output` requires an existing,
-private root-owned parent directory and writes atomically with mode `0600` so a
-service account cannot replace the release-change record. Repeat
+private root-owned parent directory, writes atomically with mode `0600`, and
+syncs the replacement directory entry on POSIX so a service account cannot
+replace the release-change record. Repeat
 the verification after every restore drill. The command
 uses `sudo` because it verifies the root-owned service environment file; it
 preserves only the two explicitly named Basic Auth variables for the public
