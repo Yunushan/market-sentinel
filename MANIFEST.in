@@ -6,6 +6,8 @@ include README.md
 include SECURITY.md
 include requirements.lock
 include requirements-build.lock
+include requirements-live.lock
+include requirements-test.lock
 include requirements*.txt
 include *.bat
 include marketsentinel.png

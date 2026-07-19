@@ -48,7 +48,7 @@ class PolymarketTrader:
 
     def __init__(self, cfg: TraderConfig):
         if ClobClient is None:
-            raise RuntimeError("py-clob-client is not installed. Install requirements.txt first.")
+            raise RuntimeError("py-clob-client is not installed. Install requirements-live.lock first.")
         self.cfg = cfg
         self.auth_readiness = validate_sdk_trading_readiness(
             private_key=self.cfg.private_key,

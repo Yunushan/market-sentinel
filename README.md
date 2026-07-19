@@ -267,9 +267,18 @@ pip install --require-hashes -r requirements.lock
 pip install --no-deps -e .
 ```
 
-`requirements.lock` is the reviewed, hash-protected production dependency set.
-Regenerate it only as part of an intentional dependency update with
-`python -m piptools compile --generate-hashes --strip-extras --output-file requirements.lock pyproject.toml`.
+`requirements.lock` is the reviewed, hash-protected runtime dependency set.
+For authenticated Polymarket CLOB signing and trading, install
+`requirements-live.lock` after the runtime lock. For local verification, install
+`requirements-test.lock` instead; it includes the live SDK plus `pytest` and
+`coverage`. Distribution builds also need `requirements-build.lock`. Regenerate
+the locks only as part of an intentional dependency update with
+`python -m piptools compile --generate-hashes --strip-extras --output-file requirements.lock pyproject.toml`,
+`python -m piptools compile --generate-hashes --strip-extras --output-file requirements-live.lock requirements-live.txt`,
+`python -m piptools compile --generate-hashes --strip-extras --output-file requirements-test.lock requirements-test.txt`,
+and `python -m piptools compile --generate-hashes --strip-extras --output-file requirements-build.lock requirements-build.txt`.
+Compile the runtime and test locks with Python 3.10 so their conditional
+`tomli` dependency remains represented for the minimum supported interpreter.
 
 ### 3) (Optional) set up LIVE trading credentials
 Copy `.env.example` to `.env` and fill values:
@@ -534,8 +543,9 @@ This runs:
 - offline unit tests for config/storage, API wrapper parsing, alert crossing, copy-trade percentage sizing, and wallet activity de-duplication
 - enforced branch-coverage floors of 65% across the full Python application and 74% across the headless/backend surface; `python verify.py` fails when either floor regresses
 
-Pytest is included in `requirements.txt`; run the pytest suite directly with:
+Install `requirements-test.lock` before running the pytest suite:
 ```bash
+python -m pip install --require-hashes -r requirements-test.lock
 python -m pytest
 ```
 

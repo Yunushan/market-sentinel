@@ -16,10 +16,7 @@ dependencies = [
     "truststore>=0.10.0",
     "websocket-client>=1.7.0",
     "python-dotenv>=1.0.0",
-    "py-clob-client>=0.34.0",
     "packaging>=24.0",
-    "pytest>=8.0",
-    "coverage[toml]>=7.6",
     "cryptography>=42.0.0",
     "eth-account>=0.13.0",
     "eth-abi>=5.0.0,<6.0.0",
@@ -41,6 +38,13 @@ classifiers = [
 build = [
     "build==1.5.0",
     "setuptools==82.0.1",
+]
+live = [
+    "py-clob-client>=0.34.0",
+]
+test = [
+    "pytest>=8.0",
+    "coverage[toml]>=7.6",
 ]
 
 [tool.setuptools]

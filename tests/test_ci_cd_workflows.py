@@ -36,7 +36,8 @@ class CiCdWorkflowTests(unittest.TestCase):
             "python app.py --smoke-test",
             "python verify.py",
             "python -m pip install --no-cache-dir --upgrade pip",
-            "python -m pip install --no-cache-dir --require-hashes -r requirements.lock",
+            "python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock",
+            "python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock",
             "python -m pip install --no-cache-dir --no-deps -e .",
             "scripts/ci_enterprise_linux_smoke.py",
             "RHEL 8 UBI / Python 3.12",
@@ -112,7 +113,7 @@ class CiCdWorkflowTests(unittest.TestCase):
             "python verify.py",
             "PIP_NO_CACHE_DIR",
             "python -m pip install --no-cache-dir --upgrade pip",
-            "python -m pip install --no-cache-dir --require-hashes -r requirements.lock",
+            "python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock",
             "python -m pip install --no-cache-dir --no-deps -e .",
             "python -m build",
             "python -m build --no-isolation",
@@ -132,6 +133,7 @@ class CiCdWorkflowTests(unittest.TestCase):
             "windows-2025-vs2026",
             "requirements-build.lock",
             "requirements.lock",
+            "requirements-test.lock",
             "python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock",
             "pyproject.toml",
             "dotnet tool install --global wix --version 6.0.2",
@@ -194,7 +196,8 @@ class CiCdWorkflowTests(unittest.TestCase):
     def test_windows_packaging_lock_is_hash_protected(self) -> None:
         source = (ROOT / "requirements-build.txt").read_text(encoding="utf-8")
         text = (ROOT / "requirements-build.lock").read_text(encoding="utf-8")
-        self.assertEqual("pyinstaller==6.21.0\n", source)
+        self.assertEqual("build==1.5.0\npyinstaller==6.21.0\n", source)
+        self.assertIn("build==1.5.0", text)
         self.assertIn("pyinstaller==6.21.0", text)
         self.assertIn("pyinstaller-hooks-contrib==2026.6", text)
         self.assertIn("setuptools==83.0.0", text)

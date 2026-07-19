@@ -28,7 +28,9 @@ Jobs:
 - Short-retention artifacts for the frontend bundle and Python distributions.
 - Every third-party action is pinned to a reviewed 40-character commit SHA,
   with its tracked major version retained as a comment for reviewability.
-- Python dependencies install from hash-protected `requirements.lock`; editable
+- Runtime dependencies install from hash-protected `requirements.lock`; authenticated
+  CLOB deployments add `requirements-live.lock`; CI test jobs use the
+  hash-protected `requirements-test.lock`; editable
   installation uses `--no-deps` so CI cannot silently resolve newer packages.
 
 The workflow uses read-only repository permissions by default and cancels stale runs on the same ref.
@@ -132,11 +134,11 @@ Dependabot opens grouped weekly pull requests for:
 - Python requirements
 - Frontend npm dependencies
 
-The committed Python lock is regenerated with `pip-compile --allow-unsafe
---extra build --generate-hashes` only during an intentional dependency update.
-CI installs it with `pip install --require-hashes -r requirements.lock` and
-builds Python distributions with `python -m build --no-isolation`, so the
-build backend and frontend CI's `npm ci` use committed dependency inputs.
+The runtime, live SDK, test, and build locks are regenerated with `pip-compile
+--allow-unsafe --generate-hashes` only during an intentional dependency update.
+CI test jobs install `requirements-test.lock`; package build jobs install
+`requirements.lock` plus `requirements-build.lock`, so runtime, live, test, and
+build tooling remain independently reviewable and hash protected.
 The Windows packaging-only PyInstaller dependency graph is likewise installed
 from hash-protected `requirements-build.lock`.
 

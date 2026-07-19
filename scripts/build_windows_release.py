@@ -197,6 +197,8 @@ def copy_release_payload(package_dir: Path, frontend_dist: Path, version: str) -
     copy_file(ROOT / "pyproject.toml", package_dir / "pyproject.toml")
     copy_file(ROOT / "requirements.txt", package_dir / "requirements.txt")
     copy_file(ROOT / "requirements.lock", package_dir / "requirements.lock")
+    copy_file(ROOT / "requirements-live.txt", package_dir / "requirements-live.txt")
+    copy_file(ROOT / "requirements-live.lock", package_dir / "requirements-live.lock")
     copy_file(ROOT / ".env.example", package_dir / ".env.example")
     copy_file(ROOT / "data" / "config.example.json", package_dir / "data" / "config.example.json")
     copy_file(ROOT / "assets" / "marketsentinel.ico", package_dir / "assets" / "marketsentinel.ico")

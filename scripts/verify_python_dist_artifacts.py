@@ -36,8 +36,12 @@ REQUIRED_SDIST_MEMBERS = {
     "frontend/package.json",
     "frontend/src/App.tsx",
     "requirements.lock",
+    "requirements-live.lock",
+    "requirements-test.lock",
     "requirements-build.lock",
     "requirements.txt",
+    "requirements-live.txt",
+    "requirements-test.txt",
     "scripts/verify_dependency_lock.py",
     "scripts/collect_platform_evidence.py",
     "scripts/review_platform_evidence.py",
@@ -106,6 +110,26 @@ def verify_wheel(path: Path, expected_version: str) -> None:
                 )
         if metadata.get_all("License-File") != ["LICENSE"]:
             raise SystemExit(f"Wheel {path.name} must declare LICENSE exactly once.")
+        test_dependency_entries = [
+            value
+            for value in metadata.get_all("Requires-Dist", [])
+            if value.lower().startswith(("pytest", "coverage"))
+        ]
+        if len(test_dependency_entries) != 2 or any(
+            'extra == "test"' not in value for value in test_dependency_entries
+        ):
+            raise SystemExit(
+                f"Wheel {path.name} must expose pytest and coverage only through the test extra."
+            )
+        live_dependency_entries = [
+            value
+            for value in metadata.get_all("Requires-Dist", [])
+            if value.lower().startswith("py-clob-client")
+        ]
+        if len(live_dependency_entries) != 1 or 'extra == "live"' not in live_dependency_entries[0]:
+            raise SystemExit(
+                f"Wheel {path.name} must expose py-clob-client only through the live extra."
+            )
         _verify_license_text(archive.read(license_name).decode("utf-8"), f"Wheel {path.name} LICENSE")
         if "market-sentinel = market_sentinel_cli:main" not in archive.read(entry_points_name).decode("utf-8"):
             raise SystemExit(f"Wheel {path.name} is missing the market-sentinel CLI entry point.")

@@ -34,11 +34,27 @@ sudo mkdir -p /opt/market-sentinel
 sudo chown "$USER" /opt/market-sentinel
 git clone https://github.com/Yunushan/market-sentinel.git /opt/market-sentinel
 cd /opt/market-sentinel
+# Validate the checked-out source with the test dependency set before deployment.
+python3 -m venv .verify-venv
+.verify-venv/bin/python -m pip install --upgrade pip
+.verify-venv/bin/python -m pip install --require-hashes -r requirements-test.lock
+.verify-venv/bin/python -m pip install --no-deps .
+.verify-venv/bin/python verify.py --frontend-build --frontend-live-smoke
+rm -rf .verify-venv
+
+# Install the lean runtime dependency set used by the systemd service.
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install --require-hashes -r requirements.lock
 .venv/bin/python -m pip install --no-deps .
-.venv/bin/python verify.py --frontend-build --frontend-live-smoke
+```
+
+An authenticated Polymarket CLOB SDK is intentionally excluded from the
+baseline runtime. Install it only for an explicitly approved signed-trading
+workflow:
+
+```bash
+.venv/bin/python -m pip install --require-hashes -r requirements-live.lock
 ```
 
 Build the React frontend before starting the service:
@@ -215,8 +231,9 @@ Before deploying a new release, verify its GitHub Actions run, checksum file,
 SPDX SBOM, and build-provenance attestation. The release workflow rejects a tag
 unless its target commit is already reachable from protected `main`; do not
 publish from an unmerged feature branch. Confirm the release tag matches
-`pyproject.toml`, install only from `requirements.lock`, and perform a staged
-loopback deployment before public proxy cutover.
+`pyproject.toml`, install `requirements.lock`, and perform a staged loopback
+deployment before public proxy cutover. Install `requirements-live.lock` only
+where authenticated CLOB signing is explicitly approved.
 
 Funded production acceptance additionally requires a current credentialed-read
 report and a deliberately approved, capped order/cancel report with
