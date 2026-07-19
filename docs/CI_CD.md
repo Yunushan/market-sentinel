@@ -117,7 +117,10 @@ The normal verifier runs `python scripts/verify_platform_support.py` to ensure p
    - SHA256 checksums
    - GitHub build-provenance attestations
 
-Manual releases can also be started from the GitHub Actions UI with `workflow_dispatch`.
+Manual releases can also be started from the GitHub Actions UI with
+`workflow_dispatch`, but select the existing release tag as the workflow ref.
+The workflow rejects a supplied tag that is missing, resolves to a different
+commit, or is not reachable from protected `main`.
 
 ## Dependency Automation
 
