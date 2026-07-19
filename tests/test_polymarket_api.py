@@ -13,6 +13,7 @@ from unittest.mock import patch
 from polymarket import bridge, clob_auth, clob_rest, data_api, gamma, relayer, ws_market, ws_sports, ws_user
 from polymarket.analytics_cache import (
     POLYMARKET_MDD_AUDIT_KIND,
+    _fsync_parent_directory,
     load_analytics_cache,
     load_analytics_artifact,
     save_analytics_cache,
@@ -151,6 +152,20 @@ class PolymarketApiWrapperTests(unittest.TestCase):
             backups = list(cache_path.parent.glob("analytics-cache.json.corrupt-*"))
             self.assertEqual(len(backups), 1)
             self.assertEqual(backups[0].read_text(encoding="utf-8"), "{ not valid json")
+
+    def test_analytics_cache_parent_directory_is_synced_on_posix(self) -> None:
+        path = Path("cache") / "analytics-cache.json"
+        with (
+            patch("polymarket.analytics_cache.os.name", "posix"),
+            patch("polymarket.analytics_cache.os.open", return_value=42) as open_directory,
+            patch("polymarket.analytics_cache.os.fsync") as sync,
+            patch("polymarket.analytics_cache.os.close") as close,
+        ):
+            _fsync_parent_directory(path)
+
+        open_directory.assert_called_once()
+        sync.assert_called_once_with(42)
+        close.assert_called_once_with(42)
 
     def test_analytics_cache_does_not_quarantine_a_directory_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
