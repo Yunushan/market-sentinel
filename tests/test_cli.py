@@ -212,6 +212,19 @@ class MarketSentinelCliTests(unittest.TestCase):
             self.assertEqual(json.loads(stdout.getvalue())["paper"]["summary"]["marked"], 1)
             self.assertEqual(market_sentinel_cli._load_paper_marks(marks_path), marks)
 
+    def test_paper_marks_sync_parent_directory_after_atomic_replace_on_posix(self) -> None:
+        path = Path("state") / "marks.json"
+        with patch("market_sentinel_cli.os.name", "posix"), patch(
+            "market_sentinel_cli.os.open", return_value=41
+        ) as open_directory, patch("market_sentinel_cli.os.fsync") as fsync, patch(
+            "market_sentinel_cli.os.close"
+        ) as close_directory:
+            market_sentinel_cli._fsync_parent_directory(path)
+
+        open_directory.assert_called_once_with(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        fsync.assert_called_once_with(41)
+        close_directory.assert_called_once_with(41)
+
     def test_leaderboard_status_reads_existing_state_without_starting_a_scan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_path = Path(tmp) / "leaderboard.sqlite3"
