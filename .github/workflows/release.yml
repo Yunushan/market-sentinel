@@ -50,6 +50,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Resolve release inputs
         id: release
@@ -98,15 +99,17 @@ jobs:
               )
           PY
 
-      - name: Require release commit to be reachable from protected main
+      - name: Require release tag to resolve to workflow commit on protected main
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          git fetch --no-tags origin main
-          if ! git merge-base --is-ancestor "${GITHUB_SHA}" "origin/main"; then
-            echo "Release commit ${GITHUB_SHA} is not reachable from origin/main." >&2
-            echo "Publish releases only from a commit already merged to protected main." >&2
-            exit 1
-          fi
+          git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w 0)" fetch --force --tags origin main
+          python scripts/verify_release_provenance.py \
+            --tag "${RELEASE_TAG}" \
+            --commit "${GITHUB_SHA}" \
+            --main-ref "origin/main"
 
   python-compatibility:
     name: Python compatibility ${{ matrix.python-version }} / ${{ matrix.os }}
@@ -134,6 +137,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -143,7 +147,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --no-cache-dir --upgrade pip
-          python -m pip install --no-cache-dir --require-hashes -r requirements.lock
+          python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
           python -m pip install --no-cache-dir --no-deps -e .
 
       - name: Verify Python and Tkinter fallback
@@ -161,6 +165,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -170,17 +175,25 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --no-cache-dir --upgrade pip
-          python -m pip install --no-cache-dir --require-hashes -r requirements.lock
+          python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
           python -m pip install --no-cache-dir --no-deps -e .
-          python -m pip install --no-cache-dir build
+          python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock
 
       - name: Verify Python and Tkinter fallback
         run: |
           python app.py --smoke-test
           python verify.py
 
+      - name: Verify real Tkinter GUI lifecycle
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes xvfb
+          xvfb-run --auto-servernum python app.py --gui-smoke-test
+        env:
+          PREDICTION_MARKET_CONFIG_PATH: ${{ runner.temp }}/market-sentinel-gui-smoke.json
+
       - name: Build Python distributions
-        run: python -m build
+        run: python -m build --no-isolation
 
       - name: Smoke install built wheel
         shell: bash
@@ -226,6 +239,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -280,6 +294,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -356,7 +371,7 @@ jobs:
           python -m pip install --no-cache-dir --upgrade pip
           python -m pip install --no-cache-dir --require-hashes -r requirements.lock
           python -m pip install --no-cache-dir --no-deps -e .
-          python -m pip install --no-cache-dir -r requirements-build.txt
+          python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock
 
       - name: Install WiX Toolset
         shell: pwsh
@@ -430,6 +445,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python for release metadata
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6

@@ -17,6 +17,7 @@ from app import (
     market_id_from_choice,
     main,
     safe_float,
+    tkinter_gui_lifecycle_smoke_payload,
 )
 from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, WalletWatch
 from core.storage import ConfigLoadError
@@ -375,6 +376,107 @@ class FakeRegistry:
 
 
 class AppLogicTests(unittest.TestCase):
+    def test_gui_lifecycle_smoke_constructs_widget_contract_without_workers(self) -> None:
+        expected_tabs = [
+            "Markets & Alerts",
+            "Paper Trading",
+            "Market Safety",
+            "Wallet Tracker",
+            "Polymarket Analytics",
+            "Copy Trading",
+            "Logs",
+            "About",
+        ]
+
+        class FakeNotebook:
+            def tabs(self):
+                return list(range(len(expected_tabs)))
+
+            def tab(self, tab_id, option):
+                self_test.assertEqual(option, "text")
+                return expected_tabs[tab_id]
+
+        class FakeApp:
+            def __init__(self, *, start_background_workers: bool):
+                self.background_workers_argument = start_background_workers
+                self._background_workers_started = start_background_workers
+                self.notebook = FakeNotebook()
+                self.withdrawn = False
+                self.updated = False
+                self.shutdown_called = False
+
+            def withdraw(self) -> None:
+                self.withdrawn = True
+
+            def update_idletasks(self) -> None:
+                self.updated = True
+
+            def winfo_exists(self) -> int:
+                return 1
+
+            def title(self) -> str:
+                return "MarketSentinel"
+
+            def shutdown(self) -> None:
+                self.shutdown_called = True
+
+        self_test = self
+        created = []
+
+        def app_factory(*, start_background_workers: bool):
+            app = FakeApp(start_background_workers=start_background_workers)
+            created.append(app)
+            return app
+
+        payload = tkinter_gui_lifecycle_smoke_payload(app_factory=app_factory)
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["desktop_tabs"], expected_tabs)
+        self.assertFalse(payload["background_workers_started"])
+        self.assertEqual(len(created), 1)
+        self.assertFalse(created[0].background_workers_argument)
+        self.assertTrue(created[0].withdrawn)
+        self.assertTrue(created[0].updated)
+        self.assertTrue(created[0].shutdown_called)
+
+    def test_gui_shutdown_stops_workers_cancels_queue_and_is_idempotent(self) -> None:
+        class Worker:
+            def __init__(self):
+                self.stop_calls = 0
+
+            def stop(self) -> None:
+                self.stop_calls += 1
+
+        class ShutdownHarness:
+            def __init__(self):
+                self._shutdown_started = False
+                self._leaderboard_cancel_event = threading.Event()
+                self.market_ws = Worker()
+                self.wallet_poller = Worker()
+                self.adapter_price_poller = Worker()
+                self._queue_after_id = "queue-callback"
+                self.cancelled = []
+                self.destroy_calls = 0
+
+            def after_cancel(self, callback_id) -> None:
+                self.cancelled.append(callback_id)
+
+            def destroy(self) -> None:
+                self.destroy_calls += 1
+
+        harness = ShutdownHarness()
+
+        App.shutdown(harness)
+        App.shutdown(harness)
+
+        self.assertTrue(harness._shutdown_started)
+        self.assertTrue(harness._leaderboard_cancel_event.is_set())
+        self.assertEqual(harness.cancelled, ["queue-callback"])
+        self.assertEqual(harness.destroy_calls, 1)
+        self.assertEqual(harness.market_ws.stop_calls, 1)
+        self.assertEqual(harness.wallet_poller.stop_calls, 1)
+        self.assertEqual(harness.adapter_price_poller.stop_calls, 1)
+
     def test_main_reports_unreadable_configuration_without_starting_gui(self) -> None:
         error = ConfigLoadError("Configuration file cannot be loaded: config.json")
 

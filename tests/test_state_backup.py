@@ -10,12 +10,27 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from scripts.backup_state import create_backup
+from scripts.backup_state import _fsync_directory, create_backup
 from scripts.restore_state_backup import restore_backup, verify_backup
 
 
 class StateBackupTests(unittest.TestCase):
+    def test_backup_directory_is_synced_on_posix(self) -> None:
+        directory = Path("backups")
+        with (
+            patch("scripts.backup_state.os.name", "posix"),
+            patch("scripts.backup_state.os.open", return_value=42) as open_directory,
+            patch("scripts.backup_state.os.fsync") as sync,
+            patch("scripts.backup_state.os.close") as close,
+        ):
+            _fsync_directory(directory)
+
+        open_directory.assert_called_once()
+        sync.assert_called_once_with(42)
+        close.assert_called_once_with(42)
+
     def test_restore_utility_runs_when_invoked_as_a_script_path(self) -> None:
         script = Path(__file__).resolve().parent.parent / "scripts" / "restore_state_backup.py"
         result = subprocess.run([sys.executable, str(script), "--help"], capture_output=True, text=True, check=False)

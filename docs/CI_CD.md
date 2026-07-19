@@ -14,11 +14,15 @@ Jobs:
 
 - Python verification on Ubuntu, macOS `14`, macOS `15`, macOS `26`, and hosted Windows across Python `3.10`, `3.11`, `3.12`, `3.13`, and `3.14`.
 - Forward Python compatibility checks through the moving latest stable `3.x` runner; this avoids prerelease runner failures while still following future stable Python releases above 3.16 as GitHub Actions publishes them.
-- Enterprise Linux smoke checks through RHEL UBI 8/9/10, a RHEL 7-era manylinux2014 ABI container, and Rocky Linux 8/9/10 containers.
+- Enterprise Linux verification through RHEL UBI 8/9/10, a RHEL 7-era manylinux2014 ABI container, and Rocky Linux 8/9/10 containers. The UBI and Rocky containers provision Tkinter, then run clean dependency installation, the Enterprise Linux checks, the Tkinter smoke command, and the complete Python verifier. The manylinux2014 lane remains an explicitly non-desktop ABI compatibility check.
 - Windows 11 ARM hosted compatibility checks with Python `3.12` x64, matching the currently available wheel support for the project's transitive dependencies.
 - An opt-in Windows 10 self-hosted job, enabled only when repository variable `ENABLE_WINDOWS_10_SELF_HOSTED=true` and a self-hosted runner labelled `windows-10` are available. `.github/actionlint.yaml` declares that intentional custom label so workflow linting remains strict for all other runner names.
 - Mobile web smoke checks for Android 14/15/16 and iOS 15/16/18/26 user-agent and viewport profiles against the built React UI.
-- Tkinter fallback smoke test with `python app.py --smoke-test`.
+- Tkinter fallback metadata smoke with `python app.py --smoke-test`, plus a real
+  Tkinter widget-tree lifecycle smoke under Ubuntu Xvfb with
+  `python app.py --gui-smoke-test`. The lifecycle smoke disables network
+  background workers and verifies that normal close cancels queued UI work and
+  stops worker objects before destroying the Tk interpreter.
 - Full project verification with `python verify.py`.
 - Enforced branch-coverage floors of 65% for the full Python application and
   74% for the headless/backend surface. The verifier measures both and fails on
@@ -28,7 +32,9 @@ Jobs:
 - Short-retention artifacts for the frontend bundle and Python distributions.
 - Every third-party action is pinned to a reviewed 40-character commit SHA,
   with its tracked major version retained as a comment for reviewability.
-- Python dependencies install from hash-protected `requirements.lock`; editable
+- Runtime dependencies install from hash-protected `requirements.lock`; authenticated
+  CLOB deployments add `requirements-live.lock`; CI test jobs use the
+  hash-protected `requirements-test.lock`; editable
   installation uses `--no-deps` so CI cannot silently resolve newer packages.
 
 The workflow uses read-only repository permissions by default and cancels stale runs on the same ref.
@@ -82,6 +88,7 @@ The normal verifier runs `python scripts/verify_platform_support.py` to ensure p
 
    ```bash
    python app.py --smoke-test
+   python app.py --gui-smoke-test # Requires a local display server.
    python -m pytest -q
    python verify.py
    python scripts/verify_dependency_lock.py
@@ -117,7 +124,10 @@ The normal verifier runs `python scripts/verify_platform_support.py` to ensure p
    - SHA256 checksums
    - GitHub build-provenance attestations
 
-Manual releases can also be started from the GitHub Actions UI with `workflow_dispatch`.
+Manual releases can also be started from the GitHub Actions UI with
+`workflow_dispatch`, but select the existing release tag as the workflow ref.
+The workflow rejects a supplied tag that is missing, resolves to a different
+commit, or is not reachable from protected `main`.
 
 ## Dependency Automation
 
@@ -129,10 +139,13 @@ Dependabot opens grouped weekly pull requests for:
 - Python requirements
 - Frontend npm dependencies
 
-The committed Python lock is regenerated with `pip-compile --generate-hashes`
-only during an intentional dependency update. CI installs it with
-`pip install --require-hashes -r requirements.lock`; frontend CI uses `npm ci`
-from `frontend/package-lock.json`.
+The runtime, live SDK, test, and build locks are regenerated with `pip-compile
+--allow-unsafe --generate-hashes` only during an intentional dependency update.
+CI test jobs install `requirements-test.lock`; package build jobs install
+`requirements.lock` plus `requirements-build.lock`, so runtime, live, test, and
+build tooling remain independently reviewable and hash protected.
+The Windows packaging-only PyInstaller dependency graph is likewise installed
+from hash-protected `requirements-build.lock`.
 
 ## Windows Release Packages
 

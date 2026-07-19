@@ -168,6 +168,7 @@ class FinalParityTests(unittest.TestCase):
         text = (ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertIn("python app.py --smoke-test", text)
+        self.assertIn("python app.py --gui-smoke-test", text)
         self.assertIn("python verify.py --frontend-build", text)
         self.assertIn("npm run build", text)
         self.assertIn("run_gui.bat", text)

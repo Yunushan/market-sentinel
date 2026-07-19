@@ -8,17 +8,23 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from pathlib import Path
+from stat import S_IFREG
 from unittest.mock import patch
 from urllib.error import HTTPError
 
+from scripts import verify_production_deployment as deployment
 from scripts.verify_production_deployment import (
     check_evidence_output_directory,
     check_filesystem_permissions,
     check_loopback,
     check_public_proxy,
     check_systemd,
+    _fsync_parent_directory,
+    build_evidence,
+    source_identity,
     main,
     write_evidence,
 )
@@ -42,6 +48,53 @@ class _Response:
 
 
 class ProductionDeploymentTests(unittest.TestCase):
+    def test_evidence_includes_a_versioned_utc_collection_timestamp(self) -> None:
+        evidence = build_evidence(
+            [{"name": "loopback_health", "status": "pass"}],
+            collected_at=datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc),
+            source={
+                "project_version": "1.0.11",
+                "git_revision": "a" * 40,
+                "git_revision_status": "ok",
+            },
+        )
+
+        self.assertEqual(evidence["schema_version"], 1)
+        self.assertEqual(evidence["collected_at"], "2026-07-19T12:00:00Z")
+        self.assertEqual(evidence["source"]["project_version"], "1.0.11")
+        self.assertEqual(evidence["source"]["git_revision"], "a" * 40)
+        self.assertEqual(evidence["status"], "ok")
+
+    def test_source_identity_records_only_a_valid_git_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text("[project]\nversion = '1.2.3'\n", encoding="utf-8")
+            with patch(
+                "scripts.verify_production_deployment.subprocess.run",
+                return_value=subprocess.CompletedProcess(["git"], 0, "a" * 40 + "\n", ""),
+            ):
+                identity = source_identity(root)
+
+        self.assertEqual(identity, {
+            "project_version": "1.2.3",
+            "git_revision": "a" * 40,
+            "git_revision_status": "ok",
+        })
+
+    def test_source_identity_does_not_retain_invalid_git_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text("[project]\nversion = '1.2.3'\n", encoding="utf-8")
+            with patch(
+                "scripts.verify_production_deployment.subprocess.run",
+                return_value=subprocess.CompletedProcess(["git"], 0, "credential-like-output\n", ""),
+            ):
+                identity = source_identity(root)
+
+        self.assertEqual(identity["project_version"], "1.2.3")
+        self.assertEqual(identity["git_revision"], "")
+        self.assertEqual(identity["git_revision_status"], "unavailable")
+
     def test_verifier_runs_when_invoked_as_a_script_path(self) -> None:
         script = Path(__file__).resolve().parent.parent / "scripts" / "verify_production_deployment.py"
         result = subprocess.run([sys.executable, str(script), "--help"], capture_output=True, text=True, check=False)
@@ -71,8 +124,25 @@ class ProductionDeploymentTests(unittest.TestCase):
         environment = check_filesystem_permissions(lambda path: paths[path.name])[0]
         self.assertEqual(environment["status"], "fail")
 
+    @unittest.skipUnless(os.name == "posix", "symbolic-link safety is verified on POSIX hosts")
+    def test_filesystem_check_rejects_a_symlinked_critical_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "target.env"
+            target.write_text("token=not-read", encoding="utf-8")
+            linked = root / "market-sentinel.env"
+            linked.symlink_to(target)
+
+            with patch.object(deployment, "REQUIRED_PRIVATE_PATHS", ((linked, S_IFREG, False),)):
+                check = check_filesystem_permissions()[0]
+
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("expected=file", check["detail"])
+
     def test_evidence_output_requires_a_private_root_owned_parent_directory(self) -> None:
-        output = Path("/var/lib/market-sentinel-deployment-evidence") / "deployment.json"
+        # Do not use /var here: macOS deliberately exposes it as a compatibility
+        # symlink, while this unit test supplies its own directory metadata.
+        output = Path.cwd().resolve() / "market-sentinel-evidence-test" / "deployment.json"
         metadata = SimpleNamespace(st_mode=0o040700, st_uid=0)
         self.assertEqual(check_evidence_output_directory(output, lambda path: metadata)["status"], "pass")
 
@@ -148,6 +218,20 @@ class ProductionDeploymentTests(unittest.TestCase):
                 self.assertEqual(output.stat().st_mode & 0o777, 0o600)
             self.assertFalse(list(output.parent.glob("*.tmp")))
 
+    def test_evidence_parent_directory_is_synced_on_posix(self) -> None:
+        path = Path("evidence") / "deployment.json"
+        with (
+            patch("scripts.verify_production_deployment.os.name", "posix"),
+            patch("scripts.verify_production_deployment.os.open", return_value=42) as open_directory,
+            patch("scripts.verify_production_deployment.os.fsync") as sync,
+            patch("scripts.verify_production_deployment.os.close") as close,
+        ):
+            _fsync_parent_directory(path)
+
+        open_directory.assert_called_once()
+        sync.assert_called_once_with(42)
+        close.assert_called_once_with(42)
+
     @unittest.skipUnless(os.name == "posix", "symlink safety is verified on POSIX hosts")
     def test_evidence_output_ignores_a_predictable_temp_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -170,7 +254,14 @@ class ProductionDeploymentTests(unittest.TestCase):
             patch.object(
                 sys,
                 "argv",
-                ["verify_production_deployment.py", "--skip-systemd", "--output", "deployment.json"],
+                [
+                    "verify_production_deployment.py",
+                    "--skip-systemd",
+                    "--expected-version",
+                    "1.0.11",
+                    "--output",
+                    "deployment.json",
+                ],
             ),
             patch("scripts.verify_production_deployment.check_loopback", return_value={"name": "loopback_health", "status": "pass"}),
             patch(
@@ -185,6 +276,21 @@ class ProductionDeploymentTests(unittest.TestCase):
         evidence = json.loads(stdout.getvalue())
         self.assertEqual(evidence["status"], "failed")
         self.assertEqual(evidence["checks"][-1]["name"], "evidence_output")
+
+    def test_verifier_requires_an_expected_release_version(self) -> None:
+        stdout = io.StringIO()
+        with (
+            patch.object(sys, "argv", ["verify_production_deployment.py", "--skip-systemd"]),
+            patch("scripts.verify_production_deployment.check_loopback") as check_loopback_mock,
+            contextlib.redirect_stdout(stdout),
+        ):
+            self.assertEqual(main(), 1)
+
+        evidence = json.loads(stdout.getvalue())
+        self.assertEqual(evidence["status"], "failed")
+        self.assertEqual(evidence["checks"][0]["name"], "expected_version")
+        self.assertIn("--expected-version is required", evidence["checks"][0]["detail"])
+        check_loopback_mock.assert_not_called()
 
     def test_public_proxy_requires_https_security_headers_and_no_store(self) -> None:
         headers = {

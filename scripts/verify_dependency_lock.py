@@ -14,6 +14,12 @@ except ModuleNotFoundError:  # Python 3.10 compatibility.
 
 ROOT = Path(__file__).resolve().parent.parent
 LOCK_PATH = ROOT / "requirements.lock"
+LIVE_LOCK_PATH = ROOT / "requirements-live.lock"
+TEST_LOCK_PATH = ROOT / "requirements-test.lock"
+BUILD_LOCK_PATH = ROOT / "requirements-build.lock"
+LIVE_REQUIREMENTS_PATH = ROOT / "requirements-live.txt"
+TEST_REQUIREMENTS_PATH = ROOT / "requirements-test.txt"
+BUILD_REQUIREMENTS_PATH = ROOT / "requirements-build.txt"
 PROJECT_PATH = ROOT / "pyproject.toml"
 LOCKED_REQUIREMENT_RE = re.compile(r"^([A-Za-z0-9_.-]+)==[^\s;]+(?:\s*;\s*[^\\]+)?\s*\\?$")
 HASH_RE = re.compile(r"^\s*--hash=sha256:[0-9a-f]{64}$")
@@ -60,13 +66,34 @@ def lock_issues(lock_text: str, project_dependencies: list[str]) -> list[str]:
     return issues
 
 
+def _requirement_lines(path: Path) -> list[str]:
+    return [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith(("#", "-r"))
+    ]
+
+
 def main() -> int:
-    if not LOCK_PATH.exists():
-        print("requirements.lock is missing", file=sys.stderr)
-        return 1
     project = tomllib.loads(PROJECT_PATH.read_text(encoding="utf-8"))
-    dependencies = list(project.get("project", {}).get("dependencies", []))
-    issues = lock_issues(LOCK_PATH.read_text(encoding="utf-8"), dependencies)
+    optional = project.get("project", {}).get("optional-dependencies", {})
+    runtime_dependencies = list(project.get("project", {}).get("dependencies", []))
+    live_dependencies = [*runtime_dependencies, *optional.get("live", [])]
+    checks = (
+        (LOCK_PATH, runtime_dependencies),
+        (LIVE_LOCK_PATH, live_dependencies),
+        (TEST_LOCK_PATH, [*live_dependencies, *optional.get("test", [])]),
+        (BUILD_LOCK_PATH, _requirement_lines(BUILD_REQUIREMENTS_PATH)),
+    )
+    issues: list[str] = []
+    for lock_path, dependencies in checks:
+        if not lock_path.exists():
+            issues.append(f"{lock_path.name} is missing")
+            continue
+        issues.extend(
+            f"{lock_path.name}: {issue}"
+            for issue in lock_issues(lock_path.read_text(encoding="utf-8"), dependencies)
+        )
     if issues:
         print("Dependency lock validation failed:", file=sys.stderr)
         for issue in issues:

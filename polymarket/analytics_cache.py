@@ -68,6 +68,7 @@ def save_analytics_cache(cache: Mapping[str, Any], path: Optional[Path | str] = 
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, target)
+        _fsync_parent_directory(target)
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -81,9 +82,22 @@ def _quarantine_invalid_cache(target: Path) -> Optional[Path]:
     backup = target.with_name(f"{target.name}.corrupt-{time.time_ns()}")
     try:
         os.replace(target, backup)
+        _fsync_parent_directory(backup)
     except OSError:
         return None
     return backup
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    """Persist cache file renames on POSIX filesystems."""
+    if os.name != "posix":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path.parent, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def analytics_cache_summary(path: Optional[Path | str] = None, *, enabled: bool = False) -> Dict[str, Any]:

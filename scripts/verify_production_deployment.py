@@ -4,6 +4,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -19,6 +20,11 @@ if __package__:
     from scripts.verify_service_health import check_health
 else:  # Supports the documented `python /path/to/scripts/verify_production_deployment.py` invocation.
     from verify_service_health import check_health
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 uses the locked tomli dependency.
+    import tomli as tomllib
 
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
@@ -39,6 +45,9 @@ REQUIRED_PROXY_HEADERS = (
 )
 BACKUP_MAX_AGE_SECONDS = 26 * 60 * 60
 BACKUP_MAX_FUTURE_SKEW_SECONDS = 5 * 60
+EVIDENCE_SCHEMA_VERSION = 1
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 REQUIRED_PRIVATE_PATHS = (
     (Path("/etc/market-sentinel/market-sentinel.env"), S_IFREG, True),
     (Path("/var/lib/market-sentinel"), S_IFDIR, False),
@@ -49,6 +58,41 @@ REQUIRED_PRIVATE_PATHS = (
 def _run_command(args: list[str]) -> subprocess.CompletedProcess[str]:
     environment = {**os.environ, "LC_ALL": "C", "TZ": "UTC"}
     return subprocess.run(args, capture_output=True, text=True, check=False, timeout=15, env=environment)
+
+
+def source_identity(root: Path = PROJECT_ROOT) -> dict[str, str]:
+    """Return minimal source provenance without retaining command output."""
+    project_version = "unknown"
+    try:
+        data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        candidate = data.get("project", {}).get("version", "")
+        if isinstance(candidate, str) and candidate.strip():
+            project_version = candidate.strip()
+    except (OSError, TypeError, ValueError):
+        pass
+
+    revision = ""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+            env={**os.environ, "LC_ALL": "C", "TZ": "UTC"},
+        )
+        candidate = result.stdout.strip().lower()
+        if result.returncode == 0 and COMMIT_SHA.fullmatch(candidate):
+            revision = candidate
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    return {
+        "project_version": project_version,
+        "git_revision": revision,
+        "git_revision_status": "ok" if revision else "unavailable",
+    }
 
 
 def _systemd_timestamp_seconds(value: str) -> float:
@@ -62,7 +106,7 @@ def _systemd_timestamp_seconds(value: str) -> float:
 
 
 def check_filesystem_permissions(
-    stat_reader: Callable[[Path], object] = lambda path: path.stat(),
+    stat_reader: Callable[[Path], object] = lambda path: path.lstat(),
 ) -> list[dict[str, Any]]:
     return [
         _check_private_path(path, expected_type, require_root_owner, stat_reader)
@@ -229,12 +273,41 @@ def write_evidence(path: Path, payload: dict[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        _fsync_parent_directory(path)
     except OSError:
         try:
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
         raise
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    """Persist the directory entry created by the atomic replacement on POSIX hosts."""
+    if os.name != "posix":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path.parent, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def build_evidence(
+    checks: list[dict[str, Any]],
+    *,
+    collected_at: datetime | None = None,
+    source: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    timestamp = collected_at or datetime.now(timezone.utc)
+    return {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "collected_at": timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "source": source if source is not None else source_identity(),
+        "status": "ok" if all(check["status"] == "pass" for check in checks) else "failed",
+        "checks": checks,
+    }
 
 
 def main() -> int:
@@ -259,37 +332,46 @@ def main() -> int:
     args = parser.parse_args()
 
     checks: list[dict[str, Any]] = []
-    try:
-        if not args.skip_systemd:
-            checks.extend(check_systemd())
-            checks.extend(check_filesystem_permissions())
-        checks.append(check_loopback(args.loopback_url, args.token, args.timeout, args.expected_version))
-        if args.public_url:
-            password = os.environ.get(args.public_basic_password_env, "")
-            checks.append(
-                check_public_proxy(
-                    args.public_url,
-                    args.public_basic_user,
-                    password,
-                    args.timeout,
-                    args.expected_version,
+    expected_version = args.expected_version.strip()
+    if not expected_version:
+        checks.append(
+            {
+                "name": "expected_version",
+                "status": "fail",
+                "detail": "--expected-version is required to prove the deployed release identity",
+            }
+        )
+    else:
+        try:
+            if not args.skip_systemd:
+                checks.extend(check_systemd())
+                checks.extend(check_filesystem_permissions())
+            checks.append(check_loopback(args.loopback_url, args.token, args.timeout, expected_version))
+            if args.public_url:
+                password = os.environ.get(args.public_basic_password_env, "")
+                checks.append(
+                    check_public_proxy(
+                        args.public_url,
+                        args.public_basic_user,
+                        password,
+                        args.timeout,
+                        expected_version,
+                    )
                 )
-            )
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
-        checks.append({"name": "deployment_verifier", "status": "fail", "detail": str(exc)})
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
+            checks.append({"name": "deployment_verifier", "status": "fail", "detail": str(exc)})
 
-    passed = all(check["status"] == "pass" for check in checks)
-    evidence = {"status": "ok" if passed else "failed", "checks": checks}
+    evidence = build_evidence(checks)
     if args.output:
         output_directory = check_evidence_output_directory(args.output)
         checks.append(output_directory)
-        evidence = {"status": "ok" if all(check["status"] == "pass" for check in checks) else "failed", "checks": checks}
+        evidence = build_evidence(checks)
         if output_directory["status"] == "pass":
             try:
                 write_evidence(args.output, evidence)
             except OSError as exc:
                 checks.append({"name": "evidence_output", "status": "fail", "detail": str(exc)})
-                evidence = {"status": "failed", "checks": checks}
+                evidence = build_evidence(checks)
     print(json.dumps(evidence, sort_keys=True))
     return 0 if evidence["status"] == "ok" else 1
 

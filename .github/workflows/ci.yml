@@ -49,6 +49,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -58,7 +59,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --no-cache-dir --upgrade pip
-          python -m pip install --no-cache-dir --require-hashes -r requirements.lock
+          python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
           python -m pip install --no-cache-dir --no-deps -e .
 
       - name: Tkinter fallback smoke test
@@ -87,6 +88,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up future Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -96,7 +98,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --no-cache-dir --upgrade pip
-          python -m pip install --no-cache-dir --require-hashes -r requirements.lock
+          python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
           python -m pip install --no-cache-dir --no-deps -e .
 
       - name: Tkinter fallback smoke test
@@ -104,6 +106,38 @@ jobs:
 
       - name: Project verification
         run: python verify.py
+
+  tkinter-gui-lifecycle:
+    name: Tkinter GUI lifecycle / Ubuntu
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --no-cache-dir --upgrade pip
+          python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
+          python -m pip install --no-cache-dir --no-deps -e .
+
+      - name: Install virtual display
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes xvfb
+
+      - name: Construct and close the real Tkinter GUI
+        env:
+          PREDICTION_MARKET_CONFIG_PATH: ${{ runner.temp }}/market-sentinel-gui-smoke.json
+        run: xvfb-run --auto-servernum python app.py --gui-smoke-test
 
   enterprise-linux:
     name: ${{ matrix.name }}
@@ -116,36 +150,44 @@ jobs:
           - name: RHEL 8 UBI / Python 3.12
             image: registry.access.redhat.com/ubi8/python-312:latest
             python: python3.12
-            bootstrap: ""
+            bootstrap: dnf -y install python3.12-tkinter git
+            desktop_validation: "true"
           - name: RHEL 9 UBI / Python 3.12
             image: registry.access.redhat.com/ubi9/python-312:latest
             python: python3.12
-            bootstrap: ""
+            bootstrap: dnf -y install python3.12-tkinter git
+            desktop_validation: "true"
           - name: RHEL 10 UBI / Python 3.12 minimal
             image: registry.access.redhat.com/ubi10/python-312-minimal:latest
             python: python3.12
-            bootstrap: ""
+            bootstrap: microdnf install -y python3.12-tkinter git
+            desktop_validation: "true"
           - name: RHEL 7 ABI / manylinux2014 Python 3.10
             image: quay.io/pypa/manylinux2014_x86_64:latest
             python: /opt/python/cp310-cp310/bin/python
             bootstrap: ""
+            desktop_validation: "false"
           - name: Rocky Linux 8 / Python 3.12
             image: rockylinux/rockylinux:8
             python: python3.12
-            bootstrap: dnf -y install python3.12 python3.12-pip
+            bootstrap: dnf -y install python3.12 python3.12-pip python3.12-tkinter git
+            desktop_validation: "true"
           - name: Rocky Linux 9 / Python 3.12
             image: rockylinux/rockylinux:9
             python: python3.12
-            bootstrap: dnf -y install python3.12 python3.12-pip
+            bootstrap: dnf -y install python3.12 python3.12-pip python3.12-tkinter git
+            desktop_validation: "true"
           - name: Rocky Linux 10 / Python 3.12
             image: rockylinux/rockylinux:10
             python: python3.12
-            bootstrap: dnf -y install python3.12 python3.12-pip
+            bootstrap: dnf -y install python3.12 python3.12-pip python3.12-tkinter git
+            desktop_validation: "true"
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Verify in Enterprise Linux container
         shell: bash
@@ -154,12 +196,14 @@ jobs:
           CONTAINER_IMAGE: ${{ matrix.image }}
           CONTAINER_NAME: ${{ matrix.name }}
           PYTHON_COMMAND: ${{ matrix.python }}
+          DESKTOP_VALIDATION: ${{ matrix.desktop_validation }}
         run: |
           docker run --rm \
             --user 0 \
             -e CI_BOOTSTRAP_COMMAND="$BOOTSTRAP_COMMAND" \
             -e CI_CONTAINER_NAME="$CONTAINER_NAME" \
             -e CI_PYTHON_COMMAND="$PYTHON_COMMAND" \
+            -e CI_DESKTOP_VALIDATION="$DESKTOP_VALIDATION" \
             -e PIP_DISABLE_PIP_VERSION_CHECK=1 \
             -e PIP_NO_CACHE_DIR=1 \
             -v "$PWD:/workspace" \
@@ -169,6 +213,9 @@ jobs:
               set -eu
               if [ -n "${CI_BOOTSTRAP_COMMAND:-}" ]; then
                 sh -lc "$CI_BOOTSTRAP_COMMAND"
+              fi
+              if command -v git >/dev/null 2>&1; then
+                git config --global --add safe.directory /workspace
               fi
 
               PYTHON="${CI_PYTHON_COMMAND:-python3}"
@@ -190,9 +237,15 @@ jobs:
                 PYTHON_BIN=python
               fi
               "$PYTHON_BIN" -m pip install --no-cache-dir --upgrade pip
-              "$PYTHON_BIN" -m pip install --no-cache-dir --require-hashes -r requirements.lock
+              "$PYTHON_BIN" -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
               "$PYTHON_BIN" -m pip install --no-cache-dir --no-deps .
               "$PYTHON_BIN" scripts/ci_enterprise_linux_smoke.py --label "$CI_CONTAINER_NAME"
+              if [ "${CI_DESKTOP_VALIDATION:-false}" = "true" ]; then
+                "$PYTHON_BIN" app.py --smoke-test
+                "$PYTHON_BIN" verify.py
+              else
+                echo "[info] Desktop smoke and full verification intentionally skipped for ABI-only container."
+              fi
             '
 
   windows-11:
@@ -204,6 +257,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -214,7 +268,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --no-cache-dir --upgrade pip
-          python -m pip install --no-cache-dir --require-hashes -r requirements.lock
+          python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
           python -m pip install --no-cache-dir --no-deps -e .
 
       - name: Tkinter fallback smoke test
@@ -237,6 +291,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -246,7 +301,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --no-cache-dir --upgrade pip
-          python -m pip install --no-cache-dir --require-hashes -r requirements.lock
+          python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
           python -m pip install --no-cache-dir --no-deps -e .
 
       - name: Tkinter fallback smoke test
@@ -267,6 +322,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -315,6 +371,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -340,6 +397,7 @@ jobs:
     name: Python package build
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: ${{ always() }}
     needs:
       - python
       - future-python
@@ -348,10 +406,38 @@ jobs:
       - frontend
       - mobile-web
     steps:
+      - name: Enforce required CI jobs
+        env:
+          PYTHON_RESULT: ${{ needs.python.result }}
+          FUTURE_PYTHON_RESULT: ${{ needs.future-python.result }}
+          ENTERPRISE_LINUX_RESULT: ${{ needs.enterprise-linux.result }}
+          WINDOWS_11_RESULT: ${{ needs.windows-11.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          MOBILE_WEB_RESULT: ${{ needs.mobile-web.result }}
+        shell: bash
+        run: |
+          failed=0
+          for entry in \
+            "python:${PYTHON_RESULT}" \
+            "future-python:${FUTURE_PYTHON_RESULT}" \
+            "enterprise-linux:${ENTERPRISE_LINUX_RESULT}" \
+            "windows-11:${WINDOWS_11_RESULT}" \
+            "frontend:${FRONTEND_RESULT}" \
+            "mobile-web:${MOBILE_WEB_RESULT}"; do
+            job="${entry%%:*}"
+            result="${entry#*:}"
+            if [ "${result}" != "success" ]; then
+              echo "Required CI job ${job} finished with ${result}."
+              failed=1
+            fi
+          done
+          exit "${failed}"
+
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -362,8 +448,8 @@ jobs:
         run: |
           python -m pip install --no-cache-dir --upgrade pip
           python -m pip install --no-cache-dir --require-hashes -r requirements.lock
-          python -m pip install --no-cache-dir build
-          python -m build
+          python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock
+          python -m build --no-isolation
 
       - name: Smoke install built wheel
         shell: bash

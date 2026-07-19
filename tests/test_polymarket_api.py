@@ -13,6 +13,7 @@ from unittest.mock import patch
 from polymarket import bridge, clob_auth, clob_rest, data_api, gamma, relayer, ws_market, ws_sports, ws_user
 from polymarket.analytics_cache import (
     POLYMARKET_MDD_AUDIT_KIND,
+    _fsync_parent_directory,
     load_analytics_cache,
     load_analytics_artifact,
     save_analytics_cache,
@@ -53,6 +54,9 @@ from polymarket.live_reports import (
     list_live_validation_report_decisions,
     purge_live_validation_coverage_promotion_proposal_snapshots,
     record_live_validation_report_decision,
+    save_live_validation_decisions,
+    save_live_validation_promotion_proposal_snapshots,
+    save_live_validation_reports,
     store_live_validation_coverage_promotion_proposal_snapshot,
     store_live_validation_report,
 )
@@ -151,6 +155,41 @@ class PolymarketApiWrapperTests(unittest.TestCase):
             backups = list(cache_path.parent.glob("analytics-cache.json.corrupt-*"))
             self.assertEqual(len(backups), 1)
             self.assertEqual(backups[0].read_text(encoding="utf-8"), "{ not valid json")
+
+    def test_analytics_cache_parent_directory_is_synced_on_posix(self) -> None:
+        path = Path("cache") / "analytics-cache.json"
+        with (
+            patch("polymarket.analytics_cache.os.name", "posix"),
+            patch("polymarket.analytics_cache.os.open", return_value=42) as open_directory,
+            patch("polymarket.analytics_cache.os.fsync") as sync,
+            patch("polymarket.analytics_cache.os.close") as close,
+        ):
+            _fsync_parent_directory(path)
+
+        open_directory.assert_called_once()
+        sync.assert_called_once_with(42)
+        close.assert_called_once_with(42)
+
+    def test_live_safety_stores_use_secure_atomic_artifact_writes(self) -> None:
+        writers = (
+            ("reports", save_live_validation_reports),
+            ("decisions", save_live_validation_decisions),
+            ("snapshots", save_live_validation_promotion_proposal_snapshots),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, writer in writers:
+                with self.subTest(store=name):
+                    target = root / f"{name}.json"
+                    predictable_temporary = target.with_name(f"{target.name}.tmp")
+                    predictable_temporary.write_text("do not overwrite", encoding="utf-8")
+                    with patch("polymarket.live_reports._fsync_parent_directory") as sync_parent:
+                        self.assertEqual(writer({"entries": {"one": {"status": "ok"}}}, target), target)
+
+                    self.assertEqual(json.loads(target.read_text(encoding="utf-8"))["entries"]["one"]["status"], "ok")
+                    self.assertEqual(predictable_temporary.read_text(encoding="utf-8"), "do not overwrite")
+                    self.assertFalse(list(root.glob(f".{target.name}.*.tmp")))
+                    sync_parent.assert_called_once_with(target)
 
     def test_analytics_cache_does_not_quarantine_a_directory_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

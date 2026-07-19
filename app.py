@@ -435,7 +435,7 @@ class AdapterPricePoller:
 # ---------------------------
 
 class App(tk.Tk):
-    def __init__(self):
+    def __init__(self, *, start_background_workers: bool = True):
         set_windows_app_id(APP_ID)
         set_windows_dpi_awareness()
         super().__init__()
@@ -462,6 +462,9 @@ class App(tk.Tk):
         self._leaderboard_loading = False
         self._leaderboard_cancel_event = threading.Event()
         self._last_leaderboard_payload: Optional[Dict[str, Any]] = None
+        self._background_workers_started = bool(start_background_workers)
+        self._shutdown_started = False
+        self._queue_after_id: Optional[str] = None
 
         # price state by token_id
         self.price_state: Dict[str, Dict[str, Optional[float]]] = {}
@@ -474,12 +477,14 @@ class App(tk.Tk):
             custom_feature_enabled=False,
             verbose=False,
         )
-        self.market_ws.start()
+        if self._background_workers_started:
+            self.market_ws.start()
 
         # Wallet poller
         self.wallet_poller = WalletPoller(self.ui_queue, self.cfg, poll_interval=10.0)
         self.adapter_price_poller = AdapterPricePoller(self.ui_queue, self.cfg, self.adapter_registry)
-        self.adapter_price_poller.start()
+        if self._background_workers_started:
+            self.adapter_price_poller.start()
 
         # Cached trader
         self._trader: Optional[PolymarketTrader] = None
@@ -494,7 +499,30 @@ class App(tk.Tk):
         self.bind("<FocusIn>", lambda _event: self._apply_native_titlebar(self), add="+")
 
         # Kick off queue processing
-        self.after(100, self._process_queue)
+        self._queue_after_id = self.after(100, self._process_queue)
+        self.protocol("WM_DELETE_WINDOW", self.shutdown)
+
+    def shutdown(self) -> None:
+        """Stop background activity before destroying the Tk interpreter."""
+        if self._shutdown_started:
+            return
+        self._shutdown_started = True
+        self._leaderboard_cancel_event.set()
+        for worker in (self.market_ws, self.wallet_poller, self.adapter_price_poller):
+            try:
+                worker.stop()
+            except Exception:
+                pass
+        if self._queue_after_id:
+            try:
+                self.after_cancel(self._queue_after_id)
+            except tk.TclError:
+                pass
+            self._queue_after_id = None
+        try:
+            self.destroy()
+        except tk.TclError:
+            pass
 
     # ------------------ UI build ------------------
 
@@ -719,6 +747,7 @@ class App(tk.Tk):
         ).pack(fill="x", padx=10, pady=(4, 6))
 
         nb = ttk.Notebook(self)
+        self.notebook = nb
         nb.pack(fill="both", expand=True)
 
         self.tab_alerts = ttk.Frame(nb)
@@ -3075,7 +3104,8 @@ class App(tk.Tk):
             custom_feature_enabled=False,
             verbose=False,
         )
-        self.market_ws.start()
+        if self._background_workers_started:
+            self.market_ws.start()
         self.ui_queue.put(("log", f"Resubscribed WS to {len(ids)} tokens."))
 
     # ------------------ Paper trading ------------------
@@ -4685,7 +4715,8 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         finally:
-            self.after(100, self._process_queue)
+            if not self._shutdown_started:
+                self._queue_after_id = self.after(100, self._process_queue)
 
     def _handle_wallet_activity(self, watch_id: str, item: Dict[str, Any]):
         # Add to activity UI
@@ -4742,11 +4773,42 @@ def tkinter_smoke_payload() -> Dict[str, Any]:
     }
 
 
+def tkinter_gui_lifecycle_smoke_payload(*, app_factory=App) -> Dict[str, Any]:
+    """Construct and tear down the real Tk widget tree without network workers."""
+    app = app_factory(start_background_workers=False)
+    expected_tabs = [
+        "Markets & Alerts",
+        "Paper Trading",
+        "Market Safety",
+        "Wallet Tracker",
+        "Polymarket Analytics",
+        "Copy Trading",
+        "Logs",
+        "About",
+    ]
+    try:
+        app.withdraw()
+        app.update_idletasks()
+        tabs = [str(app.notebook.tab(tab_id, "text")) for tab_id in app.notebook.tabs()]
+        return {
+            "ok": app.winfo_exists() == 1 and tabs == expected_tabs,
+            "window_title": app.title(),
+            "desktop_tabs": tabs,
+            "background_workers_started": app._background_workers_started,
+        }
+    finally:
+        app.shutdown()
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if "--smoke-test" in args:
         print(json.dumps(tkinter_smoke_payload(), sort_keys=True))
         return 0
+    if "--gui-smoke-test" in args:
+        payload = tkinter_gui_lifecycle_smoke_payload()
+        print(json.dumps(payload, sort_keys=True))
+        return 0 if payload["ok"] else 1
     if "--web-gui" in args:
         import argparse
 

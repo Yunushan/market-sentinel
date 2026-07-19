@@ -18,6 +18,7 @@ except Exception:  # pragma: no cover
     load_dotenv = None  # type: ignore
 
 from polymarket import bridge, clob_auth, clob_rest, data_api, gamma, relayer
+from core.atomic_files import atomic_write_text
 from polymarket.auth_readiness import build_clob_auth_readiness
 from polymarket.credential_runbook import build_polymarket_credential_runbook
 from polymarket.live_verification import (
@@ -347,8 +348,7 @@ def main() -> int:
         report["stage_gates"]["required_authenticated_read"] = "failed"
     if args.report_file:
         path = Path(args.report_file)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        atomic_write_text(path, json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["ok"] else 1
 

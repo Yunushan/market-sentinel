@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from core.models import AppConfig, CopyTradeSettings, MarketConfig, PaperTradeRecord, PriceAlert, WalletWatch
-from core.storage import CONFIG_PATH_ENV, ConfigLoadError, default_config_path, load_config, save_config
+from core.storage import CONFIG_PATH_ENV, ConfigLoadError, _fsync_parent_directory, default_config_path, load_config, save_config
 from market_adapters import MARKET_IDS
 from polymarket.util import is_wallet_address, normalize_wallet
 
@@ -167,6 +167,20 @@ class CoreModelTests(unittest.TestCase):
         self.assertEqual(loaded.ui_design, "aurora_2026")
         self.assertEqual(loaded.selected_market_id, "kalshi")
         self.assertEqual(leftovers, [])
+
+    def test_configuration_parent_directory_is_synced_on_posix(self) -> None:
+        path = Path("config") / "config.json"
+        with (
+            patch("core.storage.os.name", "posix"),
+            patch("core.storage.os.open", return_value=42) as open_directory,
+            patch("core.storage.os.fsync") as sync,
+            patch("core.storage.os.close") as close,
+        ):
+            _fsync_parent_directory(path)
+
+        open_directory.assert_called_once()
+        sync.assert_called_once_with(42)
+        close.assert_called_once_with(42)
 
     def test_unknown_selected_market_falls_back_to_polymarket(self) -> None:
         loaded = AppConfig.from_dict({"selected_market_id": "unknown-market"})

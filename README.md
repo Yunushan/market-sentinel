@@ -267,9 +267,18 @@ pip install --require-hashes -r requirements.lock
 pip install --no-deps -e .
 ```
 
-`requirements.lock` is the reviewed, hash-protected production dependency set.
-Regenerate it only as part of an intentional dependency update with
-`python -m piptools compile --generate-hashes --strip-extras --output-file requirements.lock pyproject.toml`.
+`requirements.lock` is the reviewed, hash-protected runtime dependency set.
+For authenticated Polymarket CLOB signing and trading, install
+`requirements-live.lock` after the runtime lock. For local verification, install
+`requirements-test.lock` instead; it includes the live SDK plus `pytest` and
+`coverage`. Distribution builds also need `requirements-build.lock`. Regenerate
+the locks only as part of an intentional dependency update with
+`python -m piptools compile --generate-hashes --strip-extras --output-file requirements.lock pyproject.toml`,
+`python -m piptools compile --generate-hashes --strip-extras --output-file requirements-live.lock requirements-live.txt`,
+`python -m piptools compile --generate-hashes --strip-extras --output-file requirements-test.lock requirements-test.txt`,
+and `python -m piptools compile --generate-hashes --strip-extras --output-file requirements-build.lock requirements-build.txt`.
+Compile the runtime and test locks with Python 3.10 so their conditional
+`tomli` dependency remains represented for the minimum supported interpreter.
 
 ### 3) (Optional) set up LIVE trading credentials
 Copy `.env.example` to `.env` and fill values:
@@ -381,7 +390,7 @@ market-sentinel polymarket-mdd-cache list
 market-sentinel serve --host 127.0.0.1 --port 8765
 ```
 
-Commands that mutate config or paper state write through the same atomic config storage as the GUI. Most commands return JSON to stdout and support `--output file.json` plus `--compact`; `polymarket-leaderboard` can emit CSV or JSON. `doctor` is read-only: it checks configuration integrity and storage access, installed dependencies, React build availability, and the selected market's live-safety state without printing secrets. Use `doctor --strict` in service deployment automation to fail on warnings such as an armed live-trading configuration; it always fails on corrupt configuration, unwritable storage, or missing dependencies. `paper marks` persists CLI-only computed marks in an atomic sidecar beside the selected config (or `--marks-file`) so refresh, show, and clear work across separate CLI processes; it contains no credentials and is ignored by Git. `polymarket-live-reports`, `polymarket-live-decisions`, and `polymarket-promotion-proposal` expose the same local redacted report/review/decision/proposal artifacts as Live Safety; they never derive credentials, perform network actions, or place orders, and Markdown is available only for existing review exports. Unlimited scans run until the public leaderboard API returns no more rows, a repeated full page is detected, a rate limit stops the run, or the process is cancelled; use finite `--scanned` and `--mdd-scan` values for normal interactive jobs. For long VPS scans, use `--state-db path.sqlite3 --resume` plus retry flags: every fetched page, normalized row, and completed MDD audit is committed to SQLite, so a transient SSL/API failure only loses the current page batch and a later invocation resumes from the durable state. Add `--resume-on-failure` to keep a `nohup` scan alive after transient Polymarket HTTP/SSL failures; it resumes SQLite state after exponential backoff, with `--resume-max-restarts 0` meaning retry until interrupted. Run `market-sentinel polymarket-leaderboard-status --state-db path.sqlite3 --pid-file polymarket-scan.pid` at any time for a read-only JSON status with rows/pages, MDD done/error/pending counts, next offset, timestamps, stop reason, saved scan signature, and optional PID-file liveness. Use `market-sentinel polymarket-leaderboard-export --state-db path.sqlite3 --require-mdd --max-mdd-pct 20 --format csv --output current.csv` to write a sorted partial result snapshot without rerunning API or MDD calls; its JSON output identifies whether the export is still partial. A repeated page is recorded as `stop_reason=repeated_page`; it is an upstream pagination boundary, not proof that every Polymarket account exists in the public leaderboard. The CSV/JSON output is streamed from SQLite rather than rebuilding all rows in RAM. `--checkpoint` remains available as a lightweight JSONL checkpoint for shorter scans, but cannot be combined with `--state-db`. Progress logs on stderr include timestamp, PID, running status, elapsed time, phase, percent, scan rate, MDD rate, and ETA when a finite limit is known.
+Commands that mutate config or paper state write through the same atomic config storage as the GUI. Most commands return JSON to stdout and support `--output file.json` plus `--compact`; `polymarket-leaderboard` can emit CSV or JSON. `doctor` is read-only: it checks configuration integrity and storage access, installed dependencies, React build availability, and the selected market's live-safety state without printing secrets. Use `doctor --strict` in service deployment automation to fail on warnings such as an armed live-trading configuration; it always fails on corrupt configuration, unwritable storage, or missing dependencies. `paper marks` persists CLI-only computed marks in an atomic sidecar beside the selected config (or `--marks-file`) so refresh, show, and clear work across separate CLI processes; the file and its parent directory are synced on POSIX after replacement, it contains no credentials, and it is ignored by Git. `polymarket-live-reports`, `polymarket-live-decisions`, and `polymarket-promotion-proposal` expose the same local redacted report/review/decision/proposal artifacts as Live Safety; they never derive credentials, perform network actions, or place orders, and Markdown is available only for existing review exports. Unlimited scans run until the public leaderboard API returns no more rows, a repeated full page is detected, a rate limit stops the run, or the process is cancelled; use finite `--scanned` and `--mdd-scan` values for normal interactive jobs. For long VPS scans, use `--state-db path.sqlite3 --resume` plus retry flags: every fetched page, normalized row, and completed MDD audit is committed to SQLite, so a transient SSL/API failure only loses the current page batch and a later invocation resumes from the durable state. Add `--resume-on-failure` to keep a `nohup` scan alive after transient Polymarket HTTP/SSL failures; it resumes SQLite state after exponential backoff, with `--resume-max-restarts 0` meaning retry until interrupted. Run `market-sentinel polymarket-leaderboard-status --state-db path.sqlite3 --pid-file polymarket-scan.pid` at any time for a read-only JSON status with rows/pages, MDD done/error/pending counts, next offset, timestamps, stop reason, saved scan signature, and optional PID-file liveness. Use `market-sentinel polymarket-leaderboard-export --state-db path.sqlite3 --require-mdd --max-mdd-pct 20 --format csv --output current.csv` to write a sorted partial result snapshot without rerunning API or MDD calls; its JSON output identifies whether the export is still partial. A repeated page is recorded as `stop_reason=repeated_page`; it is an upstream pagination boundary, not proof that every Polymarket account exists in the public leaderboard. The CSV/JSON output is streamed from SQLite rather than rebuilding all rows in RAM. `--checkpoint` remains available as a lightweight JSONL checkpoint for shorter scans, but cannot be combined with `--state-db`. Progress logs on stderr include timestamp, PID, running status, elapsed time, phase, percent, scan rate, MDD rate, and ETA when a finite limit is known.
 
 Keep long-scan state, exports, progress logs, PID files, and the default MDD
 analytics cache under `data/`. The repository ignores those generated
@@ -534,8 +543,9 @@ This runs:
 - offline unit tests for config/storage, API wrapper parsing, alert crossing, copy-trade percentage sizing, and wallet activity de-duplication
 - enforced branch-coverage floors of 65% across the full Python application and 74% across the headless/backend surface; `python verify.py` fails when either floor regresses
 
-Pytest is included in `requirements.txt`; run the pytest suite directly with:
+Install `requirements-test.lock` before running the pytest suite:
 ```bash
+python -m pip install --require-hashes -r requirements-test.lock
 python -m pytest
 ```
 
@@ -543,6 +553,14 @@ Tkinter fallback smoke check:
 ```bash
 python app.py --smoke-test
 ```
+
+Real Tkinter lifecycle smoke check (requires a display server; CI uses Xvfb):
+```bash
+python app.py --gui-smoke-test
+```
+
+This constructs the full desktop widget tree, verifies the tab contract, and
+closes it without starting network background workers.
 
 React frontend checks:
 ```bash
@@ -568,7 +586,7 @@ If `frontend/node_modules` is missing, the normal verifier records frontend buil
 ## CI/CD and Releases
 
 GitHub Actions workflows live under `.github/workflows`:
-- `ci.yml` runs Python verification across Ubuntu, macOS `14`/`15`/`26`, and hosted Windows with Python `3.10` through `3.14`, runs a moving latest stable `3.x` compatibility lane for future Python releases, smoke checks RHEL UBI 8/9/10, a RHEL 7-era manylinux2014 ABI container, Rocky Linux 8/9/10, hosted Windows 11 ARM with Python `3.12` x64 dependency wheels, mobile web profiles for Android 14/15/16 and iOS 15/16/18/26, includes an opt-in self-hosted Windows 10 job gated by `ENABLE_WINDOWS_10_SELF_HOSTED=true`, builds the React frontend with Node.js `24`, and builds Python distributions.
+- `ci.yml` runs Python verification across Ubuntu, macOS `14`/`15`/`26`, and hosted Windows with Python `3.10` through `3.14`, runs a moving latest stable `3.x` compatibility lane for future Python releases, constructs and closes the real Tkinter widget tree under Ubuntu Xvfb, smoke checks RHEL UBI 8/9/10, a RHEL 7-era manylinux2014 ABI container, Rocky Linux 8/9/10, hosted Windows 11 ARM with Python `3.12` x64 dependency wheels, mobile web profiles for Android 14/15/16 and iOS 15/16/18/26, includes an opt-in self-hosted Windows 10 job gated by `ENABLE_WINDOWS_10_SELF_HOSTED=true`, builds the React frontend with Node.js `24`, and builds Python distributions.
 - `security.yml` runs CodeQL analysis and requires dependency review on pull requests once the repository dependency graph is enabled.
 - `release.yml` publishes tagged releases (`v*.*.*`) with Python package artifacts, a zipped React production bundle, Windows x64 portable/installer packages, SHA256 checksums, an SPDX SBOM, and GitHub build-provenance attestations. Local verification rejects reusing an existing release tag from a newer commit and requires an untagged project version to be newer than the latest tag.
 

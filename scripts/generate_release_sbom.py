@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,11 @@ except ModuleNotFoundError:  # Python 3.10 compatibility.
 
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from core.atomic_files import atomic_write_text
+
 LOCK_RE = re.compile(r"^([A-Za-z0-9_.-]+)==([^\s;]+)")
 
 
@@ -113,8 +119,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     payload = build_sbom(str(args.version))
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_text(args.output, json.dumps(payload, indent=2, sort_keys=True) + "\n")
     print(f"[ok] SBOM ({args.output})")
     return 0
 

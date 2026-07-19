@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import textwrap
@@ -40,12 +41,30 @@ def copy_file(source: Path, destination: Path) -> None:
     shutil.copy2(source, destination)
 
 
+def extract_frontend_archive(frontend_zip: Path, destination: Path) -> None:
+    """Extract a release artifact without allowing ZIP members to escape its directory."""
+    destination = destination.resolve()
+    with ZipFile(frontend_zip) as archive:
+        for member in archive.infolist():
+            relative = Path(member.filename)
+            if relative.is_absolute() or relative.drive or ".." in relative.parts:
+                raise ValueError(f"frontend archive contains unsafe member path: {member.filename}")
+            mode = member.external_attr >> 16
+            if stat.S_ISLNK(mode):
+                raise ValueError(f"frontend archive contains unsupported symbolic-link member: {member.filename}")
+            target = (destination / relative).resolve()
+            try:
+                target.relative_to(destination)
+            except ValueError as exc:
+                raise ValueError(f"frontend archive member escapes destination: {member.filename}") from exc
+        archive.extractall(destination)
+
+
 def prepare_frontend_dist(frontend_zip: Path | None) -> Path:
     frontend_dist = ROOT / "frontend" / "dist"
     if frontend_zip is not None:
         clean_dir(frontend_dist)
-        with ZipFile(frontend_zip) as archive:
-            archive.extractall(frontend_dist)
+        extract_frontend_archive(frontend_zip, frontend_dist)
     if not (frontend_dist / "index.html").exists():
         raise SystemExit(
             "frontend/dist/index.html is missing. Build the React frontend first or pass --frontend-zip."
@@ -178,6 +197,8 @@ def copy_release_payload(package_dir: Path, frontend_dist: Path, version: str) -
     copy_file(ROOT / "pyproject.toml", package_dir / "pyproject.toml")
     copy_file(ROOT / "requirements.txt", package_dir / "requirements.txt")
     copy_file(ROOT / "requirements.lock", package_dir / "requirements.lock")
+    copy_file(ROOT / "requirements-live.txt", package_dir / "requirements-live.txt")
+    copy_file(ROOT / "requirements-live.lock", package_dir / "requirements-live.lock")
     copy_file(ROOT / ".env.example", package_dir / ".env.example")
     copy_file(ROOT / "data" / "config.example.json", package_dir / "data" / "config.example.json")
     copy_file(ROOT / "assets" / "marketsentinel.ico", package_dir / "assets" / "marketsentinel.ico")

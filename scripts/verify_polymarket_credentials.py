@@ -15,6 +15,7 @@ except Exception:  # pragma: no cover
     load_dotenv = None  # type: ignore
 
 from polymarket.credential_runbook import build_polymarket_credential_runbook
+from core.atomic_files import atomic_write_text
 
 
 def _load_env() -> None:
@@ -24,8 +25,7 @@ def _load_env() -> None:
 
 def _write_report(path_text: str, payload: dict) -> None:
     path = Path(path_text)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def _print_summary(runbook: dict) -> None:

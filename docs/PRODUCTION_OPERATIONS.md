@@ -34,11 +34,27 @@ sudo mkdir -p /opt/market-sentinel
 sudo chown "$USER" /opt/market-sentinel
 git clone https://github.com/Yunushan/market-sentinel.git /opt/market-sentinel
 cd /opt/market-sentinel
+# Validate the checked-out source with the test dependency set before deployment.
+python3 -m venv .verify-venv
+.verify-venv/bin/python -m pip install --upgrade pip
+.verify-venv/bin/python -m pip install --require-hashes -r requirements-test.lock
+.verify-venv/bin/python -m pip install --no-deps .
+.verify-venv/bin/python verify.py --frontend-build --frontend-live-smoke
+rm -rf .verify-venv
+
+# Install the lean runtime dependency set used by the systemd service.
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install --require-hashes -r requirements.lock
 .venv/bin/python -m pip install --no-deps .
-.venv/bin/python verify.py --frontend-build --frontend-live-smoke
+```
+
+An authenticated Polymarket CLOB SDK is intentionally excluded from the
+baseline runtime. Install it only for an explicitly approved signed-trading
+workflow:
+
+```bash
+.venv/bin/python -m pip install --require-hashes -r requirements-live.lock
 ```
 
 Build the React frontend before starting the service:
@@ -92,7 +108,8 @@ The backup timer runs a local, network-isolated state backup each day with a
 `/var/lib/market-sentinel-backups`, owned by the service account and separate
 from the live state directory. Place `/var/lib` on encrypted storage or change
 the backup destination to an encrypted mounted volume before using this in
-production. SQLite state databases are captured with SQLite's online backup API
+production. Archive, manifest, and retention updates are published atomically
+and their directory changes are synced on POSIX filesystems. SQLite state databases are captured with SQLite's online backup API
 instead of copying WAL sidecar files. The archive intentionally excludes
 `/etc/market-sentinel` and its credentials; protect and back up that root-owned
 configuration through the host's secret-management and configuration process.
@@ -129,6 +146,8 @@ It also verifies the root-owned, private service environment file and private
 state/backup directories used by the bundled systemd units.
 It also requires a successful backup completed within the last 26 hours; enable
 the timer and run the service once before collecting deployment evidence.
+`--expected-version` is required: it prevents a healthy but stale deployment
+from being accepted as release evidence.
 It does not place orders, contact market APIs, or enable any live feature.
 
 ```bash
@@ -143,15 +162,17 @@ sudo --preserve-env=MARKET_SENTINEL_PUBLIC_BASIC_USER,MARKET_SENTINEL_PUBLIC_BAS
 ```
 
 Keep the password only in the environment. Do not pass it on the command line.
-The generated JSON contains no credentials; `--output` requires an existing,
-private root-owned parent directory and writes atomically with mode `0600` so a
-service account cannot replace the release-change record. Repeat
+The generated JSON contains a schema version, UTC collection timestamp, and source version/revision status but no credentials; `--output` requires an existing,
+private root-owned parent directory, writes atomically with mode `0600`, and
+syncs the replacement directory entry on POSIX so a service account cannot
+replace the release-change record. Repeat
 the verification after every restore drill. The command
 uses `sudo` because it verifies the root-owned service environment file; it
 preserves only the two explicitly named Basic Auth variables for the public
 proxy check. For a
 loopback-only staging host, omit `--public-url`; the script will still validate
-the local service and timer.
+the local service and timer, but retain `--expected-version` for the deployed
+release.
 
 ## Monitoring and recovery
 
@@ -213,8 +234,9 @@ Before deploying a new release, verify its GitHub Actions run, checksum file,
 SPDX SBOM, and build-provenance attestation. The release workflow rejects a tag
 unless its target commit is already reachable from protected `main`; do not
 publish from an unmerged feature branch. Confirm the release tag matches
-`pyproject.toml`, install only from `requirements.lock`, and perform a staged
-loopback deployment before public proxy cutover.
+`pyproject.toml`, install `requirements.lock`, and perform a staged loopback
+deployment before public proxy cutover. Install `requirements-live.lock` only
+where authenticated CLOB signing is explicitly approved.
 
 Funded production acceptance additionally requires a current credentialed-read
 report and a deliberately approved, capped order/cancel report with

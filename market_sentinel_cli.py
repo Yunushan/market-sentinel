@@ -1452,6 +1452,18 @@ def _active_paper_marks(cfg: Any, marks: Mapping[tuple[str, str], Dict[str, Any]
     return {key: dict(value) for key, value in marks.items() if key in active}
 
 
+def _fsync_parent_directory(path: Path) -> None:
+    """Persist a completed atomic rename on POSIX filesystems."""
+    if os.name != "posix":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path.parent, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _save_paper_marks(path: Path, marks: Mapping[tuple[str, str], Mapping[str, Any]]) -> None:
     payload = {
         "version": 1,
@@ -1476,6 +1488,7 @@ def _save_paper_marks(path: Path, marks: Mapping[tuple[str, str], Mapping[str, A
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(tmp_path, path)
+        _fsync_parent_directory(path)
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
