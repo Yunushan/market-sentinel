@@ -45,6 +45,7 @@ REQUIRED_SDIST_MEMBERS = {
     "scripts/verify_polymarket_live.py",
     "scripts/restore_state_backup.py",
     "scripts/verify_production_deployment.py",
+    "scripts/verify_release_provenance.py",
     "scripts/verify_release_assets.py",
     "tests/fixtures/crypto_com_predict/events.json",
     "tests/fixtures/crypto_com_predict/contracts.json",
