@@ -128,7 +128,7 @@ jobs:
           - name: RHEL 10 UBI / Python 3.12 minimal
             image: registry.access.redhat.com/ubi10/python-312-minimal:latest
             python: python3.12
-            bootstrap: dnf -y install python3.12-tkinter git
+            bootstrap: microdnf install -y python3.12-tkinter git
             desktop_validation: "true"
           - name: RHEL 7 ABI / manylinux2014 Python 3.10
             image: quay.io/pypa/manylinux2014_x86_64:latest
@@ -181,6 +181,9 @@ jobs:
               set -eu
               if [ -n "${CI_BOOTSTRAP_COMMAND:-}" ]; then
                 sh -lc "$CI_BOOTSTRAP_COMMAND"
+              fi
+              if command -v git >/dev/null 2>&1; then
+                git config --global --add safe.directory /workspace
               fi
 
               PYTHON="${CI_PYTHON_COMMAND:-python3}"
