@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -145,22 +146,45 @@ def load_live_validation_promotion_proposal_snapshots(path: Optional[Path | str]
     return raw
 
 
+def _fsync_parent_directory(path: Path) -> None:
+    if os.name != "posix":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path.parent, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _write_store_atomic(target: Path, store: Mapping[str, Any]) -> Path:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            if os.name == "posix":
+                os.fchmod(handle.fileno(), 0o600)
+            json.dump(_jsonable(store), handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+        _fsync_parent_directory(target)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    return target
+
+
 def save_live_validation_reports(store: Mapping[str, Any], path: Optional[Path | str] = None) -> Path:
     target = live_validation_reports_path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f"{target.name}.tmp")
-    tmp.write_text(json.dumps(_jsonable(store), indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(target)
-    return target
+    return _write_store_atomic(target, store)
 
 
 def save_live_validation_decisions(store: Mapping[str, Any], path: Optional[Path | str] = None) -> Path:
     target = live_validation_decisions_path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f"{target.name}.tmp")
-    tmp.write_text(json.dumps(_jsonable(store), indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(target)
-    return target
+    return _write_store_atomic(target, store)
 
 
 def save_live_validation_promotion_proposal_snapshots(
@@ -168,11 +192,7 @@ def save_live_validation_promotion_proposal_snapshots(
     path: Optional[Path | str] = None,
 ) -> Path:
     target = live_validation_promotion_proposal_snapshots_path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f"{target.name}.tmp")
-    tmp.write_text(json.dumps(_jsonable(store), indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(target)
-    return target
+    return _write_store_atomic(target, store)
 
 
 def redact_live_validation_report(report: Mapping[str, Any]) -> Dict[str, Any]:
