@@ -91,6 +91,7 @@ class CiCdWorkflowTests(unittest.TestCase):
         self.assertIn('desktop_validation: "true"', enterprise_linux)
         self.assertIn('desktop_validation: "false"', enterprise_linux)
         self.assertIn("python3.12-tkinter", enterprise_linux)
+        self.assertIn("python3.12-tkinter git", enterprise_linux)
         self.assertIn("CI_DESKTOP_VALIDATION", enterprise_linux)
         self.assertIn('"$PYTHON_BIN" app.py --smoke-test', enterprise_linux)
         self.assertIn('"$PYTHON_BIN" verify.py', enterprise_linux)

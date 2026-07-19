@@ -642,6 +642,12 @@ eth-utils==6.0.0 \
     #   eth-keys
     #   eth-rlp
     #   rlp
+exceptiongroup==1.3.1 ; python_version < "3.11" \
+    --hash=sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219 \
+    --hash=sha256:a7a39a3bd276781e98394987d3a5701d0c4edffb633bb7a5144577f82c773598
+    # via
+    #   anyio
+    #   market-sentinel (pyproject.toml); retained from the Python 3.10 compatibility resolution
 hexbytes==1.3.1 \
     --hash=sha256:a657eebebdfe27254336f98d8af6e2236f3f83aed164b87466b6cf6c5f5a4765 \
     --hash=sha256:da01ff24a1a9a2b1881c4b85f0e9f9b0f51b526b379ffa23832ae7899d29c2c7

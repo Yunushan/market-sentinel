@@ -118,17 +118,17 @@ jobs:
           - name: RHEL 8 UBI / Python 3.12
             image: registry.access.redhat.com/ubi8/python-312:latest
             python: python3.12
-            bootstrap: microdnf install -y python3.12-tkinter
+            bootstrap: dnf -y install python3.12-tkinter git
             desktop_validation: "true"
           - name: RHEL 9 UBI / Python 3.12
             image: registry.access.redhat.com/ubi9/python-312:latest
             python: python3.12
-            bootstrap: microdnf install -y python3.12-tkinter
+            bootstrap: dnf -y install python3.12-tkinter git
             desktop_validation: "true"
           - name: RHEL 10 UBI / Python 3.12 minimal
             image: registry.access.redhat.com/ubi10/python-312-minimal:latest
             python: python3.12
-            bootstrap: microdnf install -y python3.12-tkinter
+            bootstrap: dnf -y install python3.12-tkinter git
             desktop_validation: "true"
           - name: RHEL 7 ABI / manylinux2014 Python 3.10
             image: quay.io/pypa/manylinux2014_x86_64:latest
@@ -138,17 +138,17 @@ jobs:
           - name: Rocky Linux 8 / Python 3.12
             image: rockylinux/rockylinux:8
             python: python3.12
-            bootstrap: dnf -y install python3.12 python3.12-pip python3.12-tkinter
+            bootstrap: dnf -y install python3.12 python3.12-pip python3.12-tkinter git
             desktop_validation: "true"
           - name: Rocky Linux 9 / Python 3.12
             image: rockylinux/rockylinux:9
             python: python3.12
-            bootstrap: dnf -y install python3.12 python3.12-pip python3.12-tkinter
+            bootstrap: dnf -y install python3.12 python3.12-pip python3.12-tkinter git
             desktop_validation: "true"
           - name: Rocky Linux 10 / Python 3.12
             image: rockylinux/rockylinux:10
             python: python3.12
-            bootstrap: dnf -y install python3.12 python3.12-pip python3.12-tkinter
+            bootstrap: dnf -y install python3.12 python3.12-pip python3.12-tkinter git
             desktop_validation: "true"
     steps:
       - name: Checkout

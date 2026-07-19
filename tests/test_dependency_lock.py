@@ -15,6 +15,7 @@ class DependencyLockTests(unittest.TestCase):
         lock = ROOT / "requirements.lock"
         self.assertTrue(lock.exists())
         dependencies = [
+            "exceptiongroup>=1.0.2; python_version < '3.11'",
             "requests>=2.31.0",
             "truststore>=0.10.0",
             "websocket-client>=1.7.0",
@@ -27,10 +28,15 @@ class DependencyLockTests(unittest.TestCase):
         self.assertNotIn("pytest==", lock)
         self.assertNotIn("coverage==", lock)
 
-    def test_lock_includes_python_310_requirement_with_hashes(self) -> None:
-        lock = (ROOT / "requirements.lock").read_text(encoding="utf-8")
-        self.assertIn('tomli==2.2.1 ; python_version < "3.11"', lock)
-        self.assertIn("--hash=sha256:cb55c73c5f4408779d0cf3eef9f762b9c9f147a77de7b258bef0a5628adc85cc", lock)
+    def test_runtime_derived_locks_include_python_310_requirements_with_hashes(self) -> None:
+        for name in ("requirements.lock", "requirements-live.lock", "requirements-test.lock"):
+            with self.subTest(name=name):
+                lock = (ROOT / name).read_text(encoding="utf-8")
+                self.assertIn('exceptiongroup==1.3.1 ; python_version < "3.11"', lock)
+                self.assertIn("--hash=sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", lock)
+                self.assertIn("--hash=sha256:a7a39a3bd276781e98394987d3a5701d0c4edffb633bb7a5144577f82c773598", lock)
+                self.assertIn('tomli==2.2.1 ; python_version < "3.11"', lock)
+                self.assertIn("--hash=sha256:cb55c73c5f4408779d0cf3eef9f762b9c9f147a77de7b258bef0a5628adc85cc", lock)
 
     def test_build_lock_includes_hash_pinned_distribution_build_toolchain(self) -> None:
         lock = (ROOT / "requirements-build.lock").read_text(encoding="utf-8")
