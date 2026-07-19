@@ -51,23 +51,28 @@ The strict gate is expected to fail until Windows 10, RHEL/Rocky desktop runners
 
 ## Collecting Host Evidence
 
-When a required hosted, VM, or self-hosted target is available, run the
-collector from a clean checkout after installing the locked dependencies. It
-runs real dependency, Tkinter-smoke, and project-verification commands while
-discarding their output so the JSON record cannot contain environment values or
-credential-bearing logs:
+When a required hosted, VM, or self-hosted target is available, use the
+isolated runner from a clean checkout. It creates a disposable virtual
+environment, installs `requirements-test.lock` with hashes, installs the
+checkout without dependency resolution, then runs
+`collect_platform_evidence.py`. This avoids accidentally treating host-global
+packages as clean-install evidence. It discards command output so the JSON
+record cannot contain environment values or credential-bearing logs:
 
 ```bash
-python scripts/collect_platform_evidence.py \
+python scripts/run_platform_evidence.py \
   --platform "FreeBSD 14.2" \
   --output platform-evidence-freebsd-14.2.json \
   --include-frontend-build
 ```
 
-The collector returns nonzero when any check fails and writes the result
-atomically. Its record includes the project version and, when Git metadata is
-available, the exact commit tested; it never retains command output. Evidence
-records are review inputs only: do not change a support claim or enable
+The runner returns nonzero without writing an evidence record if the target
+cannot create a virtual environment or install the locked dependencies. On
+minimal operating systems, install that Python version's `venv` package first.
+After bootstrap, the collector returns nonzero when any check fails and writes
+the result atomically. Its record includes the project version and, when Git
+metadata is available, the exact commit tested; it never retains command output.
+Evidence records are review inputs only: do not change a support claim or enable
 `--require-full` based on an unreviewed record. A platform can be promoted only
 after an operator verifies the host identity, source revision, clean dependency
 installation, command results, and applicable release/install path.

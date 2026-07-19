@@ -27,6 +27,7 @@ class PlatformSupportTests(unittest.TestCase):
             "Promotion Gates",
             "Collecting Host Evidence",
             "collect_platform_evidence.py",
+            "run_platform_evidence.py",
             "Reviewing Host Evidence",
             "review_platform_evidence.py",
         ):

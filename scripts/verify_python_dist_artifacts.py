@@ -44,6 +44,7 @@ REQUIRED_SDIST_MEMBERS = {
     "requirements-test.txt",
     "scripts/verify_dependency_lock.py",
     "scripts/collect_platform_evidence.py",
+    "scripts/run_platform_evidence.py",
     "scripts/review_platform_evidence.py",
     "scripts/backup_state.py",
     "scripts/verify_polymarket_live.py",
