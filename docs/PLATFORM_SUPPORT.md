@@ -71,3 +71,18 @@ records are review inputs only: do not change a support claim or enable
 `--require-full` based on an unreviewed record. A platform can be promoted only
 after an operator verifies the host identity, source revision, clean dependency
 installation, command results, and applicable release/install path.
+
+### Reviewing Host Evidence
+
+Review a collector-generated record from the exact source checkout that it
+claims to have tested:
+
+```bash
+python scripts/review_platform_evidence.py platform-evidence-freebsd-14.2.json
+```
+
+The reviewer rejects malformed JSON, captured command output, failed or missing
+required checks, unexpected fields, and source version or Git revision mismatch.
+It produces a payload hash for the operator's audit trail, but always reports
+`promotion_permitted: false`; platform support claims remain a human review and
+release decision.
