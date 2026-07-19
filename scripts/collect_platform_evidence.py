@@ -122,6 +122,17 @@ def collect_evidence(
     }
 
 
+def _fsync_parent_directory(path: Path) -> None:
+    if os.name != "posix":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path.parent, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def write_evidence(path: Path, payload: dict[str, Any]) -> None:
     if not path.parent.is_dir():
         raise ValueError(f"evidence parent directory does not exist: {path.parent}")
@@ -148,6 +159,7 @@ def write_evidence(path: Path, payload: dict[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        _fsync_parent_directory(path)
     except OSError:
         temporary.unlink(missing_ok=True)
         raise

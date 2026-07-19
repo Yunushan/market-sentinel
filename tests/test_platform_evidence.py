@@ -44,10 +44,12 @@ class PlatformEvidenceTests(unittest.TestCase):
     def test_writes_atomic_json_to_existing_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "platform-evidence.json"
-            write_evidence(output, {"status": "ok", "checks": []})
+            with patch("scripts.collect_platform_evidence._fsync_parent_directory") as sync_parent:
+                write_evidence(output, {"status": "ok", "checks": []})
 
             self.assertEqual({"status": "ok", "checks": []}, json.loads(output.read_text(encoding="utf-8")))
             self.assertFalse(list(output.parent.glob("*.tmp")))
+            sync_parent.assert_called_once_with(output)
 
     def test_rejects_a_missing_output_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
