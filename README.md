@@ -554,6 +554,14 @@ Tkinter fallback smoke check:
 python app.py --smoke-test
 ```
 
+Real Tkinter lifecycle smoke check (requires a display server; CI uses Xvfb):
+```bash
+python app.py --gui-smoke-test
+```
+
+This constructs the full desktop widget tree, verifies the tab contract, and
+closes it without starting network background workers.
+
 React frontend checks:
 ```bash
 cd frontend
@@ -578,7 +586,7 @@ If `frontend/node_modules` is missing, the normal verifier records frontend buil
 ## CI/CD and Releases
 
 GitHub Actions workflows live under `.github/workflows`:
-- `ci.yml` runs Python verification across Ubuntu, macOS `14`/`15`/`26`, and hosted Windows with Python `3.10` through `3.14`, runs a moving latest stable `3.x` compatibility lane for future Python releases, smoke checks RHEL UBI 8/9/10, a RHEL 7-era manylinux2014 ABI container, Rocky Linux 8/9/10, hosted Windows 11 ARM with Python `3.12` x64 dependency wheels, mobile web profiles for Android 14/15/16 and iOS 15/16/18/26, includes an opt-in self-hosted Windows 10 job gated by `ENABLE_WINDOWS_10_SELF_HOSTED=true`, builds the React frontend with Node.js `24`, and builds Python distributions.
+- `ci.yml` runs Python verification across Ubuntu, macOS `14`/`15`/`26`, and hosted Windows with Python `3.10` through `3.14`, runs a moving latest stable `3.x` compatibility lane for future Python releases, constructs and closes the real Tkinter widget tree under Ubuntu Xvfb, smoke checks RHEL UBI 8/9/10, a RHEL 7-era manylinux2014 ABI container, Rocky Linux 8/9/10, hosted Windows 11 ARM with Python `3.12` x64 dependency wheels, mobile web profiles for Android 14/15/16 and iOS 15/16/18/26, includes an opt-in self-hosted Windows 10 job gated by `ENABLE_WINDOWS_10_SELF_HOSTED=true`, builds the React frontend with Node.js `24`, and builds Python distributions.
 - `security.yml` runs CodeQL analysis and requires dependency review on pull requests once the repository dependency graph is enabled.
 - `release.yml` publishes tagged releases (`v*.*.*`) with Python package artifacts, a zipped React production bundle, Windows x64 portable/installer packages, SHA256 checksums, an SPDX SBOM, and GitHub build-provenance attestations. Local verification rejects reusing an existing release tag from a newer commit and requires an untagged project version to be newer than the latest tag.
 

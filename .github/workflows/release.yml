@@ -183,6 +183,14 @@ jobs:
           python app.py --smoke-test
           python verify.py
 
+      - name: Verify real Tkinter GUI lifecycle
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes xvfb
+          xvfb-run --auto-servernum python app.py --gui-smoke-test
+        env:
+          PREDICTION_MARKET_CONFIG_PATH: ${{ runner.temp }}/market-sentinel-gui-smoke.json
+
       - name: Build Python distributions
         run: python -m build --no-isolation
 

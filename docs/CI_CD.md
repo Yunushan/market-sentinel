@@ -18,7 +18,11 @@ Jobs:
 - Windows 11 ARM hosted compatibility checks with Python `3.12` x64, matching the currently available wheel support for the project's transitive dependencies.
 - An opt-in Windows 10 self-hosted job, enabled only when repository variable `ENABLE_WINDOWS_10_SELF_HOSTED=true` and a self-hosted runner labelled `windows-10` are available. `.github/actionlint.yaml` declares that intentional custom label so workflow linting remains strict for all other runner names.
 - Mobile web smoke checks for Android 14/15/16 and iOS 15/16/18/26 user-agent and viewport profiles against the built React UI.
-- Tkinter fallback smoke test with `python app.py --smoke-test`.
+- Tkinter fallback metadata smoke with `python app.py --smoke-test`, plus a real
+  Tkinter widget-tree lifecycle smoke under Ubuntu Xvfb with
+  `python app.py --gui-smoke-test`. The lifecycle smoke disables network
+  background workers and verifies that normal close cancels queued UI work and
+  stops worker objects before destroying the Tk interpreter.
 - Full project verification with `python verify.py`.
 - Enforced branch-coverage floors of 65% for the full Python application and
   74% for the headless/backend surface. The verifier measures both and fails on
@@ -84,6 +88,7 @@ The normal verifier runs `python scripts/verify_platform_support.py` to ensure p
 
    ```bash
    python app.py --smoke-test
+   python app.py --gui-smoke-test # Requires a local display server.
    python -m pytest -q
    python verify.py
    python scripts/verify_dependency_lock.py

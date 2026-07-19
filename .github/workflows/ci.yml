@@ -107,6 +107,38 @@ jobs:
       - name: Project verification
         run: python verify.py
 
+  tkinter-gui-lifecycle:
+    name: Tkinter GUI lifecycle / Ubuntu
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --no-cache-dir --upgrade pip
+          python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
+          python -m pip install --no-cache-dir --no-deps -e .
+
+      - name: Install virtual display
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes xvfb
+
+      - name: Construct and close the real Tkinter GUI
+        env:
+          PREDICTION_MARKET_CONFIG_PATH: ${{ runner.temp }}/market-sentinel-gui-smoke.json
+        run: xvfb-run --auto-servernum python app.py --gui-smoke-test
+
   enterprise-linux:
     name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
