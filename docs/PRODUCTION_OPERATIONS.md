@@ -92,7 +92,8 @@ The backup timer runs a local, network-isolated state backup each day with a
 `/var/lib/market-sentinel-backups`, owned by the service account and separate
 from the live state directory. Place `/var/lib` on encrypted storage or change
 the backup destination to an encrypted mounted volume before using this in
-production. SQLite state databases are captured with SQLite's online backup API
+production. Archive, manifest, and retention updates are published atomically
+and their directory changes are synced on POSIX filesystems. SQLite state databases are captured with SQLite's online backup API
 instead of copying WAL sidecar files. The archive intentionally excludes
 `/etc/market-sentinel` and its credentials; protect and back up that root-owned
 configuration through the host's secret-management and configuration process.

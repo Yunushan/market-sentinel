@@ -95,9 +95,22 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
             os.fsync(handle.fileno())
         os.chmod(temporary_path, 0o600)
         os.replace(temporary_path, path)
+        _fsync_directory(path.parent)
     except Exception:
         temporary_path.unlink(missing_ok=True)
         raise
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Persist backup publication and retention changes on POSIX filesystems."""
+    if os.name != "posix":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _validate_locations(source: Path, destination: Path) -> tuple[Path, Path]:
@@ -121,6 +134,8 @@ def _prune_backups(destination: Path, retain: int) -> list[str]:
         path.unlink()
         path.with_name(path.name + MANIFEST_SUFFIX).unlink(missing_ok=True)
         removed.append(path.name)
+    if removed:
+        _fsync_directory(destination)
     return removed
 
 
@@ -155,6 +170,7 @@ def create_backup(source: Path, destination: Path, retain: int = 14) -> dict[str
                 os.fsync(raw_handle.fileno())
         os.chmod(temporary_path, 0o600)
         os.replace(temporary_path, archive_path)
+        _fsync_directory(destination)
     except Exception:
         temporary_path.unlink(missing_ok=True)
         raise
