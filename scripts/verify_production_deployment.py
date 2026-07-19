@@ -332,24 +332,34 @@ def main() -> int:
     args = parser.parse_args()
 
     checks: list[dict[str, Any]] = []
-    try:
-        if not args.skip_systemd:
-            checks.extend(check_systemd())
-            checks.extend(check_filesystem_permissions())
-        checks.append(check_loopback(args.loopback_url, args.token, args.timeout, args.expected_version))
-        if args.public_url:
-            password = os.environ.get(args.public_basic_password_env, "")
-            checks.append(
-                check_public_proxy(
-                    args.public_url,
-                    args.public_basic_user,
-                    password,
-                    args.timeout,
-                    args.expected_version,
+    expected_version = args.expected_version.strip()
+    if not expected_version:
+        checks.append(
+            {
+                "name": "expected_version",
+                "status": "fail",
+                "detail": "--expected-version is required to prove the deployed release identity",
+            }
+        )
+    else:
+        try:
+            if not args.skip_systemd:
+                checks.extend(check_systemd())
+                checks.extend(check_filesystem_permissions())
+            checks.append(check_loopback(args.loopback_url, args.token, args.timeout, expected_version))
+            if args.public_url:
+                password = os.environ.get(args.public_basic_password_env, "")
+                checks.append(
+                    check_public_proxy(
+                        args.public_url,
+                        args.public_basic_user,
+                        password,
+                        args.timeout,
+                        expected_version,
+                    )
                 )
-            )
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
-        checks.append({"name": "deployment_verifier", "status": "fail", "detail": str(exc)})
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
+            checks.append({"name": "deployment_verifier", "status": "fail", "detail": str(exc)})
 
     evidence = build_evidence(checks)
     if args.output:

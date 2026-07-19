@@ -118,31 +118,38 @@ jobs:
           - name: RHEL 8 UBI / Python 3.12
             image: registry.access.redhat.com/ubi8/python-312:latest
             python: python3.12
-            bootstrap: ""
+            bootstrap: microdnf install -y python3.12-tkinter
+            desktop_validation: "true"
           - name: RHEL 9 UBI / Python 3.12
             image: registry.access.redhat.com/ubi9/python-312:latest
             python: python3.12
-            bootstrap: ""
+            bootstrap: microdnf install -y python3.12-tkinter
+            desktop_validation: "true"
           - name: RHEL 10 UBI / Python 3.12 minimal
             image: registry.access.redhat.com/ubi10/python-312-minimal:latest
             python: python3.12
-            bootstrap: ""
+            bootstrap: microdnf install -y python3.12-tkinter
+            desktop_validation: "true"
           - name: RHEL 7 ABI / manylinux2014 Python 3.10
             image: quay.io/pypa/manylinux2014_x86_64:latest
             python: /opt/python/cp310-cp310/bin/python
             bootstrap: ""
+            desktop_validation: "false"
           - name: Rocky Linux 8 / Python 3.12
             image: rockylinux/rockylinux:8
             python: python3.12
-            bootstrap: dnf -y install python3.12 python3.12-pip
+            bootstrap: dnf -y install python3.12 python3.12-pip python3.12-tkinter
+            desktop_validation: "true"
           - name: Rocky Linux 9 / Python 3.12
             image: rockylinux/rockylinux:9
             python: python3.12
-            bootstrap: dnf -y install python3.12 python3.12-pip
+            bootstrap: dnf -y install python3.12 python3.12-pip python3.12-tkinter
+            desktop_validation: "true"
           - name: Rocky Linux 10 / Python 3.12
             image: rockylinux/rockylinux:10
             python: python3.12
-            bootstrap: dnf -y install python3.12 python3.12-pip
+            bootstrap: dnf -y install python3.12 python3.12-pip python3.12-tkinter
+            desktop_validation: "true"
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -157,12 +164,14 @@ jobs:
           CONTAINER_IMAGE: ${{ matrix.image }}
           CONTAINER_NAME: ${{ matrix.name }}
           PYTHON_COMMAND: ${{ matrix.python }}
+          DESKTOP_VALIDATION: ${{ matrix.desktop_validation }}
         run: |
           docker run --rm \
             --user 0 \
             -e CI_BOOTSTRAP_COMMAND="$BOOTSTRAP_COMMAND" \
             -e CI_CONTAINER_NAME="$CONTAINER_NAME" \
             -e CI_PYTHON_COMMAND="$PYTHON_COMMAND" \
+            -e CI_DESKTOP_VALIDATION="$DESKTOP_VALIDATION" \
             -e PIP_DISABLE_PIP_VERSION_CHECK=1 \
             -e PIP_NO_CACHE_DIR=1 \
             -v "$PWD:/workspace" \
@@ -196,8 +205,12 @@ jobs:
               "$PYTHON_BIN" -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
               "$PYTHON_BIN" -m pip install --no-cache-dir --no-deps .
               "$PYTHON_BIN" scripts/ci_enterprise_linux_smoke.py --label "$CI_CONTAINER_NAME"
-              "$PYTHON_BIN" app.py --smoke-test
-              "$PYTHON_BIN" verify.py
+              if [ "${CI_DESKTOP_VALIDATION:-false}" = "true" ]; then
+                "$PYTHON_BIN" app.py --smoke-test
+                "$PYTHON_BIN" verify.py
+              else
+                echo "[info] Desktop smoke and full verification intentionally skipped for ABI-only container."
+              fi
             '
 
   windows-11:

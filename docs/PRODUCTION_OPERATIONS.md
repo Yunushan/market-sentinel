@@ -146,6 +146,8 @@ It also verifies the root-owned, private service environment file and private
 state/backup directories used by the bundled systemd units.
 It also requires a successful backup completed within the last 26 hours; enable
 the timer and run the service once before collecting deployment evidence.
+`--expected-version` is required: it prevents a healthy but stale deployment
+from being accepted as release evidence.
 It does not place orders, contact market APIs, or enable any live feature.
 
 ```bash
@@ -169,7 +171,8 @@ uses `sudo` because it verifies the root-owned service environment file; it
 preserves only the two explicitly named Basic Auth variables for the public
 proxy check. For a
 loopback-only staging host, omit `--public-url`; the script will still validate
-the local service and timer.
+the local service and timer, but retain `--expected-version` for the deployed
+release.
 
 ## Monitoring and recovery
 

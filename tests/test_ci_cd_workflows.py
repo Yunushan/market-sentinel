@@ -88,8 +88,13 @@ class CiCdWorkflowTests(unittest.TestCase):
         self.assertNotIn("windows-latest", text)
         self.assertNotIn("python -m pip install --no-cache-dir build", text)
         enterprise_linux = text.split("  enterprise-linux:\n", 1)[1].split("  windows-11:\n", 1)[0]
+        self.assertIn('desktop_validation: "true"', enterprise_linux)
+        self.assertIn('desktop_validation: "false"', enterprise_linux)
+        self.assertIn("python3.12-tkinter", enterprise_linux)
+        self.assertIn("CI_DESKTOP_VALIDATION", enterprise_linux)
         self.assertIn('"$PYTHON_BIN" app.py --smoke-test', enterprise_linux)
         self.assertIn('"$PYTHON_BIN" verify.py', enterprise_linux)
+        self.assertIn("ABI-only container", enterprise_linux)
         self.assertEqual(
             [],
             workflow_action_pin_issues(

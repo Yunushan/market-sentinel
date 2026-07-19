@@ -254,7 +254,14 @@ class ProductionDeploymentTests(unittest.TestCase):
             patch.object(
                 sys,
                 "argv",
-                ["verify_production_deployment.py", "--skip-systemd", "--output", "deployment.json"],
+                [
+                    "verify_production_deployment.py",
+                    "--skip-systemd",
+                    "--expected-version",
+                    "1.0.11",
+                    "--output",
+                    "deployment.json",
+                ],
             ),
             patch("scripts.verify_production_deployment.check_loopback", return_value={"name": "loopback_health", "status": "pass"}),
             patch(
@@ -269,6 +276,21 @@ class ProductionDeploymentTests(unittest.TestCase):
         evidence = json.loads(stdout.getvalue())
         self.assertEqual(evidence["status"], "failed")
         self.assertEqual(evidence["checks"][-1]["name"], "evidence_output")
+
+    def test_verifier_requires_an_expected_release_version(self) -> None:
+        stdout = io.StringIO()
+        with (
+            patch.object(sys, "argv", ["verify_production_deployment.py", "--skip-systemd"]),
+            patch("scripts.verify_production_deployment.check_loopback") as check_loopback_mock,
+            contextlib.redirect_stdout(stdout),
+        ):
+            self.assertEqual(main(), 1)
+
+        evidence = json.loads(stdout.getvalue())
+        self.assertEqual(evidence["status"], "failed")
+        self.assertEqual(evidence["checks"][0]["name"], "expected_version")
+        self.assertIn("--expected-version is required", evidence["checks"][0]["detail"])
+        check_loopback_mock.assert_not_called()
 
     def test_public_proxy_requires_https_security_headers_and_no_store(self) -> None:
         headers = {
