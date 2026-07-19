@@ -14,7 +14,7 @@ Jobs:
 
 - Python verification on Ubuntu, macOS `14`, macOS `15`, macOS `26`, and hosted Windows across Python `3.10`, `3.11`, `3.12`, `3.13`, and `3.14`.
 - Forward Python compatibility checks through the moving latest stable `3.x` runner; this avoids prerelease runner failures while still following future stable Python releases above 3.16 as GitHub Actions publishes them.
-- Enterprise Linux smoke checks through RHEL UBI 8/9/10, a RHEL 7-era manylinux2014 ABI container, and Rocky Linux 8/9/10 containers.
+- Enterprise Linux verification through RHEL UBI 8/9/10, a RHEL 7-era manylinux2014 ABI container, and Rocky Linux 8/9/10 containers. Each container performs clean dependency installation, the Enterprise Linux checks, the Tkinter smoke command, and the complete Python verifier.
 - Windows 11 ARM hosted compatibility checks with Python `3.12` x64, matching the currently available wheel support for the project's transitive dependencies.
 - An opt-in Windows 10 self-hosted job, enabled only when repository variable `ENABLE_WINDOWS_10_SELF_HOSTED=true` and a self-hosted runner labelled `windows-10` are available. `.github/actionlint.yaml` declares that intentional custom label so workflow linting remains strict for all other runner names.
 - Mobile web smoke checks for Android 14/15/16 and iOS 15/16/18/26 user-agent and viewport profiles against the built React UI.

@@ -87,6 +87,9 @@ class CiCdWorkflowTests(unittest.TestCase):
         self.assertNotIn("macos-latest", text)
         self.assertNotIn("windows-latest", text)
         self.assertNotIn("python -m pip install --no-cache-dir build", text)
+        enterprise_linux = text.split("  enterprise-linux:\n", 1)[1].split("  windows-11:\n", 1)[0]
+        self.assertIn('"$PYTHON_BIN" app.py --smoke-test', enterprise_linux)
+        self.assertIn('"$PYTHON_BIN" verify.py', enterprise_linux)
         self.assertEqual(
             [],
             workflow_action_pin_issues(

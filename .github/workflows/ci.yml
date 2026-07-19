@@ -196,6 +196,8 @@ jobs:
               "$PYTHON_BIN" -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
               "$PYTHON_BIN" -m pip install --no-cache-dir --no-deps .
               "$PYTHON_BIN" scripts/ci_enterprise_linux_smoke.py --label "$CI_CONTAINER_NAME"
+              "$PYTHON_BIN" app.py --smoke-test
+              "$PYTHON_BIN" verify.py
             '
 
   windows-11:

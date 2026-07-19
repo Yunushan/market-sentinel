@@ -40,14 +40,14 @@ PLATFORMS: Dict[str, Dict[str, Any]] = {
         "required_for_full_claim": True,
         "fully_tested": False,
         "evidence": ["RHEL UBI 8 CI", "RHEL UBI 9 CI", "RHEL UBI 10 CI", "RHEL 7 ABI manylinux2014 CI"],
-        "missing": ["RHEL runner or container with Tkinter", "python app.py --smoke-test", "python verify.py"],
+        "missing": ["repeatable RHEL desktop runner or release/install evidence"],
     },
     "rocky_linux": {
         "label": "Rocky Linux",
         "required_for_full_claim": True,
         "fully_tested": False,
         "evidence": ["Rocky Linux 8 CI", "Rocky Linux 9 CI", "Rocky Linux 10 CI"],
-        "missing": ["Rocky runner or container with Tkinter", "python app.py --smoke-test", "python verify.py"],
+        "missing": ["repeatable Rocky desktop runner or release/install evidence"],
     },
     "macos": {
         "label": "macOS",
