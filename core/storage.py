@@ -50,6 +50,19 @@ def save_config(cfg: AppConfig, path: Path = DEFAULT_CONFIG_PATH) -> None:
             tmp.flush()
             os.fsync(tmp.fileno())
         os.replace(tmp_path, path)
+        _fsync_parent_directory(path)
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    """Persist the atomic configuration replacement on POSIX filesystems."""
+    if os.name != "posix":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path.parent, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
