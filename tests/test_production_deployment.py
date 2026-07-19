@@ -10,9 +10,11 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
+from stat import S_IFREG
 from unittest.mock import patch
 from urllib.error import HTTPError
 
+from scripts import verify_production_deployment as deployment
 from scripts.verify_production_deployment import (
     check_evidence_output_directory,
     check_filesystem_permissions,
@@ -70,6 +72,21 @@ class ProductionDeploymentTests(unittest.TestCase):
         paths["market-sentinel.env"] = SimpleNamespace(st_mode=0o100640, st_uid=123)
         environment = check_filesystem_permissions(lambda path: paths[path.name])[0]
         self.assertEqual(environment["status"], "fail")
+
+    @unittest.skipUnless(os.name == "posix", "symbolic-link safety is verified on POSIX hosts")
+    def test_filesystem_check_rejects_a_symlinked_critical_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "target.env"
+            target.write_text("token=not-read", encoding="utf-8")
+            linked = root / "market-sentinel.env"
+            linked.symlink_to(target)
+
+            with patch.object(deployment, "REQUIRED_PRIVATE_PATHS", ((linked, S_IFREG, False),)):
+                check = check_filesystem_permissions()[0]
+
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("expected=file", check["detail"])
 
     def test_evidence_output_requires_a_private_root_owned_parent_directory(self) -> None:
         # Do not use /var here: macOS deliberately exposes it as a compatibility

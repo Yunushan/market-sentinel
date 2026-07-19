@@ -62,7 +62,7 @@ def _systemd_timestamp_seconds(value: str) -> float:
 
 
 def check_filesystem_permissions(
-    stat_reader: Callable[[Path], object] = lambda path: path.stat(),
+    stat_reader: Callable[[Path], object] = lambda path: path.lstat(),
 ) -> list[dict[str, Any]]:
     return [
         _check_private_path(path, expected_type, require_root_owner, stat_reader)
