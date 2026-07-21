@@ -83,6 +83,43 @@ class LeaderboardStateStoreTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_query_filters_and_sorting_cannot_interpolate_sql_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LeaderboardStateStore(Path(tmp) / "leaderboard.sqlite3")
+            try:
+                store.prepare({"remote_sort": "PNL", "direction": "DESC", "period": "all", "category": "OVERALL"}, resume=False)
+                store.record_page(
+                    0,
+                    1,
+                    [
+                        {
+                            "rank": 1,
+                            "display_name": "leader",
+                            "wallet": "0x" + "1" * 40,
+                            "pnl_usd": 20.0,
+                            "volume_usd": 100.0,
+                            "roi_pct": 20.0,
+                            "trade_count": 3,
+                            "raw": {},
+                        }
+                    ],
+                )
+
+                rows = list(
+                    store.iter_results(
+                        {"min_pnl_usd": "0; DROP TABLE rows;--"},  # type: ignore[dict-item]
+                        require_mdd=False,
+                        sort="roi_pct; DROP TABLE rows;--",
+                        direction="ASC; DROP TABLE rows;--",
+                        limit=1,
+                    )
+                )
+
+                self.assertEqual(rows, [])
+                self.assertEqual(store.progress()["rows"], 1)
+            finally:
+                store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

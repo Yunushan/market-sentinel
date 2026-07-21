@@ -1,0 +1,91 @@
+from __future__ import annotations
+
+import unittest
+
+from scripts.verify_repository_settings import (
+    REQUIRED_CHECKS,
+    check_branch_protection,
+    check_release_environment,
+    check_release_variable,
+    collect_checks,
+)
+
+
+def _passing_protection() -> dict:
+    return {
+        "required_status_checks": {"strict": True, "contexts": sorted(REQUIRED_CHECKS)},
+        "enforce_admins": {"enabled": True},
+        "required_pull_request_reviews": {"required_approving_review_count": 0},
+        "required_conversation_resolution": {"enabled": True},
+        "required_linear_history": {"enabled": True},
+        "allow_force_pushes": {"enabled": False},
+        "allow_deletions": {"enabled": False},
+    }
+
+
+def _passing_environment() -> dict:
+    return {
+        "protection_rules": [{"type": "required_reviewers", "prevent_self_review": True}],
+        "deployment_branch_policy": {"protected_branches": True},
+    }
+
+
+class RepositorySettingsTests(unittest.TestCase):
+    def test_branch_protection_requires_all_documented_controls(self) -> None:
+        checks = check_branch_protection(_passing_protection())
+        self.assertTrue(all(check["status"] == "pass" for check in checks))
+
+        weak = _passing_protection()
+        weak["required_status_checks"] = {"strict": False, "contexts": ["CodeQL"]}
+        weak["allow_force_pushes"] = {"enabled": True}
+        names = {check["name"] for check in check_branch_protection(weak) if check["status"] == "fail"}
+        self.assertIn("branch_required_status_checks", names)
+        self.assertIn("branch_require_up_to_date", names)
+        self.assertIn("branch_force_pushes_disabled", names)
+
+    def test_release_environment_requires_reviewers_branches_and_signing_secrets(self) -> None:
+        secret_names = ["WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64", "WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD"]
+        checks = check_release_environment(_passing_environment(), secret_names)
+        self.assertTrue(all(check["status"] == "pass" for check in checks))
+        self.assertEqual(check_release_variable({"value": "true"})["status"], "pass")
+
+        weak = {"protection_rules": [], "deployment_branch_policy": {"protected_branches": False}}
+        failures = {check["name"] for check in check_release_environment(weak, []) if check["status"] == "fail"}
+        self.assertEqual(
+            failures,
+            {
+                "release_required_reviewers",
+                "release_prevent_self_review",
+                "release_protected_branches",
+                "release_signing_secrets",
+            },
+        )
+        self.assertEqual(check_release_variable({"value": "false"})["status"], "fail")
+
+    def test_collection_uses_documented_read_only_api_endpoints(self) -> None:
+        requested: list[str] = []
+        documents = {
+            "/repos/acme/market-sentinel/branches/main/protection": _passing_protection(),
+            "/repos/acme/market-sentinel/environments/release": _passing_environment(),
+            "/repos/acme/market-sentinel/environments/release/secrets?per_page=100": {
+                "secrets": [
+                    {"name": "WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64"},
+                    {"name": "WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD"},
+                ]
+            },
+            "/repos/acme/market-sentinel/actions/variables/REQUIRE_WINDOWS_CODE_SIGNING": {"value": "true"},
+        }
+
+        def request(path: str, token: str, timeout: float):
+            requested.append(path)
+            self.assertEqual(token, "not-a-real-token")
+            self.assertEqual(timeout, 5.0)
+            return documents[path]
+
+        checks = collect_checks("acme/market-sentinel", "main", "not-a-real-token", 5.0, request)
+        self.assertEqual(requested, list(documents))
+        self.assertTrue(all(check["status"] == "pass" for check in checks))
+
+
+if __name__ == "__main__":
+    unittest.main()

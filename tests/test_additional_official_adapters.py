@@ -14,7 +14,7 @@ from market_adapters import (
     PredictFunAdapter,
     XOMarketAdapter,
 )
-from market_adapters.errors import MarketConfigurationError, UnsupportedFeatureError
+from market_adapters.errors import MarketConfigurationError
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"

@@ -289,6 +289,23 @@ class WebApiTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-loopback"):
             ReactGuiServer(("0.0.0.0", 0), ReactGuiHandler)
 
+    def test_server_uses_bounded_connection_and_shutdown_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            server = ReactGuiServer(
+                ("127.0.0.1", 0),
+                ReactGuiHandler,
+                config_path=root / "config.json",
+                frontend_dir=root / "dist",
+            )
+            try:
+                self.assertTrue(server.allow_reuse_address)
+                self.assertTrue(server.daemon_threads)
+                self.assertFalse(server.block_on_close)
+                self.assertEqual(server.request_queue_size, 32)
+            finally:
+                server.server_close()
+
     def test_configured_allowed_origins_merges_cli_and_environment_values(self) -> None:
         with patch.dict(
             os.environ,
@@ -339,6 +356,14 @@ class WebApiTests(unittest.TestCase):
                 self.assertEqual(status, HTTPStatus.OK)
                 self.assertEqual(payload["status"], "ok")
 
+                status, headers, _ = self._request_raw(
+                    base_url,
+                    "/api/health",
+                    headers={"Authorization": "Bearer test-token"},
+                )
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertRegex(headers.get("X-Request-ID", ""), r"^[0-9a-f]{24}$")
+
                 status, payload = self._request_json(
                     base_url,
                     "/api/health",
@@ -356,6 +381,51 @@ class WebApiTests(unittest.TestCase):
                 self.assertEqual(status, HTTPStatus.NO_CONTENT)
                 self.assertEqual(headers.get("Access-Control-Allow-Origin"), "http://127.0.0.1:5173")
                 self.assertNotEqual(headers.get("Access-Control-Allow-Origin"), "*")
+                self.assertEqual(headers.get("Access-Control-Expose-Headers"), "X-Request-ID")
+
+                status, headers, body = self._request_raw(
+                    base_url,
+                    "/metrics",
+                    headers={"Authorization": "Bearer test-token"},
+                )
+                metrics = body.decode("utf-8")
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(headers.get("Content-Type"), "text/plain; version=0.0.4; charset=utf-8")
+                self.assertIn("# TYPE market_sentinel_http_requests_total counter", metrics)
+                self.assertIn('market_sentinel_http_requests_total{method="GET",status="200"}', metrics)
+                self.assertIn("market_sentinel_http_request_duration_seconds_total", metrics)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+    def test_api_token_failures_are_rate_limited_and_valid_token_resets_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "frontend"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            server, thread, base_url = self._serve_api(root / "config.json", frontend_dir, api_token="test-token")
+            try:
+                for _ in range(10):
+                    status, payload = self._request_json(base_url, "/api/health", headers={"Authorization": "Bearer wrong"})
+                    self.assertEqual(status, HTTPStatus.UNAUTHORIZED)
+                    self.assertEqual(payload["error"]["code"], "api_token_required")
+
+                status, headers, body = self._request_raw(
+                    base_url, "/api/health", headers={"Authorization": "Bearer wrong"}
+                )
+                self.assertEqual(status, HTTPStatus.TOO_MANY_REQUESTS)
+                self.assertRegex(headers.get("Retry-After", ""), r"^[1-9][0-9]*$")
+                self.assertEqual(json.loads(body.decode("utf-8"))["error"]["code"], "api_token_rate_limited")
+
+                status, _payload = self._request_json(
+                    base_url, "/api/health", headers={"Authorization": "Bearer test-token"}
+                )
+                self.assertEqual(status, HTTPStatus.OK)
+                status, payload = self._request_json(base_url, "/api/health", headers={"Authorization": "Bearer wrong"})
+                self.assertEqual(status, HTTPStatus.UNAUTHORIZED)
+                self.assertEqual(payload["error"]["code"], "api_token_required")
             finally:
                 server.shutdown()
                 server.server_close()
@@ -1882,6 +1952,10 @@ class WebApiTests(unittest.TestCase):
         self.assertIn("npm run build", payload["react_build_command"])
         self.assertEqual(payload["react_prod_command"], "run_web_gui_prod.bat")
         self.assertFalse(payload["frontend_build_available"])
+        self.assertEqual(payload["observability"]["metrics_endpoint"], "/metrics")
+        self.assertEqual(payload["observability"]["metrics_format"], "prometheus")
+        self.assertEqual(payload["observability"]["request_logging"], "structured_json")
+        self.assertIn("/metrics", payload["routes"]["GET"])
         self.assertIn("/api/state", payload["routes"]["GET"])
         self.assertIn("/api/live-safety", payload["routes"]["GET"])
         self.assertIn("/api/polymarket/coverage", payload["routes"]["GET"])
@@ -2572,6 +2646,19 @@ class WebApiTests(unittest.TestCase):
                 thread.join(timeout=5)
 
         self.assertEqual(root_status, 200)
+        expected_security_headers = {
+            "Content-Security-Policy": "default-src 'self'",
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+            "Referrer-Policy": "no-referrer",
+            "Permissions-Policy": "camera=()",
+            "Cross-Origin-Opener-Policy": "same-origin",
+        }
+        for headers in (root_headers, asset_headers, hashed_asset_headers, fallback_headers, health_headers):
+            with self.subTest(headers=headers.get("Content-Type")):
+                for name, value in expected_security_headers.items():
+                    self.assertIn(value, headers.get(name, ""))
+                self.assertEqual(headers.get("Server"), "MarketSentinel")
         self.assertIn("text/html", root_headers["Content-Type"])
         self.assertEqual(root_headers.get("Cache-Control"), "no-store")
         self.assertIn(b"React app", root_body)
@@ -2596,6 +2683,21 @@ class WebApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             self.assertEqual(static_cache_control(root / "outside.js", root / "dist"), "no-store")
+
+    def test_static_path_resolution_rejects_encoded_windows_separator_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+
+            self.assertIsNone(
+                ReactGuiHandler._resolve_static_path(None, frontend_dir, "/%2e%2e%5coutside.txt")
+            )
+            self.assertEqual(
+                ReactGuiHandler._resolve_static_path(None, frontend_dir, "/"),
+                (frontend_dir / "index.html").resolve(),
+            )
 
     def test_app_state_payload_combines_initial_react_gui_state(self) -> None:
         cfg = AppConfig()

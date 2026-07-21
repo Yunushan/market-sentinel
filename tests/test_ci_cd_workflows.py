@@ -38,7 +38,7 @@ class CiCdWorkflowTests(unittest.TestCase):
             "xvfb-run --auto-servernum python app.py --gui-smoke-test",
             "PREDICTION_MARKET_CONFIG_PATH",
             "python verify.py",
-            "python -m pip install --no-cache-dir --upgrade pip",
+            "python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock",
             "python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock",
             "python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock",
             "python -m pip install --no-cache-dir --no-deps -e .",
@@ -127,7 +127,7 @@ class CiCdWorkflowTests(unittest.TestCase):
             "PREDICTION_MARKET_CONFIG_PATH",
             "python verify.py",
             "PIP_NO_CACHE_DIR",
-            "python -m pip install --no-cache-dir --upgrade pip",
+            "python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock",
             "python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock",
             "python -m pip install --no-cache-dir --no-deps -e .",
             "python -m build",
@@ -143,15 +143,28 @@ class CiCdWorkflowTests(unittest.TestCase):
             "Python compatibility",
             '"3.x"',
             "npm run build",
+            "npm ci --ignore-scripts",
+            "npm install --ignore-scripts --no-audit --no-fund",
+            "Audit frontend dependencies used for packaging",
+            "npm audit --audit-level=high",
             "Build Windows EXE and MSI",
             "macos-14",
             "macos-15",
             "macos-26",
             "windows-2025-vs2026",
             "requirements-build.lock",
+            "requirements-bootstrap.lock",
+            "requirements-security.lock",
             "requirements.lock",
             "requirements-test.lock",
             "python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock",
+            "Audit locked Python dependencies used for packaging",
+            "pip_audit --requirement requirements.lock --progress-spinner off",
+            "pip_audit --requirement requirements-live.lock --progress-spinner off",
+            "pip_audit --requirement requirements-test.lock --progress-spinner off",
+            "pip_audit --requirement requirements-build.lock --progress-spinner off",
+            "pip_audit --requirement requirements-bootstrap.lock --progress-spinner off",
+            "pip_audit --requirement requirements-security.lock --progress-spinner off",
             "pyproject.toml",
             "dotnet tool install --global wix --version 6.0.2",
             'Expected WiX Toolset 6.0.2',
@@ -231,6 +244,15 @@ class CiCdWorkflowTests(unittest.TestCase):
             "Frontend dependency audit",
             "npm ci --ignore-scripts",
             "npm audit --omit=dev --audit-level=high",
+            "Audit all locked Python dependency graphs",
+            "requirements-bootstrap.lock",
+            "requirements-security.lock",
+            "pip_audit --requirement requirements.lock --progress-spinner off",
+            "pip_audit --requirement requirements-live.lock --progress-spinner off",
+            "pip_audit --requirement requirements-test.lock --progress-spinner off",
+            "pip_audit --requirement requirements-build.lock --progress-spinner off",
+            "pip_audit --requirement requirements-bootstrap.lock --progress-spinner off",
+            "pip_audit --requirement requirements-security.lock --progress-spinner off",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, security)
@@ -241,6 +263,7 @@ class CiCdWorkflowTests(unittest.TestCase):
                 security,
                 {
                     "actions/checkout": (7, "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"),
+                    "actions/setup-python": (6, "ece7cb06caefa5fff74198d8649806c4678c61a1"),
                     "actions/setup-node": (7, "820762786026740c76f36085b0efc47a31fe5020"),
                     "actions/dependency-review-action": (5, "a1d282b36b6f3519aa1f3fc636f609c47dddb294"),
                     "github/codeql-action/init": (4, "eec0bff2f6c15bf3f1e8a0152f94d17664a06a06"),
@@ -259,6 +282,18 @@ class CiCdWorkflowTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, dependabot)
         self.assertNotIn("labels:", dependabot)
+
+    def test_repository_settings_policy_has_a_read_only_evidence_command(self) -> None:
+        text = (ROOT / "docs" / "REPOSITORY_SETTINGS.md").read_text(encoding="utf-8")
+        for fragment in (
+            "scripts/verify_repository_settings.py",
+            "Administration: read",
+            "Actions: read",
+            "REQUIRE_WINDOWS_CODE_SIGNING=true",
+            "nonzero exit status",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, text)
 
     def test_action_policy_accepts_reviewed_pins_and_rejects_drift(self) -> None:
         expected = {

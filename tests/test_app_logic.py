@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import queue
+import sys
+import tempfile
 import threading
 import time
 import unittest
 from importlib import metadata as importlib_metadata
+from pathlib import Path
 from unittest.mock import patch
 
 from app import (
@@ -12,12 +15,14 @@ from app import (
     AdapterPricePoller,
     WalletPoller,
     activity_key,
+    application_resource_roots,
     extract_slug,
     market_choice_label,
     market_id_from_choice,
     main,
     safe_float,
     tkinter_gui_lifecycle_smoke_payload,
+    tkinter_smoke_payload,
 )
 from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, WalletWatch
 from core.storage import ConfigLoadError
@@ -376,6 +381,22 @@ class FakeRegistry:
 
 
 class AppLogicTests(unittest.TestCase):
+    def test_frozen_smoke_payload_uses_packaged_release_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            package_root = Path(tmp) / "market-sentinel-v1.0.11-win-x64"
+            (package_root / "assets").mkdir(parents=True)
+            (package_root / "assets" / "marketsentinel.ico").write_bytes(b"ico")
+            (package_root / "assets" / "marketsentinel.png").write_bytes(b"png")
+            executable = package_root / "market-sentinel.exe"
+            executable.write_bytes(b"exe")
+
+            with (
+                patch.object(sys, "frozen", True, create=True),
+                patch.object(sys, "executable", str(executable)),
+            ):
+                self.assertEqual(application_resource_roots()[0], package_root)
+                self.assertTrue(tkinter_smoke_payload()["icon_available"])
+
     def test_gui_lifecycle_smoke_constructs_widget_contract_without_workers(self) -> None:
         expected_tabs = [
             "Markets & Alerts",

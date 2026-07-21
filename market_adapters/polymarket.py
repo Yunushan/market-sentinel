@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Mapping, Optional
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, UnsupportedFeatureError
+from .errors import MarketConfigurationError
 from .types import (
     MarketContract,
     MarketEvent,

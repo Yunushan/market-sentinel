@@ -146,7 +146,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --no-cache-dir --upgrade pip
+          python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
           python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
           python -m pip install --no-cache-dir --no-deps -e .
 
@@ -174,10 +174,20 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --no-cache-dir --upgrade pip
+          python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
           python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
           python -m pip install --no-cache-dir --no-deps -e .
           python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock
+          python -m pip install --no-cache-dir --require-hashes -r requirements-security.lock
+
+      - name: Audit locked Python dependencies used for packaging
+        run: |
+          python -m pip_audit --requirement requirements-bootstrap.lock --progress-spinner off
+          python -m pip_audit --requirement requirements.lock --progress-spinner off
+          python -m pip_audit --requirement requirements-live.lock --progress-spinner off
+          python -m pip_audit --requirement requirements-test.lock --progress-spinner off
+          python -m pip_audit --requirement requirements-build.lock --progress-spinner off
+          python -m pip_audit --requirement requirements-security.lock --progress-spinner off
 
       - name: Verify Python and Tkinter fallback
         run: |
@@ -250,10 +260,13 @@ jobs:
         shell: bash
         run: |
           if [ -f package-lock.json ]; then
-            npm ci
+            npm ci --ignore-scripts
           else
-            npm install --no-audit --no-fund
+            npm install --ignore-scripts --no-audit --no-fund
           fi
+
+      - name: Audit frontend dependencies used for packaging
+        run: npm audit --audit-level=high
 
       - name: Build React frontend
         run: npm run build
@@ -368,7 +381,7 @@ jobs:
       - name: Install Python build dependencies
         shell: pwsh
         run: |
-          python -m pip install --no-cache-dir --upgrade pip
+          python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
           python -m pip install --no-cache-dir --require-hashes -r requirements.lock
           python -m pip install --no-cache-dir --no-deps -e .
           python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock

@@ -82,8 +82,8 @@ class _GraphQLAdapter(MarketAdapter):
     def _probability(value: Any, *, allow_zero: bool = True) -> float:
         try:
             number = float(value)
-        except (TypeError, ValueError):
-            raise MarketConfigurationError("Probability must be numeric.")
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Probability must be numeric.") from exc
         if not math.isfinite(number):
             raise MarketConfigurationError("Probability must be finite.")
         if number > 1.0 and number <= 100.0:

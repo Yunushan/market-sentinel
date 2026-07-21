@@ -68,6 +68,35 @@ jobs:
       - name: Audit production frontend dependencies
         run: npm audit --omit=dev --audit-level=high
 
+  python-dependency-audit:
+    name: Python dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+
+      - name: Install hash-locked audit tool
+        run: |
+          python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
+          python -m pip install --no-cache-dir --require-hashes -r requirements-security.lock
+
+      - name: Audit all locked Python dependency graphs
+        run: |
+          python -m pip_audit --requirement requirements-bootstrap.lock --progress-spinner off
+          python -m pip_audit --requirement requirements.lock --progress-spinner off
+          python -m pip_audit --requirement requirements-live.lock --progress-spinner off
+          python -m pip_audit --requirement requirements-test.lock --progress-spinner off
+          python -m pip_audit --requirement requirements-build.lock --progress-spinner off
+          python -m pip_audit --requirement requirements-security.lock --progress-spinner off
+
   codeql:
     name: CodeQL
     runs-on: ubuntu-latest
