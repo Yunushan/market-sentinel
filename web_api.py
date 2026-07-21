@@ -3544,6 +3544,9 @@ class ReactGuiServer(ThreadingHTTPServer):
         self.api_token = token
         self.config_path = config_path
         self.frontend_dir = frontend_dir
+        # Static files are a deployment-time input. Build the immutable catalog
+        # before serving requests so URL parsing never performs filesystem work.
+        self.static_files = ReactGuiHandler._static_file_catalog(self.frontend_dir)
         self.adapter_registry = adapter_registry or build_default_registry()
         default_origins = {
             f"http://{self.bind_host}:{self.server_address[1]}",
@@ -4339,7 +4342,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self._send_error(HTTPStatus.NOT_FOUND, "not_found", "Unknown API route.")
 
     def _serve_static(self, raw_path: str) -> None:
-        static_files = self._static_file_catalog(self.app_server.frontend_dir)
+        static_files = self.app_server.static_files
         index = self._resolve_static_path(static_files, "/")
         if index is None or not index.is_file():
             self._send_error(
@@ -4405,8 +4408,10 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
     def _static_file_catalog(frontend_dir: Path) -> Dict[str, Path]:
         """Return the supported static files beneath a trusted build directory."""
         try:
-            root = frontend_dir.resolve()
+            root = frontend_dir.resolve()  # codeql[py/path-injection] Deployment-time server configuration, not HTTP input.
         except (OSError, RuntimeError, ValueError):
+            return {}
+        if not root.is_dir():
             return {}
 
         catalog: Dict[str, Path] = {}
@@ -4420,7 +4425,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             if target.is_file():
                 catalog[relative_path] = target
 
-        add_file("index.html", root / "index.html")
+        add_file("index.html", root / "index.html")  # codeql[py/path-injection] Constant child of the configured build directory.
         try:
             root_entries = tuple(root.iterdir())
         except OSError:
@@ -4429,14 +4434,14 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             if candidate.name != "index.html" and STATIC_FRONTEND_FILENAME_RE.fullmatch(candidate.name):
                 add_file(candidate.name, candidate)
 
-        assets_dir = root / "assets"
+        assets_dir = root / "assets"  # codeql[py/path-injection] Constant child of the configured build directory.
         try:
             asset_entries = tuple(assets_dir.iterdir()) if assets_dir.is_dir() else ()
         except OSError:
             return catalog
         for candidate in asset_entries:
             if STATIC_FRONTEND_FILENAME_RE.fullmatch(candidate.name):
-                add_file(f"assets/{candidate.name}", candidate)
+                add_file(f"assets/{candidate.name}", candidate)  # codeql[py/path-injection] Candidate came from trusted assets_dir enumeration.
         return catalog
 
     def _send_json(self, status: int, payload: Dict[str, Any], *, retry_after_seconds: Optional[int] = None) -> None:
