@@ -229,6 +229,7 @@ class WebApiTests(unittest.TestCase):
             ReactGuiHandler,
             config_path=config_path,
             frontend_dir=frontend_dir,
+            static_files=ReactGuiHandler._static_file_catalog(frontend_dir),
             adapter_registry=FakeRegistry(FakePaperAdapter()),
             api_token=api_token,
         )
@@ -326,7 +327,7 @@ class WebApiTests(unittest.TestCase):
             config_path.write_text("{not-json", encoding="utf-8")
 
             with self.assertRaises(ConfigLoadError):
-                run_server("127.0.0.1", 0, config_path, root / "dist")
+                run_server("127.0.0.1", 0, config_path)
 
     def test_dynamic_http_header_values_cannot_inject_response_headers(self) -> None:
         injected = 'report.csv\r\nSet-Cookie: compromised=true\n'

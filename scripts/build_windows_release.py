@@ -161,7 +161,7 @@ def write_launcher_files(package_dir: Path, version: str) -> None:
             echo Tkinter fallback: start_tkinter_gui.bat
             echo Config path: %PREDICTION_MARKET_CONFIG_PATH%
             start "" "http://127.0.0.1:%API_PORT%"
-            "%~dp0{APP_NAME}.exe" --web-gui --host 127.0.0.1 --port %API_PORT% --config "%PREDICTION_MARKET_CONFIG_PATH%" --frontend-dir "%~dp0frontend\\dist"
+            "%~dp0{APP_NAME}.exe" --web-gui --host 127.0.0.1 --port %API_PORT% --config "%PREDICTION_MARKET_CONFIG_PATH%"
             """
         ),
         encoding="utf-8",
@@ -175,7 +175,7 @@ def write_launcher_files(package_dir: Path, version: str) -> None:
             - start_tkinter_gui.bat launches the desktop Tkinter GUI.
             - start_web_gui.bat serves the bundled React GUI at http://127.0.0.1:8765.
             - {APP_NAME}.exe launches Tkinter directly.
-            - {APP_NAME}.exe --web-gui --frontend-dir frontend\\dist serves the React GUI.
+            - {APP_NAME}.exe --web-gui serves the bundled React GUI.
 
             Local configuration:
             - data\\config.example.json is a full example configuration.

@@ -12,6 +12,7 @@ import os
 import posixpath
 import re
 import secrets
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -106,7 +107,11 @@ from polymarket.ws_user import build_user_subscription
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_FRONTEND_DIR = PROJECT_ROOT / "frontend" / "dist"
+DEFAULT_FRONTEND_DIR = (
+    Path(sys.executable).resolve().parent / "frontend" / "dist"
+    if getattr(sys, "frozen", False)
+    else PROJECT_ROOT / "frontend" / "dist"
+)
 PROJECT_NAME = "market-sentinel"
 HASHED_FRONTEND_ASSET_RE = re.compile(r"-[A-Za-z0-9_-]{8,}\.[^.]+$")
 STATIC_FRONTEND_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -3529,6 +3534,7 @@ class ReactGuiServer(ThreadingHTTPServer):
         *,
         config_path: Path = DEFAULT_CONFIG_PATH,
         frontend_dir: Path = DEFAULT_FRONTEND_DIR,
+        static_files: Optional[Mapping[str, Path]] = None,
         adapter_registry: Optional[AdapterRegistry] = None,
         api_token: str = "",
         allowed_origins: Optional[Sequence[str]] = None,
@@ -3546,7 +3552,7 @@ class ReactGuiServer(ThreadingHTTPServer):
         self.frontend_dir = frontend_dir
         # Static files are a deployment-time input. Build the immutable catalog
         # before serving requests so URL parsing never performs filesystem work.
-        self.static_files = ReactGuiHandler._static_file_catalog(self.frontend_dir)
+        self.static_files = dict(static_files) if static_files is not None else ReactGuiHandler._static_file_catalog()
         self.adapter_registry = adapter_registry or build_default_registry()
         default_origins = {
             f"http://{self.bind_host}:{self.server_address[1]}",
@@ -4405,7 +4411,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         return static_files.get(relative_path)
 
     @staticmethod
-    def _static_file_catalog(frontend_dir: Path) -> Dict[str, Path]:
+    def _static_file_catalog(frontend_dir: Path = DEFAULT_FRONTEND_DIR) -> Dict[str, Path]:
         """Return the supported static files beneath a trusted build directory."""
         try:
             root = frontend_dir.resolve()  # codeql[py/path-injection] Deployment-time server configuration, not HTTP input.
@@ -4514,12 +4520,12 @@ def run_server(
     host: str,
     port: int,
     config_path: Path,
-    frontend_dir: Path,
     *,
     api_token: str = "",
     allow_remote: bool = False,
     allowed_origins: Optional[Sequence[str]] = None,
 ) -> None:
+    frontend_dir = DEFAULT_FRONTEND_DIR
     if not is_loopback_host(host) and not allow_remote:
         raise ValueError(
             "Refusing a non-loopback bind without --allow-remote. Keep the default loopback bind and use a TLS reverse proxy."
@@ -4554,7 +4560,6 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
-    parser.add_argument("--frontend-dir", type=Path, default=DEFAULT_FRONTEND_DIR)
     parser.add_argument(
         "--api-token",
         default=os.environ.get("MARKET_SENTINEL_API_TOKEN", ""),
@@ -4576,7 +4581,6 @@ def main() -> None:
         args.host,
         args.port,
         args.config,
-        args.frontend_dir,
         api_token=args.api_token,
         allow_remote=args.allow_remote,
         allowed_origins=configured_allowed_origins(args.allow_origin),
