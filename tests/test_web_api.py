@@ -2692,17 +2692,18 @@ class WebApiTests(unittest.TestCase):
             asset_dir.mkdir()
             asset = asset_dir / "app.js"
             asset.write_text("console.log('ok');", encoding="utf-8")
+            static_files = ReactGuiHandler._static_file_catalog(frontend_dir)
 
             self.assertIsNone(
-                ReactGuiHandler._resolve_static_path(None, frontend_dir, "/%2e%2e%5coutside.txt")
+                ReactGuiHandler._resolve_static_path(None, static_files, "/%2e%2e%5coutside.txt")
             )
-            self.assertIsNone(ReactGuiHandler._resolve_static_path(None, frontend_dir, "/assets/nested/app.js"))
+            self.assertIsNone(ReactGuiHandler._resolve_static_path(None, static_files, "/assets/nested/app.js"))
             self.assertEqual(
-                ReactGuiHandler._resolve_static_path(None, frontend_dir, "/"),
+                ReactGuiHandler._resolve_static_path(None, static_files, "/"),
                 (frontend_dir / "index.html").resolve(),
             )
             self.assertEqual(
-                ReactGuiHandler._resolve_static_path(None, frontend_dir, "/assets/app.js"),
+                ReactGuiHandler._resolve_static_path(None, static_files, "/assets/app.js"),
                 asset.resolve(),
             )
 

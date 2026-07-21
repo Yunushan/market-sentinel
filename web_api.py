@@ -4339,8 +4339,8 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self._send_error(HTTPStatus.NOT_FOUND, "not_found", "Unknown API route.")
 
     def _serve_static(self, raw_path: str) -> None:
-        frontend_dir = self.app_server.frontend_dir
-        index = self._resolve_static_path(frontend_dir, "/")
+        static_files = self._static_file_catalog(self.app_server.frontend_dir)
+        index = self._resolve_static_path(static_files, "/")
         if index is None or not index.is_file():
             self._send_error(
                 HTTPStatus.NOT_FOUND,
@@ -4356,7 +4356,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             )
             return
 
-        target = self._resolve_static_path(frontend_dir, raw_path)
+        target = self._resolve_static_path(static_files, raw_path)
         if target is None or not target.exists() or not target.is_file():
             target = index
             relative_path = "index.html"
@@ -4375,7 +4375,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _resolve_static_path(self, frontend_dir: Path, raw_path: str) -> Optional[Path]:
+    def _resolve_static_path(self, static_files: Mapping[str, Path], raw_path: str) -> Optional[Path]:
         path = unquote(raw_path.split("?", 1)[0])
         # A backslash is a path separator on Windows but not POSIX. Reject it on
         # every platform instead of allowing platform-dependent interpretation.
@@ -4399,7 +4399,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
 
         # Look up a URL key in a catalog built only from the trusted frontend
         # directory.  No request value is used to construct a filesystem path.
-        return ReactGuiHandler._static_file_catalog(frontend_dir).get(relative_path)
+        return static_files.get(relative_path)
 
     @staticmethod
     def _static_file_catalog(frontend_dir: Path) -> Dict[str, Path]:
