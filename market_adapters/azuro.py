@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import time
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
@@ -494,8 +493,8 @@ class AzuroAdapter(MarketAdapter):
     def _min_odds_units(value: Any) -> str:
         try:
             odds = float(value)
-        except (TypeError, ValueError):
-            raise MarketConfigurationError("Azuro decimal odds must be numeric.")
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Azuro decimal odds must be numeric.") from exc
         if not math.isfinite(odds) or odds <= 0:
             raise MarketConfigurationError("Azuro decimal odds must be positive.")
         return str(int(round(odds * AZURO_ODDS_SCALE)))

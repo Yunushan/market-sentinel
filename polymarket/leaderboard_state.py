@@ -220,7 +220,8 @@ class LeaderboardStateStore:
 
     def candidate_count(self, filters: Mapping[str, Optional[float]]) -> int:
         where, values = self._where(filters, require_mdd=False)
-        row = self.connection.execute(f"SELECT COUNT(*) AS count FROM rows {where}", values).fetchone()
+        # `where` is built only from the fixed column tuple in `_where`; values remain bound parameters.
+        row = self.connection.execute(f"SELECT COUNT(*) AS count FROM rows {where}", values).fetchone()  # noqa: S608
         return int(row["count"])
 
     def iter_mdd_candidates(
@@ -233,7 +234,8 @@ class LeaderboardStateStore:
     ) -> Iterator[Dict[str, Any]]:
         where, values = self._where(filters, require_mdd=False)
         order = self._order_clause(sort, direction, candidate=True)
-        query = f"SELECT * FROM rows {where} {order}"
+        # `where` and `order` are both generated from fixed allowlists; user input is never interpolated.
+        query = f"SELECT * FROM rows {where} {order}"  # noqa: S608
         if limit is not None:
             query += " LIMIT ?"
             values.append(int(limit))
@@ -313,7 +315,8 @@ class LeaderboardStateStore:
 
     def result_count(self, filters: Mapping[str, Optional[float]], *, require_mdd: bool) -> int:
         where, values = self._where(filters, require_mdd=require_mdd)
-        row = self.connection.execute(f"SELECT COUNT(*) AS count FROM rows {where}", values).fetchone()
+        # `where` is built only from the fixed column tuple in `_where`; values remain bound parameters.
+        row = self.connection.execute(f"SELECT COUNT(*) AS count FROM rows {where}", values).fetchone()  # noqa: S608
         return int(row["count"])
 
     def iter_results(
@@ -326,7 +329,8 @@ class LeaderboardStateStore:
         limit: Optional[int],
     ) -> Iterator[Dict[str, Any]]:
         where, values = self._where(filters, require_mdd=require_mdd)
-        query = f"SELECT * FROM rows {where} {self._order_clause(sort, direction)}"
+        # `_where` and `_order_clause` produce fixed SQL fragments; user values are passed separately.
+        query = f"SELECT * FROM rows {where} {self._order_clause(sort, direction)}"  # noqa: S608
         if limit is not None:
             query += " LIMIT ?"
             values.append(int(limit))

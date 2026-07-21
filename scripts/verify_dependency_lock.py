@@ -17,9 +17,13 @@ LOCK_PATH = ROOT / "requirements.lock"
 LIVE_LOCK_PATH = ROOT / "requirements-live.lock"
 TEST_LOCK_PATH = ROOT / "requirements-test.lock"
 BUILD_LOCK_PATH = ROOT / "requirements-build.lock"
+SECURITY_LOCK_PATH = ROOT / "requirements-security.lock"
+BOOTSTRAP_LOCK_PATH = ROOT / "requirements-bootstrap.lock"
 LIVE_REQUIREMENTS_PATH = ROOT / "requirements-live.txt"
 TEST_REQUIREMENTS_PATH = ROOT / "requirements-test.txt"
 BUILD_REQUIREMENTS_PATH = ROOT / "requirements-build.txt"
+SECURITY_REQUIREMENTS_PATH = ROOT / "requirements-security.txt"
+BOOTSTRAP_REQUIREMENTS_PATH = ROOT / "requirements-bootstrap.txt"
 PROJECT_PATH = ROOT / "pyproject.toml"
 LOCKED_REQUIREMENT_RE = re.compile(r"^([A-Za-z0-9_.-]+)==[^\s;]+(?:\s*;\s*[^\\]+)?\s*\\?$")
 HASH_RE = re.compile(r"^\s*--hash=sha256:[0-9a-f]{64}$")
@@ -84,6 +88,8 @@ def main() -> int:
         (LIVE_LOCK_PATH, live_dependencies),
         (TEST_LOCK_PATH, [*live_dependencies, *optional.get("test", [])]),
         (BUILD_LOCK_PATH, _requirement_lines(BUILD_REQUIREMENTS_PATH)),
+        (SECURITY_LOCK_PATH, _requirement_lines(SECURITY_REQUIREMENTS_PATH)),
+        (BOOTSTRAP_LOCK_PATH, _requirement_lines(BOOTSTRAP_REQUIREMENTS_PATH)),
     )
     issues: list[str] = []
     for lock_path, dependencies in checks:

@@ -20,6 +20,7 @@ from scripts.verify_production_deployment import (
     check_evidence_output_directory,
     check_filesystem_permissions,
     check_loopback,
+    check_loopback_metrics,
     check_public_proxy,
     check_systemd,
     _fsync_parent_directory,
@@ -207,6 +208,41 @@ class ProductionDeploymentTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "expected 1.0.11"):
                 check_loopback("http://127.0.0.1", "", 1.0, "1.0.11")
 
+    def test_loopback_metrics_requires_prometheus_format_and_required_counters(self) -> None:
+        good_headers = {"Content-Type": "text/plain; version=0.0.4; charset=utf-8"}
+        good_metrics = "\n".join(
+            [
+                "market_sentinel_http_requests_total 1",
+                "market_sentinel_http_request_duration_seconds_total 0.100000",
+                "market_sentinel_http_requests_completed_total 1",
+            ]
+        )
+
+        class MetricsResponse:
+            status = 200
+            headers = good_headers
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read(self):
+                return good_metrics.encode("utf-8")
+
+        with patch("scripts.verify_production_deployment.urlopen", return_value=MetricsResponse()):
+            self.assertEqual(check_loopback_metrics("http://127.0.0.1:8765/metrics", "token", 1.0)["status"], "pass")
+
+        missing_metric = good_metrics.replace("market_sentinel_http_requests_completed_total 1", "")
+        class MissingMetricResponse(MetricsResponse):
+            def read(self):
+                return missing_metric.encode("utf-8")
+
+        with patch("scripts.verify_production_deployment.urlopen", return_value=MissingMetricResponse()):
+            with self.assertRaisesRegex(RuntimeError, "missing required metrics"):
+                check_loopback_metrics("http://127.0.0.1:8765/metrics", "", 1.0)
+
     def test_evidence_output_is_atomic_json_with_private_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "evidence" / "deployment.json"
@@ -264,6 +300,7 @@ class ProductionDeploymentTests(unittest.TestCase):
                 ],
             ),
             patch("scripts.verify_production_deployment.check_loopback", return_value={"name": "loopback_health", "status": "pass"}),
+            patch("scripts.verify_production_deployment.check_loopback_metrics", return_value={"name": "loopback_metrics", "status": "pass"}),
             patch(
                 "scripts.verify_production_deployment.check_evidence_output_directory",
                 return_value={"name": "filesystem_private_evidence", "status": "pass"},
@@ -292,14 +329,40 @@ class ProductionDeploymentTests(unittest.TestCase):
         self.assertIn("--expected-version is required", evidence["checks"][0]["detail"])
         check_loopback_mock.assert_not_called()
 
+    def test_skip_systemd_runs_loopback_checks_without_linux_host_assumptions(self) -> None:
+        stdout = io.StringIO()
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "verify_production_deployment.py",
+                    "--skip-systemd",
+                    "--expected-version",
+                    "1.0.11",
+                ],
+            ),
+            patch("scripts.verify_production_deployment.check_systemd") as systemd_check,
+            patch("scripts.verify_production_deployment.check_filesystem_permissions") as filesystem_check,
+            patch("scripts.verify_production_deployment.check_loopback", return_value={"name": "loopback_health", "status": "pass"}),
+            patch("scripts.verify_production_deployment.check_loopback_metrics", return_value={"name": "loopback_metrics", "status": "pass"}),
+            contextlib.redirect_stdout(stdout),
+        ):
+            self.assertEqual(main(), 0)
+
+        evidence = json.loads(stdout.getvalue())
+        self.assertEqual(evidence["status"], "ok")
+        systemd_check.assert_not_called()
+        filesystem_check.assert_not_called()
+
     def test_public_proxy_requires_https_security_headers_and_no_store(self) -> None:
         headers = {
-            "Strict-Transport-Security": "max-age=31536000",
-            "Content-Security-Policy": "default-src 'self'",
+            "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+            "Content-Security-Policy": "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self'",
             "X-Content-Type-Options": "nosniff",
             "X-Frame-Options": "DENY",
             "Referrer-Policy": "no-referrer",
-            "Permissions-Policy": "camera=()",
+            "Permissions-Policy": "camera=(), geolocation=(), microphone=(), payment=(), usb=()",
             "Cross-Origin-Opener-Policy": "same-origin",
             "Cross-Origin-Resource-Policy": "same-origin",
             "Cache-Control": "no-store",
@@ -313,6 +376,20 @@ class ProductionDeploymentTests(unittest.TestCase):
                 check_public_proxy("https://analytics.example.com", "operator", "secret", 1.0, "1.0.10")["status"],
                 "pass",
             )
+        weak_headers = {**headers, "X-Frame-Options": "SAMEORIGIN"}
+        with patch(
+            "scripts.verify_production_deployment.urlopen",
+            side_effect=[unauthenticated, _Response(weak_headers, {"status": "ok", "api_version": "1.0.10"})],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "incomplete security-header policy: x-frame-options"):
+                check_public_proxy("https://analytics.example.com", "operator", "secret", 1.0)
+        server_headers = {**headers, "Server": "Caddy"}
+        with patch(
+            "scripts.verify_production_deployment.urlopen",
+            side_effect=[unauthenticated, _Response(server_headers, {"status": "ok", "api_version": "1.0.10"})],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "exposes a Server header"):
+                check_public_proxy("https://analytics.example.com", "operator", "secret", 1.0)
         with self.assertRaisesRegex(ValueError, "Basic Auth credentials"):
             check_public_proxy("https://analytics.example.com", "", "secret", 1.0)
         with patch("scripts.verify_production_deployment.urlopen", return_value=_Response(headers, {"status": "ok", "api_version": "1.0.10"})):
@@ -335,12 +412,12 @@ class ProductionDeploymentTests(unittest.TestCase):
 
     def test_public_proxy_closes_the_unauthenticated_error_response(self) -> None:
         headers = {
-            "Strict-Transport-Security": "max-age=31536000",
-            "Content-Security-Policy": "default-src 'self'",
+            "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+            "Content-Security-Policy": "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self'",
             "X-Content-Type-Options": "nosniff",
             "X-Frame-Options": "DENY",
             "Referrer-Policy": "no-referrer",
-            "Permissions-Policy": "camera=()",
+            "Permissions-Policy": "camera=(), geolocation=(), microphone=(), payment=(), usb=()",
             "Cross-Origin-Opener-Policy": "same-origin",
             "Cross-Origin-Resource-Policy": "same-origin",
             "Cache-Control": "no-store",

@@ -2213,7 +2213,7 @@ def _review_promotion(report: Mapping[str, Any], promotion: Mapping[str, Any]) -
 
 def _review_operator_commands(report: Mapping[str, Any]) -> Dict[str, str]:
     commands: Dict[str, str] = {}
-    for source_key, prefix in (
+    for source_key, _prefix in (
         ("operator_commands", ""),
         ("commands", ""),
     ):

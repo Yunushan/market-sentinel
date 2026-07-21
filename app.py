@@ -1332,18 +1332,7 @@ class App(tk.Tk):
         return exact_paths or fallback_paths
 
     def _resource_roots(self) -> List[Path]:
-        roots: List[Path] = []
-        frozen_root = getattr(sys, "_MEIPASS", None)
-        if frozen_root:
-            roots.append(Path(frozen_root))
-        if getattr(sys, "frozen", False):
-            roots.append(Path(sys.executable).resolve().parent)
-        roots.append(Path(__file__).resolve().parent)
-        unique: List[Path] = []
-        for root in roots:
-            if root not in unique:
-                unique.append(root)
-        return unique
+        return application_resource_roots()
 
     def _load_icon_image(self):
         self._icon_images = []
@@ -4410,7 +4399,7 @@ class App(tk.Tk):
         if side not in ("BUY", "SELL"):
             return
         if side == "SELL" and not s.allow_sells:
-            self.ui_queue.put(("log", f"[copy] Skipping SELL trade (allow_sells=false)."))
+            self.ui_queue.put(("log", "[copy] Skipping SELL trade (allow_sells=false)."))
             return
 
         token_id = str(item.get("asset") or "")
@@ -4466,7 +4455,7 @@ class App(tk.Tk):
         if self._geoblock_cache is None:
             self.do_geoblock_check()
         if self._geoblock_cache and self._geoblock_cache.get("blocked") is True:
-            self.ui_queue.put(("log", f"[copy] BLOCKED by geoblock. Refusing to place order."))
+            self.ui_queue.put(("log", "[copy] BLOCKED by geoblock. Refusing to place order."))
             return
 
         order = PaperOrderRequest(
@@ -4741,12 +4730,32 @@ class App(tk.Tk):
         self._copy_trade_from_activity(item)
 
 
+def application_resource_roots() -> List[Path]:
+    """Return source and packaged asset roots, preferring the release folder when frozen."""
+    roots: List[Path] = []
+    if getattr(sys, "frozen", False):
+        roots.append(Path(sys.executable).resolve().parent)
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if frozen_root:
+        roots.append(Path(frozen_root))
+    roots.append(Path(__file__).resolve().parent)
+    unique: List[Path] = []
+    for root in roots:
+        if root not in unique:
+            unique.append(root)
+    return unique
+
+
 def tkinter_smoke_payload() -> Dict[str, Any]:
     registry = build_default_registry()
     cfg = AppConfig()
     market_ids = [metadata.market_id for metadata in registry.list_metadata()]
     choices = [market_choice_label(metadata) for metadata in registry.list_metadata()]
-    root = Path(__file__).resolve().parent
+    icon_available = any(
+        (root / "assets" / "marketsentinel.ico").exists()
+        and any((root / relative_path).exists() for relative_path in (Path("assets/marketsentinel.png"), Path("marketsentinel.png")))
+        for root in application_resource_roots()
+    )
     return {
         "ok": True,
         "app_class": App.__name__,
@@ -4765,7 +4774,7 @@ def tkinter_smoke_payload() -> Dict[str, Any]:
             "Logs",
             "About",
         ],
-        "icon_available": (root / "assets" / "marketsentinel.ico").exists() and (root / "marketsentinel.png").exists(),
+        "icon_available": icon_available,
         "market_count": len(market_ids),
         "choice_count": len(choices),
         "all_markets_configured": set(market_ids) == set(cfg.markets),
@@ -4812,16 +4821,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     if "--web-gui" in args:
         import argparse
 
-        from web_api import DEFAULT_CONFIG_PATH, DEFAULT_FRONTEND_DIR, run_server
+        from web_api import DEFAULT_CONFIG_PATH, run_server
 
         parser = argparse.ArgumentParser(description="Run the packaged React/TypeScript GUI server.")
         parser.add_argument("--web-gui", action="store_true")
         parser.add_argument("--host", default="127.0.0.1")
         parser.add_argument("--port", type=int, default=8765)
         parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
-        parser.add_argument("--frontend-dir", type=Path, default=DEFAULT_FRONTEND_DIR)
         parsed = parser.parse_args(args)
-        run_server(parsed.host, parsed.port, parsed.config, parsed.frontend_dir)
+        run_server(parsed.host, parsed.port, parsed.config)
         return 0
 
     set_windows_app_id(APP_ID)

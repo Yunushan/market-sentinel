@@ -24,6 +24,8 @@ Jobs:
   background workers and verifies that normal close cancels queued UI work and
   stops worker objects before destroying the Tk interpreter.
 - Full project verification with `python verify.py`.
+- A pinned Ruff static-analysis gate (`F` correctness, `B` bugbear, and `S608`
+  dynamic-SQL rules), run by `python verify.py` before the functional test suite.
 - Enforced branch-coverage floors of 65% for the full Python application and
   74% for the headless/backend surface. The verifier measures both and fails on
   regression.
@@ -52,6 +54,10 @@ Jobs:
 - A reproducible `npm ci --ignore-scripts` followed by `npm audit --omit=dev
   --audit-level=high` on every security workflow run. This fails closed for
   high-severity vulnerabilities in the production frontend dependency tree.
+- Hash-locked `pip-audit` checks against `requirements.lock` and
+  `requirements-live.lock` on every security workflow run. These fail closed
+  when either supported Python runtime dependency graph has a known
+  vulnerability.
 - CodeQL analysis for Python and JavaScript/TypeScript.
 
 The CodeQL job is the only job with `security-events: write`; all other jobs use least-privilege read permissions unless they need more. Dependency review runs with the pull-request permissions required by GitHub's action and fails on high-severity dependency changes.
@@ -139,11 +145,19 @@ Dependabot opens grouped weekly pull requests for:
 - Python requirements
 - Frontend npm dependencies
 
-The runtime, live SDK, test, and build locks are regenerated with `pip-compile
---allow-unsafe --generate-hashes` only during an intentional dependency update.
-CI test jobs install `requirements-test.lock`; package build jobs install
-`requirements.lock` plus `requirements-build.lock`, so runtime, live, test, and
-build tooling remain independently reviewable and hash protected.
+The bootstrap installer plus runtime, live SDK, test, build, and security-audit
+locks are regenerated with `pip-compile --allow-unsafe --generate-hashes` only
+during an intentional dependency update. Every Python workflow first installs
+the hash-locked `requirements-bootstrap.lock`; CI test jobs then install
+`requirements-test.lock`, while package build jobs install
+`requirements.lock` plus `requirements-build.lock`. The security workflow and
+the release package gate install `requirements-security.lock` and audit every
+bootstrap, runtime, live, test, build, and security lock before publishing.
+This keeps all Python dependency graphs independently reviewable and hash
+protected.
+The release frontend build installs with lifecycle scripts disabled and runs
+`npm audit --audit-level=high` over its full build dependency tree before
+creating the published bundle.
 The Windows packaging-only PyInstaller dependency graph is likewise installed
 from hash-protected `requirements-build.lock`.
 

@@ -14,6 +14,20 @@ regional restrictions.
   provided Caddy example supplies Basic Auth, TLS, a restrictive browser
   content-security policy, cross-origin and permissions headers, and the
   upstream API token.
+- The application also emits a conservative browser-security baseline on every
+  local response (including errors and CORS preflights): CSP, anti-framing,
+  no-sniff, no-referrer, restricted browser permissions, and opener isolation.
+  Caddy remains responsible for public HTTPS-only HSTS, resource isolation, and
+  removing the `Server` header at the internet-facing boundary.
+- The threaded loopback server gives each connection 15 seconds to make
+  progress, uses daemon request workers, and does not wait on stalled workers
+  during shutdown. The systemd unit retains its 30-second stop deadline as a
+  final process-level safeguard.
+- When an API token is configured, the server permits ten failed token attempts
+  per client per minute, then returns `429` with `Retry-After`. A valid token
+  immediately clears that client record. This is a backstop for the proxy's
+  authentication controls, not a replacement for Caddy Basic Auth or firewall
+  policy.
 - Run under the dedicated `market-sentinel` user. Use `/var/lib/market-sentinel`
   for state and a root-owned `/etc/market-sentinel/market-sentinel.env` for
   credentials and tokens.
@@ -36,7 +50,7 @@ git clone https://github.com/Yunushan/market-sentinel.git /opt/market-sentinel
 cd /opt/market-sentinel
 # Validate the checked-out source with the test dependency set before deployment.
 python3 -m venv .verify-venv
-.verify-venv/bin/python -m pip install --upgrade pip
+.verify-venv/bin/python -m pip install --require-hashes -r requirements-bootstrap.lock
 .verify-venv/bin/python -m pip install --require-hashes -r requirements-test.lock
 .verify-venv/bin/python -m pip install --no-deps .
 .verify-venv/bin/python verify.py --frontend-build --frontend-live-smoke
@@ -44,7 +58,7 @@ rm -rf .verify-venv
 
 # Install the lean runtime dependency set used by the systemd service.
 python3 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install --require-hashes -r requirements-bootstrap.lock
 .venv/bin/python -m pip install --require-hashes -r requirements.lock
 .venv/bin/python -m pip install --no-deps .
 ```
@@ -139,9 +153,10 @@ comma-separated.
 
 After a deployment, collect a read-only verification record from the VPS. It
 checks the systemd web service and health timer, validates the loopback health
-endpoint and release version, and, when given a public URL, proves that an
+endpoint, authenticated Prometheus metrics endpoint, and release version, and, when given a public URL, proves that an
 unauthenticated request receives `401` before validating the authenticated HTTPS
-proxy response, cache policy, and browser security headers.
+proxy response, cache policy, the required browser-security header directives,
+and removal of the public `Server` header.
 It also verifies the root-owned, private service environment file and private
 state/backup directories used by the bundled systemd units.
 It also requires a successful backup completed within the last 26 hours; enable
@@ -174,6 +189,11 @@ loopback-only staging host, omit `--public-url`; the script will still validate
 the local service and timer, but retain `--expected-version` for the deployed
 release.
 
+For a non-Linux or isolated local loopback smoke test only, add
+`--skip-systemd`. This intentionally skips Linux systemd and filesystem
+ownership checks while retaining versioned health and metrics validation; it is
+not production-host evidence.
+
 ## Monitoring and recovery
 
 - Health: `market-sentinel-health.timer` polls `GET /api/health` through
@@ -187,7 +207,18 @@ release.
   strict-mode failure for operator review.
 - Logs: ship `journalctl -u market-sentinel-web` to the selected log system and
   alert on restart loops, authentication failures, failed safety preflights,
-  and API rate-limit errors.
+  and API rate-limit errors. Every completed HTTP request is emitted as one
+  JSON log record with `timestamp`, `request_id`, `method`, path (without its
+  query string), status, and duration. Use `request_id` when correlating an
+  operator report with the reverse-proxy and service logs; it is also returned
+  in the `X-Request-ID` response header.
+- Metrics: the authenticated `/metrics` endpoint exposes bounded Prometheus
+  counters for completed HTTP requests and request duration. It deliberately
+  never uses request paths, wallets, query values, or credentials as labels.
+  Caddy Basic Auth and the upstream API token protect this endpoint in the
+  supplied deployment. Scrape it through the public proxy or a trusted
+  loopback collector, and alert on sustained `5xx` responses, elevated request
+  duration, and an unexpected loss of request traffic.
 - Backups: back up `/var/lib/market-sentinel` daily with encryption and tested
   retention. `market-sentinel-backup.timer` performs an integrity-manifested
   daily archive with 14 retained copies. The directory contains local
