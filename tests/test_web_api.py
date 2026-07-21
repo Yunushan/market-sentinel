@@ -224,15 +224,15 @@ class WebApiTests(unittest.TestCase):
         return buffer.getvalue()
 
     def _serve_api(self, config_path: Path, frontend_dir: Path, *, api_token: str = ""):
-        server = ReactGuiServer(
-            ("127.0.0.1", 0),
-            ReactGuiHandler,
-            config_path=config_path,
-            frontend_dir=frontend_dir,
-            static_files=ReactGuiHandler._static_file_catalog(frontend_dir),
-            adapter_registry=FakeRegistry(FakePaperAdapter()),
-            api_token=api_token,
-        )
+        with patch("web_api.DEFAULT_FRONTEND_DIR", frontend_dir):
+            server = ReactGuiServer(
+                ("127.0.0.1", 0),
+                ReactGuiHandler,
+                config_path=config_path,
+                frontend_dir=frontend_dir,
+                adapter_registry=FakeRegistry(FakePaperAdapter()),
+                api_token=api_token,
+            )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         return server, thread, f"http://127.0.0.1:{server.server_address[1]}"
@@ -2693,7 +2693,8 @@ class WebApiTests(unittest.TestCase):
             asset_dir.mkdir()
             asset = asset_dir / "app.js"
             asset.write_text("console.log('ok');", encoding="utf-8")
-            static_files = ReactGuiHandler._static_file_catalog(frontend_dir)
+            with patch("web_api.DEFAULT_FRONTEND_DIR", frontend_dir):
+                static_files = ReactGuiHandler._static_file_catalog()
 
             self.assertIsNone(
                 ReactGuiHandler._resolve_static_path(None, static_files, "/%2e%2e%5coutside.txt")
