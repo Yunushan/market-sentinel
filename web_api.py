@@ -4389,23 +4389,55 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             return None
         parts = normalized.split("/")
         if len(parts) == 1:
-            relative_dir = Path()
+            relative_path = parts[0]
         elif len(parts) == 2 and parts[0] == "assets":
-            relative_dir = Path("assets")
+            relative_path = f"assets/{parts[1]}"
         else:
             return None
-        filename = os.path.basename(parts[-1])
-        if filename != parts[-1] or not STATIC_FRONTEND_FILENAME_RE.fullmatch(filename):
+        if not STATIC_FRONTEND_FILENAME_RE.fullmatch(parts[-1]):
             return None
+
+        # Look up a URL key in a catalog built only from the trusted frontend
+        # directory.  No request value is used to construct a filesystem path.
+        return ReactGuiHandler._static_file_catalog(frontend_dir).get(relative_path)
+
+    @staticmethod
+    def _static_file_catalog(frontend_dir: Path) -> Dict[str, Path]:
+        """Return the supported static files beneath a trusted build directory."""
         try:
             root = frontend_dir.resolve()
-            # codeql[py/path-injection] ``filename`` is an allowlisted single
-            # component and ``relative_dir`` is restricted to ``.`` or ``assets``.
-            target = (root / relative_dir / filename).resolve()
-            target.relative_to(root)
         except (OSError, RuntimeError, ValueError):
-            return None
-        return target
+            return {}
+
+        catalog: Dict[str, Path] = {}
+
+        def add_file(relative_path: str, candidate: Path) -> None:
+            try:
+                target = candidate.resolve()
+                target.relative_to(root)
+            except (OSError, RuntimeError, ValueError):
+                return
+            if target.is_file():
+                catalog[relative_path] = target
+
+        add_file("index.html", root / "index.html")
+        try:
+            root_entries = tuple(root.iterdir())
+        except OSError:
+            return catalog
+        for candidate in root_entries:
+            if candidate.name != "index.html" and STATIC_FRONTEND_FILENAME_RE.fullmatch(candidate.name):
+                add_file(candidate.name, candidate)
+
+        assets_dir = root / "assets"
+        try:
+            asset_entries = tuple(assets_dir.iterdir()) if assets_dir.is_dir() else ()
+        except OSError:
+            return catalog
+        for candidate in asset_entries:
+            if STATIC_FRONTEND_FILENAME_RE.fullmatch(candidate.name):
+                add_file(f"assets/{candidate.name}", candidate)
+        return catalog
 
     def _send_json(self, status: int, payload: Dict[str, Any], *, retry_after_seconds: Optional[int] = None) -> None:
         data = _json_bytes(payload)
