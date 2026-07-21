@@ -109,6 +109,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_FRONTEND_DIR = PROJECT_ROOT / "frontend" / "dist"
 PROJECT_NAME = "market-sentinel"
 HASHED_FRONTEND_ASSET_RE = re.compile(r"-[A-Za-z0-9_-]{8,}\.[^.]+$")
+STATIC_FRONTEND_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 MAX_JSON_BODY_BYTES = 1_000_000
 HTTP_CONNECTION_TIMEOUT_SECONDS = 15.0
 AUTH_FAILURE_MAX_ATTEMPTS = 10
@@ -4366,15 +4367,29 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
 
     def _resolve_static_path(self, frontend_dir: Path, raw_path: str) -> Optional[Path]:
         path = unquote(raw_path.split("?", 1)[0])
+        # A backslash is a path separator on Windows but not POSIX. Reject it on
+        # every platform instead of allowing platform-dependent interpretation.
+        if "\\" in path:
+            return None
         if path in {"", "/"}:
             normalized = "index.html"
         else:
             normalized = posixpath.normpath(path.lstrip("/"))
         if normalized.startswith("../") or normalized == "..":
             return None
+        parts = normalized.split("/")
+        if len(parts) == 1:
+            relative_dir = Path()
+        elif len(parts) == 2 and parts[0] == "assets":
+            relative_dir = Path("assets")
+        else:
+            return None
+        filename = os.path.basename(parts[-1])
+        if filename != parts[-1] or not STATIC_FRONTEND_FILENAME_RE.fullmatch(filename):
+            return None
         try:
             root = frontend_dir.resolve()
-            target = (root / normalized).resolve()
+            target = (root / relative_dir / filename).resolve()
             target.relative_to(root)
         except (OSError, RuntimeError, ValueError):
             return None
