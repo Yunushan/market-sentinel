@@ -190,8 +190,11 @@ def _safe_attachment_filename(value: Any) -> str:
 def static_cache_control(target: Path, frontend_dir: Path) -> str:
     """Avoid stale SPA shells while allowing immutable content-hashed assets."""
     try:
-        relative_path = target.relative_to(frontend_dir).as_posix()
-    except ValueError:
+        # macOS may canonicalize /var to /private/var during static resolution.
+        # Resolve both sides before comparing so legitimate assets keep their
+        # intended cache policy across platforms.
+        relative_path = target.resolve().relative_to(frontend_dir.resolve()).as_posix()
+    except (OSError, RuntimeError, ValueError):
         return "no-store"
     if relative_path == "index.html":
         return "no-store"
