@@ -2679,10 +2679,8 @@ class WebApiTests(unittest.TestCase):
         health = json.loads(health_body.decode("utf-8"))
         self.assertTrue(health["frontend_build_available"])
 
-    def test_static_cache_control_rejects_files_outside_frontend_root(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            self.assertEqual(static_cache_control(root / "outside.js", root / "dist"), "no-store")
+    def test_static_cache_control_rejects_unknown_relative_path(self) -> None:
+        self.assertEqual(static_cache_control(None), "no-store")
 
     def test_static_path_resolution_rejects_encoded_windows_separator_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

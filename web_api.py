@@ -187,18 +187,20 @@ def _safe_attachment_filename(value: Any) -> str:
     return filename or "download"
 
 
-def static_cache_control(target: Path, frontend_dir: Path) -> str:
-    """Avoid stale SPA shells while allowing immutable content-hashed assets."""
-    try:
-        # macOS may canonicalize /var to /private/var during static resolution.
-        # Resolve both sides before comparing so legitimate assets keep their
-        # intended cache policy across platforms.
-        relative_path = target.resolve().relative_to(frontend_dir.resolve()).as_posix()
-    except (OSError, RuntimeError, ValueError):
+def static_cache_control(relative_path: Optional[str]) -> str:
+    """Avoid stale SPA shells while allowing immutable content-hashed assets.
+
+    ``relative_path`` is the already-validated route classification, rather
+    than a filesystem path.  This keeps cache policy independent of platform
+    path canonicalization such as macOS's ``/var`` to ``/private/var`` alias.
+    """
+    if relative_path is None:
         return "no-store"
     if relative_path == "index.html":
         return "no-store"
-    if relative_path.startswith("assets/") and HASHED_FRONTEND_ASSET_RE.search(target.name):
+    if relative_path.startswith("assets/") and HASHED_FRONTEND_ASSET_RE.search(
+        relative_path.rsplit("/", 1)[-1]
+    ):
         return "public, max-age=31536000, immutable"
     return "no-cache, max-age=0, must-revalidate"
 
@@ -4357,13 +4359,18 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         target = self._resolve_static_path(frontend_dir, raw_path)
         if target is None or not target.exists() or not target.is_file():
             target = index
+            relative_path = "index.html"
+        elif target.parent.name == "assets":
+            relative_path = f"assets/{target.name}"
+        else:
+            relative_path = target.name
 
         content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         data = target.read_bytes()
         self.send_response(HTTPStatus.OK)
         self._send_cors_headers()
         self.send_header("Content-Type", content_type)
-        self.send_header("Cache-Control", static_cache_control(target, frontend_dir))
+        self.send_header("Cache-Control", static_cache_control(relative_path))
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -4392,6 +4399,8 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             return None
         try:
             root = frontend_dir.resolve()
+            # codeql[py/path-injection] ``filename`` is an allowlisted single
+            # component and ``relative_dir`` is restricted to ``.`` or ``assets``.
             target = (root / relative_dir / filename).resolve()
             target.relative_to(root)
         except (OSError, RuntimeError, ValueError):

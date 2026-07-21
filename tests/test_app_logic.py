@@ -394,7 +394,9 @@ class AppLogicTests(unittest.TestCase):
                 patch.object(sys, "frozen", True, create=True),
                 patch.object(sys, "executable", str(executable)),
             ):
-                self.assertEqual(application_resource_roots()[0], package_root)
+                # Windows runners can canonicalize temporary paths to a short
+                # name or normalized casing when resolving the executable.
+                self.assertEqual(application_resource_roots()[0], package_root.resolve())
                 self.assertTrue(tkinter_smoke_payload()["icon_available"])
 
     def test_gui_lifecycle_smoke_constructs_widget_contract_without_workers(self) -> None:
