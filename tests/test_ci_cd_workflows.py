@@ -105,8 +105,8 @@ class CiCdWorkflowTests(unittest.TestCase):
             workflow_action_pin_issues(
                 text,
                 {
-                    "actions/checkout": (7, "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"),
-                    "actions/setup-python": (6, "ece7cb06caefa5fff74198d8649806c4678c61a1"),
+                    "actions/checkout": (7, "3d3c42e5aac5ba805825da76410c181273ba90b1"),
+                    "actions/setup-python": (7, "5fda3b95a4ea91299a34e894583c3862153e4b97"),
                     "actions/setup-node": (7, "820762786026740c76f36085b0efc47a31fe5020"),
                     "actions/upload-artifact": (7, "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
                     "actions/download-artifact": (8, "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"),
@@ -177,7 +177,7 @@ class CiCdWorkflowTests(unittest.TestCase):
             "scripts/generate_release_sbom.py",
             "Verify final release assets",
             "scripts/verify_release_assets.py",
-            "actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3",
+            "actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3",
             "attestations: write",
             "id-token: write",
             "Verify protected Windows signing configuration",
@@ -213,12 +213,12 @@ class CiCdWorkflowTests(unittest.TestCase):
             workflow_action_pin_issues(
                 text,
                 {
-                    "actions/checkout": (7, "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"),
-                    "actions/setup-python": (6, "ece7cb06caefa5fff74198d8649806c4678c61a1"),
+                    "actions/checkout": (7, "3d3c42e5aac5ba805825da76410c181273ba90b1"),
+                    "actions/setup-python": (7, "5fda3b95a4ea91299a34e894583c3862153e4b97"),
                     "actions/setup-node": (7, "820762786026740c76f36085b0efc47a31fe5020"),
                     "actions/upload-artifact": (7, "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
                     "actions/download-artifact": (8, "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"),
-                    "actions/attest-build-provenance": (3, "43d14bc2b83dec42d39ecae14e916627a18bb661"),
+                    "actions/attest-build-provenance": (3, "977bb373ede98d70efdf65b84cb5f73e068dcc2a"),
                 },
             ),
         )
@@ -262,12 +262,12 @@ class CiCdWorkflowTests(unittest.TestCase):
             workflow_action_pin_issues(
                 security,
                 {
-                    "actions/checkout": (7, "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"),
-                    "actions/setup-python": (6, "ece7cb06caefa5fff74198d8649806c4678c61a1"),
+                    "actions/checkout": (7, "3d3c42e5aac5ba805825da76410c181273ba90b1"),
+                    "actions/setup-python": (7, "5fda3b95a4ea91299a34e894583c3862153e4b97"),
                     "actions/setup-node": (7, "820762786026740c76f36085b0efc47a31fe5020"),
                     "actions/dependency-review-action": (5, "a1d282b36b6f3519aa1f3fc636f609c47dddb294"),
-                    "github/codeql-action/init": (4, "eec0bff2f6c15bf3f1e8a0152f94d17664a06a06"),
-                    "github/codeql-action/analyze": (4, "eec0bff2f6c15bf3f1e8a0152f94d17664a06a06"),
+                    "github/codeql-action/init": (4, "7188fc363630916deb702c7fdcf4e481b751f97a"),
+                    "github/codeql-action/analyze": (4, "7188fc363630916deb702c7fdcf4e481b751f97a"),
                 },
             ),
         )
@@ -297,15 +297,15 @@ class CiCdWorkflowTests(unittest.TestCase):
 
     def test_action_policy_accepts_reviewed_pins_and_rejects_drift(self) -> None:
         expected = {
-            "actions/checkout": (7, "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"),
+            "actions/checkout": (7, "3d3c42e5aac5ba805825da76410c181273ba90b1"),
             "actions/setup-node": (7, "820762786026740c76f36085b0efc47a31fe5020"),
         }
         reviewed = """
-        - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         """
         drifted = """
-        - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         """
 
