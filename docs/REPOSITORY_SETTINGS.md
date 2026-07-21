@@ -48,3 +48,24 @@ signing credentials there: `WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64`,
 `WINDOWS_CODE_SIGNING_TIMESTAMP_URL`. Set repository/environment variable
 `REQUIRE_WINDOWS_CODE_SIGNING=true`. Never add venue credentials to GitHub
 Actions.
+
+## Evidence check
+
+Before a release, collect read-only proof that the externally configured controls
+match this policy. Set `GITHUB_TOKEN` only in the calling shell to a fine-grained
+token with repository `Administration: read` and `Actions: read` permissions;
+the command does not print or persist the token.
+
+```bash
+python scripts/verify_repository_settings.py \
+  --repository Yunushan/market-sentinel \
+  --branch main
+```
+
+It validates required checks, up-to-date and administrator-enforced branch
+protection, pull-request/conversation/linear-history controls, disabled force
+pushes and deletions, release-environment reviewers and self-review prevention,
+protected deployment branches, required Windows-signing secret names, and
+`REQUIRE_WINDOWS_CODE_SIGNING=true`. It reports a nonzero exit status on any
+missing control. Run it from an administrator-authorized workstation; a normal
+workflow token is intentionally insufficient for this audit.

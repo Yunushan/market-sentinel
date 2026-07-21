@@ -33,16 +33,26 @@ REQUIRED_UNITS = (
     "market-sentinel-health.timer",
     "market-sentinel-backup.timer",
 )
-REQUIRED_PROXY_HEADERS = (
-    "strict-transport-security",
-    "content-security-policy",
-    "x-content-type-options",
-    "x-frame-options",
-    "referrer-policy",
-    "permissions-policy",
-    "cross-origin-opener-policy",
-    "cross-origin-resource-policy",
-)
+REQUIRED_PROXY_HEADER_VALUES = {
+    "strict-transport-security": ("max-age=31536000", "includesubdomains"),
+    "content-security-policy": (
+        "default-src 'self'",
+        "base-uri 'self'",
+        "object-src 'none'",
+        "frame-ancestors 'none'",
+        "form-action 'self'",
+        "connect-src 'self'",
+        "img-src 'self' data:",
+        "script-src 'self'",
+        "style-src 'self'",
+    ),
+    "x-content-type-options": ("nosniff",),
+    "x-frame-options": ("deny",),
+    "referrer-policy": ("no-referrer",),
+    "permissions-policy": ("camera=()", "geolocation=()", "microphone=()", "payment=()", "usb=()"),
+    "cross-origin-opener-policy": ("same-origin",),
+    "cross-origin-resource-policy": ("same-origin",),
+}
 BACKUP_MAX_AGE_SECONDS = 26 * 60 * 60
 BACKUP_MAX_FUTURE_SKEW_SECONDS = 5 * 60
 EVIDENCE_SCHEMA_VERSION = 1
@@ -122,8 +132,8 @@ def _check_private_path(
 ) -> dict[str, Any]:
     try:
         metadata = stat_reader(path)
-        mode = int(getattr(metadata, "st_mode"))
-        owner = int(getattr(metadata, "st_uid"))
+        mode = int(metadata.st_mode)
+        owner = int(metadata.st_uid)
         valid_type = S_ISREG(mode) if expected_type == S_IFREG else S_ISDIR(mode)
         private = S_IMODE(mode) & 0o077 == 0
         owner_valid = not require_root_owner or owner == 0
@@ -217,6 +227,29 @@ def check_loopback(url: str, token: str, timeout: float, expected_version: str =
     return {"name": "loopback_health", "status": "pass", "api_version": version}
 
 
+def check_loopback_metrics(url: str, token: str, timeout: float) -> dict[str, Any]:
+    """Verify the authenticated Prometheus endpoint without persisting metric values."""
+    headers = {"Accept": "text/plain; version=0.0.4"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    with urlopen(Request(url, headers=headers, method="GET"), timeout=timeout) as response:
+        content_type = str(response.headers.get("Content-Type") or "").lower()
+        body = response.read().decode("utf-8")
+    if response.status != 200:
+        raise RuntimeError(f"loopback metrics endpoint returned HTTP {response.status}")
+    if not content_type.startswith("text/plain; version=0.0.4"):
+        raise RuntimeError("loopback metrics endpoint did not return Prometheus text format")
+    required = (
+        "market_sentinel_http_requests_total",
+        "market_sentinel_http_request_duration_seconds_total",
+        "market_sentinel_http_requests_completed_total",
+    )
+    missing = [name for name in required if name not in body]
+    if missing:
+        raise RuntimeError("loopback metrics endpoint is missing required metrics: " + ", ".join(missing))
+    return {"name": "loopback_metrics", "status": "pass", "format": "prometheus"}
+
+
 def check_public_proxy(
     url: str,
     username: str,
@@ -245,18 +278,27 @@ def check_public_proxy(
     headers["Authorization"] = f"Basic {encoded}"
     with urlopen(Request(health_url, headers=headers, method="GET"), timeout=timeout) as response:
         payload = json.loads(response.read().decode("utf-8"))
-        header_names = {name.lower() for name in response.headers}
-        missing = [name for name in REQUIRED_PROXY_HEADERS if name not in header_names]
+        response_headers = {str(name).lower(): str(value) for name, value in response.headers.items()}
+        missing = [name for name in REQUIRED_PROXY_HEADER_VALUES if name not in response_headers]
         if response.status != 200 or payload.get("status") != "ok":
             raise RuntimeError("public proxy health endpoint did not report status=ok")
         if expected_version and str(payload.get("api_version", "")) != expected_version:
             raise RuntimeError(
                 f"public proxy reported version {payload.get('api_version')}, expected {expected_version}"
             )
-        if response.headers.get("Cache-Control") != "no-store":
+        if response_headers.get("cache-control") != "no-store":
             raise RuntimeError("public proxy health endpoint is missing Cache-Control: no-store")
         if missing:
             raise RuntimeError("public proxy is missing security headers: " + ", ".join(missing))
+        weak_headers = [
+            name
+            for name, expected_values in REQUIRED_PROXY_HEADER_VALUES.items()
+            if any(value not in response_headers[name].lower() for value in expected_values)
+        ]
+        if weak_headers:
+            raise RuntimeError("public proxy has incomplete security-header policy: " + ", ".join(weak_headers))
+        if response_headers.get("server"):
+            raise RuntimeError("public proxy exposes a Server header")
     return {"name": "public_https_proxy", "status": "pass", "api_version": payload.get("api_version")}
 
 
@@ -313,10 +355,15 @@ def build_evidence(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Collect read-only MarketSentinel production deployment evidence.")
     parser.add_argument("--loopback-url", default="http://127.0.0.1:8765/api/health")
+    parser.add_argument("--loopback-metrics-url", default="http://127.0.0.1:8765/metrics")
     parser.add_argument("--token", default=os.environ.get("MARKET_SENTINEL_API_TOKEN", ""))
     parser.add_argument("--expected-version", default="")
     parser.add_argument("--timeout", type=float, default=10.0)
-    parser.add_argument("--skip-systemd", action="store_true")
+    parser.add_argument(
+        "--skip-systemd",
+        action="store_true",
+        help="Skip Linux systemd and Linux filesystem-ownership checks for an isolated loopback smoke test.",
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -347,6 +394,7 @@ def main() -> int:
                 checks.extend(check_systemd())
                 checks.extend(check_filesystem_permissions())
             checks.append(check_loopback(args.loopback_url, args.token, args.timeout, expected_version))
+            checks.append(check_loopback_metrics(args.loopback_metrics_url, args.token, args.timeout))
             if args.public_url:
                 password = os.environ.get(args.public_basic_password_env, "")
                 checks.append(

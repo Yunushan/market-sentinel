@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Mapping, Tuple
 
 try:
     import tomllib
@@ -34,6 +35,7 @@ REQUIRED_IMPORTS = {
     "packaging": "packaging",
     "pytest": "pytest",
     "coverage": "coverage",
+    "ruff": "ruff",
     "cryptography": "cryptography",
     "eth-account": "eth_account",
     "eth-abi": "eth_abi",
@@ -62,6 +64,7 @@ WORKFLOW_ACTION_PINS = {
     },
     ".github/workflows/security.yml": {
         "actions/checkout": (7, "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"),
+        "actions/setup-python": (6, "ece7cb06caefa5fff74198d8649806c4678c61a1"),
         "actions/dependency-review-action": (5, "a1d282b36b6f3519aa1f3fc636f609c47dddb294"),
         "github/codeql-action/init": (4, "eec0bff2f6c15bf3f1e8a0152f94d17664a06a06"),
         "github/codeql-action/analyze": (4, "eec0bff2f6c15bf3f1e8a0152f94d17664a06a06"),
@@ -159,6 +162,19 @@ def run_compile_check() -> None:
     if not all(checks):
         raise SystemExit("Python compile check failed.")
     print("[ok] compileall")
+
+
+def run_static_analysis() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "ruff", "check", "."],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        output = (result.stdout + result.stderr).strip()
+        raise SystemExit("Ruff static analysis failed:\n" + output)
+    print("[ok] Ruff static analysis")
 
 
 def run_adapter_catalog_check() -> None:
@@ -751,7 +767,7 @@ def run_polymarket_live_report_decision_ledger_check() -> None:
             )
         except ValueError as exc:
             if "review_bundle_hash mismatch" not in str(exc):
-                raise SystemExit("Polymarket decision ledger returned the wrong tamper error.")
+                raise SystemExit("Polymarket decision ledger returned the wrong tamper error.") from exc
         else:
             raise SystemExit("Polymarket decision ledger accepted a tampered review hash.")
         ledger = list_live_validation_report_decisions(path=decision_path)
@@ -1077,7 +1093,7 @@ def run_ci_cd_workflow_check() -> None:
             "Future Python",
             '"3.x"',
             "PIP_NO_CACHE_DIR",
-            "python -m pip install --no-cache-dir --upgrade pip",
+            "python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock",
             "python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock",
             "python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock",
             "python -m pip install --no-cache-dir --no-deps -e .",
@@ -1101,15 +1117,27 @@ def run_ci_cd_workflow_check() -> None:
             '--main-ref "origin/main"',
             "Python compatibility",
             '"3.x"',
+            "npm ci --ignore-scripts",
+            "npm install --ignore-scripts --no-audit --no-fund",
+            "Audit frontend dependencies used for packaging",
+            "npm audit --audit-level=high",
             "Build Windows EXE and MSI",
             "macos-14",
             "macos-26",
             "windows-2025-vs2026",
             "PIP_NO_CACHE_DIR",
-            "python -m pip install --no-cache-dir --upgrade pip",
+            "python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock",
             "python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock",
             "python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock",
+            "python -m pip install --no-cache-dir --require-hashes -r requirements-security.lock",
             "python -m pip install --no-cache-dir --no-deps -e .",
+            "Audit locked Python dependencies used for packaging",
+            "pip_audit --requirement requirements.lock --progress-spinner off",
+            "pip_audit --requirement requirements-live.lock --progress-spinner off",
+            "pip_audit --requirement requirements-test.lock --progress-spinner off",
+            "pip_audit --requirement requirements-build.lock --progress-spinner off",
+            "pip_audit --requirement requirements-bootstrap.lock --progress-spinner off",
+            "pip_audit --requirement requirements-security.lock --progress-spinner off",
             "scripts/build_windows_release.py",
             "windows-dist",
             "sha256sum * > SHA256SUMS.txt",
@@ -1158,6 +1186,8 @@ def run_ci_cd_workflow_check() -> None:
             "requirements-live.lock",
             "requirements-test.lock",
             "requirements-build.lock",
+            "requirements-bootstrap.lock",
+            "requirements-security.lock",
             "hash protected",
             "direct dependency",
         ),
@@ -1403,6 +1433,7 @@ def main() -> None:
     if not args.skip_pip_check:
         run_pip_check()
     run_compile_check()
+    run_static_analysis()
     run_adapter_catalog_check()
     run_project_metadata_check()
     run_release_version_check()

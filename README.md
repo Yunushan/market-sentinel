@@ -333,7 +333,7 @@ cd frontend
 npm install
 npm run build
 cd ..
-python web_api.py --host 127.0.0.1 --port 8765 --frontend-dir frontend/dist
+python web_api.py --host 127.0.0.1 --port 8765
 ```
 
 Then open `http://127.0.0.1:8765`.

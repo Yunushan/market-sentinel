@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hmac
 import hashlib
 import importlib.metadata as importlib_metadata
@@ -10,6 +11,9 @@ import mimetypes
 import os
 import posixpath
 import re
+import secrets
+import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http import HTTPStatus
@@ -103,16 +107,78 @@ from polymarket.ws_user import build_user_subscription
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_FRONTEND_DIR = PROJECT_ROOT / "frontend" / "dist"
+DEFAULT_FRONTEND_DIR = (
+    Path(sys.executable).resolve().parent / "frontend" / "dist"
+    if getattr(sys, "frozen", False)
+    else PROJECT_ROOT / "frontend" / "dist"
+)
 PROJECT_NAME = "market-sentinel"
 HASHED_FRONTEND_ASSET_RE = re.compile(r"-[A-Za-z0-9_-]{8,}\.[^.]+$")
+STATIC_FRONTEND_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 MAX_JSON_BODY_BYTES = 1_000_000
+HTTP_CONNECTION_TIMEOUT_SECONDS = 15.0
+AUTH_FAILURE_MAX_ATTEMPTS = 10
+AUTH_FAILURE_WINDOW_SECONDS = 60.0
+MAX_TRACKED_AUTH_FAILURE_CLIENTS = 1_024
 PYTHON_GUI_COMMAND = "python app.py"
 PYTHON_GUI_SCRIPT = "run_gui.bat"
 REACT_DEV_COMMAND = "run_web_gui_dev.bat"
 REACT_DEV_MANUAL_COMMAND = "python web_api.py --host 127.0.0.1 --port 8765 + cd frontend && npm run dev"
 REACT_BUILD_COMMAND = "cd frontend && npm install && npm run build"
 REACT_PROD_COMMAND = "run_web_gui_prod.bat"
+
+
+class HttpRequestMetrics:
+    """Thread-safe, bounded Prometheus metrics for the local HTTP server."""
+
+    _METHODS = frozenset({"GET", "POST", "PATCH", "DELETE", "OPTIONS"})
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._started_at = time.time()
+        self._requests: Dict[Tuple[str, int], int] = {}
+        self._duration_seconds_total = 0.0
+
+    def record(self, method: str, status: int, duration_seconds: float) -> None:
+        normalized_method = str(method or "OTHER").upper()
+        if normalized_method not in self._METHODS:
+            normalized_method = "OTHER"
+        normalized_status = int(status) if 100 <= int(status) <= 599 else 500
+        with self._lock:
+            key = (normalized_method, normalized_status)
+            self._requests[key] = self._requests.get(key, 0) + 1
+            self._duration_seconds_total += max(0.0, float(duration_seconds))
+
+    def prometheus_text(self) -> str:
+        """Render aggregate metrics without unbounded user-controlled labels."""
+        with self._lock:
+            rows = sorted(self._requests.items())
+            total = sum(self._requests.values())
+            duration_seconds_total = self._duration_seconds_total
+            started_at = self._started_at
+        lines = [
+            "# HELP market_sentinel_http_requests_total Completed HTTP requests by method and status.",
+            "# TYPE market_sentinel_http_requests_total counter",
+        ]
+        for (method, status), count in rows:
+            lines.append(
+                f'market_sentinel_http_requests_total{{method="{method}",status="{status}"}} {count}'
+            )
+        lines.extend(
+            [
+                "# HELP market_sentinel_http_request_duration_seconds_total Total completed HTTP request duration.",
+                "# TYPE market_sentinel_http_request_duration_seconds_total counter",
+                f"market_sentinel_http_request_duration_seconds_total {duration_seconds_total:.6f}",
+                "# HELP market_sentinel_http_requests_completed_total Total completed HTTP requests.",
+                "# TYPE market_sentinel_http_requests_completed_total counter",
+                f"market_sentinel_http_requests_completed_total {total}",
+                "# HELP market_sentinel_http_server_start_time_seconds Unix time when the HTTP server started.",
+                "# TYPE market_sentinel_http_server_start_time_seconds gauge",
+                f"market_sentinel_http_server_start_time_seconds {started_at:.6f}",
+                "",
+            ]
+        )
+        return "\n".join(lines)
 
 
 def _safe_http_header_value(value: Any) -> str:
@@ -126,15 +192,20 @@ def _safe_attachment_filename(value: Any) -> str:
     return filename or "download"
 
 
-def static_cache_control(target: Path, frontend_dir: Path) -> str:
-    """Avoid stale SPA shells while allowing immutable content-hashed assets."""
-    try:
-        relative_path = target.relative_to(frontend_dir).as_posix()
-    except ValueError:
+def static_cache_control(relative_path: Optional[str]) -> str:
+    """Avoid stale SPA shells while allowing immutable content-hashed assets.
+
+    ``relative_path`` is the already-validated route classification, rather
+    than a filesystem path.  This keeps cache policy independent of platform
+    path canonicalization such as macOS's ``/var`` to ``/private/var`` alias.
+    """
+    if relative_path is None:
         return "no-store"
     if relative_path == "index.html":
         return "no-store"
-    if relative_path.startswith("assets/") and HASHED_FRONTEND_ASSET_RE.search(target.name):
+    if relative_path.startswith("assets/") and HASHED_FRONTEND_ASSET_RE.search(
+        relative_path.rsplit("/", 1)[-1]
+    ):
         return "public, max-age=31536000, immutable"
     return "no-cache, max-age=0, must-revalidate"
 
@@ -188,6 +259,7 @@ def configured_allowed_origins(cli_origins: Optional[Sequence[str]] = None) -> L
 
 API_ROUTES = {
     "GET": [
+        "/metrics",
         "/api/health",
         "/api/state",
         "/api/config",
@@ -943,6 +1015,12 @@ def health_payload(config_path: Path = DEFAULT_CONFIG_PATH, frontend_dir: Path =
         "config_path": str(config_path),
         "frontend_dist": str(frontend_dir),
         "frontend_build_available": frontend_index.exists(),
+        "observability": {
+            "metrics_endpoint": "/metrics",
+            "metrics_format": "prometheus",
+            "request_logging": "structured_json",
+            "metrics_access": "same server authorization as the API",
+        },
         "routes": API_ROUTES,
     }
 
@@ -3399,7 +3477,56 @@ def refresh_selected_paper_mark(
     return updated
 
 
+class AuthFailureLimiter:
+    """Bound repeated invalid API-token attempts without retaining unbounded client state."""
+
+    def __init__(
+        self,
+        *,
+        max_attempts: int = AUTH_FAILURE_MAX_ATTEMPTS,
+        window_seconds: float = AUTH_FAILURE_WINDOW_SECONDS,
+        max_clients: int = MAX_TRACKED_AUTH_FAILURE_CLIENTS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.max_attempts = max(1, int(max_attempts))
+        self.window_seconds = max(1.0, float(window_seconds))
+        self.max_clients = max(1, int(max_clients))
+        self.clock = clock
+        self._attempts: Dict[str, List[float]] = {}
+        self._lock = threading.Lock()
+
+    def record_failure(self, client_id: str) -> Optional[int]:
+        """Record one failed attempt and return the required retry delay, if blocked."""
+        now = self.clock()
+        key = str(client_id or "unknown")[:256]
+        with self._lock:
+            attempts = [
+                timestamp
+                for timestamp in self._attempts.get(key, [])
+                if now - timestamp < self.window_seconds
+            ]
+            if len(attempts) >= self.max_attempts:
+                self._attempts[key] = attempts
+                remaining = self.window_seconds - (now - attempts[0])
+                return max(1, int(remaining + 0.999))
+            if key not in self._attempts and len(self._attempts) >= self.max_clients:
+                oldest_key = min(self._attempts, key=lambda item: self._attempts[item][-1] if self._attempts[item] else now)
+                self._attempts.pop(oldest_key, None)
+            attempts.append(now)
+            self._attempts[key] = attempts
+        return None
+
+    def clear(self, client_id: str) -> None:
+        with self._lock:
+            self._attempts.pop(str(client_id or "unknown")[:256], None)
+
+
 class ReactGuiServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+    block_on_close = False
+    request_queue_size = 32
+
     def __init__(
         self,
         server_address: tuple[str, int],
@@ -3422,6 +3549,9 @@ class ReactGuiServer(ThreadingHTTPServer):
         self.api_token = token
         self.config_path = config_path
         self.frontend_dir = frontend_dir
+        # Static files are a deployment-time input. Build the immutable catalog
+        # before serving requests so URL parsing never performs filesystem work.
+        self.static_files = ReactGuiHandler._static_file_catalog()
         self.adapter_registry = adapter_registry or build_default_registry()
         default_origins = {
             f"http://{self.bind_host}:{self.server_address[1]}",
@@ -3443,10 +3573,72 @@ class ReactGuiServer(ThreadingHTTPServer):
             "last_polled_at": None,
             "last_message": "Not polled yet.",
         }
+        self.http_metrics = HttpRequestMetrics()
+        self.auth_failure_limiter = AuthFailureLimiter()
 
 
 class ReactGuiHandler(BaseHTTPRequestHandler):
     server_version = "PredictionMarketReactGui/0.1"
+    _security_headers = (
+        (
+            "Content-Security-Policy",
+            "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; "
+            "form-action 'self'; connect-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self'",
+        ),
+        ("X-Content-Type-Options", "nosniff"),
+        ("X-Frame-Options", "DENY"),
+        ("Referrer-Policy", "no-referrer"),
+        ("Permissions-Policy", "camera=(), geolocation=(), microphone=(), payment=(), usb=()"),
+        ("Cross-Origin-Opener-Policy", "same-origin"),
+    )
+
+    def setup(self) -> None:
+        """Bound each client connection so incomplete requests cannot pin worker threads."""
+        super().setup()
+        self.connection.settimeout(HTTP_CONNECTION_TIMEOUT_SECONDS)
+
+    def version_string(self) -> str:
+        """Do not disclose the Python runtime version in HTTP responses."""
+        return "MarketSentinel"
+
+    def end_headers(self) -> None:
+        """Apply the browser baseline to every success, error, and preflight response."""
+        for name, value in self._security_headers:
+            self.send_header(name, value)
+        super().end_headers()
+
+    def handle_one_request(self) -> None:
+        """Emit one safe structured log event and one aggregate metric per request."""
+        started_at = time.monotonic()
+        self._request_id = secrets.token_hex(12)
+        self._response_status: Optional[int] = None
+        try:
+            super().handle_one_request()
+        finally:
+            method = str(getattr(self, "command", "") or "").upper()
+            if method:
+                status = self._response_status if self._response_status is not None else HTTPStatus.INTERNAL_SERVER_ERROR
+                duration_seconds = time.monotonic() - started_at
+                self.app_server.http_metrics.record(method, int(status), duration_seconds)
+                raw_path = str(getattr(self, "path", "") or "")
+                path = urlparse(raw_path).path[:512] or "/"
+                event = {
+                    "event": "http_request",
+                    "request_id": self._request_id,
+                    "method": method,
+                    "path": path,
+                    "status": int(status),
+                    "duration_ms": round(max(0.0, duration_seconds) * 1000, 3),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                print(json.dumps(event, sort_keys=True, separators=(",", ":")), flush=True)
+
+    def send_response(self, code: int, message: Optional[str] = None) -> None:
+        self._response_status = int(code)
+        super().send_response(code, message)
+        request_id = getattr(self, "_request_id", "")
+        if request_id:
+            self.send_header("X-Request-ID", request_id)
 
     def do_OPTIONS(self) -> None:
         if not self._origin_is_allowed():
@@ -3460,6 +3652,13 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         if not self._require_authorized_request():
             return
         parsed = urlparse(self.path)
+        if parsed.path == "/metrics":
+            self._send_text(
+                HTTPStatus.OK,
+                self.app_server.http_metrics.prometheus_text(),
+                content_type="text/plain; version=0.0.4; charset=utf-8",
+            )
+            return
         if parsed.path.startswith("/api/"):
             self._handle_api_get(parsed.path, parsed.query)
             return
@@ -3481,7 +3680,8 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self._handle_mutation("DELETE")
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        print(f"[web-gui] {self.address_string()} - {fmt % args}")
+        # handle_one_request emits a structured, query-string-free event instead.
+        return None
 
     @property
     def app_server(self) -> ReactGuiServer:
@@ -3508,8 +3708,20 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         authorization = str(self.headers.get("Authorization") or "").strip()
         if authorization.lower().startswith("bearer "):
             presented = authorization[7:].strip()
+        client_id = str(self.client_address[0] or "unknown")
         if hmac.compare_digest(presented, expected):
+            self.app_server.auth_failure_limiter.clear(client_id)
             return True
+        retry_after = self.app_server.auth_failure_limiter.record_failure(client_id)
+        if retry_after is not None:
+            self._send_error(
+                HTTPStatus.TOO_MANY_REQUESTS,
+                "api_token_rate_limited",
+                "Too many invalid API token attempts; retry later.",
+                {"retry_after_seconds": retry_after},
+                retry_after_seconds=retry_after,
+            )
+            return False
         self._send_error(HTTPStatus.UNAUTHORIZED, "api_token_required", "A valid API token is required for this server.")
         return False
 
@@ -4135,9 +4347,9 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self._send_error(HTTPStatus.NOT_FOUND, "not_found", "Unknown API route.")
 
     def _serve_static(self, raw_path: str) -> None:
-        frontend_dir = self.app_server.frontend_dir
-        index = frontend_dir / "index.html"
-        if not index.exists():
+        static_files = self.app_server.static_files
+        index = self._resolve_static_path(static_files, "/")
+        if index is None or not index.is_file():
             self._send_error(
                 HTTPStatus.NOT_FOUND,
                 "react_build_missing",
@@ -4152,35 +4364,99 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             )
             return
 
-        target = self._resolve_static_path(frontend_dir, raw_path)
+        target = self._resolve_static_path(static_files, raw_path)
         if target is None or not target.exists() or not target.is_file():
             target = index
+            relative_path = "index.html"
+        elif target.parent.name == "assets":
+            relative_path = f"assets/{target.name}"
+        else:
+            relative_path = target.name
 
         content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         data = target.read_bytes()
         self.send_response(HTTPStatus.OK)
         self._send_cors_headers()
         self.send_header("Content-Type", content_type)
-        self.send_header("Cache-Control", static_cache_control(target, frontend_dir))
+        self.send_header("Cache-Control", static_cache_control(relative_path))
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
 
-    def _resolve_static_path(self, frontend_dir: Path, raw_path: str) -> Optional[Path]:
+    def _resolve_static_path(self, static_files: Mapping[str, Path], raw_path: str) -> Optional[Path]:
         path = unquote(raw_path.split("?", 1)[0])
+        # A backslash is a path separator on Windows but not POSIX. Reject it on
+        # every platform instead of allowing platform-dependent interpretation.
+        if "\\" in path:
+            return None
         if path in {"", "/"}:
-            return frontend_dir / "index.html"
-        normalized = posixpath.normpath(path.lstrip("/"))
+            normalized = "index.html"
+        else:
+            normalized = posixpath.normpath(path.lstrip("/"))
         if normalized.startswith("../") or normalized == "..":
             return None
-        return frontend_dir / normalized
+        parts = normalized.split("/")
+        if len(parts) == 1:
+            relative_path = parts[0]
+        elif len(parts) == 2 and parts[0] == "assets":
+            relative_path = f"assets/{parts[1]}"
+        else:
+            return None
+        if not STATIC_FRONTEND_FILENAME_RE.fullmatch(parts[-1]):
+            return None
 
-    def _send_json(self, status: int, payload: Dict[str, Any]) -> None:
+        # Look up a URL key in a catalog built only from the trusted frontend
+        # directory.  No request value is used to construct a filesystem path.
+        return static_files.get(relative_path)
+
+    @staticmethod
+    def _static_file_catalog() -> Dict[str, Path]:
+        """Return the supported static files beneath a trusted build directory."""
+        try:
+            root = DEFAULT_FRONTEND_DIR.resolve()
+        except (OSError, RuntimeError, ValueError):
+            return {}
+        if not root.is_dir():
+            return {}
+
+        catalog: Dict[str, Path] = {}
+
+        def add_file(relative_path: str, candidate: Path) -> None:
+            try:
+                target = candidate.resolve()
+                target.relative_to(root)
+            except (OSError, RuntimeError, ValueError):
+                return
+            if target.is_file():
+                catalog[relative_path] = target
+
+        add_file("index.html", root / "index.html")
+        try:
+            root_entries = tuple(root.iterdir())
+        except OSError:
+            return catalog
+        for candidate in root_entries:
+            if candidate.name != "index.html" and STATIC_FRONTEND_FILENAME_RE.fullmatch(candidate.name):
+                add_file(candidate.name, candidate)
+
+        assets_dir = root / "assets"
+        try:
+            asset_entries = tuple(assets_dir.iterdir()) if assets_dir.is_dir() else ()
+        except OSError:
+            return catalog
+        for candidate in asset_entries:
+            if STATIC_FRONTEND_FILENAME_RE.fullmatch(candidate.name):
+                add_file(f"assets/{candidate.name}", candidate)
+        return catalog
+
+    def _send_json(self, status: int, payload: Dict[str, Any], *, retry_after_seconds: Optional[int] = None) -> None:
         data = _json_bytes(payload)
         self.send_response(status)
         self._send_cors_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
+        if retry_after_seconds is not None:
+            self.send_header("Retry-After", str(max(1, int(retry_after_seconds))))
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Connection", "close")
         self.end_headers()
@@ -4210,8 +4486,14 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         code: str,
         message: str,
         details: Optional[Mapping[str, Any]] = None,
+        *,
+        retry_after_seconds: Optional[int] = None,
     ) -> None:
-        self._send_json(status, api_error_payload(status, code, message, details))
+        self._send_json(
+            status,
+            api_error_payload(status, code, message, details),
+            retry_after_seconds=retry_after_seconds,
+        )
 
     def _send_cors_headers(self) -> None:
         origin = str(self.headers.get("Origin") or "").strip().rstrip("/")
@@ -4220,6 +4502,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, PATCH, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Market-Sentinel-Token")
+        self.send_header("Access-Control-Expose-Headers", "X-Request-ID")
 
 
 def is_loopback_host(host: str) -> bool:
@@ -4236,12 +4519,12 @@ def run_server(
     host: str,
     port: int,
     config_path: Path,
-    frontend_dir: Path,
     *,
     api_token: str = "",
     allow_remote: bool = False,
     allowed_origins: Optional[Sequence[str]] = None,
 ) -> None:
+    frontend_dir = DEFAULT_FRONTEND_DIR
     if not is_loopback_host(host) and not allow_remote:
         raise ValueError(
             "Refusing a non-loopback bind without --allow-remote. Keep the default loopback bind and use a TLS reverse proxy."
@@ -4276,7 +4559,6 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
-    parser.add_argument("--frontend-dir", type=Path, default=DEFAULT_FRONTEND_DIR)
     parser.add_argument(
         "--api-token",
         default=os.environ.get("MARKET_SENTINEL_API_TOKEN", ""),
@@ -4298,7 +4580,6 @@ def main() -> None:
         args.host,
         args.port,
         args.config,
-        args.frontend_dir,
         api_token=args.api_token,
         allow_remote=args.allow_remote,
         allowed_origins=configured_allowed_origins(args.allow_origin),

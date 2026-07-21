@@ -226,13 +226,13 @@ class AdapterFoundationTests(unittest.TestCase):
             adapter = registry.create(market_id)
 
             operations = (
-                ("event_listing", lambda: adapter.list_events()),
-                ("event_listing", lambda: adapter.list_contracts("event-1")),
-                ("price_reading", lambda: adapter.get_price("contract-1")),
-                ("orderbook_reading", lambda: adapter.get_orderbook("contract-1")),
-                ("paper_trading", lambda: adapter.place_paper_order(order)),
-                ("live_trading", lambda: adapter.place_live_order(order)),
-                ("copy_trading", lambda: adapter.copy_trade_from_activity({})),
+                ("event_listing", lambda adapter=adapter: adapter.list_events()),
+                ("event_listing", lambda adapter=adapter: adapter.list_contracts("event-1")),
+                ("price_reading", lambda adapter=adapter: adapter.get_price("contract-1")),
+                ("orderbook_reading", lambda adapter=adapter: adapter.get_orderbook("contract-1")),
+                ("paper_trading", lambda adapter=adapter: adapter.place_paper_order(order)),
+                ("live_trading", lambda adapter=adapter: adapter.place_live_order(order)),
+                ("copy_trading", lambda adapter=adapter: adapter.copy_trade_from_activity({})),
             )
 
             for feature, operation in operations:

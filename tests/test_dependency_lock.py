@@ -48,12 +48,34 @@ class DependencyLockTests(unittest.TestCase):
         lock = (ROOT / "requirements-test.lock").read_text(encoding="utf-8")
         self.assertEqual(
             [],
-            lock_issues(lock, ["requests>=2.31.0", "py-clob-client>=0.34.0", "pytest>=8.0", "coverage[toml]>=7.6"]),
+            lock_issues(
+                lock,
+                ["requests>=2.31.0", "py-clob-client>=0.34.0", "pytest>=8.0", "coverage[toml]>=7.6", "ruff==0.14.13"],
+            ),
         )
 
     def test_live_lock_covers_authenticated_clob_sdk_dependencies(self) -> None:
         lock = (ROOT / "requirements-live.lock").read_text(encoding="utf-8")
         self.assertEqual([], lock_issues(lock, ["requests>=2.31.0", "py-clob-client>=0.34.0"]))
+
+    def test_security_audit_lock_is_hash_protected(self) -> None:
+        source = (ROOT / "requirements-security.txt").read_text(encoding="utf-8")
+        lock = (ROOT / "requirements-security.lock").read_text(encoding="utf-8")
+        self.assertEqual("pip-audit==2.10.1\n", source)
+        self.assertEqual([], lock_issues(lock, ["pip-audit==2.10.1"]))
+
+    def test_bootstrap_pip_lock_is_hash_protected(self) -> None:
+        source = (ROOT / "requirements-bootstrap.txt").read_text(encoding="utf-8")
+        lock = (ROOT / "requirements-bootstrap.lock").read_text(encoding="utf-8")
+        self.assertEqual("pip==26.1.2\n", source)
+        self.assertEqual([], lock_issues(lock, ["pip==26.1.2"]))
+
+    def test_standalone_lock_verifier_covers_security_audit_lock(self) -> None:
+        verifier = (ROOT / "scripts" / "verify_dependency_lock.py").read_text(encoding="utf-8")
+        self.assertIn("SECURITY_LOCK_PATH", verifier)
+        self.assertIn("SECURITY_REQUIREMENTS_PATH", verifier)
+        self.assertIn("BOOTSTRAP_LOCK_PATH", verifier)
+        self.assertIn("BOOTSTRAP_REQUIREMENTS_PATH", verifier)
 
     def test_lock_validation_rejects_unhashed_or_missing_direct_dependency(self) -> None:
         lock = "requests==2.0.0\n"

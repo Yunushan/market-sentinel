@@ -13,11 +13,7 @@ from .auth_readiness import (
     redacted_address,
 )
 from .clob_auth import REQUIRED_L2_HEADERS
-from .live_verification import (
-    ABSOLUTE_MAX_VERIFY_NOTIONAL,
-    ABSOLUTE_MAX_VERIFY_SIZE,
-    CONFIRM_LIVE_ORDER_CANCEL,
-)
+from .live_verification import CONFIRM_LIVE_ORDER_CANCEL
 from .ws_user import build_user_subscription
 
 

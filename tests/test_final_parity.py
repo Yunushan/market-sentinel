@@ -152,7 +152,7 @@ class FinalParityTests(unittest.TestCase):
         self.assertIn('APP_TITLE = "MarketSentinel"', app_source)
         self.assertIn('background=[("active", tab_hover_bg), ("selected", tab_bg)]', app_source)
         self.assertIn("iconbitmap(default=str(icon_path))", app_source)
-        self.assertIn("run_server(parsed.host, parsed.port, parsed.config, parsed.frontend_dir)", app_source)
+        self.assertIn("run_server(parsed.host, parsed.port, parsed.config)", app_source)
         self.assertIn("PyInstaller", build_source)
         self.assertIn('copy_file(ROOT / "assets" / "marketsentinel.ico"', build_source)
         self.assertIn('copy_file(ROOT / "marketsentinel.png"', build_source)
