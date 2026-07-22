@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import io
+import json
 import queue
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from contextlib import redirect_stdout
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from unittest.mock import patch
@@ -511,6 +514,49 @@ class AppLogicTests(unittest.TestCase):
             self.assertEqual(main([]), 1)
 
         show_error.assert_called_once_with("MarketSentinel configuration error", str(error))
+
+    def test_main_smoke_test_emits_machine_readable_payload(self) -> None:
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            self.assertEqual(main(["--smoke-test"]), 0)
+
+        payload = json.loads(output.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["tkinter_base"])
+        self.assertEqual(payload["app_class"], "App")
+
+    def test_main_gui_smoke_test_reflects_lifecycle_status(self) -> None:
+        outcomes = (({"ok": True, "checks": []}, 0), ({"ok": False, "checks": []}, 1))
+        for payload, expected_exit_code in outcomes:
+            with self.subTest(payload=payload):
+                output = io.StringIO()
+                with (
+                    patch("app.tkinter_gui_lifecycle_smoke_payload", return_value=payload),
+                    redirect_stdout(output),
+                ):
+                    self.assertEqual(main(["--gui-smoke-test"]), expected_exit_code)
+
+                self.assertEqual(json.loads(output.getvalue()), payload)
+
+    def test_main_web_gui_passes_explicit_server_arguments(self) -> None:
+        with patch("web_api.run_server") as run_server:
+            self.assertEqual(
+                main(
+                    [
+                        "--web-gui",
+                        "--host",
+                        "127.0.0.1",
+                        "--port",
+                        "8766",
+                        "--config",
+                        "custom-config.json",
+                    ]
+                ),
+                0,
+            )
+
+        run_server.assert_called_once_with("127.0.0.1", 8766, Path("custom-config.json"))
 
     def test_slug_and_float_helpers(self) -> None:
         self.assertEqual(
