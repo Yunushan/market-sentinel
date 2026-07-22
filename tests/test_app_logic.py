@@ -402,6 +402,39 @@ class AppLogicTests(unittest.TestCase):
                 self.assertEqual(application_resource_roots()[0], package_root.resolve())
                 self.assertTrue(tkinter_smoke_payload()["icon_available"])
 
+    def test_release_asset_helpers_prefer_packaged_icons_and_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            package_root = Path(tmp) / "market-sentinel-v1.0.12-win-x64"
+            source_root = Path(tmp) / "source-checkout"
+            package_icons = package_root / "assets" / "icons"
+            source_icons = source_root / "assets" / "icons"
+            package_icons.mkdir(parents=True)
+            source_icons.mkdir(parents=True)
+            package_icon = package_root / "assets" / "marketsentinel.ico"
+            package_icon.write_bytes(b"ico")
+            package_png = package_icons / "marketsentinel-64.png"
+            package_png.write_bytes(b"png")
+            (source_root / "assets" / "marketsentinel.png").write_bytes(b"fallback-png")
+            (source_icons / "marketsentinel-256.png").write_bytes(b"source-png")
+            package_requirements = package_root / "requirements.txt"
+            package_requirements.write_text("requests==2.32.3\n", encoding="utf-8")
+            package_pyproject = package_root / "pyproject.toml"
+            package_pyproject.write_text("[project]\nname = 'market-sentinel'\n", encoding="utf-8")
+
+            class ReleaseAssetHarness:
+                def _resource_roots(self) -> list[Path]:
+                    return [package_root, source_root]
+
+            harness = ReleaseAssetHarness()
+
+            self.assertEqual(App._icon_path(harness), package_icon)
+            self.assertEqual(
+                App._icon_png_paths(harness),
+                [package_png, source_icons / "marketsentinel-256.png"],
+            )
+            self.assertEqual(App._requirements_path(harness), package_requirements)
+            self.assertEqual(App._pyproject_path(harness), package_pyproject)
+
     def test_gui_lifecycle_smoke_constructs_widget_contract_without_workers(self) -> None:
         expected_tabs = [
             "Markets & Alerts",
