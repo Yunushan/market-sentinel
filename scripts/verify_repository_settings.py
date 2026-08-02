@@ -8,6 +8,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+try:
+    import truststore
+except ImportError:  # pragma: no cover - optional for minimal standalone use
+    truststore = None
+
 
 API_VERSION = "2026-03-10"
 DEFAULT_API_URL = "https://api.github.com"
@@ -27,10 +32,21 @@ REQUIRED_RELEASE_SECRETS = frozenset(
     }
 )
 JsonRequest = Callable[[str, str, float], Any]
+_TRUSTSTORE_INJECTED = False
+
+
+def _ensure_system_trust_store() -> None:
+    """Use the host trust store when the optional locked dependency is available."""
+    global _TRUSTSTORE_INJECTED
+    if _TRUSTSTORE_INJECTED or truststore is None:
+        return
+    truststore.inject_into_ssl()
+    _TRUSTSTORE_INJECTED = True
 
 
 def _request_json(path: str, token: str, timeout: float, api_url: str = DEFAULT_API_URL) -> Any:
     """Read a GitHub API document without including token material in errors."""
+    _ensure_system_trust_store()
     base = api_url.rstrip("/")
     headers = {
         "Accept": "application/vnd.github+json",

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
+import scripts.verify_repository_settings as repository_settings
 from scripts.verify_repository_settings import (
     REQUIRED_CHECKS,
     check_branch_protection,
@@ -31,6 +33,17 @@ def _passing_environment() -> dict:
 
 
 class RepositorySettingsTests(unittest.TestCase):
+    def test_request_transport_uses_system_trust_store_when_available(self) -> None:
+        previous = repository_settings._TRUSTSTORE_INJECTED
+        try:
+            repository_settings._TRUSTSTORE_INJECTED = False
+            with patch.object(repository_settings, "truststore") as truststore:
+                repository_settings._ensure_system_trust_store()
+                truststore.inject_into_ssl.assert_called_once_with()
+                self.assertTrue(repository_settings._TRUSTSTORE_INJECTED)
+        finally:
+            repository_settings._TRUSTSTORE_INJECTED = previous
+
     def test_branch_protection_requires_all_documented_controls(self) -> None:
         checks = check_branch_protection(_passing_protection())
         self.assertTrue(all(check["status"] == "pass" for check in checks))
