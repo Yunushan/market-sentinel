@@ -105,6 +105,33 @@ def source_identity(root: Path = PROJECT_ROOT) -> dict[str, str]:
     }
 
 
+def check_source_revision(
+    expected_revision: str,
+    source: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Require deployment evidence to match the intended release commit."""
+    expected = expected_revision.strip().lower()
+    if not COMMIT_SHA.fullmatch(expected):
+        return {
+            "name": "source_revision",
+            "status": "fail",
+            "detail": "--expected-source-revision must be a lowercase 40-character Git commit",
+        }
+    identity = source if source is not None else source_identity()
+    actual = identity.get("git_revision", "").strip().lower()
+    if actual != expected:
+        return {
+            "name": "source_revision",
+            "status": "fail",
+            "detail": f"deployed Git revision is {actual or 'unavailable'}, expected {expected}",
+        }
+    return {
+        "name": "source_revision",
+        "status": "pass",
+        "detail": f"deployed Git revision matches {expected}",
+    }
+
+
 def _systemd_timestamp_seconds(value: str) -> float:
     normalized = value.strip()
     for pattern in ("%a %Y-%m-%d %H:%M:%S UTC", "%a %Y-%m-%d %H:%M:%S.%f UTC"):
@@ -358,6 +385,11 @@ def main() -> int:
     parser.add_argument("--loopback-metrics-url", default="http://127.0.0.1:8765/metrics")
     parser.add_argument("--token", default=os.environ.get("MARKET_SENTINEL_API_TOKEN", ""))
     parser.add_argument("--expected-version", default="")
+    parser.add_argument(
+        "--expected-source-revision",
+        default="",
+        help="Required lowercase 40-character Git commit for the deployed release source.",
+    )
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument(
         "--skip-systemd",
@@ -380,7 +412,10 @@ def main() -> int:
 
     checks: list[dict[str, Any]] = []
     expected_version = args.expected_version.strip()
+    expected_source_revision = args.expected_source_revision.strip().lower()
+    missing_identity = False
     if not expected_version:
+        missing_identity = True
         checks.append(
             {
                 "name": "expected_version",
@@ -388,8 +423,18 @@ def main() -> int:
                 "detail": "--expected-version is required to prove the deployed release identity",
             }
         )
-    else:
+    if not expected_source_revision:
+        missing_identity = True
+        checks.append(
+            {
+                "name": "expected_source_revision",
+                "status": "fail",
+                "detail": "--expected-source-revision is required to prove the deployed source identity",
+            }
+        )
+    if not missing_identity:
         try:
+            checks.append(check_source_revision(expected_source_revision))
             if not args.skip_systemd:
                 checks.extend(check_systemd())
                 checks.extend(check_filesystem_permissions())

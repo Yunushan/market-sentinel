@@ -163,15 +163,21 @@ It also requires a successful backup completed within the last 26 hours; enable
 the timer and run the service once before collecting deployment evidence.
 `--expected-version` is required: it prevents a healthy but stale deployment
 from being accepted as release evidence.
+`--expected-source-revision` is also required: it prevents a healthy service
+from being accepted when the checkout does not match the intended release
+commit. Resolve it from the trusted release tag before running the verifier.
 It does not place orders, contact market APIs, or enable any live feature.
 
 ```bash
 export MARKET_SENTINEL_PUBLIC_BASIC_USER="operator"
 export MARKET_SENTINEL_PUBLIC_BASIC_PASSWORD="the-existing-caddy-password"
+RELEASE_VERSION="<RELEASE_VERSION>"
+EXPECTED_SOURCE_REVISION="$(git -C /opt/market-sentinel rev-list -n1 "v${RELEASE_VERSION}")"
 
 sudo --preserve-env=MARKET_SENTINEL_PUBLIC_BASIC_USER,MARKET_SENTINEL_PUBLIC_BASIC_PASSWORD \
   /opt/market-sentinel/.venv/bin/python /opt/market-sentinel/scripts/verify_production_deployment.py \
-  --expected-version <RELEASE_VERSION> \
+  --expected-version "${RELEASE_VERSION}" \
+  --expected-source-revision "${EXPECTED_SOURCE_REVISION}" \
   --public-url https://analytics.example.com \
   --output /var/lib/market-sentinel-deployment-evidence/deployment-evidence-<RELEASE_VERSION>.json
 ```
@@ -186,8 +192,8 @@ uses `sudo` because it verifies the root-owned service environment file; it
 preserves only the two explicitly named Basic Auth variables for the public
 proxy check. For a
 loopback-only staging host, omit `--public-url`; the script will still validate
-the local service and timer, but retain `--expected-version` for the deployed
-release.
+the local service and timer, but retain both expected identity arguments for the
+deployed release.
 
 For a non-Linux or isolated local loopback smoke test only, add
 `--skip-systemd`. This intentionally skips Linux systemd and filesystem
