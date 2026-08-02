@@ -22,6 +22,7 @@ from scripts.verify_production_deployment import (
     check_loopback,
     check_loopback_metrics,
     check_public_proxy,
+    check_source_revision,
     check_systemd,
     _fsync_parent_directory,
     build_evidence,
@@ -243,6 +244,19 @@ class ProductionDeploymentTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "missing required metrics"):
                 check_loopback_metrics("http://127.0.0.1:8765/metrics", "", 1.0)
 
+    def test_source_revision_requires_an_exact_release_commit(self) -> None:
+        revision = "a" * 40
+        self.assertEqual(
+            "pass",
+            check_source_revision(revision, {"git_revision": revision})["status"],
+        )
+        mismatch = check_source_revision(revision, {"git_revision": "b" * 40})
+        self.assertEqual("fail", mismatch["status"])
+        self.assertIn("expected", mismatch["detail"])
+        invalid = check_source_revision("not-a-commit", {"git_revision": revision})
+        self.assertEqual("fail", invalid["status"])
+        self.assertIn("40-character Git commit", invalid["detail"])
+
     def test_evidence_output_is_atomic_json_with_private_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "evidence" / "deployment.json"
@@ -295,6 +309,8 @@ class ProductionDeploymentTests(unittest.TestCase):
                     "--skip-systemd",
                     "--expected-version",
                     "1.0.11",
+                    "--expected-source-revision",
+                    "a" * 40,
                     "--output",
                     "deployment.json",
                 ],
@@ -340,8 +356,11 @@ class ProductionDeploymentTests(unittest.TestCase):
                     "--skip-systemd",
                     "--expected-version",
                     "1.0.11",
+                    "--expected-source-revision",
+                    "a" * 40,
                 ],
             ),
+            patch("scripts.verify_production_deployment.check_source_revision", return_value={"name": "source_revision", "status": "pass"}) as source_revision_check,
             patch("scripts.verify_production_deployment.check_systemd") as systemd_check,
             patch("scripts.verify_production_deployment.check_filesystem_permissions") as filesystem_check,
             patch("scripts.verify_production_deployment.check_loopback", return_value={"name": "loopback_health", "status": "pass"}),
@@ -352,8 +371,28 @@ class ProductionDeploymentTests(unittest.TestCase):
 
         evidence = json.loads(stdout.getvalue())
         self.assertEqual(evidence["status"], "ok")
+        source_revision_check.assert_called_once_with("a" * 40)
         systemd_check.assert_not_called()
         filesystem_check.assert_not_called()
+
+    def test_verifier_requires_an_expected_source_revision(self) -> None:
+        stdout = io.StringIO()
+        with (
+            patch.object(
+                sys,
+                "argv",
+                ["verify_production_deployment.py", "--skip-systemd", "--expected-version", "1.0.11"],
+            ),
+            patch("scripts.verify_production_deployment.check_loopback") as check_loopback_mock,
+            contextlib.redirect_stdout(stdout),
+        ):
+            self.assertEqual(main(), 1)
+
+        evidence = json.loads(stdout.getvalue())
+        self.assertEqual(evidence["status"], "failed")
+        self.assertEqual(evidence["checks"][0]["name"], "expected_source_revision")
+        self.assertIn("--expected-source-revision is required", evidence["checks"][0]["detail"])
+        check_loopback_mock.assert_not_called()
 
     def test_public_proxy_requires_https_security_headers_and_no_store(self) -> None:
         headers = {
