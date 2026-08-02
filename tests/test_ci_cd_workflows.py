@@ -116,8 +116,13 @@ class CiCdWorkflowTests(unittest.TestCase):
 
         package = text.split("  package:\n", 1)[1]
         self.assertIn("- tkinter-gui-lifecycle", package)
+        self.assertIn("- windows-10-self-hosted", package)
         self.assertIn("TKINTER_GUI_RESULT: ${{ needs.tkinter-gui-lifecycle.result }}", package)
         self.assertIn('"tkinter-gui-lifecycle:${TKINTER_GUI_RESULT}"', package)
+        self.assertIn("WINDOWS_10_RESULT: ${{ needs.windows-10-self-hosted.result }}", package)
+        self.assertIn("WINDOWS_10_ENABLED: ${{ vars.ENABLE_WINDOWS_10_SELF_HOSTED }}", package)
+        self.assertIn('if [ "${WINDOWS_10_ENABLED}" = "true" ]', package)
+        self.assertIn('"Required opt-in CI job windows-10-self-hosted finished with ${WINDOWS_10_RESULT}."', package)
 
     def test_release_workflow_publishes_checked_and_checksummed_assets(self) -> None:
         text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
