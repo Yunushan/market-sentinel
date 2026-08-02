@@ -17,6 +17,7 @@ REQUIRED_CHECKS = frozenset(
         "CodeQL",
         "Dependency review",
         "Frontend dependency audit",
+        "Python dependency audit",
     }
 )
 REQUIRED_RELEASE_SECRETS = frozenset(

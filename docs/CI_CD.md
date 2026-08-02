@@ -182,7 +182,7 @@ The Windows launchers use `data/config.json` when the package folder is writable
 
 Recommended GitHub settings:
 
-- Require the `CI / Python ...` matrix, `CI / React build`, `Security / CodeQL`, and `Security / Dependency review` checks before merging.
+- Require the `Python package build`, `Python dependency audit`, `CodeQL`, `Dependency review`, and `Frontend dependency audit` checks before merging. The package gate aggregates the Python/OS matrix, React build, mobile-web smoke, enterprise Linux checks, Windows 11, and real Tkinter GUI lifecycle job.
 - Enable GitHub dependency graph; the dependency review job fails closed without it.
 - Keep GitHub Actions workflow permissions as read-only by default.
 - Create a protected `release` environment if production releases should require approval.

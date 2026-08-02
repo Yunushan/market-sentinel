@@ -114,6 +114,11 @@ class CiCdWorkflowTests(unittest.TestCase):
             ),
         )
 
+        package = text.split("  package:\n", 1)[1]
+        self.assertIn("- tkinter-gui-lifecycle", package)
+        self.assertIn("TKINTER_GUI_RESULT: ${{ needs.tkinter-gui-lifecycle.result }}", package)
+        self.assertIn('"tkinter-gui-lifecycle:${TKINTER_GUI_RESULT}"', package)
+
     def test_release_workflow_publishes_checked_and_checksummed_assets(self) -> None:
         text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 
@@ -245,6 +250,7 @@ class CiCdWorkflowTests(unittest.TestCase):
             "npm ci --ignore-scripts",
             "npm audit --omit=dev --audit-level=high",
             "Audit all locked Python dependency graphs",
+            "name: Python dependency audit",
             "requirements-bootstrap.lock",
             "requirements-security.lock",
             "pip_audit --requirement requirements.lock --progress-spinner off",
