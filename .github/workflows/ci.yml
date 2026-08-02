@@ -403,6 +403,7 @@ jobs:
       - future-python
       - enterprise-linux
       - windows-11
+      - windows-10-self-hosted
       - frontend
       - mobile-web
       - tkinter-gui-lifecycle
@@ -413,6 +414,8 @@ jobs:
           FUTURE_PYTHON_RESULT: ${{ needs.future-python.result }}
           ENTERPRISE_LINUX_RESULT: ${{ needs.enterprise-linux.result }}
           WINDOWS_11_RESULT: ${{ needs.windows-11.result }}
+          WINDOWS_10_RESULT: ${{ needs.windows-10-self-hosted.result }}
+          WINDOWS_10_ENABLED: ${{ vars.ENABLE_WINDOWS_10_SELF_HOSTED }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           MOBILE_WEB_RESULT: ${{ needs.mobile-web.result }}
           TKINTER_GUI_RESULT: ${{ needs.tkinter-gui-lifecycle.result }}
@@ -434,6 +437,10 @@ jobs:
               failed=1
             fi
           done
+          if [ "${WINDOWS_10_ENABLED}" = "true" ] && [ "${WINDOWS_10_RESULT}" != "success" ]; then
+            echo "Required opt-in CI job windows-10-self-hosted finished with ${WINDOWS_10_RESULT}."
+            failed=1
+          fi
           exit "${failed}"
 
       - name: Checkout
