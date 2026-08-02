@@ -8,9 +8,10 @@ must enable them before treating a release as production-ready.
 Protect `main` with:
 
 1. Required successful `Python package build`, `CodeQL`, `Dependency review`,
-   and `Frontend dependency audit` checks. `Python package build` is the
-   aggregate CI gate: it waits for the supported Python/OS matrix, enterprise
-   Linux containers, Windows 11, React build, and mobile-web smoke jobs.
+   `Frontend dependency audit`, and `Python dependency audit` checks. `Python
+   package build` is the aggregate CI gate: it waits for the supported
+   Python/OS matrix, enterprise Linux containers, Windows 11, React build,
+   mobile-web smoke, and real Tkinter GUI lifecycle jobs.
 2. No force pushes, no branch deletion, and no direct administrator bypass for
    normal releases.
 3. Required conversation resolution and linear history.

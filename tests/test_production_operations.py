@@ -55,6 +55,7 @@ class ProductionOperationsTests(unittest.TestCase):
         self.assertIn("Team production policy", repository_settings)
         self.assertIn("secret scanning", repository_settings)
         self.assertIn("Python package build", repository_settings)
+        self.assertIn("Python dependency audit", repository_settings)
         self.assertIn("Frontend dependency audit", repository_settings)
         self.assertIn("Release` workflow", repository_settings)
         self.assertIn("MARKET_SENTINEL_ALLOWED_ORIGINS", service_environment)

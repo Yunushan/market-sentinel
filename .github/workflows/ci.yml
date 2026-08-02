@@ -405,6 +405,7 @@ jobs:
       - windows-11
       - frontend
       - mobile-web
+      - tkinter-gui-lifecycle
     steps:
       - name: Enforce required CI jobs
         env:
@@ -414,6 +415,7 @@ jobs:
           WINDOWS_11_RESULT: ${{ needs.windows-11.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           MOBILE_WEB_RESULT: ${{ needs.mobile-web.result }}
+          TKINTER_GUI_RESULT: ${{ needs.tkinter-gui-lifecycle.result }}
         shell: bash
         run: |
           failed=0
@@ -423,7 +425,8 @@ jobs:
             "enterprise-linux:${ENTERPRISE_LINUX_RESULT}" \
             "windows-11:${WINDOWS_11_RESULT}" \
             "frontend:${FRONTEND_RESULT}" \
-            "mobile-web:${MOBILE_WEB_RESULT}"; do
+            "mobile-web:${MOBILE_WEB_RESULT}" \
+            "tkinter-gui-lifecycle:${TKINTER_GUI_RESULT}"; do
             job="${entry%%:*}"
             result="${entry#*:}"
             if [ "${result}" != "success" ]; then
