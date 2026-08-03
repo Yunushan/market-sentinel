@@ -50,7 +50,7 @@ class DependencyLockTests(unittest.TestCase):
             [],
             lock_issues(
                 lock,
-                ["requests>=2.31.0", "py-clob-client>=0.34.0", "pytest>=8.0", "coverage[toml]>=7.6", "ruff==0.14.13"],
+                ["requests>=2.31.0", "py-clob-client>=0.34.0", "pytest>=8.0", "coverage[toml]>=7.6", "ruff==0.16.1"],
             ),
         )
 
