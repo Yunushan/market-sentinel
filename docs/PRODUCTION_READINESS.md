@@ -42,15 +42,36 @@ runbook, browser smoke test, or dry-run transcript.
 ## External Evidence Manifests
 
 External points require a JSON manifest supplied with the corresponding
-option. Every manifest must contain `verified: true`, non-empty `reviewed_by`
-and `reviewed_at` values, and a non-empty `checks` array whose entries all have
-`status` equal to `pass` or `ok`:
+option. Every manifest must contain `schema_version: 1`, the exact
+`evidence_type` for the scorer option that consumes it, a non-empty `source`,
+`verified: true`, non-empty `reviewed_by` and ISO-8601 `reviewed_at` values,
+and a non-empty `checks` array with unique names whose entries all have
+`status` equal to `pass` or `ok`. Tier-specific fields are also validated so a
+deployment, release, platform, or Polymarket report cannot be relabeled to
+award another category.
+
+| Scorer option | Required `evidence_type` | Required identity fields |
+| --- | --- | --- |
+| `--deployment-evidence` | `deployment` | `scope`, `environment`, `expected_version`, `source_revision` |
+| `--platform-ci-evidence` | `platform-ci` | `scope`, `run_id`, `source_revision` |
+| `--platform-evidence` | `platform` | `scope`, `targets` |
+| `--release-environment-evidence` | `release-environment` | `source` |
+| `--release-history-evidence` | `release-history` | `scope`, `tag`, `target_commit` |
+| `--release-evidence` | `release` | `scope`, current `tag`, `target_commit`, `assets` |
+| `--credentialed-evidence` | `credentialed-polymarket` | `scope`, `target_tier=credential_live_verified`, `report_hash` |
+| `--funded-evidence` | `funded-polymarket` | `scope`, `target_tier=funded_live_verified`, `report_hash`, `live_action=true` |
 
 ```json
 {
+  "schema_version": 1,
+  "evidence_type": "platform-ci",
   "verified": true,
   "reviewed_by": "operator-or-reviewer",
   "reviewed_at": "2026-08-03T18:00:00Z",
+  "source": "GitHub Actions run URL or redacted host report",
+  "scope": "hosted-ci",
+  "run_id": 123,
+  "source_revision": "0123456789abcdef0123456789abcdef01234567",
   "checks": [
     {"name": "source_revision", "status": "pass"}
   ]

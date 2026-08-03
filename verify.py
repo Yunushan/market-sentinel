@@ -1248,6 +1248,9 @@ def run_ci_cd_workflow_check() -> None:
             "conservative",
             "Score Model",
             "External Evidence Manifests",
+            "schema_version",
+            "evidence_type",
+            "source_revision",
             "--platform-ci-evidence",
             "--release-environment-evidence",
             "--release-history-evidence",
@@ -1261,6 +1264,9 @@ def run_ci_cd_workflow_check() -> None:
             "--release-history-evidence",
             "--require-100",
             "verified",
+            "schema_version",
+            "evidence_type",
+            "source_revision",
         ),
     }
     for path, expected_fragments in required_files.items():

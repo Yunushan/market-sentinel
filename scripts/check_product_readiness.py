@@ -10,11 +10,18 @@ or funded points are awarded.
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 compatibility.
+    import tomli as tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -164,7 +171,23 @@ def _run_public_live() -> dict[str, Any]:
     return {"status": "pass" if passed else "fail", "command": command, "returncode": result.returncode}
 
 
-def _reviewed_evidence(path_value: str, label: str) -> tuple[bool, str]:
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _project_version() -> str:
+    metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    return str(metadata.get("project", {}).get("version") or "").strip()
+
+
+def _reviewed_evidence(
+    path_value: str,
+    label: str,
+    *,
+    evidence_type: str,
+    required_fields: tuple[str, ...] = (),
+    expected_fields: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
     if not path_value:
         return False, f"Provide reviewed {label} JSON evidence."
     path = Path(path_value).expanduser()
@@ -174,11 +197,51 @@ def _reviewed_evidence(path_value: str, label: str) -> tuple[bool, str]:
         return False, f"{label} evidence is not readable JSON."
     if not isinstance(payload, dict) or payload.get("verified") is not True:
         return False, f"{label} evidence must contain verified=true."
+    if payload.get("schema_version") != 1:
+        return False, f"{label} evidence must contain schema_version=1."
+    if payload.get("evidence_type") != evidence_type:
+        return False, f"{label} evidence must declare evidence_type={evidence_type!r}."
     if not payload.get("reviewed_by") or not payload.get("reviewed_at"):
         return False, f"{label} evidence requires reviewed_by and reviewed_at."
+    if not isinstance(payload["reviewed_by"], str) or "\n" in payload["reviewed_by"]:
+        return False, f"{label} evidence reviewed_by must be a single-line string."
+    if not isinstance(payload["reviewed_at"], str):
+        return False, f"{label} evidence reviewed_at must be an ISO-8601 string."
+    try:
+        datetime.fromisoformat(payload["reviewed_at"].replace("Z", "+00:00"))
+    except ValueError:
+        return False, f"{label} evidence reviewed_at must be valid ISO-8601."
+    if not isinstance(payload.get("source"), str) or not payload["source"].strip():
+        return False, f"{label} evidence requires a non-empty source."
+    missing_fields = [field for field in required_fields if field not in payload or payload[field] in (None, "", [])]
+    if missing_fields:
+        return False, f"{label} evidence is missing required fields: {', '.join(missing_fields)}."
+    for field, expected in (expected_fields or {}).items():
+        if payload.get(field) != expected:
+            return False, f"{label} evidence field {field} must equal {expected!r}."
+    for field in ("source_revision", "target_commit"):
+        if field in payload and (not isinstance(payload[field], str) or not _COMMIT_RE.fullmatch(payload[field])):
+            return False, f"{label} evidence field {field} must be a 40-character commit SHA."
+    if "report_hash" in payload and (
+        not isinstance(payload["report_hash"], str) or not _HASH_RE.fullmatch(payload["report_hash"])
+    ):
+        return False, f"{label} evidence report_hash must be a 64-character SHA-256 value."
+    if "run_id" in payload and (not isinstance(payload["run_id"], int) or payload["run_id"] <= 0):
+        return False, f"{label} evidence run_id must be a positive integer."
+    if "assets" in payload and (not isinstance(payload["assets"], list) or not payload["assets"]):
+        return False, f"{label} evidence assets must be a non-empty list."
+    if "targets" in payload and (not isinstance(payload["targets"], list) or not payload["targets"]):
+        return False, f"{label} evidence targets must be a non-empty list."
+    if evidence_type == "funded-polymarket" and payload.get("live_action") is not True:
+        return False, "funded Polymarket evidence requires live_action=true."
     checks = payload.get("checks")
     if not isinstance(checks, list) or not checks:
         return False, f"{label} evidence requires a non-empty checks list."
+    names = [check.get("name") for check in checks if isinstance(check, dict)]
+    if len(names) != len(checks) or any(not isinstance(name, str) or not name.strip() for name in names):
+        return False, f"{label} evidence checks require non-empty names."
+    if len(set(names)) != len(names):
+        return False, f"{label} evidence checks must have unique names."
     if any(not isinstance(check, dict) or check.get("status") not in {"pass", "ok"} for check in checks):
         return False, f"{label} evidence contains a failed or malformed check."
     return True, f"Reviewed {label} evidence accepted."
@@ -249,7 +312,12 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         else "Security files or local security verification are incomplete.",
         [] if security_ok else ["SECURITY.md, lock files, CI workflow, and a passing local verifier"],
     )
-    settings_ok, settings_detail = _reviewed_evidence(args.repository_settings_evidence, "repository-settings")
+    settings_ok, settings_detail = _reviewed_evidence(
+        args.repository_settings_evidence,
+        "repository-settings",
+        evidence_type="repository-settings",
+        required_fields=("source",),
+    )
     if settings_ok:
         security["earned"] += 1
         security["basis"] += " " + settings_detail
@@ -258,10 +326,24 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
 
     ci_ok = _paths_exist(REQUIRED_CI_FILES)
     release_environment_ok, release_environment_detail = _reviewed_evidence(
-        args.release_environment_evidence, "release-environment"
+        args.release_environment_evidence,
+        "release-environment",
+        evidence_type="release-environment",
+        required_fields=("source",),
     )
-    release_history_ok, release_history_detail = _reviewed_evidence(args.release_history_evidence, "release history")
-    release_ok, release_detail = _reviewed_evidence(args.release_evidence, "release")
+    release_history_ok, release_history_detail = _reviewed_evidence(
+        args.release_history_evidence,
+        "release history",
+        evidence_type="release-history",
+        required_fields=("scope", "tag", "target_commit"),
+    )
+    release_ok, release_detail = _reviewed_evidence(
+        args.release_evidence,
+        "release",
+        evidence_type="release",
+        required_fields=("scope", "tag", "target_commit", "assets"),
+        expected_fields={"tag": f"v{_project_version()}"},
+    )
     ci_cd = _category(
         "ci_cd_release",
         14 if ci_ok else 0,
@@ -287,7 +369,13 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         ci_cd["missing"].append(release_detail)
 
     operations_ok = _paths_exist(REQUIRED_OPERATIONS_FILES)
-    deployment_ok, deployment_detail = _reviewed_evidence(args.deployment_evidence, "deployment")
+    deployment_ok, deployment_detail = _reviewed_evidence(
+        args.deployment_evidence,
+        "deployment",
+        evidence_type="deployment",
+        required_fields=("scope", "environment", "expected_version", "source_revision"),
+        expected_fields={"expected_version": _project_version()},
+    )
     operations = _category(
         "operations_recovery",
         12 if operations_ok else 0,
@@ -303,8 +391,18 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         operations["missing"].append(deployment_detail)
 
     platform_ok = _paths_exist(REQUIRED_PLATFORM_FILES)
-    platform_ci_ok, platform_ci_detail = _reviewed_evidence(args.platform_ci_evidence, "platform CI")
-    platform_evidence_ok, platform_detail = _reviewed_evidence(args.platform_evidence, "platform")
+    platform_ci_ok, platform_ci_detail = _reviewed_evidence(
+        args.platform_ci_evidence,
+        "platform CI",
+        evidence_type="platform-ci",
+        required_fields=("scope", "run_id", "source_revision"),
+    )
+    platform_evidence_ok, platform_detail = _reviewed_evidence(
+        args.platform_evidence,
+        "platform",
+        evidence_type="platform",
+        required_fields=("scope", "targets"),
+    )
     platform = _category(
         "platform_evidence",
         5 if platform_ok else 0,
@@ -326,8 +424,20 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
 
     live_ok = _paths_exist(REQUIRED_LIVE_FILES)
     public_ok = public_result.get("status") == "pass"
-    credentialed_ok, credentialed_detail = _reviewed_evidence(args.credentialed_evidence, "credentialed Polymarket")
-    funded_ok, funded_detail = _reviewed_evidence(args.funded_evidence, "funded Polymarket")
+    credentialed_ok, credentialed_detail = _reviewed_evidence(
+        args.credentialed_evidence,
+        "credentialed Polymarket",
+        evidence_type="credentialed-polymarket",
+        required_fields=("scope", "target_tier", "report_hash"),
+        expected_fields={"target_tier": "credential_live_verified"},
+    )
+    funded_ok, funded_detail = _reviewed_evidence(
+        args.funded_evidence,
+        "funded Polymarket",
+        evidence_type="funded-polymarket",
+        required_fields=("scope", "target_tier", "report_hash", "live_action"),
+        expected_fields={"target_tier": "funded_live_verified"},
+    )
     live = _category(
         "live_acceptance",
         3 if live_ok and public_ok else 0,
