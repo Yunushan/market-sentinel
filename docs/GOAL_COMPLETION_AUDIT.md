@@ -9,7 +9,8 @@ account, jurisdiction, or platform-runner checks have occurred.
 All repository-controlled requirements in the goal are complete. This includes
 the application, adapter catalog, supported or truthful blocked adapters,
 configuration, GUI and CLI paths, documentation, local safety controls, and
-repeatable verification. The user explicitly excluded the external evidence
+repeatable verification, including the conservative readiness scorer described
+in [`PRODUCTION_READINESS.md`](PRODUCTION_READINESS.md). The user explicitly excluded the external evidence
 gates below from this local completion scope. They remain deliberately
 unpromoted and cannot be inferred from local tests or CI configuration.
 
