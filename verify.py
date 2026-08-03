@@ -60,14 +60,14 @@ WORKFLOW_ACTION_PINS = {
         "actions/setup-node": (7, "820762786026740c76f36085b0efc47a31fe5020"),
         "actions/upload-artifact": (7, "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
         "actions/download-artifact": (8, "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"),
-        "actions/attest-build-provenance": (3, "977bb373ede98d70efdf65b84cb5f73e068dcc2a"),
+        "actions/attest-build-provenance": (4, "0f67c3f4856b2e3261c31976d6725780e5e4c373"),
     },
     ".github/workflows/security.yml": {
         "actions/checkout": (7, "3d3c42e5aac5ba805825da76410c181273ba90b1"),
         "actions/setup-python": (7, "5fda3b95a4ea91299a34e894583c3862153e4b97"),
         "actions/dependency-review-action": (5, "a1d282b36b6f3519aa1f3fc636f609c47dddb294"),
-        "github/codeql-action/init": (4, "7188fc363630916deb702c7fdcf4e481b751f97a"),
-        "github/codeql-action/analyze": (4, "7188fc363630916deb702c7fdcf4e481b751f97a"),
+        "github/codeql-action/init": (4, "f205ea1c3313d32999d8d6a48b4f6530d4437b38"),
+        "github/codeql-action/analyze": (4, "f205ea1c3313d32999d8d6a48b4f6530d4437b38"),
     },
 }
 WORKFLOW_ACTION_REF_RE = re.compile(
@@ -1143,7 +1143,7 @@ def run_ci_cd_workflow_check() -> None:
             "sha256sum * > SHA256SUMS.txt",
             "Generate SPDX SBOM",
             "scripts/generate_release_sbom.py",
-            "actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3",
+            "actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1",
             "attestations: write",
             "id-token: write",
             "Verify protected Windows signing configuration",
