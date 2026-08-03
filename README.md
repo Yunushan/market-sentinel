@@ -585,6 +585,22 @@ If `frontend/node_modules` is missing, the normal verifier records frontend buil
 
 ## CI/CD and Releases
 
+For a conservative, reproducible production-readiness score, run:
+
+```bash
+python scripts/check_product_readiness.py \
+  --full-local \
+  --run-public-live \
+  --json
+```
+
+The scorer keeps repository verification separate from real deployment,
+platform, GitHub-settings, credentialed Polymarket, and funded-operation
+evidence. See [`docs/PRODUCTION_READINESS.md`](docs/PRODUCTION_READINESS.md)
+for the 100-point model and reviewed evidence-manifest contract. A green CI
+matrix is not treated as proof that an external runner or production host has
+completed its required checks.
+
 GitHub Actions workflows live under `.github/workflows`:
 - `ci.yml` runs Python verification across Ubuntu, macOS `14`/`15`/`26`, and hosted Windows with Python `3.10` through `3.14`, runs a moving latest stable `3.x` compatibility lane for future Python releases, constructs and closes the real Tkinter widget tree under Ubuntu Xvfb, smoke checks RHEL UBI 8/9/10, a RHEL 7-era manylinux2014 ABI container, Rocky Linux 8/9/10, hosted Windows 11 ARM with Python `3.12` x64 dependency wheels, mobile web profiles for Android 14/15/16 and iOS 15/16/18/26, includes an opt-in self-hosted Windows 10 job gated by `ENABLE_WINDOWS_10_SELF_HOSTED=true`, builds the React frontend with Node.js `24`, and builds Python distributions.
 - `security.yml` runs CodeQL analysis and requires dependency review on pull requests once the repository dependency graph is enabled.
