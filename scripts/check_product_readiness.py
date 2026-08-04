@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,8 @@ except ModuleNotFoundError:  # Python 3.10 compatibility.
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PUBLIC_LIVE_ATTEMPTS = 2
+PUBLIC_LIVE_RETRY_DELAY_SECONDS = 1.0
 
 CATEGORY_WEIGHTS = {
     "architecture_scope": 18,
@@ -147,28 +150,43 @@ def _run_public_live() -> dict[str, Any]:
         "--timeout",
         "15",
     ]
-    try:
-        with tempfile.TemporaryDirectory(prefix="market-sentinel-readiness-") as temporary:
-            report_path = Path(temporary) / "public-live.json"
-            result = subprocess.run(
-                [*command, "--report-file", str(report_path)],
-                cwd=ROOT,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=120,
-            )
-            if result.returncode != 0 or not report_path.is_file():
-                return {"status": "fail", "command": command, "returncode": result.returncode}
-            report = json.loads(report_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
-        return {"status": "fail", "command": command, "detail": type(exc).__name__}
-
-    public_checks = report.get("public_checks", {})
-    passed = bool(report.get("ok")) and bool(public_checks) and all(
-        isinstance(check, dict) and check.get("status") == "ok" for check in public_checks.values()
-    )
-    return {"status": "pass" if passed else "fail", "command": command, "returncode": result.returncode}
+    last_result: dict[str, Any] = {"status": "fail", "command": command}
+    for attempt in range(1, PUBLIC_LIVE_ATTEMPTS + 1):
+        try:
+            with tempfile.TemporaryDirectory(prefix="market-sentinel-readiness-") as temporary:
+                report_path = Path(temporary) / "public-live.json"
+                result = subprocess.run(
+                    [*command, "--report-file", str(report_path)],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=120,
+                )
+                if result.returncode == 0 and report_path.is_file():
+                    report = json.loads(report_path.read_text(encoding="utf-8"))
+                    public_checks = report.get("public_checks", {})
+                    passed = bool(report.get("ok")) and bool(public_checks) and all(
+                        isinstance(check, dict) and check.get("status") == "ok" for check in public_checks.values()
+                    )
+                    if passed:
+                        return {
+                            "status": "pass",
+                            "command": command,
+                            "returncode": result.returncode,
+                            "attempt": attempt,
+                        }
+                last_result = {
+                    "status": "fail",
+                    "command": command,
+                    "returncode": result.returncode,
+                    "attempt": attempt,
+                }
+        except (OSError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
+            last_result = {"status": "fail", "command": command, "detail": type(exc).__name__, "attempt": attempt}
+        if attempt < PUBLIC_LIVE_ATTEMPTS:
+            time.sleep(PUBLIC_LIVE_RETRY_DELAY_SECONDS)
+    return last_result
 
 
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")

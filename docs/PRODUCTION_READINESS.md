@@ -20,6 +20,11 @@ python scripts/check_product_readiness.py \
 --frontend-live-smoke`. The public probe never derives credentials, opens the
 authenticated user stream, places orders, or performs funded actions.
 
+The readiness scorer retries the complete public-only probe once after a
+transient subprocess, transport, or malformed-report failure. Each individual
+HTTP request remains bounded by the shared client timeout/retry policy; a
+repeated probe failure still fails the score.
+
 Use `--no-run-local` when inspecting the repository shape only. A skipped
 check does not receive local test or security points.
 
