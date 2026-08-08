@@ -3,8 +3,8 @@
   "evidence_type": "platform",
   "verified": true,
   "reviewed_by": "Codex production-readiness audit",
-  "reviewed_at": "2026-08-08T08:48:18Z",
-  "source": "https://github.com/Yunushan/market-sentinel/actions/runs/30841137171",
+  "reviewed_at": "2026-08-08T09:16:56Z",
+  "source": "https://github.com/Yunushan/market-sentinel/actions/runs/31249964328",
   "scope": "Full-support desktop targets with successful current hosted CI evidence",
   "targets": [
     "Windows",
