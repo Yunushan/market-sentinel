@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "evidence_type": "platform",
+  "verified": true,
+  "reviewed_by": "Codex production-readiness audit",
+  "reviewed_at": "2026-08-08T08:48:18Z",
+  "source": "https://github.com/Yunushan/market-sentinel/actions/runs/30841137171",
+  "scope": "Full-support desktop targets with successful current hosted CI evidence",
+  "targets": [
+    "Windows",
+    "Windows 11",
+    "Ubuntu Linux",
+    "macOS"
+  ],
+  "checks": [
+    {"name": "windows_hosted_python_and_smoke", "status": "pass"},
+    {"name": "windows_11_arm_python_and_smoke", "status": "pass"},
+    {"name": "ubuntu_python_tkinter_and_verifier", "status": "pass"},
+    {"name": "macos_14_15_26_python_and_verifier", "status": "pass"}
+  ]
+}
