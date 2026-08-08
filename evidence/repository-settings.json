@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "evidence_type": "repository-settings",
+  "verified": true,
+  "reviewed_by": "Codex production-readiness audit",
+  "reviewed_at": "2026-08-08T09:16:56Z",
+  "source": "https://api.github.com/repos/Yunushan/market-sentinel/branches/main/protection",
+  "scope": "Protected main branch merge and history controls",
+  "checks": [
+    {"name": "branch_required_status_checks", "status": "pass"},
+    {"name": "branch_require_up_to_date", "status": "pass"},
+    {"name": "branch_enforce_admins", "status": "pass"},
+    {"name": "branch_require_pull_request", "status": "pass"},
+    {"name": "branch_conversation_resolution", "status": "pass"},
+    {"name": "branch_linear_history", "status": "pass"},
+    {"name": "branch_force_pushes_disabled", "status": "pass"},
+    {"name": "branch_deletions_disabled", "status": "pass"}
+  ]
+}
