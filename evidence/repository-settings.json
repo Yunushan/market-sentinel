@@ -3,7 +3,7 @@
   "evidence_type": "repository-settings",
   "verified": true,
   "reviewed_by": "Codex production-readiness audit",
-  "reviewed_at": "2026-08-08T09:16:56Z",
+  "reviewed_at": "2026-08-11T07:29:18Z",
   "source": "https://api.github.com/repos/Yunushan/market-sentinel/branches/main/protection",
   "scope": "Protected main branch merge and history controls",
   "checks": [

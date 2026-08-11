@@ -3,7 +3,7 @@
   "evidence_type": "release-history",
   "verified": true,
   "reviewed_by": "Codex production-readiness audit",
-  "reviewed_at": "2026-08-08T08:48:18Z",
+  "reviewed_at": "2026-08-11T07:29:18Z",
   "source": "https://github.com/Yunushan/market-sentinel/releases",
   "scope": "Published GitHub release lineage through the latest published release",
   "tag": "v1.0.9",
