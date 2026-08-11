@@ -50,6 +50,7 @@ class PolymarketResponseError(PolymarketError):
 
 
 T = TypeVar("T")
+DEFAULT_USER_AGENT = "market-sentinel/1.0"
 
 
 @dataclass(frozen=True)
@@ -173,6 +174,8 @@ def _request(
     method = endpoint.method.upper()
     url = endpoint_url(endpoint, path)
     request_headers = dict(headers or {})
+    request_headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
+    request_headers.setdefault("Accept", "application/json")
     if payload is not None:
         request_headers.setdefault("Content-Type", "application/json")
     attempts = retry_policy.attempts_for(method)

@@ -79,7 +79,15 @@ Polymarket coverage is intentionally reported by verification tier, not as a sin
 | `credential_live_verified` | Real credentialed read/stream verified. Currently blocked without credentials. |
 | `funded_live_verified` | Funded order/cancel or fund-movement flow verified. Currently blocked without explicit credentials and live-action approval. |
 
-Current truthful status: public Gamma/Data/CLOB/Bridge probes pass; endpoint contracts are hardened offline against documented paths, auth tiers, and batch caps; CLOB authentication readiness and the credential runbook are validated locally with redacted payloads; authenticated CLOB, user WebSocket, Relayer, Bridge address/fund movement, and funded order/cancel verification are blocked until credentials and explicit live parameters are supplied.
+Current truthful status: Gamma/Data/CLOB/Bridge probes are implemented and must be
+re-run from the target network before claiming `public_live_verified`; the latest
+local readiness audit could not reach the official endpoints because their TLS
+connections were reset. Endpoint contracts are hardened offline against
+documented paths, auth tiers, and batch caps; CLOB authentication readiness and
+the credential runbook are validated locally with redacted payloads;
+authenticated CLOB, user WebSocket, Relayer, Bridge address/fund movement, and
+funded order/cancel verification remain blocked until credentials and explicit
+live parameters are supplied.
 
 Stored live-validation reports include a promotion guard before they can support production verification claims:
 

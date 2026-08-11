@@ -6,12 +6,70 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 class ProductReadinessTests(unittest.TestCase):
+    def test_public_live_probe_retries_transient_failure(self) -> None:
+        calls = 0
+
+        def run_probe(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            nonlocal calls
+            calls += 1
+            report_path = Path(command[command.index("--report-file") + 1])
+            if calls == 2:
+                report_path.write_text(
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "public_checks": {
+                                name: {"status": "ok"}
+                                for name in ("clob_time", "gamma_markets", "data_leaderboard", "bridge_supported_assets")
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(command, 0, "", "")
+            return subprocess.CompletedProcess(command, 1, "", "transient endpoint failure")
+
+        with (
+            patch("scripts.check_product_readiness.subprocess.run", side_effect=run_probe),
+            patch("scripts.check_product_readiness.time.sleep") as sleep,
+        ):
+            from scripts.check_product_readiness import _run_public_live
+
+            result = _run_public_live()
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["attempt"], 2)
+        self.assertEqual(calls, 2)
+        sleep.assert_called_once()
+
+    def test_public_live_probe_fails_after_retries(self) -> None:
+        calls = 0
+
+        def run_probe(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            nonlocal calls
+            calls += 1
+            return subprocess.CompletedProcess(command, 1, "", "transient endpoint failure")
+
+        with (
+            patch("scripts.check_product_readiness.subprocess.run", side_effect=run_probe),
+            patch("scripts.check_product_readiness.time.sleep") as sleep,
+        ):
+            from scripts.check_product_readiness import _run_public_live
+
+            result = _run_public_live()
+
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["attempt"], 2)
+        self.assertEqual(calls, 2)
+        sleep.assert_called_once()
+
     def test_readiness_scorer_reports_conservative_static_score(self) -> None:
         result = subprocess.run(
             [sys.executable, "scripts/check_product_readiness.py", "--no-run-local", "--json"],
