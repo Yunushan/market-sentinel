@@ -551,6 +551,14 @@ class PolymarketApiWrapperTests(unittest.TestCase):
         self.assertEqual(mock_request.call_count, 2)
         mock_sleep.assert_called_once()
 
+    def test_shared_client_sets_identifying_json_headers_by_default(self) -> None:
+        with patch(HTTP_REQUEST, return_value=FakeResponse({"time": 123})) as mock_request:
+            self.assertEqual(clob_rest.get_server_time(timeout=1), {"time": 123})
+
+        headers = mock_request.call_args.kwargs["headers"]
+        self.assertEqual(headers["User-Agent"], "market-sentinel/1.0")
+        self.assertEqual(headers["Accept"], "application/json")
+
         with (
             patch("polymarket.http_client.time.sleep"),
             patch(

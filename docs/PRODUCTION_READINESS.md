@@ -30,15 +30,22 @@ check does not receive local test or security points.
 
 ## Score Model
 
-| Area | Points | Local baseline | Additional proof required for full points |
+| Area | Points | Current verified | Remaining proof required |
 | --- | ---: | ---: | --- |
 | Architecture and scope | 18 | 18 | None beyond the repository contract |
-| Tests and correctness | 18 | 18 after local verification | None |
-| Security and safety | 17 | 16 after local verification | Reviewed repository-settings evidence |
-| CI/CD and release | 17 | 14 when release tooling is present | +1 protected release environment; +1 release history; +1 current published release |
-| Operations and recovery | 15 | 12 when deployment artifacts are present | Reviewed real-host deployment evidence |
-| Platform evidence | 10 | 5 when the support matrix is present | +3 successful hosted CI lanes; +2 evidence for every full-support target |
-| Live acceptance | 5 | 3 after public checks pass | Credentialed read and approved funded audit |
+| Tests and correctness | 18 | 18 | None |
+| Security and safety | 17 | 17 | None in the reviewed repository-settings snapshot |
+| CI/CD and release | 17 | 16 | A current published `v1.0.11` release and artifact manifest |
+| Operations and recovery | 15 | 12 | Reviewed real-host deployment evidence for `v1.0.11` |
+| Platform evidence | 10 | 10 | None for the reviewed hosted matrix |
+| Live acceptance | 5 | 0 | Reachable public endpoints, credentialed read evidence, and approved funded audit |
+
+The latest full audit is **91/100 (not ready)**. Local verification passed all
+543 tests (7 intentionally skipped), Ruff, the frontend build, and the frontend
+live smoke. The public-only Polymarket probe was retried and failed because the
+official API connections were reset from the audit network; no live evidence was
+invented to compensate for that failure. The score therefore reflects repository
+and reviewed GitHub evidence, not a production certification.
 
 The scorer never treats a workflow matrix as proof that a runner completed.
 It also does not promote Polymarket credentialed or funded tiers from a local
@@ -65,6 +72,12 @@ award another category.
 | `--release-evidence` | `release` | `scope`, current `tag`, `target_commit`, `assets` |
 | `--credentialed-evidence` | `credentialed-polymarket` | `scope`, `target_tier=credential_live_verified`, `report_hash` |
 | `--funded-evidence` | `funded-polymarket` | `scope`, `target_tier=funded_live_verified`, `report_hash`, `live_action=true` |
+
+The repository currently includes `evidence/release-environment.json`, a
+reviewed snapshot of the GitHub `release` environment's required-reviewer,
+protected-branch, and signing-requirement controls. It intentionally does not
+claim that signing secrets are present; the release workflow remains
+fail-closed until those secrets are configured.
 
 ```json
 {

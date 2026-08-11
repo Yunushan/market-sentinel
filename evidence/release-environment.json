@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "evidence_type": "release-environment",
+  "verified": true,
+  "reviewed_by": "Codex production-readiness audit",
+  "reviewed_at": "2026-08-11T07:20:28Z",
+  "source": "https://api.github.com/repos/Yunushan/market-sentinel/environments",
+  "scope": "GitHub release environment protection controls",
+  "checks": [
+    {"name": "release_environment_exists", "status": "pass"},
+    {"name": "required_reviewer_gate_enabled", "status": "pass"},
+    {"name": "self_review_prevented", "status": "pass"},
+    {"name": "protected_branches_only", "status": "pass"},
+    {"name": "administrator_bypass_disabled", "status": "pass"},
+    {"name": "windows_signing_requirement_enabled", "status": "pass"}
+  ],
+  "notes": [
+    "The release environment protects deployments with a required reviewer and protected-branch policy.",
+    "The non-secret REQUIRE_WINDOWS_CODE_SIGNING=true variable is configured.",
+    "Signing secrets were not inferred from GitHub metadata; release signing remains separately fail-closed until configured."
+  ]
+}

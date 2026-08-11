@@ -67,8 +67,8 @@ class DependencyLockTests(unittest.TestCase):
     def test_bootstrap_pip_lock_is_hash_protected(self) -> None:
         source = (ROOT / "requirements-bootstrap.txt").read_text(encoding="utf-8")
         lock = (ROOT / "requirements-bootstrap.lock").read_text(encoding="utf-8")
-        self.assertEqual("pip==26.2\n", source)
-        self.assertEqual([], lock_issues(lock, ["pip==26.2"]))
+        self.assertEqual("pip==26.2.1\n", source)
+        self.assertEqual([], lock_issues(lock, ["pip==26.2.1"]))
 
     def test_standalone_lock_verifier_covers_security_audit_lock(self) -> None:
         verifier = (ROOT / "scripts" / "verify_dependency_lock.py").read_text(encoding="utf-8")
