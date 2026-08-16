@@ -238,6 +238,14 @@ class CiCdWorkflowTests(unittest.TestCase):
             ),
         )
 
+    def test_distribution_smoke_uses_the_current_catalog_count(self) -> None:
+        for workflow_name in ("ci.yml", "release.yml"):
+            with self.subTest(workflow=workflow_name):
+                text = (ROOT / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
+                self.assertIn("from market_adapters import MARKET_IDS; print(len(MARKET_IDS))", text)
+                self.assertIn("EXPECTED_MARKET_COUNT", text)
+                self.assertNotIn("len(build_default_registry().list_market_ids()) == 41", text)
+
     def test_windows_packaging_lock_is_hash_protected(self) -> None:
         source = (ROOT / "requirements-build.txt").read_text(encoding="utf-8")
         text = (ROOT / "requirements-build.lock").read_text(encoding="utf-8")
