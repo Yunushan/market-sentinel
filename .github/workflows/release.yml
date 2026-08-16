@@ -210,12 +210,13 @@ jobs:
         env:
           EXPECTED_VERSION: ${{ needs.metadata.outputs.version }}
         run: |
+          expected_market_count="$(python -c 'from market_adapters import MARKET_IDS; print(len(MARKET_IDS))')"
           python scripts/verify_python_dist_artifacts.py --dist-dir dist --expected-version "${EXPECTED_VERSION}"
           python -m pip install --no-cache-dir --force-reinstall --no-deps "dist/market_sentinel-${EXPECTED_VERSION}-py3-none-any.whl"
           smoke_dir="$(mktemp -d)"
           cd "${smoke_dir}"
           market-sentinel --help >/dev/null
-          python - <<'PY'
+          EXPECTED_MARKET_COUNT="${expected_market_count}" python - <<'PY'
           import os
           from importlib.metadata import metadata, version
           from market_adapters import CryptoComPredictAdapter, build_default_registry
@@ -224,7 +225,7 @@ jobs:
           package_metadata = metadata("market-sentinel")
           assert package_metadata["License-Expression"] == "0BSD"
           assert package_metadata.get_all("License-File") == ["LICENSE"]
-          assert len(build_default_registry().list_market_ids()) == 41
+          assert len(build_default_registry().list_market_ids()) == int(os.environ["EXPECTED_MARKET_COUNT"])
           assert CryptoComPredictAdapter().market_id == "crypto_com_predict"
           PY
 
