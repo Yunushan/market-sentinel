@@ -94,6 +94,7 @@ IMPLEMENTED_ADAPTER_FIXTURE_TESTS = {
     "gemini_titan": ("gemini", "test_additional_official_adapters.py"),
     "predict_fun": ("predict_fun", "test_additional_official_adapters.py"),
     "betfair_exchange": ("betfair_exchange", "test_additional_official_adapters.py"),
+    "xmarket": ("xmarket", "test_additional_official_adapters.py"),
 }
 
 

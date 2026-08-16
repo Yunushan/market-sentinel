@@ -22,6 +22,7 @@ from .runtime import AdapterRuntime, RateLimiter, ResolvedCredential, load_json_
 from .stub import StubMarketAdapter, VerifiedBlockedAdapter, create_stub_adapter, create_verified_blocked_adapter
 from .sx_bet import SxBetAdapter
 from .xo import XOMarketAdapter
+from .xmarket import XMarketAdapter
 from .types import (
     MarketCapabilities,
     MarketContract,
@@ -75,6 +76,7 @@ __all__ = [
     "VERIFIED_BLOCKERS",
     "VerifiedBlockedAdapter",
     "XOMarketAdapter",
+    "XMarketAdapter",
     "ZeitgeistAdapter",
     "build_default_registry",
     "create_stub_adapter",

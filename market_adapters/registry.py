@@ -5,6 +5,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Type
 from .base import MarketAdapter
 from .catalog import MARKET_CATALOG
 from .errors import MarketConfigurationError
+from .expanded_catalog import EXPANDED_VERIFIED_BLOCKERS
 from .types import MarketMetadata
 
 
@@ -264,6 +265,8 @@ VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+VERIFIED_BLOCKERS.update(EXPANDED_VERIFIED_BLOCKERS)
+
 
 AdapterFactory = Callable[[Optional[Mapping[str, Any]]], MarketAdapter]
 
@@ -360,6 +363,7 @@ def build_default_registry() -> AdapterRegistry:
     from .sx_bet import SxBetAdapter
     from .stub import create_stub_adapter, create_verified_blocked_adapter
     from .xo import XOMarketAdapter
+    from .xmarket import XMarketAdapter
 
     implemented_adapters = (
         PolymarketAdapter,
@@ -380,6 +384,7 @@ def build_default_registry() -> AdapterRegistry:
         PredictFunAdapter,
         XOMarketAdapter,
         BetfairExchangeAdapter,
+        XMarketAdapter,
     )
     registry.register_adapter(PolymarketAdapter, replace=True)
     registry.register_adapter(KalshiAdapter, replace=True)
@@ -399,6 +404,7 @@ def build_default_registry() -> AdapterRegistry:
     registry.register_adapter(PredictFunAdapter, replace=True)
     registry.register_adapter(XOMarketAdapter, replace=True)
     registry.register_adapter(BetfairExchangeAdapter, replace=True)
+    registry.register_adapter(XMarketAdapter, replace=True)
     for metadata in MARKET_CATALOG:
         if metadata.market_id in {adapter.metadata.market_id for adapter in implemented_adapters}:
             continue
@@ -411,7 +417,7 @@ def build_default_registry() -> AdapterRegistry:
                     config,
                     reason=str(blocker["reason"]),
                     references=blocker.get("references", ()),
-                    last_reviewed="2026-05-26",
+                    last_reviewed=str(blocker.get("last_reviewed") or "2026-05-26"),
                 ),
                 replace=True,
             )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, Tuple
 
+from .expanded_catalog import EXPANDED_MARKET_CATALOG
 from .types import MarketCapabilities, MarketMetadata
 
 
@@ -492,7 +493,7 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         capabilities=BETFAIR_CAPABILITIES,
     ),
     MarketMetadata(market_id="probo", display_name="Probo", homepage_url="https://probo.in"),
-)
+) + EXPANDED_MARKET_CATALOG
 
 MARKET_IDS = tuple(m.market_id for m in MARKET_CATALOG)
 _MARKET_BY_ID: Dict[str, MarketMetadata] = {m.market_id: m for m in MARKET_CATALOG}

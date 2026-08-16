@@ -483,7 +483,7 @@ API hardening:
 
 This matrix describes current application adapter support. Verified-blocked markets appear in the GUI and config, but their market-specific operations intentionally return clear unsupported-feature messages until official access, entitlements, or documented automation terms make support safe to add. Verified-blocked rows were checked against currently available official docs/pages.
 
-Article 35 re-audited verified-blocked markets on 2026-05-26 and did not promote any blocked market. A 2026-07-15 follow-up promoted Crypto.com Predict/CDNA after Crypto.com published its official Predictions Market Data API. Context Markets remains sunset, Hyperliquid outcome metadata is still not production-safe for this adapter, Thales needs chain-specific AMM/wallet safeguards and fixtures, and Smarkets/CME still require approval, data-use permission, or licensed entitlements before support can be added.
+Article 35 re-audited verified-blocked markets on 2026-05-26 and did not promote any blocked market. A 2026-07-15 follow-up promoted Crypto.com Predict/CDNA after Crypto.com published its official Predictions Market Data API. Context Markets remains sunset, Hyperliquid outcome metadata is still not production-safe for this adapter, Thales needs chain-specific AMM/wallet safeguards and fixtures, and Smarkets/CME still require approval, data-use permission, or licensed entitlements before support can be added. Xmarket was added as an implemented adapter after its documented API was mapped with offline fixtures. The catalog includes the 50 requested platform names, including separate rows for distribution and protocol variants whose access contracts differ.
 
 | Market | Adapter | Alerts | Read-only data | Paper trading | Live trading | Copy trading | API required | Credentials required | Region/KYC limitation |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -528,6 +528,33 @@ Article 35 re-audited verified-blocked markets on 2026-05-26 and did not promote
 | Smarkets (`smarkets`) | Verified blocked | No | No | No | No | No | Required | Exchange account required | Region/KYC limited |
 | Betfair Exchange (`betfair_exchange`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
 | Probo (`probo`) | Verified blocked | No | No | No | No | No | Required | Account required | Region limited |
+| Coinbase Prediction Markets (`coinbase_prediction_markets`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
+| Probable (`probable`) | Verified blocked | No | No | No | No | No | Required | API credentials required | Jurisdiction varies |
+| Kalshi via Robinhood (`kalshi_via_robinhood`) | Verified blocked | No | No | No | No | No | Required | Brokerage account required | Region/KYC limited |
+| FanDuel Predicts (`fanduel_predicts`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
+| Seer (`seer`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| DFlow (`dflow`) | Verified blocked | No | No | No | No | No | Required | API credentials required | Jurisdiction varies |
+| Space (`space`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Xmarket (`xmarket`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | API credentials required | Jurisdiction varies |
+| Trueo (`trueo`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| PRDT Finance (`prdt_finance`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| SynStation (`synstation`) | Verified blocked | No | No | No | No | No | Required | API credentials required | Jurisdiction varies |
+| Gnosis Prediction Markets (`gnosis_prediction_markets`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Zeitgeist SDK / Markets (`zeitgeist_sdk_markets`) | Verified blocked | No | No | No | No | No | Required | Not required | Jurisdiction varies |
+| MetaDAO (`metadao`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Levr Bet (`levr_bet`) | Verified blocked | No | No | No | No | No | Required | Account required | Jurisdiction varies |
+| Dexsport (`dexsport`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Lamas Finance (`lamas_finance`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Zetarium World (`zetarium_world`) | Verified blocked | No | No | No | No | No | Required | Account required | Jurisdiction varies |
+| Blinq (`blinq`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Zeitgeist Prediction Pools (`zeitgeist_prediction_pools`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Reality.eth Markets (`reality_eth_markets`) | Verified blocked | No | No | No | No | No | Required | Wallet/personhood required | Identity/jurisdiction limited |
+| SportsTrade (`sportstrade`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
+| Prophet Exchange (`prophet_exchange`) | Verified blocked | No | No | No | No | No | Required | API credentials required | Region/KYC limited |
+| Sporttrade Prediction / Exchange Products (`sporttrade_products`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
+| Matchbook (`matchbook`) | Verified blocked | No | No | No | No | No | Required | Exchange account/API keys | Region/KYC limited |
+| SciCast (`scicast`) | Verified blocked | No | No | No | No | No | Required | Account/export access required | Not trading/KYC limited |
+| Meta Arena (`meta_arena`) | Verified blocked | No | No | No | No | No | Required | Account required | Jurisdiction varies |
 
 ## Verification
 
