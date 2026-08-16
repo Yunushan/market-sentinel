@@ -1,0 +1,10 @@
+{
+  "bids": [
+    {"price": 0.43, "quantity": 12},
+    {"price": 0.41, "quantity": 20}
+  ],
+  "asks": [
+    {"price": 0.45, "quantity": 15},
+    {"price": 0.47, "quantity": 25}
+  ]
+}

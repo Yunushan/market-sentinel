@@ -79,6 +79,7 @@ IMPLEMENTED_MARKETS = {
     "predict_fun",
     "betfair_exchange",
     "crypto_com_predict",
+    "xmarket",
 }
 VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)
 

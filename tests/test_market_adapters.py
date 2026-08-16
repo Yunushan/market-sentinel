@@ -31,6 +31,7 @@ from market_adapters import (
     VERIFIED_BLOCKERS,
     VerifiedBlockedAdapter,
     XOMarketAdapter,
+    XMarketAdapter,
     ZeitgeistAdapter,
     build_default_registry,
     create_stub_adapter,
@@ -72,6 +73,7 @@ IMPLEMENTED_MARKETS = {
     "predict_fun",
     "betfair_exchange",
     "crypto_com_predict",
+    "xmarket",
 }
 VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)
 
@@ -102,7 +104,7 @@ class DummyAdapter(MarketAdapter):
 class AdapterFoundationTests(unittest.TestCase):
     def test_catalog_contains_goal_markets_with_unique_ids(self) -> None:
         self.assertEqual(len(MARKET_IDS), len(set(MARKET_IDS)))
-        self.assertEqual(len(MARKET_CATALOG), 41)
+        self.assertEqual(len(MARKET_CATALOG), 68)
         self.assertIn("polymarket", MARKET_IDS)
         self.assertIn("kalshi", MARKET_IDS)
         self.assertIn("limitless_exchange", MARKET_IDS)
@@ -152,6 +154,8 @@ class AdapterFoundationTests(unittest.TestCase):
         self.assertIsInstance(registry.create("predict_fun"), PredictFunAdapter)
         self.assertEqual(registry.get_metadata("betfair_exchange").display_name, "Betfair Exchange")
         self.assertIsInstance(registry.create("betfair_exchange"), BetfairExchangeAdapter)
+        self.assertEqual(registry.get_metadata("xmarket").display_name, "Xmarket")
+        self.assertIsInstance(registry.create("xmarket"), XMarketAdapter)
 
     def test_non_implemented_catalog_entries_create_stub_adapters(self) -> None:
         registry = build_default_registry()
@@ -175,9 +179,10 @@ class AdapterFoundationTests(unittest.TestCase):
                 self.assertIsInstance(adapter, VerifiedBlockedAdapter)
                 self.assertTrue(health["stub"])
                 self.assertTrue(health["verified_blocker"])
-                self.assertEqual(health["last_reviewed"], "2026-05-26")
+                expected_review = str(VERIFIED_BLOCKERS[market_id].get("last_reviewed") or "2026-05-26")
+                self.assertEqual(health["last_reviewed"], expected_review)
                 self.assertGreaterEqual(len(health["references"]), 1)
-                self.assertIn("Verified 2026-05-26", health["message"])
+                self.assertIn(f"Verified {expected_review}", health["message"])
 
                 with self.assertRaises(UnsupportedFeatureError) as ctx:
                     adapter.list_events()

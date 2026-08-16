@@ -41,6 +41,7 @@ IMPLEMENTED_MARKETS = {
     "predict_fun",
     "betfair_exchange",
     "crypto_com_predict",
+    "xmarket",
 }
 VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)
 
@@ -71,7 +72,9 @@ class BlockersDocTests(unittest.TestCase):
                 continue
             if any(f"`{market_id}`" in line for market_id in VERIFIED_BLOCKED_MARKETS):
                 self.assertIn("| Verified blocked |", line)
-                self.assertIn("Verified 2026-05-26", line)
+                blocked_id = next(market_id for market_id in VERIFIED_BLOCKED_MARKETS if f"`{market_id}`" in line)
+                expected_review = str(VERIFIED_BLOCKERS[blocked_id].get("last_reviewed") or "2026-05-26")
+                self.assertIn(f"Verified {expected_review}", line)
                 continue
             if any(f"`{market_id}`" in line for market_id in MARKET_IDS):
                 self.assertIn("| Stub |", line)

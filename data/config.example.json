@@ -505,6 +505,257 @@
         "min_request_interval_seconds": 0.5,
         "notes": "Read-only market discovery, outcome asset price alerts, and local paper orders are implemented through the official Zeitgeist Subsquid/indexer GraphQL shape. Live trading requires wallet-signed Substrate extrinsics and is not implemented."
       }
+    },
+    "coinbase_prediction_markets": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: Coinbase prediction markets are exposed through the Coinbase/CFM product, but no public prediction-market API contract is available for third-party automation."
+      }
+    },
+    "probable": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: Probable publishes developer documentation, but endpoint schemas, credential handling, rate limits, and offline fixtures are not yet validated in this app."
+      }
+    },
+    "kalshi_via_robinhood": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: Robinhood does not publish a separate public automation contract for Kalshi-through-Robinhood accounts; private brokerage endpoints are unsupported."
+      }
+    },
+    "fanduel_predicts": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: FanDuel Predicts is a consumer product without a public documented prediction-market API or third-party automation contract."
+      }
+    },
+    "seer": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: Seer requires chain, wallet, settlement, and fixture-backed adapter coverage that is not implemented."
+      }
+    },
+    "dflow": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: DFlow requires API-key, Solana mint, wallet, and fixture-backed integration coverage that is not implemented."
+      }
+    },
+    "space": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: Space is a wallet-based Solana prediction platform without a validated public REST/indexer contract in this repository."
+      }
+    },
+    "xmarket": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "implemented",
+        "xmarket_api_base_url": "https://engine.xmarket.app/api/v1",
+        "xmarket_authenticated_api_base_url": "https://engine.xmarket.app/openapi/v1",
+        "credential_env_vars": [
+          "XMARKET_API_KEY"
+        ],
+        "live_trading_enabled": false,
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
+        "min_request_interval_seconds": 0.6,
+        "notes": "Market discovery, outcome listing, orderbooks, prices, local paper orders, and guarded API-key order submission are implemented through the official Xmarket API. Live trading stays disabled by default."
+      }
+    },
+    "trueo": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: Trueo is an on-chain prediction market, but a validated contract/indexer adapter with settlement and wallet safeguards is not implemented."
+      }
+    },
+    "prdt_finance": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: PRDT Finance lacks a validated public market-data/order adapter and offline fixtures in this app."
+      }
+    },
+    "synstation": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: no stable official market-data and order API contract has been validated for SynStation."
+      }
+    },
+    "gnosis_prediction_markets": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: Gnosis prediction-market surfaces overlap with Omen contracts, but a separate supported Gnosis market API and lifecycle contract is not implemented."
+      }
+    },
+    "zeitgeist_sdk_markets": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: the existing Zeitgeist adapter does not independently cover the SDK/market target with validated endpoints and fixtures."
+      }
+    },
+    "metadao": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: MetaDAO requires validated Solana market, wallet, settlement, and account-data integration."
+      }
+    },
+    "levr_bet": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: no stable official Levr Bet API, contract schema, and settlement fixtures have been validated."
+      }
+    },
+    "dexsport": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: Dexsport lacks a validated prediction-market data, wallet, and settlement adapter for this app."
+      }
+    },
+    "lamas_finance": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: Lamas Finance lacks a validated public API and fixture-backed contract integration here."
+      }
+    },
+    "zetarium_world": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: Zetarium World prediction-market V2/API support is not a stable production integration target in this repository."
+      }
+    },
+    "blinq": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: Blinq lacks a validated public API and risk-controlled adapter contract."
+      }
+    },
+    "zeitgeist_prediction_pools": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: prediction-pool support needs a separate pool schema, asset accounting, and lifecycle fixtures beyond the existing Zeitgeist adapter."
+      }
+    },
+    "reality_eth_markets": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: Reality.eth is an oracle/question protocol, not a validated tradable-market API for this application."
+      }
+    },
+    "sportstrade": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: SportsTrade does not expose a validated public API contract for this app's market, quote, and order model."
+      }
+    },
+    "prophet_exchange": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: Prophet Exchange API access requires approval and partner credentials unavailable to public adapter tests."
+      }
+    },
+    "sporttrade_products": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: Sporttrade product access and automation require a validated account/API contract that is not publicly available here."
+      }
+    },
+    "matchbook": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: Matchbook has an official API, but automated use requires account approval and express API/data-use authorization."
+      }
+    },
+    "scicast": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: SciCast historical data-mart documentation is not a current production market/trading API contract."
+      }
+    },
+    "meta_arena": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "verified_blocked",
+        "credential_env_vars": [],
+        "live_trading_enabled": false,
+        "notes": "Verified 2026-08-16: Meta Arena is a game platform and does not expose a validated prediction-market API for this adapter model."
+      }
     }
   },
   "selected_market_id": "polymarket",
