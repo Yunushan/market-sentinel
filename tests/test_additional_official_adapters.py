@@ -13,6 +13,7 @@ from market_adapters import (
     PaperOrderRequest,
     PredictFunAdapter,
     XOMarketAdapter,
+    XMarketAdapter,
 )
 from market_adapters.errors import MarketConfigurationError
 
@@ -37,6 +38,58 @@ class FakeResponse:
 
 
 class AdditionalOfficialAdapterTests(unittest.TestCase):
+    def test_xmarket_adapter_maps_markets_orderbooks_paper_orders_and_guarded_live_orders(self) -> None:
+        adapter = XMarketAdapter()
+        markets = load_fixture("xmarket", "markets")
+        market = load_fixture("xmarket", "market")
+        orderbook = load_fixture("xmarket", "orderbook")
+
+        def fake_get_json(url: str, *, params=None, headers=None):
+            self.assertEqual(headers["x-api-key"], "xmarket-key")
+            if url.endswith("/markets"):
+                return markets
+            if url.endswith("/markets/market-1"):
+                return market
+            if url.endswith("/orderbook/outcome-yes"):
+                return orderbook
+            raise AssertionError(f"unexpected Xmarket URL: {url}")
+
+        adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+        order = PaperOrderRequest("xmarket", "market-1:outcome-yes", "BUY", 10, 0.44)
+
+        with patch.dict("os.environ", {"XMARKET_API_KEY": "xmarket-key"}):
+            events = adapter.list_events("election")
+            contracts = adapter.list_contracts("market-1")
+            book = adapter.get_orderbook("market-1:outcome-yes")
+            price = adapter.get_price("market-1:outcome-yes")
+            paper = adapter.place_paper_order(order)
+            with self.assertRaises(MarketConfigurationError):
+                adapter.place_live_order(order)
+
+        self.assertEqual(events[0].event_id, "market-1")
+        self.assertEqual([contract.contract_id for contract in contracts], ["market-1:outcome-yes", "market-1:outcome-no"])
+        self.assertEqual([level.price for level in book.bids], [0.43, 0.41])
+        self.assertEqual([level.price for level in book.asks], [0.45, 0.47])
+        self.assertAlmostEqual(price.midpoint or 0.0, 0.44)
+        self.assertTrue(paper.accepted)
+
+        live_adapter = XMarketAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})
+        calls = []
+
+        def fake_request(method: str, url: str, *, params=None, json=None, headers=None, timeout=None):
+            calls.append((method, url, params, json, headers, timeout))
+            return FakeResponse(load_fixture("xmarket", "order_response"))
+
+        live_adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"XMARKET_API_KEY": "xmarket-key"}):
+            result = live_adapter.place_live_order(order)
+
+        self.assertEqual(result["response"]["id"], "xorder-1")
+        self.assertEqual(calls[0][0], "POST")
+        self.assertTrue(calls[0][1].endswith("/openapi/v1/order"))
+        self.assertEqual(calls[0][3]["outcomeId"], "outcome-yes")
+        self.assertEqual(calls[0][4]["x-api-key"], "xmarket-key")
+
     def test_gemini_prediction_adapter_maps_events_contracts_orderbook_and_paper_orders(self) -> None:
         adapter = GeminiPredictionAdapter()
         events = load_fixture("gemini", "events")
