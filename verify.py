@@ -77,16 +77,41 @@ WORKFLOW_ACTION_REF_RE = re.compile(
 
 IMPLEMENTED_ADAPTER_FIXTURE_TESTS = {
     "polymarket": ("polymarket", "test_polymarket_adapter.py"),
+    "context_v2": ("context_v2", "test_additional_official_adapters.py"),
+    "smarkets": ("smarkets", "test_additional_official_adapters.py"),
+    "thales_market": ("thales_market", "test_additional_official_adapters.py"),
+    "metadao": ("metadao", "test_additional_official_adapters.py"),
+    "seer": ("seer", "test_additional_official_adapters.py"),
+    "hyperliquid": ("hyperliquid", "test_additional_official_adapters.py"),
+    "trueo": ("trueo", "test_additional_official_adapters.py"),
+    "zeitgeist_sdk_markets": ("zeitgeist_sdk_markets", "test_legacy_web3_adapters.py"),
+    "zeitgeist_prediction_pools": ("zeitgeist_prediction_pools", "test_legacy_web3_adapters.py"),
+    "ibkr_forecasttrader": ("ibkr_forecasttrader", "test_additional_official_adapters.py"),
+    "forecastex": ("forecastex", "test_additional_official_adapters.py"),
+    "cme_prediction_markets": ("cme_prediction_markets", "test_additional_official_adapters.py"),
+    "probable": ("probable", "test_additional_official_adapters.py"),
+    "matchbook": ("matchbook", "test_additional_official_adapters.py"),
+    "prophet_exchange": ("prophet_exchange", "test_prophet_exchange_adapter.py"),
+    "prdt_finance": ("prdt_finance", "test_prdt_finance_adapter.py"),
+    "dflow": ("dflow", "test_additional_official_adapters.py"),
+    "drift_bet": ("drift_bet", "test_drift_bet_adapter.py"),
+    "frenzy_finance": ("frenzy_finance", "test_frenzy_finance_adapter.py"),
+    "space": ("space", "test_space_adapter.py"),
+    "hedgehog_markets": ("hedgehog_markets", "test_hedgehog_markets_adapter.py"),
     "kalshi": ("kalshi", "test_kalshi_adapter.py"),
     "predictit": ("predictit", "test_predictit_adapter.py"),
     "crypto_com_predict": ("crypto_com_predict", "test_crypto_com_predict_adapter.py"),
+    "fanatics_markets": ("fanatics_markets", "test_fanatics_markets_adapter.py"),
+    "coinbase_prediction_markets": ("coinbase_prediction_markets", "test_coinbase_prediction_adapter.py"),
     "manifold": ("manifold", "test_manifold_adapter.py"),
     "metaculus": ("metaculus", "test_metaculus_adapter.py"),
     "limitless_exchange": ("limitless_exchange", "test_limitless_adapter.py"),
     "sx_bet": ("sx_bet", "test_sx_bet_adapter.py"),
     "azuro": ("azuro", "test_azuro_adapter.py"),
     "augur": ("augur", "test_legacy_web3_adapters.py"),
+    "reality_eth_markets": ("reality_eth_markets", "test_legacy_web3_adapters.py"),
     "omen": ("omen", "test_legacy_web3_adapters.py"),
+    "gnosis_prediction_markets": ("gnosis_prediction_markets", "test_legacy_web3_adapters.py"),
     "zeitgeist": ("zeitgeist", "test_legacy_web3_adapters.py"),
     "myriad_markets": ("myriad_markets", "test_additional_official_adapters.py"),
     "xo_market": ("xo_market", "test_additional_official_adapters.py"),
@@ -477,8 +502,11 @@ def run_fixture_check() -> None:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:
             raise SystemExit(f"Invalid fixture JSON at {path.relative_to(ROOT)}: {exc}") from exc
-        if not isinstance(data, dict):
-            raise SystemExit(f"Fixture must contain a JSON object: {path.relative_to(ROOT)}")
+        # Some official endpoints (notably IBKR Client Portal) return a
+        # top-level array rather than an object.  Accept either response shape,
+        # but reject scalar/null payloads and empty fixtures.
+        if not isinstance(data, (dict, list)) or not data:
+            raise SystemExit(f"Fixture must contain a non-empty JSON object or array: {path.relative_to(ROOT)}")
 
     required = {
         fixture_root / "polymarket" / "market.json",
@@ -540,6 +568,9 @@ def run_fixture_check() -> None:
         fixture_root / "betfair_exchange" / "market_catalogue.json",
         fixture_root / "betfair_exchange" / "market_book.json",
         fixture_root / "betfair_exchange" / "place_order_response.json",
+        fixture_root / "hedgehog_markets" / "program_accounts.json",
+        fixture_root / "frenzy_finance" / "rpc_responses.json",
+        fixture_root / "prdt_finance" / "rpc_responses.json",
     }
     missing = [str(path.relative_to(ROOT)) for path in sorted(required) if not path.exists()]
     if missing:

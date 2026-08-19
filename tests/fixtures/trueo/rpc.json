@@ -1,0 +1,22 @@
+{
+  "manager": "0x61A98Bef11867c69489B91f340fE545eEfc695d7",
+  "market": "0x372fd7254f578939f433c9d04ca8a098ad09500a",
+  "yesToken": "0x1111111111111111111111111111111111111111",
+  "noToken": "0x2222222222222222222222222222222222222222",
+  "paymentToken": "0x3333333333333333333333333333333333333333",
+  "yesPool": "0x4444444444444444444444444444444444444444",
+  "noPool": "0x5555555555555555555555555555555555555555",
+  "question": "Will BTC reach $100k before June 2030?",
+  "source": "https://example.com/source",
+  "additionalInfo": "Resolves YES if the reference source records the threshold.",
+  "status": 0,
+  "endOfTrading": 1900000000,
+  "winningPosition": 0,
+  "poolSqrtPriceX96": "79228162514264337593543950336",
+  "poolToken0": "0x1111111111111111111111111111111111111111",
+  "poolToken1": "0x3333333333333333333333333333333333333333",
+  "poolToken0Decimals": 18,
+  "poolToken1Decimals": 18,
+  "signedTransaction": "0xdeadbeef",
+  "transactionHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

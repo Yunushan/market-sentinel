@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import math
+import re
+from urllib.parse import urlsplit
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .base import MarketAdapter
@@ -20,10 +23,22 @@ OMEN_REFERENCES = (
     "https://github.com/protofire/omen-subgraph",
     "https://omendotag.gitbook.io/omen",
 )
+GNOSIS_REFERENCES = (
+    "https://docs.gnosis.io/",
+    "https://omen.eth.limo",
+    "https://github.com/protofire/omen-subgraph",
+)
 ZEITGEIST_REFERENCES = (
     "https://docs.zeitgeist.pm/docs/build/sdk/v2/fetch-markets",
     "https://docs.zeitgeist.pm/docs/build/sdk/v2/indexer",
     "https://docs.zeitgeist.pm/docs/build/sdk/v2/calculating-current-prediction",
+    "https://github.com/zeitgeistpm/zeitgeist/tree/main/zrml/hybrid-router",
+    "https://github.com/zeitgeistpm/zeitgeist/releases",
+)
+REALITY_ETH_REFERENCES = (
+    "https://reality.eth.limo/app/docs/html/contracts.html",
+    "https://github.com/RealityETH/reality-eth-monorepo/tree/main/packages/graph",
+    "https://raw.githubusercontent.com/RealityETH/reality-eth-monorepo/master/packages/graph/schema.graphql",
 )
 
 
@@ -292,8 +307,285 @@ class AugurAdapter(_GraphQLAdapter):
         return f"{market_id}:{outcome_id}"
 
 
+class RealityEthMarketsAdapter(_GraphQLAdapter):
+    """Read-only Reality.eth question adapter backed by the official subgraph schema.
+
+    Reality.eth is an oracle/question protocol, not a traded CLOB.  This adapter
+    deliberately exposes only question discovery, response-option listing, and
+    alert-compatible lifecycle metadata; prices, orders, and wallet execution
+    remain unsupported.
+    """
+
+    metadata = get_market_metadata("reality_eth_markets")
+    graphql_config_key = "reality_eth_subgraph_url"
+    graphql_env_vars = ("REALITY_ETH_SUBGRAPH_URL", "REALITYETH_SUBGRAPH_URL")
+
+    QUESTIONS_QUERY = """
+    query RealityQuestions($first: Int!) {
+      questions(first: $first, orderBy: createdTimestamp, orderDirection: desc) {
+        id
+        questionId
+        contract
+        createdBlock
+        createdTimestamp
+        updatedBlock
+        updatedTimestamp
+        data
+        qJsonStr
+        qTitle
+        qCategory
+        qDescription
+        qLang
+        qType
+        user
+        arbitrator
+        openingTimestamp
+        timeout
+        bounty
+        currentAnswer
+        currentAnswerBond
+        currentAnswerTimestamp
+        minBond
+        lastBond
+        cumulativeBonds
+        isPendingArbitration
+        arbitrationOccurred
+        answerFinalizedTimestamp
+        currentScheduledFinalizationTimestamp
+        outcomes {
+          id
+          answer
+        }
+      }
+    }
+    """
+
+    QUESTION_QUERY = """
+    query RealityQuestion($id: ID!) {
+      question(id: $id) {
+        id
+        questionId
+        contract
+        createdBlock
+        createdTimestamp
+        updatedBlock
+        updatedTimestamp
+        data
+        qJsonStr
+        qTitle
+        qCategory
+        qDescription
+        qLang
+        qType
+        user
+        arbitrator
+        openingTimestamp
+        timeout
+        bounty
+        currentAnswer
+        currentAnswerBond
+        currentAnswerTimestamp
+        minBond
+        lastBond
+        cumulativeBonds
+        isPendingArbitration
+        arbitrationOccurred
+        answerFinalizedTimestamp
+        currentScheduledFinalizationTimestamp
+        outcomes {
+          id
+          answer
+        }
+      }
+    }
+    """
+
+    def health_check(self) -> Dict[str, Any]:
+        health = super().health_check()
+        url, source = self._graphql_url_with_source(required=False)
+        health.update(
+            {
+                "graphql_url_configured": bool(url),
+                "graphql_url_source": source,
+                "references": list(REALITY_ETH_REFERENCES),
+                "question_schema_supported": True,
+                "price_reading_supported": False,
+                "orderbook_supported": False,
+                "paper_trading_supported": False,
+                "live_trading_enabled": False,
+            }
+        )
+        return health
+
+    def list_events(self, query: str = "", limit: int = 50) -> List[MarketEvent]:
+        self.ensure_capability("event_listing")
+        desired = max(1, min(int(limit or 50), 100))
+        data = self._graphql(self.QUESTIONS_QUERY, {"first": desired})
+        questions = self._questions_from_payload(data)
+        q = str(query or "").strip().lower()
+        if q:
+            questions = [question for question in questions if self._question_matches_query(question, q)]
+        return [self._event_from_question(question) for question in questions[:desired]]
+
+    def list_contracts(self, event_id: str) -> List[MarketContract]:
+        self.ensure_capability("event_listing")
+        question = self._fetch_question(event_id)
+        question_id = self._question_id(question)
+        title = self._title(question)
+        status = self._status(question)
+        contracts = []
+        for index, outcome in enumerate(self._outcomes(question)):
+            outcome_id = str(outcome.get("id") or index)
+            outcome_name = str(outcome.get("answer") or f"Answer {index + 1}")
+            contracts.append(
+                MarketContract(
+                    market_id=self.market_id,
+                    contract_id=self._contract_id(question_id, outcome_id),
+                    event_id=str(question.get("id") or question_id),
+                    title=f"{title} - {outcome_name}",
+                    outcome=outcome_name,
+                    url="https://reality.eth.limo",
+                    status=status,
+                    raw={"question": dict(question), "outcome": dict(outcome), "outcome_index": index},
+                )
+            )
+        return contracts
+
+    def get_price(self, contract_id: str) -> PriceSnapshot:
+        raise UnsupportedFeatureError(
+            self.market_id,
+            "price_reading",
+            "Reality.eth publishes oracle answers and question lifecycle data, not tradable contract prices.",
+        )
+
+    def get_orderbook(self, contract_id: str):
+        raise UnsupportedFeatureError(
+            self.market_id,
+            "orderbook_reading",
+            "Reality.eth is a question/oracle protocol and has no CLOB orderbook.",
+        )
+
+    def place_paper_order(self, order: PaperOrderRequest):
+        raise UnsupportedFeatureError(
+            self.market_id,
+            "paper_trading",
+            "Reality.eth question responses are not tradeable paper orders.",
+        )
+
+    def place_live_order(self, order: PaperOrderRequest):
+        raise UnsupportedFeatureError(
+            self.market_id,
+            "live_trading",
+            "Reality.eth answer submission requires explicit wallet-signed protocol transactions and is not trading.",
+        )
+
+    def copy_trade_from_activity(self, activity: Mapping[str, Any]):
+        raise UnsupportedFeatureError(
+            self.market_id,
+            "copy_trading",
+            "Reality.eth has no official account-activity mirroring model for copy trading.",
+        )
+
+    def _fetch_question(self, question_id: str) -> Mapping[str, Any]:
+        normalized = str(question_id or "").strip()
+        if not normalized:
+            raise MarketConfigurationError("Reality.eth question id cannot be empty.")
+        data = self._graphql(self.QUESTION_QUERY, {"id": normalized})
+        question = data.get("question")
+        if isinstance(question, Mapping):
+            return question
+        raise MarketConfigurationError(f"Reality.eth question {normalized!r} was not found.")
+
+    def _event_from_question(self, question: Mapping[str, Any]) -> MarketEvent:
+        event_id = str(question.get("id") or self._question_id(question))
+        return MarketEvent(
+            market_id=self.market_id,
+            event_id=event_id,
+            title=self._title(question),
+            url="https://reality.eth.limo",
+            status=self._status(question),
+            raw=dict(question),
+        )
+
+    @staticmethod
+    def _questions_from_payload(data: Mapping[str, Any]) -> List[Mapping[str, Any]]:
+        questions = data.get("questions")
+        return [question for question in questions if isinstance(question, Mapping)] if isinstance(questions, list) else []
+
+    @staticmethod
+    def _question_id(question: Mapping[str, Any]) -> str:
+        return str(question.get("questionId") or question.get("id") or "").strip()
+
+    @staticmethod
+    def _title(question: Mapping[str, Any]) -> str:
+        title = str(question.get("qTitle") or question.get("qDescription") or "").strip()
+        if title:
+            return title
+        raw_json = question.get("qJsonStr")
+        if raw_json:
+            try:
+                parsed = json.loads(str(raw_json))
+            except (TypeError, ValueError):
+                parsed = {}
+            if isinstance(parsed, Mapping) and str(parsed.get("title") or "").strip():
+                return str(parsed["title"]).strip()
+        return RealityEthMarketsAdapter._question_id(question) or "Reality.eth question"
+
+    @staticmethod
+    def _status(question: Mapping[str, Any]) -> str:
+        if question.get("answerFinalizedTimestamp") not in (None, "", 0, "0"):
+            return "finalized"
+        if bool(question.get("isPendingArbitration")):
+            return "pending_arbitration"
+        return "open"
+
+    @staticmethod
+    def _outcomes(question: Mapping[str, Any]) -> List[Mapping[str, Any]]:
+        outcomes = question.get("outcomes")
+        normalized = [outcome for outcome in outcomes if isinstance(outcome, Mapping)] if isinstance(outcomes, list) else []
+        if normalized:
+            return normalized
+        q_type = str(question.get("qType") or "").lower()
+        if q_type in {"bool", "boolean"}:
+            return [{"id": "yes", "answer": "Yes"}, {"id": "no", "answer": "No"}]
+        raw_json = question.get("qJsonStr")
+        if raw_json:
+            try:
+                parsed = json.loads(str(raw_json))
+            except (TypeError, ValueError):
+                parsed = {}
+            values = parsed.get("outcomes") if isinstance(parsed, Mapping) else None
+            if isinstance(values, list) and values:
+                return [{"id": str(index), "answer": str(value)} for index, value in enumerate(values)]
+        return [{"id": "answer", "answer": "Answer"}]
+
+    @classmethod
+    def _question_matches_query(cls, question: Mapping[str, Any], query: str) -> bool:
+        values = [
+            question.get("id"),
+            question.get("questionId"),
+            question.get("qTitle"),
+            question.get("qDescription"),
+            question.get("qCategory"),
+            question.get("qType"),
+            cls._title(question),
+            " ".join(str(outcome.get("answer") or "") for outcome in cls._outcomes(question)),
+        ]
+        return query in " ".join(str(value or "") for value in values).lower()
+
+    @staticmethod
+    def _contract_id(question_id: str, outcome_id: str) -> str:
+        return f"{question_id}:{outcome_id}"
+
+
 class OmenAdapter(_GraphQLAdapter):
-    """Omen AMM adapter using the documented FixedProductMarketMaker subgraph schema."""
+    """Omen AMM adapter using the documented FixedProductMarketMaker schema.
+
+    Reads and paper orders use the official subgraph.  Live orders are limited
+    to forwarding an operator-reviewed, externally signed FPMM transaction to
+    an explicitly configured EVM RPC; this adapter never signs, approves
+    collateral, or settles a position.
+    """
 
     metadata = get_market_metadata("omen")
     graphql_config_key = "omen_subgraph_url"
@@ -376,7 +668,12 @@ class OmenAdapter(_GraphQLAdapter):
                 "graphql_url_source": source,
                 "references": list(OMEN_REFERENCES),
                 "orderbook_supported": False,
-                "live_trading_enabled": False,
+                "live_trading_supported": True,
+                "live_trading_enabled": self.config_bool("live_trading_enabled", False),
+                "signed_transaction_submission_enabled": self.config_bool(
+                    self._submit_config_key, False
+                ),
+                "rpc_configured": bool(self._configured_rpc_url),
             }
         )
         return health
@@ -440,11 +737,72 @@ class OmenAdapter(_GraphQLAdapter):
         )
 
     def place_live_order(self, order: PaperOrderRequest):
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "live_trading",
-            "Omen live trading requires explicit wallet-signed AMM transactions and is not implemented.",
+        self.ensure_capability("live_trading")
+        self._validate_order(order)
+        audit = self.preflight_live_order(order, feature_name="Omen live trading")
+        if not self.config_bool(self._submit_config_key, False):
+            raise MarketConfigurationError(
+                f"{self.display_name} live trading requires {self._submit_config_key}=true after reviewing the signed transaction."
+            )
+        rpc_url = self._configured_rpc_url
+        if not rpc_url:
+            raise MarketConfigurationError(
+                f"{self.display_name} live orders require {self._rpc_config_key} or evm_rpc_url for transaction submission."
+            )
+        fpmm_id, outcome_index = self._split_contract_id(order.contract_id)
+        signed = str(
+            order.metadata.get("signed_transaction") or order.metadata.get("signedTransaction") or ""
+        ).strip()
+        self._validate_signed_transaction(signed)
+        metadata = dict(order.metadata or {})
+        target = str(
+            metadata.get("transaction_to")
+            or metadata.get("to")
+            or metadata.get("fpmm_address")
+            or ""
+        ).strip()
+        if not target or target.casefold() != fpmm_id.casefold():
+            raise MarketConfigurationError("Omen signed transaction metadata targets a different FPMM market.")
+        method = str(metadata.get("method") or "").strip()
+        allowed_methods = {"buy", "buyWithHint", "sell", "sellFor"}
+        if method not in allowed_methods:
+            raise MarketConfigurationError(
+                "Omen live orders require reviewed buy/buyWithHint/sell/sellFor method metadata."
+            )
+        side = str(order.side or "").upper()
+        if (side == "BUY" and method not in {"buy", "buyWithHint"}) or (
+            side == "SELL" and method not in {"sell", "sellFor"}
+        ):
+            raise MarketConfigurationError("Omen signed transaction method does not match the requested order side.")
+        try:
+            reviewed_outcome = int(metadata.get("outcome_index"))
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Omen live orders require reviewed outcome_index metadata.") from exc
+        if reviewed_outcome != outcome_index:
+            raise MarketConfigurationError("Omen signed transaction metadata targets a different outcome.")
+        data = str(metadata.get("data") or metadata.get("calldata") or "").strip()
+        if data.startswith("0x"):
+            data = data[2:]
+        if not data or len(data) < 8 or len(data) % 2 or not re.fullmatch(r"[0-9a-fA-F]+", data):
+            raise MarketConfigurationError("Omen live orders require reviewed hexadecimal transaction calldata.")
+        response = self._evm_rpc(
+            rpc_url,
+            "eth_sendRawTransaction",
+            [signed],
         )
+        if not isinstance(response, str) or not re.fullmatch(r"0x[0-9a-fA-F]{64}", response):
+            raise MarketHTTPError("Omen RPC did not return a valid transaction hash.")
+        return {
+            "market_id": self.market_id,
+            "contract_id": self._contract_id(fpmm_id, outcome_index),
+            "live": True,
+            "preflight": audit,
+            "submission": "evm_rpc_eth_sendRawTransaction",
+            "tx_hash": response,
+            "fpmm_address": target,
+            "method": method,
+            "outcome_index": outcome_index,
+        }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]):
         raise UnsupportedFeatureError(
@@ -462,6 +820,57 @@ class OmenAdapter(_GraphQLAdapter):
         if isinstance(fpmm, Mapping):
             return fpmm
         raise MarketConfigurationError(f"Omen market {market_id!r} was not found.")
+
+    @property
+    def _rpc_config_key(self) -> str:
+        return "gnosis_rpc_url" if self.market_id == "gnosis_prediction_markets" else "omen_rpc_url"
+
+    @property
+    def _submit_config_key(self) -> str:
+        return (
+            "gnosis_submit_signed_transactions"
+            if self.market_id == "gnosis_prediction_markets"
+            else "omen_submit_signed_transactions"
+        )
+
+    @property
+    def _configured_rpc_url(self) -> str:
+        value = (
+            self.config.get(self._rpc_config_key)
+            or self.config.get("evm_rpc_url")
+            or self.config.get("web3_rpc_url")
+        )
+        text = str(value or "").strip().rstrip("/")
+        if not text:
+            return ""
+        parsed = urlsplit(text)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.query or parsed.fragment:
+            raise MarketConfigurationError(
+                f"{self.display_name} RPC URL must be an absolute http(s) URL without query or fragment."
+            )
+        return text
+
+    @staticmethod
+    def _validate_signed_transaction(value: str) -> None:
+        if not value or not re.fullmatch(r"0x[0-9a-fA-F]+", value) or len(value) % 2:
+            raise MarketConfigurationError(
+                "Omen live orders require an externally signed raw EVM transaction in metadata['signed_transaction']."
+            )
+        if len(value) > 2_000_002 or len(value) < 130:
+            raise MarketConfigurationError("Omen signed transaction has an invalid size.")
+
+    def _evm_rpc(self, url: str, method: str, params: List[Any]) -> Any:
+        payload = self.runtime.request_json(
+            "POST",
+            url,
+            json_body={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+            headers={"Content-Type": "application/json"},
+        )
+        if not isinstance(payload, Mapping):
+            raise MarketHTTPError(f"{self.display_name} RPC response was not a JSON object.")
+        if payload.get("error"):
+            raise MarketHTTPError(f"{self.display_name} RPC error.")
+        return payload.get("result")
 
     def _event_from_fpmm(self, fpmm: Mapping[str, Any]) -> MarketEvent:
         fpmm_id = self._fpmm_id(fpmm)
@@ -590,8 +999,42 @@ class OmenAdapter(_GraphQLAdapter):
         return f"{fpmm_id}:{int(outcome_index)}"
 
 
+class GnosisPredictionMarketsAdapter(OmenAdapter):
+    """Gnosis prediction-market alias over the official Omen FPMM indexer.
+
+    Gnosis' currently supported prediction-market surface is Omen/Presagio;
+    the market entities and lifecycle are the same FixedProductMarketMaker
+    schema.  Keeping a separate adapter identity preserves market-scoped
+    configuration and diagnostics without pretending there is a second CLOB.
+    """
+
+    metadata = get_market_metadata("gnosis_prediction_markets")
+    graphql_config_key = "gnosis_subgraph_url"
+    graphql_env_vars = ("GNOSIS_SUBGRAPH_URL", "OMEN_SUBGRAPH_URL")
+
+    def health_check(self) -> Dict[str, Any]:
+        health = super().health_check()
+        url, source = self._graphql_url_with_source(required=False)
+        health.update(
+            {
+                "graphql_url_configured": bool(url),
+                "graphql_url_source": source,
+                "references": list(GNOSIS_REFERENCES),
+                "alias_of": "omen",
+                "live_trading_enabled": False,
+            }
+        )
+        return health
+
+
 class ZeitgeistAdapter(_GraphQLAdapter):
-    """Zeitgeist adapter using the documented Subsquid/indexer GraphQL market shape."""
+    """Zeitgeist adapter using indexer reads and guarded signed HybridRouter extrinsics.
+
+    The adapter never creates keys, signs calls, approves collateral, or settles
+    positions.  Live forwarding is limited to an operator-reviewed, externally
+    signed ``HybridRouter.buy``/``sell`` extrinsic whose review metadata matches
+    the selected market/outcome and the current runtime spec version.
+    """
 
     metadata = get_market_metadata("zeitgeist")
     graphql_config_key = "zeitgeist_indexer_url"
@@ -685,13 +1128,24 @@ class ZeitgeistAdapter(_GraphQLAdapter):
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
         url, source = self._graphql_url_with_source(required=False)
+        rpc_url, rpc_source = self._configured_rpc_url()
         health.update(
             {
                 "indexer_url_configured": bool(url),
                 "indexer_url_source": source,
                 "references": list(ZEITGEIST_REFERENCES),
                 "orderbook_supported": False,
-                "live_trading_enabled": False,
+                "live_trading_supported": True,
+                "live_trading_enabled": self.config_bool("live_trading_enabled", False),
+                "signed_extrinsic_submission_enabled": self.config_bool(
+                    "zeitgeist_submit_signed_extrinsics", False
+                ),
+                "rpc_configured": bool(rpc_url),
+                "rpc_url_source": rpc_source,
+                "hybrid_router_pallet": "HybridRouter",
+                "hybrid_router_calls": ["buy", "sell"],
+                "wallet_signing_required": True,
+                "settlement_supported": False,
             }
         )
         return health
@@ -759,11 +1213,50 @@ class ZeitgeistAdapter(_GraphQLAdapter):
         )
 
     def place_live_order(self, order: PaperOrderRequest):
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "live_trading",
-            "Zeitgeist live trading requires explicit wallet-signed Substrate extrinsics and is not implemented.",
-        )
+        audit = self.preflight_live_order(order)
+        self._validate_order(order)
+        if not self.config_bool("zeitgeist_submit_signed_extrinsics", False):
+            raise MarketConfigurationError(
+                "Zeitgeist live trading requires zeitgeist_submit_signed_extrinsics=true after reviewing the signed HybridRouter extrinsic."
+            )
+        rpc_url, _source = self._configured_rpc_url()
+        if not rpc_url:
+            raise MarketConfigurationError(
+                "Zeitgeist live orders require zeitgeist_rpc_url or substrate_rpc_url for transaction submission."
+            )
+
+        market_id, outcome_index = self._split_contract_id(order.contract_id)
+        market = self._fetch_market(market_id)
+        asset_id = self._asset_id_for_outcome(market, outcome_index)
+        review = self._validate_reviewed_hybrid_router_order(order, market, asset_id, outcome_index)
+
+        runtime_version = self._substrate_rpc(rpc_url, "state_getRuntimeVersion", [])
+        if not isinstance(runtime_version, Mapping):
+            raise MarketHTTPError("Zeitgeist runtime version response was not an object.")
+        current_spec_version = self._positive_integer(runtime_version.get("specVersion"), "runtime spec version")
+        if current_spec_version != review["runtime_spec_version"]:
+            raise MarketConfigurationError(
+                "Zeitgeist signed extrinsic review runtime_spec_version does not match the connected chain."
+            )
+
+        result = self._substrate_rpc(rpc_url, "author_submitExtrinsic", [review["signed_extrinsic"]])
+        if not isinstance(result, str) or not re.fullmatch(r"0x[0-9a-fA-F]{64}", result):
+            raise MarketHTTPError("Zeitgeist author_submitExtrinsic returned an invalid extrinsic hash.")
+        return {
+            "live": True,
+            "market_id": self.market_id,
+            "contract_id": order.contract_id,
+            "side": order.side,
+            "submission": "substrate_rpc_author_submitExtrinsic",
+            "extrinsic_hash": result,
+            "pallet": "HybridRouter",
+            "call": review["call"],
+            "market_numeric_id": review["market_id"],
+            "outcome_index": review["outcome_index"],
+            "strategy": review["strategy"],
+            "runtime_spec_version": review["runtime_spec_version"],
+            "audit": audit,
+        }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]):
         raise UnsupportedFeatureError(
@@ -834,6 +1327,134 @@ class ZeitgeistAdapter(_GraphQLAdapter):
             raise MarketConfigurationError("Zeitgeist paper order size must be positive.")
         if order.limit_price is not None:
             self._probability(order.limit_price, allow_zero=False)
+
+    def _validate_reviewed_hybrid_router_order(
+        self,
+        order: PaperOrderRequest,
+        market: Mapping[str, Any],
+        asset_id: str,
+        outcome_index: int,
+    ) -> Dict[str, Any]:
+        metadata = order.metadata if isinstance(order.metadata, Mapping) else {}
+        pallet = str(metadata.get("pallet") or "").strip()
+        if pallet != "HybridRouter":
+            raise MarketConfigurationError(
+                "Zeitgeist live orders require reviewed metadata pallet='HybridRouter'."
+            )
+        call = str(metadata.get("call") or metadata.get("method") or "").strip().lower()
+        expected_call = str(order.side or "").strip().lower()
+        if call not in {"buy", "sell"} or call != expected_call:
+            raise MarketConfigurationError(
+                "Zeitgeist HybridRouter call must be buy for BUY orders or sell for SELL orders."
+            )
+
+        reviewed_market_id = self._positive_integer(metadata.get("market_id"), "reviewed market id", allow_zero=True)
+        parsed_market_id = self._positive_integer(self._market_id(market), "market id", allow_zero=True)
+        if reviewed_market_id != parsed_market_id:
+            raise MarketConfigurationError("Zeitgeist reviewed market_id does not match the selected contract.")
+
+        reviewed_outcome_index = self._positive_integer(
+            metadata.get("outcome_index"), "reviewed outcome index", allow_zero=True
+        )
+        if reviewed_outcome_index != outcome_index:
+            raise MarketConfigurationError("Zeitgeist reviewed outcome_index does not match the selected contract.")
+        reviewed_asset = str(metadata.get("asset") or metadata.get("asset_id") or "").strip()
+        if reviewed_asset != asset_id:
+            raise MarketConfigurationError("Zeitgeist reviewed asset does not match the selected outcome asset.")
+
+        expected_asset_count = len(self._outcome_assets(market))
+        asset_count = self._positive_integer(metadata.get("asset_count"), "asset_count")
+        if asset_count != expected_asset_count or asset_count > 8:
+            raise MarketConfigurationError(
+                "Zeitgeist HybridRouter asset_count must match the market outcome count and be at most 8."
+            )
+        amount_in = self._positive_integer(metadata.get("amount_in"), "amount_in")
+        price_key = "max_price" if call == "buy" else "min_price"
+        price_limit = self._positive_integer(metadata.get("price_limit", metadata.get(price_key)), price_key)
+        strategy = str(metadata.get("strategy") or "").strip()
+        if strategy not in {"ImmediateOrCancel", "LimitOrder"}:
+            raise MarketConfigurationError(
+                "Zeitgeist HybridRouter strategy must be ImmediateOrCancel or LimitOrder."
+            )
+        orders = metadata.get("orders", [])
+        if not isinstance(orders, list) or len(orders) > 64:
+            raise MarketConfigurationError("Zeitgeist HybridRouter orders must be a list of at most 64 order ids.")
+        parsed_orders = [self._positive_integer(value, "order id", allow_zero=True) for value in orders]
+        if parsed_orders != sorted(parsed_orders):
+            raise MarketConfigurationError("Zeitgeist HybridRouter order ids must be sorted for deterministic routing.")
+
+        runtime_spec_version = self._positive_integer(metadata.get("runtime_spec_version"), "runtime spec version")
+        signed_extrinsic = self._validate_signed_extrinsic(metadata.get("signed_extrinsic"))
+        self._validate_live_market_metadata(market, metadata)
+        return {
+            "market_id": reviewed_market_id,
+            "outcome_index": reviewed_outcome_index,
+            "asset_count": asset_count,
+            "asset": reviewed_asset,
+            "amount_in": amount_in,
+            "price_limit": price_limit,
+            "orders": parsed_orders,
+            "strategy": strategy,
+            "call": call,
+            "runtime_spec_version": runtime_spec_version,
+            "signed_extrinsic": signed_extrinsic,
+        }
+
+    def _validate_live_market_metadata(self, market: Mapping[str, Any], metadata: Mapping[str, Any]) -> None:
+        """Hook for aliases that require additional reviewed market metadata."""
+
+    @staticmethod
+    def _positive_integer(value: Any, label: str, *, allow_zero: bool = False) -> int:
+        if isinstance(value, bool) or value is None:
+            raise MarketConfigurationError(f"Zeitgeist {label} must be an integer.")
+        text = str(value).strip()
+        if not re.fullmatch(r"(?:0[xX][0-9a-fA-F]+|[0-9]+)", text):
+            raise MarketConfigurationError(f"Zeitgeist {label} must be an integer.")
+        number = int(text, 16) if text.lower().startswith("0x") else int(text, 10)
+        if number < 0 or (number == 0 and not allow_zero):
+            raise MarketConfigurationError(f"Zeitgeist {label} must be positive.")
+        return number
+
+    @staticmethod
+    def _validate_signed_extrinsic(value: Any) -> str:
+        if not isinstance(value, str) or value != value.strip():
+            raise MarketConfigurationError("Zeitgeist signed_extrinsic must be canonical 0x-prefixed hex.")
+        signed = value.strip()
+        if not re.fullmatch(r"0x[0-9a-fA-F]+", signed) or len(signed[2:]) % 2:
+            raise MarketConfigurationError("Zeitgeist signed_extrinsic must be canonical 0x-prefixed hex.")
+        byte_length = (len(signed) - 2) // 2
+        if byte_length < 32 or byte_length > 1_000_000:
+            raise MarketConfigurationError("Zeitgeist signed_extrinsic must be between 32 bytes and 1 MB.")
+        return signed
+
+    def _configured_rpc_url(self) -> Tuple[str, str]:
+        configured = self.config.get("substrate_rpc_url")
+        if configured and str(configured).strip():
+            return str(configured).strip().rstrip("/"), "config:substrate_rpc_url"
+        credential = self.resolve_credential(
+            "zeitgeist_rpc_url",
+            ("ZEITGEIST_RPC_URL", "SUBSTRATE_RPC_URL"),
+            required=False,
+            label="ZEITGEIST_RPC_URL",
+        )
+        if credential and credential.value.strip():
+            return credential.value.strip().rstrip("/"), credential.source
+        return "", "missing"
+
+    def _substrate_rpc(self, url: str, method: str, params: Sequence[Any]) -> Any:
+        payload = self.runtime.request_json(
+            "POST",
+            url,
+            json_body={"jsonrpc": "2.0", "id": 1, "method": method, "params": list(params)},
+            headers={"Content-Type": "application/json"},
+        )
+        if not isinstance(payload, Mapping):
+            raise MarketHTTPError("Zeitgeist RPC response was not a JSON object.")
+        if payload.get("error"):
+            raise MarketHTTPError(f"Zeitgeist RPC {method} failed: {payload['error']}")
+        if "result" not in payload:
+            raise MarketHTTPError(f"Zeitgeist RPC {method} response did not include a result.")
+        return payload["result"]
 
     @staticmethod
     def _markets_from_payload(data: Mapping[str, Any]) -> List[Mapping[str, Any]]:
@@ -912,3 +1533,67 @@ class ZeitgeistAdapter(_GraphQLAdapter):
     @staticmethod
     def _contract_id(market_id: str, outcome_index: int) -> str:
         return f"{market_id}:{int(outcome_index)}"
+
+
+class ZeitgeistSdkMarketsAdapter(ZeitgeistAdapter):
+    """Zeitgeist SDK/Markets alias using the same documented indexer contract.
+
+    The SDK's market-fetching surface is the same Subsquid GraphQL schema used
+    by the primary Zeitgeist adapter, but it is exposed as a separate catalog
+    target so configuration and health diagnostics remain explicit.
+    """
+
+    metadata = get_market_metadata("zeitgeist_sdk_markets")
+    graphql_config_key = "zeitgeist_sdk_indexer_url"
+    graphql_env_vars = ("ZEITGEIST_SDK_INDEXER_URL", "ZEITGEIST_INDEXER_URL")
+
+
+class ZeitgeistPredictionPoolsAdapter(ZeitgeistAdapter):
+    """Pool-scoped Zeitgeist adapter using the documented market/pool indexer shape.
+
+    Zeitgeist exposes pool metadata alongside each market and asset price.  This
+    adapter makes that pool contract explicit: discovery and paper quotes are
+    accepted only for markets with a valid pool identifier, while wallet
+    settlement and orderbook depth remain intentionally unsupported.
+    """
+
+    metadata = get_market_metadata("zeitgeist_prediction_pools")
+    graphql_config_key = "zeitgeist_pools_indexer_url"
+    graphql_env_vars = ("ZEITGEIST_POOLS_INDEXER_URL", "ZEITGEIST_INDEXER_URL")
+    default_graphql_url = DEFAULT_ZEITGEIST_INDEXER_URL
+
+    def health_check(self) -> Dict[str, Any]:
+        health = super().health_check()
+        health.update(
+            {
+                "alias_of": "zeitgeist",
+                "pool_schema_supported": True,
+                "pool_accounting_supported": False,
+                "pool_settlement_supported": False,
+            }
+        )
+        return health
+
+    def list_events(self, query: str = "", limit: int = 50) -> List[MarketEvent]:
+        desired = max(1, min(int(limit or 50), 100))
+        events = super().list_events(query, 100)
+        pooled = [event for event in events if isinstance(event.raw.get("pool"), Mapping)]
+        return pooled[:desired]
+
+    def _fetch_market(self, market_id: Any) -> Mapping[str, Any]:
+        market = super()._fetch_market(market_id)
+        pool = market.get("pool")
+        if not isinstance(pool, Mapping) or pool.get("poolId") is None:
+            raise MarketConfigurationError(
+                f"Zeitgeist prediction-pool market {market_id!r} did not include a valid pool identifier."
+            )
+        return market
+
+    def _validate_live_market_metadata(self, market: Mapping[str, Any], metadata: Mapping[str, Any]) -> None:
+        pool = market.get("pool")
+        if not isinstance(pool, Mapping) or pool.get("poolId") is None:
+            raise MarketConfigurationError("Zeitgeist prediction-pool live orders require a valid pool identifier.")
+        reviewed_pool_id = self._positive_integer(metadata.get("pool_id"), "reviewed pool id", allow_zero=True)
+        pool_id = self._positive_integer(pool.get("poolId"), "pool id", allow_zero=True)
+        if reviewed_pool_id != pool_id:
+            raise MarketConfigurationError("Zeitgeist reviewed pool_id does not match the selected pool.")

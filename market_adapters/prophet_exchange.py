@@ -1,0 +1,505 @@
+"""Official ProphetX/Prophet Exchange adapter.
+
+ProphetX publishes separate read-only Market Data and authenticated Trading API
+contracts.  This adapter uses the documented affiliate endpoints for event,
+market, price, and available-quantity reads, keeps paper orders local, and
+submits only the documented market-maker order shape behind the shared live
+safety gate.  It never scrapes the consumer site or stores credentials.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+import uuid
+from typing import Any, Dict, List, Mapping, Optional, Tuple
+
+from .base import MarketAdapter
+from .catalog import get_market_metadata
+from .errors import MarketConfigurationError, UnsupportedFeatureError
+from .types import (
+    MarketContract,
+    MarketEvent,
+    OrderBookLevel,
+    OrderBookSnapshot,
+    PaperOrderRequest,
+    PaperOrderResult,
+    PriceSnapshot,
+)
+
+
+DEFAULT_PROPHET_EXCHANGE_API_BASE_URL = "https://cash.api.prophetx.co/partner"
+DEFAULT_PROPHET_EXCHANGE_API_VERSION = "v3"
+PROPHET_EXCHANGE_REFERENCES = (
+    "https://docs.prophetx.co/",
+    "https://docs.prophetx.co/docs/market-data-integration",
+    "https://docs.prophetx.co/docs/integration",
+    "https://docs.prophetx.co/reference/post_auth-login-2",
+    "https://docs.prophetx.co/reference/get_mm-search-markets-2",
+)
+
+_NUMERIC_ID_RE = re.compile(r"^[0-9]{1,32}$")
+_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+class ProphetExchangeAdapter(MarketAdapter):
+    """ProphetX REST adapter with guarded Trading API order submission."""
+
+    metadata = get_market_metadata("prophet_exchange")
+    # The documented Trading API submit_order shape is a market-maker quote
+    # (strike_id, decimal price, quantity), not a consumer sell/close order.
+    live_order_sides = ("BUY",)
+
+    def __init__(self, config: Optional[Mapping[str, Any]] = None, **kwargs: Any) -> None:
+        super().__init__(config, **kwargs)
+        self._access_token: Optional[str] = None
+
+    @property
+    def api_base_url(self) -> str:
+        configured = self.config.get("prophet_exchange_api_base_url") or self.config.get("api_base_url")
+        return str(configured or DEFAULT_PROPHET_EXCHANGE_API_BASE_URL).rstrip("/")
+
+    @property
+    def api_version(self) -> str:
+        value = str(self.config.get("prophet_exchange_api_version") or DEFAULT_PROPHET_EXCHANGE_API_VERSION).strip()
+        if not re.fullmatch(r"v[0-9]{1,3}", value):
+            raise MarketConfigurationError("Prophet Exchange API version must look like v3.")
+        return value
+
+    def health_check(self) -> Dict[str, Any]:
+        health = super().health_check()
+        credentials = []
+        for credential in (
+            self.resolve_credential(
+                "prophet_exchange_api_key",
+                ("PROPHET_EXCHANGE_API_KEY",),
+                label="PROPHET_EXCHANGE_API_KEY",
+            ),
+            self.resolve_credential(
+                "prophet_exchange_access_token",
+                ("PROPHET_EXCHANGE_ACCESS_TOKEN",),
+                label="PROPHET_EXCHANGE_ACCESS_TOKEN",
+            ),
+            self.resolve_credential(
+                "prophet_exchange_access_key",
+                ("PROPHET_EXCHANGE_ACCESS_KEY",),
+                label="PROPHET_EXCHANGE_ACCESS_KEY",
+            ),
+            self.resolve_credential(
+                "prophet_exchange_secret_key",
+                ("PROPHET_EXCHANGE_SECRET_KEY",),
+                label="PROPHET_EXCHANGE_SECRET_KEY",
+            ),
+        ):
+            if credential:
+                credentials.append({"name": credential.name, "source": credential.source})
+        health.update(
+            {
+                "api_base_url": self.api_base_url,
+                "api_version": self.api_version,
+                "credential_sources": credentials,
+                "references": list(PROPHET_EXCHANGE_REFERENCES),
+                "market_data_api_key_required": True,
+                "trading_api_credentials_required": True,
+                "live_trading_supported": True,
+                "live_trading_enabled": self.config_bool("live_trading_enabled", False),
+                "live_order_shape": "external_id + strike_id + decimal price + quantity",
+            }
+        )
+        return health
+
+    def list_events(self, query: str = "", limit: int = 50) -> List[MarketEvent]:
+        self.ensure_capability("event_listing")
+        desired = max(1, min(int(limit or 50), 1000))
+        params: Dict[str, Any] = {}
+        tournament_id = self.config.get("prophet_exchange_tournament_id")
+        if tournament_id not in (None, ""):
+            params["tournament_id"] = self._required_id(tournament_id, "tournament")
+        payload = self._get("/affiliate/get_sport_events", params=params or None)
+        events = self._rows(payload, "sport_events", "events")
+        needle = str(query or "").strip().lower()
+        if needle:
+            events = [event for event in events if needle in self._search_text(event)]
+        return [self._event_from_payload(event) for event in events[:desired]]
+
+    def list_contracts(self, event_id: str) -> List[MarketContract]:
+        self.ensure_capability("event_listing")
+        event = self._required_id(event_id, "event")
+        markets = self._markets_for_event(event)
+        contracts: List[MarketContract] = []
+        for market in markets:
+            market_id = self._id(market, "market_id")
+            if not market_id:
+                continue
+            market_title = str(self._value(market, "name", "title", "market_type") or market_id)
+            status = str(self._value(market, "state", "status") or "")
+            for selection in self._selection_rows(market):
+                outcome_id = self._id(selection, "outcome_id", "outcomeId", "id")
+                if not outcome_id:
+                    continue
+                line_id = self._line_id(selection)
+                contract_id = self._contract_id(event, market_id, outcome_id, line_id)
+                outcome = str(self._value(selection, "name", "label", "title") or outcome_id)
+                contracts.append(
+                    MarketContract(
+                        market_id=self.market_id,
+                        contract_id=contract_id,
+                        event_id=event,
+                        title=f"{market_title} - {outcome}",
+                        outcome=outcome,
+                        url=str(self._value(market, "url", "slug") or market_id),
+                        status=status,
+                        raw={"market": dict(market), "selection": dict(selection)},
+                    )
+                )
+        return contracts
+
+    def get_orderbook(self, contract_id: str) -> OrderBookSnapshot:
+        self.ensure_capability("orderbook_reading")
+        event, market_id, outcome_id, line_id = self._split_contract_id(contract_id)
+        selection, market = self._selection_for_contract(event, market_id, outcome_id, line_id)
+        probability = self._selection_probability(selection)
+        quantity = self._positive_float(self._value(selection, "quantity", "available_quantity", "availableQuantity"))
+        asks = [OrderBookLevel(price=probability, size=quantity)] if probability is not None and quantity is not None else []
+        canonical = self._contract_id(event, market_id, outcome_id, line_id)
+        return OrderBookSnapshot(
+            market_id=self.market_id,
+            contract_id=canonical,
+            bids=[],
+            asks=asks,
+            raw={"market": dict(market), "selection": dict(selection), "quote_side": "available_quantity"},
+        )
+
+    def get_price(self, contract_id: str) -> PriceSnapshot:
+        self.ensure_capability("price_reading")
+        book = self.get_orderbook(contract_id)
+        ask = book.asks[0].price if book.asks else None
+        return PriceSnapshot(
+            market_id=self.market_id,
+            contract_id=book.contract_id,
+            last=ask,
+            bid=None,
+            ask=ask,
+            midpoint=None,
+            source="prophetx_affiliate_market_data",
+            raw=book.raw,
+        )
+
+    def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
+        self.ensure_capability("paper_trading")
+        event, market_id, outcome_id, line_id, selection = self._validate_order(order)
+        payload = self._order_payload(order, selection=selection, require_strike=False)
+        return PaperOrderResult(
+            market_id=self.market_id,
+            contract_id=self._contract_id(event, market_id, outcome_id, line_id),
+            accepted=True,
+            message=(
+                f"DRY RUN: would place Prophet Exchange BUY for {float(order.size):.4f} quantity"
+                + (f" at probability {float(order.limit_price):.4f}" if order.limit_price is not None else "")
+            ),
+            raw={"request": payload, "dry_run": True},
+        )
+
+    def place_live_order(self, order: PaperOrderRequest) -> Dict[str, Any]:
+        self.ensure_capability("live_trading")
+        event, market_id, outcome_id, line_id, selection = self._validate_order(order)
+        preflight = self.preflight_live_order(order)
+        payload = self._order_payload(order, selection=selection, require_strike=True)
+        response = self._request_json("POST", "/mm/submit_order", payload, trading=True)
+        return {
+            "market_id": self.market_id,
+            "contract_id": self._contract_id(event, market_id, outcome_id, line_id),
+            "live": True,
+            "preflight": preflight,
+            "request": payload,
+            "response": response,
+        }
+
+    def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
+        raise UnsupportedFeatureError(
+            self.market_id,
+            "copy_trading",
+            "Prophet Exchange copy trading is unsupported because the official API does not expose account-activity mirroring.",
+        )
+
+    def _markets_for_event(self, event_id: str) -> List[Mapping[str, Any]]:
+        payload = self._get(
+            f"/{self.api_version}/affiliate/get_markets",
+            params={"event_id": int(event_id)},
+        )
+        rows = self._rows(payload, "markets")
+        return rows
+
+    def _selection_for_contract(
+        self,
+        event_id: str,
+        market_id: str,
+        outcome_id: str,
+        line_id: str,
+    ) -> Tuple[Mapping[str, Any], Mapping[str, Any]]:
+        for market in self._markets_for_event(event_id):
+            if self._id(market, "market_id") != market_id:
+                continue
+            for selection in self._selection_rows(market):
+                if self._id(selection, "outcome_id", "outcomeId", "id") != outcome_id:
+                    continue
+                if self._line_id(selection) == line_id:
+                    return selection, market
+        raise MarketConfigurationError(
+            f"Prophet Exchange contract {market_id}:{outcome_id}:{line_id} was not found in event {event_id}."
+        )
+
+    def _get(
+        self,
+        path: str,
+        *,
+        params: Optional[Mapping[str, Any]] = None,
+        trading: bool = False,
+    ) -> Any:
+        return self.runtime.get_json(
+            self._url(self.api_base_url, path),
+            params=params,
+            headers=self._headers(required=True, trading=trading),
+        )
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        body: Mapping[str, Any],
+        *,
+        trading: bool,
+    ) -> Any:
+        return self.runtime.request_json(
+            method,
+            self._url(self.api_base_url, path),
+            json_body=dict(body),
+            headers={"Content-Type": "application/json", **self._headers(required=True, trading=trading)},
+        )
+
+    def _headers(self, *, required: bool, trading: bool) -> Dict[str, str]:
+        token = self.resolve_credential(
+            "prophet_exchange_access_token",
+            ("PROPHET_EXCHANGE_ACCESS_TOKEN",),
+            label="PROPHET_EXCHANGE_ACCESS_TOKEN",
+        )
+        if token:
+            return {"Authorization": token.value}
+        if not trading:
+            api_key = self.resolve_credential(
+                "prophet_exchange_api_key",
+                ("PROPHET_EXCHANGE_API_KEY",),
+                label="PROPHET_EXCHANGE_API_KEY",
+            )
+            if api_key:
+                return {"Authorization": api_key.value}
+        access = self.resolve_credential(
+            "prophet_exchange_access_key",
+            ("PROPHET_EXCHANGE_ACCESS_KEY",),
+            required=required,
+            label="PROPHET_EXCHANGE_ACCESS_KEY",
+        )
+        secret = self.resolve_credential(
+            "prophet_exchange_secret_key",
+            ("PROPHET_EXCHANGE_SECRET_KEY",),
+            required=required,
+            label="PROPHET_EXCHANGE_SECRET_KEY",
+        )
+        if access is None or secret is None:
+            return {}
+        if self._access_token:
+            return {"Authorization": self._access_token}
+        payload = self.runtime.request_json(
+            "POST",
+            self._url(self.api_base_url, "/auth/login"),
+            json_body={"access_key": access.value, "secret_key": secret.value},
+            headers={"Content-Type": "application/json"},
+        )
+        mapping = self._mapping_payload(payload)
+        value = self._value(mapping, "access_token", "accessToken", "token")
+        if not value:
+            raise MarketConfigurationError("Prophet Exchange login response did not include an access token.")
+        self._access_token = str(value)
+        return {"Authorization": self._access_token}
+
+    def _validate_order(
+        self, order: PaperOrderRequest
+    ) -> Tuple[str, str, str, str, Mapping[str, Any]]:
+        self.ensure_order_market(order)
+        event, market_id, outcome_id, line_id = self._split_contract_id(order.contract_id)
+        if str(order.side or "").upper() not in self.live_order_sides:
+            raise MarketConfigurationError("Prophet Exchange orders currently support BUY only through the documented API.")
+        size = self._positive_float(order.size)
+        if size is None:
+            raise MarketConfigurationError("Prophet Exchange order quantity must be positive and finite.")
+        if order.limit_price is not None and self._probability(order.limit_price) is None:
+            raise MarketConfigurationError("Prophet Exchange order probability must be between 0 and 1.")
+        selection, _market = self._selection_for_contract(event, market_id, outcome_id, line_id)
+        return event, market_id, outcome_id, line_id, selection
+
+    def _order_payload(
+        self,
+        order: PaperOrderRequest,
+        *,
+        selection: Mapping[str, Any],
+        require_strike: bool,
+    ) -> Dict[str, Any]:
+        existing = order.metadata.get("prophet_exchange_order")
+        if isinstance(existing, Mapping):
+            return dict(existing)
+        probability = self._probability(order.limit_price)
+        if probability is None:
+            raise MarketConfigurationError("Prophet Exchange orders require a limit probability.")
+        strike_id = order.metadata.get("strike_id") or self._value(selection, "strike_id", "strikeId", "line_id", "lineId")
+        if require_strike and strike_id in (None, ""):
+            raise MarketConfigurationError(
+                "Prophet Exchange live orders require the documented strike_id in the market payload or order metadata."
+            )
+        payload: Dict[str, Any] = {
+            "external_id": str(order.metadata.get("external_id") or uuid.uuid4().hex),
+            "strike_id": str(strike_id or ""),
+            "price": round(1.0 / probability, 8),
+            "quantity": float(order.size),
+        }
+        return payload
+
+    @classmethod
+    def _event_from_payload(cls, event: Mapping[str, Any]) -> MarketEvent:
+        event_id = cls._id(event, "event_id")
+        return MarketEvent(
+            market_id=cls.metadata.market_id,
+            event_id=event_id,
+            title=str(cls._value(event, "name", "title", "description") or event_id),
+            url=str(cls._value(event, "url", "slug") or event_id),
+            status=str(cls._value(event, "state", "status") or "").lower(),
+            raw=dict(event),
+        )
+
+    @classmethod
+    def _selection_rows(cls, market: Mapping[str, Any]) -> List[Mapping[str, Any]]:
+        value = market.get("selections") or market.get("outcomes") or []
+        if isinstance(value, Mapping):
+            value = list(value.values())
+        if not isinstance(value, list):
+            return []
+        rows: List[Mapping[str, Any]] = []
+        for item in value:
+            if isinstance(item, Mapping):
+                rows.append(item)
+            elif isinstance(item, list):
+                rows.extend(row for row in item if isinstance(row, Mapping))
+        return rows
+
+    @classmethod
+    def _rows(cls, payload: Any, *keys: str) -> List[Mapping[str, Any]]:
+        if isinstance(payload, list):
+            return [row for row in payload if isinstance(row, Mapping)]
+        if not isinstance(payload, Mapping):
+            return []
+        data = payload.get("data")
+        if isinstance(data, list):
+            return [row for row in data if isinstance(row, Mapping)]
+        if isinstance(data, Mapping):
+            for key in keys:
+                value = data.get(key)
+                if isinstance(value, list):
+                    return [row for row in value if isinstance(row, Mapping)]
+        for key in keys:
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [row for row in value if isinstance(row, Mapping)]
+        return []
+
+    @classmethod
+    def _mapping_payload(cls, payload: Any) -> Dict[str, Any]:
+        if isinstance(payload, Mapping):
+            data = payload.get("data")
+            return dict(data) if isinstance(data, Mapping) else dict(payload)
+        return {}
+
+    @classmethod
+    def _search_text(cls, payload: Mapping[str, Any]) -> str:
+        return " ".join(
+            str(cls._value(payload, key) or "")
+            for key in ("event_id", "name", "title", "description", "home_team", "away_team", "sport")
+        ).lower()
+
+    @staticmethod
+    def _id(payload: Mapping[str, Any], *aliases: str) -> str:
+        for key in ("id", *aliases):
+            value = payload.get(key)
+            if value not in (None, ""):
+                return str(value).strip()
+        return ""
+
+    @staticmethod
+    def _value(payload: Mapping[str, Any], *keys: str) -> Any:
+        for key in keys:
+            value = payload.get(key)
+            if value not in (None, ""):
+                return value
+        return None
+
+    @classmethod
+    def _line_id(cls, selection: Mapping[str, Any]) -> str:
+        value = cls._value(selection, "line_id", "lineId")
+        if value in (None, ""):
+            return "default"
+        clean = str(value).strip()
+        if not _SEGMENT_RE.fullmatch(clean):
+            raise MarketConfigurationError("Prophet Exchange line_id contains unsupported characters.")
+        return clean
+
+    @classmethod
+    def _selection_probability(cls, selection: Mapping[str, Any]) -> Optional[float]:
+        return cls._probability(cls._value(selection, "price", "odds", "decimal_price", "decimalPrice"))
+
+    @staticmethod
+    def _probability(value: Any) -> Optional[float]:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(number) or number <= 0:
+            return None
+        if number > 1.0:
+            number = 1.0 / number
+        return number if 0.0 < number <= 1.0 else None
+
+    @staticmethod
+    def _positive_float(value: Any) -> Optional[float]:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) and number > 0 else None
+
+    @staticmethod
+    def _required_id(value: Any, label: str) -> str:
+        clean = str(value or "").strip()
+        if not _NUMERIC_ID_RE.fullmatch(clean):
+            raise MarketConfigurationError(f"Prophet Exchange {label} id must be a positive numeric identifier.")
+        return clean
+
+    @classmethod
+    def _contract_id(cls, event_id: str, market_id: str, outcome_id: str, line_id: str) -> str:
+        return f"{event_id}:{market_id}:{outcome_id}:{line_id}"
+
+    @classmethod
+    def _split_contract_id(cls, contract_id: str) -> Tuple[str, str, str, str]:
+        parts = [part.strip() for part in str(contract_id or "").split(":")]
+        if len(parts) != 4:
+            raise MarketConfigurationError(
+                "Prophet Exchange contract id must be EVENT_ID:MARKET_ID:OUTCOME_ID:LINE_ID."
+            )
+        event, market, outcome, line = parts
+        cls._required_id(event, "event")
+        cls._required_id(market, "market")
+        cls._required_id(outcome, "outcome")
+        if not _SEGMENT_RE.fullmatch(line):
+            raise MarketConfigurationError("Prophet Exchange contract line id is invalid.")
+        return event, market, outcome, line
+
+    @staticmethod
+    def _url(base: str, path: str) -> str:
+        return f"{base.rstrip('/')}/{str(path or '').strip('/')}"

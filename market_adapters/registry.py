@@ -21,17 +21,6 @@ VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
             "https://robinhood.com/us/en/newsroom/robinhood-prediction-markets-hub/",
         ],
     },
-    "fanatics_markets": {
-        "reason": (
-            "Verified 2026-05-26: Fanatics Markets is documented as a consumer prediction-market product "
-            "built with Crypto.com/CDNA, but no public Fanatics Markets API, SDK, or automation terms are "
-            "published for third-party app integration."
-        ),
-        "references": [
-            "https://www.fanaticsinc.com/press-releases/fanatics-launches-fanatics-markets-the-first-prediction-market-at-the-intersection-of-sports-finance-and-culture",
-            "https://crypto.com/en/prediction/",
-        ],
-    },
     "draftkings_predictions": {
         "reason": (
             "Verified 2026-05-26: DraftKings Predictions is published as an app product, but no public "
@@ -43,40 +32,6 @@ VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
             "https://www.draftkings.com",
         ],
     },
-    "ibkr_forecasttrader": {
-        "reason": (
-            "Verified 2026-05-26: IBKR ForecastTrader/Forecast Contracts require an eligible IBKR account, "
-            "trading permissions, and authenticated Web API or TWS/API session handling. This app cannot "
-            "ship a reliable adapter without user-specific broker entitlements and contract mapping tests."
-        ),
-        "references": [
-            "https://forecasttrader.interactivebrokers.com/",
-            "https://www.interactivebrokers.com/campus/traders-insight/ibkr-toolbox/prediction-markets-101/",
-            "https://portal.interactivebrokers.com/download/CP_API.pdf",
-        ],
-    },
-    "forecastex": {
-        "reason": (
-            "Verified 2026-05-26: ForecastEx contracts are exchange/clearinghouse products purchased "
-            "through ForecastEx members/FCMs. No direct public ForecastEx self-service market-data and "
-            "order API is published for this app."
-        ),
-        "references": [
-            "https://forecastex.com/about/how-forecast-contracts-work",
-            "https://forecastex.com",
-        ],
-    },
-    "cme_prediction_markets": {
-        "reason": (
-            "Verified 2026-05-26: CME event contracts can require CME market-data licensing/entitlements "
-            "and a broker/order route. This app has no licensed data entitlement or documented broker "
-            "order path for automated event-contract trading."
-        ),
-        "references": [
-            "https://www.cmegroup.com/markets/event-contracts.html",
-            "https://www.cmegroup.com/market-data/market-data-api.html",
-        ],
-    },
     "nadex": {
         "reason": (
             "Verified 2026-05-26: Nadex event contracts require a Nadex account on a CFTC-regulated "
@@ -86,40 +41,6 @@ VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
         "references": [
             "https://www.nadex.com/product-market/",
             "https://www.nadex.com/learning/how-to-trade-event-contracts/",
-        ],
-    },
-    "hyperliquid": {
-        "reason": (
-            "Verified 2026-05-26: Hyperliquid exposes HyperCore trading primitives, but this app does not "
-            "yet have a first-party, stable HIP-4 prediction-market catalog/order-normalization contract "
-            "with offline fixtures and wallet risk controls. Generic perp/spot APIs are not enough."
-        ),
-        "references": [
-            "https://hyperliquid.gitbook.io/hyperliquid-docs/hypercore/overview",
-            "https://hyperliquid.gitbook.io/hyperliquid-docs/hyperliquid-improvement-proposals-hips/hip-3-builder-deployed-perpetuals",
-        ],
-    },
-    "context_v2": {
-        "reason": (
-            "Verified 2026-05-26: Context V2 publishes API/order documentation, but production use requires "
-            "service credentials, market/order lifecycle validation, and account-specific automation terms "
-            "that are not available in this local app."
-        ),
-        "references": [
-            "https://docs.context.markets/api-reference/orders/create-order",
-            "https://storage.googleapis.com/spur.us/website/resources/documentation/api-v2.pdf",
-            "https://context.app",
-        ],
-    },
-    "frenzy_finance": {
-        "reason": (
-            "Verified 2026-05-26: Frenzy Finance documents an on-chain short-duration prediction protocol, "
-            "but safe integration requires wallet/network handling, contract address validation, settlement "
-            "rules, and tests that are not available in this app."
-        ),
-        "references": [
-            "https://frenzy.finance/docs",
-            "https://frenzy.finance",
         ],
     },
     "fact_machine": {
@@ -169,14 +90,15 @@ VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
     },
     "infer": {
         "reason": (
-            "Verified 2026-05-26: INFER-pub now redirects to the RAND Forecasting Initiative, which exposes "
-            "public landing/forecast pages and account sign-in but no public documented API or export contract. "
-            "The adapter must not scrape pages or automate private sessions."
+            "Verified 2026-05-26; re-verified 2026-08-17: INFER-pub now redirects to the RAND Forecasting Initiative "
+            "permanent read-only archive. Accounts, forecasting, comments, and live submission are no longer "
+            "available; the archive exposes preserved questions/leaderboards but no supported API or export contract "
+            "for this app. The adapter must not scrape pages or automate private sessions."
         ),
         "references": [
             "https://www.infer-pub.com",
             "https://www.randforecastinginitiative.org",
-            "https://www.randforecastinginitiative.org/forecasts",
+            "https://www.randforecastinginitiative.org/questions",
         ],
     },
     "betmgm": {
@@ -212,56 +134,15 @@ VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
             "https://help.underdogfantasy.com/",
         ],
     },
-    "drift_bet": {
-        "reason": (
-            "Verified 2026-05-26: Drift BET depends on Drift/Solana wallet, margin, settlement, and market "
-            "account handling. This app has no verified official BET-specific read/order integration with "
-            "fixtures and wallet safeguards."
-        ),
-        "references": [
-            "https://www.drift.trade",
-            "https://docs.drift.trade/",
-        ],
-    },
-    "thales_market": {
-        "reason": (
-            "Verified 2026-05-26: Thales documents on-chain positional/digital-option markets, but safe "
-            "adapter support requires chain-specific contract/indexer integration, AMM accounting, and "
-            "explicit wallet transaction handling that this app does not implement."
-        ),
-        "references": [
-            "https://docs.thalesmarket.io/",
-            "https://docs.thales.io/",
-        ],
-    },
-    "hedgehog_markets": {
-        "reason": (
-            "Verified 2026-05-26: Hedgehog Markets does not publish a stable public API/SDK or documented "
-            "protocol contract sufficient for this app's discovery, pricing, order, and settlement model."
-        ),
-        "references": [
-            "https://hedgehog.markets",
-        ],
-    },
-    "smarkets": {
-        "reason": (
-            "Verified 2026-05-26: Smarkets publishes API documentation and access terms, but API/data use "
-            "requires account approval and written permission for platform data use. This app cannot ship "
-            "working support without those user-specific entitlements."
-        ),
-        "references": [
-            "https://help.smarkets.com/hc/en-gb/articles/34697834941085-Smarkets-API-Access-Integration-T-Cs",
-            "https://help.smarkets.com/hc/en-gb/articles/34720906181021-Smarkets-API-Documentation-Resources",
-        ],
-    },
     "probo": {
         "reason": (
-            "Verified 2026-05-26: Probo is a region-limited consumer opinion-market product and does not "
-            "publish a public official API, SDK, or automation permission flow suitable for this app."
+            "Verified 2026-08-17: Probo's official site states that operations are closed; the product also "
+            "does not publish a public official API, SDK, or automation permission flow suitable for this app."
         ),
         "references": [
             "https://probo.in",
         ],
+        "last_reviewed": "2026-08-17",
     },
 }
 
@@ -348,28 +229,67 @@ def build_default_registry() -> AdapterRegistry:
         registry.register_metadata(metadata)
     from .azuro import AzuroAdapter
     from .betfair import BetfairExchangeAdapter
-    from .crypto_com_predict import CryptoComPredictAdapter
+    from .coinbase_prediction import CoinbasePredictionMarketsAdapter
+    from .crypto_com_predict import CryptoComPredictAdapter, FanaticsMarketsAdapter
+    from .context_v2 import ContextV2Adapter
+    from .dflow import DFlowAdapter
+    from .drift_bet import DriftBetAdapter
+    from .frenzy import FrenzyFinanceAdapter
     from .gemini import GeminiPredictionAdapter
+    from .hyperliquid import HyperliquidAdapter
+    from .hedgehog import HedgehogMarketsAdapter
+    from .ibkr_event_contracts import CMEPredictionMarketsAdapter, ForecastExAdapter, IBKRForecastTraderAdapter
     from .kalshi import KalshiAdapter
-    from .legacy_web3 import AugurAdapter, OmenAdapter, ZeitgeistAdapter
+    from .legacy_web3 import (
+        AugurAdapter,
+        GnosisPredictionMarketsAdapter,
+        OmenAdapter,
+        RealityEthMarketsAdapter,
+        ZeitgeistAdapter,
+        ZeitgeistPredictionPoolsAdapter,
+        ZeitgeistSdkMarketsAdapter,
+    )
     from .limitless import LimitlessAdapter
+    from .matchbook import MatchbookAdapter
     from .manifold import ManifoldAdapter
     from .metaculus import MetaculusAdapter
+    from .metadao import MetaDAOAdapter
     from .myriad import MyriadAdapter
     from .opinion import OpinionAdapter
     from .polymarket import PolymarketAdapter
+    from .probable import ProbableAdapter
+    from .prdt_finance import PRDTFinanceAdapter
+    from .prophet_exchange import ProphetExchangeAdapter
     from .predict_fun import PredictFunAdapter
     from .predictit import PredictItAdapter
     from .sx_bet import SxBetAdapter
+    from .smarkets import SmarketsAdapter
+    from .seer import SeerAdapter
+    from .space import SpaceAdapter
+    from .thales import ThalesMarketAdapter
+    from .trueo import TrueoAdapter
     from .stub import create_stub_adapter, create_verified_blocked_adapter
     from .xo import XOMarketAdapter
     from .xmarket import XMarketAdapter
 
     implemented_adapters = (
         PolymarketAdapter,
+        CoinbasePredictionMarketsAdapter,
+        ProbableAdapter,
+        ProphetExchangeAdapter,
+        PRDTFinanceAdapter,
         KalshiAdapter,
         PredictItAdapter,
         CryptoComPredictAdapter,
+        FanaticsMarketsAdapter,
+        ContextV2Adapter,
+        SmarketsAdapter,
+        SeerAdapter,
+        ThalesMarketAdapter,
+        TrueoAdapter,
+        DFlowAdapter,
+        DriftBetAdapter,
+        FrenzyFinanceAdapter,
         ManifoldAdapter,
         MetaculusAdapter,
         LimitlessAdapter,
@@ -377,19 +297,44 @@ def build_default_registry() -> AdapterRegistry:
         AzuroAdapter,
         AugurAdapter,
         OmenAdapter,
+        GnosisPredictionMarketsAdapter,
+        RealityEthMarketsAdapter,
         ZeitgeistAdapter,
+        ZeitgeistPredictionPoolsAdapter,
+        ZeitgeistSdkMarketsAdapter,
         GeminiPredictionAdapter,
+        HyperliquidAdapter,
+        IBKRForecastTraderAdapter,
+        ForecastExAdapter,
+        CMEPredictionMarketsAdapter,
         MyriadAdapter,
         OpinionAdapter,
         PredictFunAdapter,
         XOMarketAdapter,
         BetfairExchangeAdapter,
         XMarketAdapter,
+        MatchbookAdapter,
+        MetaDAOAdapter,
+        SpaceAdapter,
+        HedgehogMarketsAdapter,
     )
     registry.register_adapter(PolymarketAdapter, replace=True)
+    registry.register_adapter(CoinbasePredictionMarketsAdapter, replace=True)
+    registry.register_adapter(ProbableAdapter, replace=True)
+    registry.register_adapter(ProphetExchangeAdapter, replace=True)
+    registry.register_adapter(PRDTFinanceAdapter, replace=True)
     registry.register_adapter(KalshiAdapter, replace=True)
     registry.register_adapter(PredictItAdapter, replace=True)
     registry.register_adapter(CryptoComPredictAdapter, replace=True)
+    registry.register_adapter(FanaticsMarketsAdapter, replace=True)
+    registry.register_adapter(ContextV2Adapter, replace=True)
+    registry.register_adapter(SmarketsAdapter, replace=True)
+    registry.register_adapter(SeerAdapter, replace=True)
+    registry.register_adapter(ThalesMarketAdapter, replace=True)
+    registry.register_adapter(TrueoAdapter, replace=True)
+    registry.register_adapter(DFlowAdapter, replace=True)
+    registry.register_adapter(DriftBetAdapter, replace=True)
+    registry.register_adapter(FrenzyFinanceAdapter, replace=True)
     registry.register_adapter(ManifoldAdapter, replace=True)
     registry.register_adapter(MetaculusAdapter, replace=True)
     registry.register_adapter(LimitlessAdapter, replace=True)
@@ -397,14 +342,26 @@ def build_default_registry() -> AdapterRegistry:
     registry.register_adapter(AzuroAdapter, replace=True)
     registry.register_adapter(AugurAdapter, replace=True)
     registry.register_adapter(OmenAdapter, replace=True)
+    registry.register_adapter(GnosisPredictionMarketsAdapter, replace=True)
+    registry.register_adapter(RealityEthMarketsAdapter, replace=True)
     registry.register_adapter(ZeitgeistAdapter, replace=True)
+    registry.register_adapter(ZeitgeistPredictionPoolsAdapter, replace=True)
+    registry.register_adapter(ZeitgeistSdkMarketsAdapter, replace=True)
     registry.register_adapter(GeminiPredictionAdapter, replace=True)
+    registry.register_adapter(HyperliquidAdapter, replace=True)
+    registry.register_adapter(IBKRForecastTraderAdapter, replace=True)
+    registry.register_adapter(ForecastExAdapter, replace=True)
+    registry.register_adapter(CMEPredictionMarketsAdapter, replace=True)
     registry.register_adapter(MyriadAdapter, replace=True)
     registry.register_adapter(OpinionAdapter, replace=True)
     registry.register_adapter(PredictFunAdapter, replace=True)
     registry.register_adapter(XOMarketAdapter, replace=True)
     registry.register_adapter(BetfairExchangeAdapter, replace=True)
     registry.register_adapter(XMarketAdapter, replace=True)
+    registry.register_adapter(MatchbookAdapter, replace=True)
+    registry.register_adapter(MetaDAOAdapter, replace=True)
+    registry.register_adapter(SpaceAdapter, replace=True)
+    registry.register_adapter(HedgehogMarketsAdapter, replace=True)
     for metadata in MARKET_CATALOG:
         if metadata.market_id in {adapter.metadata.market_id for adapter in implemented_adapters}:
             continue

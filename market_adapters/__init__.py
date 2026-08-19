@@ -3,22 +3,48 @@ from __future__ import annotations
 from .azuro import AzuroAdapter
 from .base import MarketAdapter
 from .betfair import BetfairExchangeAdapter
+from .coinbase_prediction import CoinbasePredictionMarketsAdapter
 from .catalog import MARKET_CATALOG, MARKET_IDS, get_market_metadata
-from .crypto_com_predict import CryptoComPredictAdapter
+from .crypto_com_predict import CryptoComPredictAdapter, FanaticsMarketsAdapter
+from .context_v2 import ContextV2Adapter
+from .dflow import DFlowAdapter
+from .drift_bet import DriftBetAdapter
+from .frenzy import FrenzyFinanceAdapter
 from .errors import MarketAdapterError, MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
 from .gemini import GeminiPredictionAdapter
+from .hyperliquid import HyperliquidAdapter
+from .hedgehog import HedgehogMarketsAdapter
+from .ibkr_event_contracts import CMEPredictionMarketsAdapter, ForecastExAdapter, IBKREventContractsAdapter, IBKRForecastTraderAdapter
 from .kalshi import KalshiAdapter
-from .legacy_web3 import AugurAdapter, OmenAdapter, ZeitgeistAdapter
+from .legacy_web3 import (
+    AugurAdapter,
+    GnosisPredictionMarketsAdapter,
+    OmenAdapter,
+    RealityEthMarketsAdapter,
+    ZeitgeistAdapter,
+    ZeitgeistPredictionPoolsAdapter,
+    ZeitgeistSdkMarketsAdapter,
+)
 from .limitless import LimitlessAdapter
 from .manifold import ManifoldAdapter
+from .matchbook import MatchbookAdapter
 from .metaculus import MetaculusAdapter
+from .metadao import MetaDAOAdapter
 from .myriad import MyriadAdapter
 from .opinion import OpinionAdapter
 from .polymarket import PolymarketAdapter
+from .probable import ProbableAdapter
+from .prdt_finance import PRDTFinanceAdapter
+from .prophet_exchange import ProphetExchangeAdapter
 from .predict_fun import PredictFunAdapter
 from .predictit import PredictItAdapter
 from .registry import AdapterRegistry, VERIFIED_BLOCKERS, build_default_registry
 from .runtime import AdapterRuntime, RateLimiter, ResolvedCredential, load_json_fixture, load_market_fixture
+from .smarkets import SmarketsAdapter
+from .seer import SeerAdapter
+from .space import SpaceAdapter
+from .thales import ThalesMarketAdapter
+from .trueo import TrueoAdapter
 from .stub import StubMarketAdapter, VerifiedBlockedAdapter, create_stub_adapter, create_verified_blocked_adapter
 from .sx_bet import SxBetAdapter
 from .xo import XOMarketAdapter
@@ -41,8 +67,21 @@ __all__ = [
     "AugurAdapter",
     "AzuroAdapter",
     "BetfairExchangeAdapter",
+    "CoinbasePredictionMarketsAdapter",
     "CryptoComPredictAdapter",
+    "FanaticsMarketsAdapter",
+    "ContextV2Adapter",
+    "DFlowAdapter",
+    "DriftBetAdapter",
+    "FrenzyFinanceAdapter",
     "GeminiPredictionAdapter",
+    "GnosisPredictionMarketsAdapter",
+    "HyperliquidAdapter",
+    "HedgehogMarketsAdapter",
+    "IBKREventContractsAdapter",
+    "IBKRForecastTraderAdapter",
+    "ForecastExAdapter",
+    "CMEPredictionMarketsAdapter",
     "MARKET_CATALOG",
     "MARKET_IDS",
     "MarketAdapter",
@@ -56,21 +95,32 @@ __all__ = [
     "KalshiAdapter",
     "LimitlessAdapter",
     "ManifoldAdapter",
+    "MatchbookAdapter",
     "MetaculusAdapter",
+    "MetaDAOAdapter",
     "MyriadAdapter",
     "OpinionAdapter",
     "OrderBookLevel",
     "OrderBookSnapshot",
     "OmenAdapter",
+    "RealityEthMarketsAdapter",
     "PaperOrderRequest",
     "PaperOrderResult",
     "PolymarketAdapter",
+    "ProbableAdapter",
+    "PRDTFinanceAdapter",
+    "ProphetExchangeAdapter",
     "PredictFunAdapter",
     "PredictItAdapter",
     "PriceSnapshot",
     "RateLimiter",
     "ResolvedCredential",
     "SxBetAdapter",
+    "SmarketsAdapter",
+    "SeerAdapter",
+    "SpaceAdapter",
+    "ThalesMarketAdapter",
+    "TrueoAdapter",
     "StubMarketAdapter",
     "UnsupportedFeatureError",
     "VERIFIED_BLOCKERS",
@@ -78,6 +128,8 @@ __all__ = [
     "XOMarketAdapter",
     "XMarketAdapter",
     "ZeitgeistAdapter",
+    "ZeitgeistPredictionPoolsAdapter",
+    "ZeitgeistSdkMarketsAdapter",
     "build_default_registry",
     "create_stub_adapter",
     "create_verified_blocked_adapter",

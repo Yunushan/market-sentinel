@@ -251,7 +251,7 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 ### 10) Legacy Web3 protocol adapter support
 - Lists Augur v2 markets/outcomes through a configured documented subgraph endpoint
 - Reads Omen AMM marginal prices and Zeitgeist indexer asset prices for alerts
-- Supports dry-run paper orders where reliable price data exists; wallet-signed live trading is not enabled
+- Supports dry-run paper orders where reliable price data exists; Zeitgeist also exposes a guarded externally signed HybridRouter transaction boundary, off by default and without in-app signing or settlement
 
 ### 11) Additional official adapter support
 - Reads Gemini Prediction Markets events/contracts and orderbooks through official endpoints
@@ -481,9 +481,15 @@ API hardening:
 
 ## Market Capability Matrix
 
-This matrix describes current application adapter support. Verified-blocked markets appear in the GUI and config, but their market-specific operations intentionally return clear unsupported-feature messages until official access, entitlements, or documented automation terms make support safe to add. Verified-blocked rows were checked against currently available official docs/pages.
+Thales Market now includes a guarded externally signed AMM transaction boundary. Live submission remains off by default and requires a reviewed network, configured AMM target, calldata/method, selected market/position, collateral approval, wallet signature, and settlement handling.
 
-Article 35 re-audited verified-blocked markets on 2026-05-26 and did not promote any blocked market. A 2026-07-15 follow-up promoted Crypto.com Predict/CDNA after Crypto.com published its official Predictions Market Data API. Context Markets remains sunset, Hyperliquid outcome metadata is still not production-safe for this adapter, Thales needs chain-specific AMM/wallet safeguards and fixtures, and Smarkets/CME still require approval, data-use permission, or licensed entitlements before support can be added. Xmarket was added as an implemented adapter after its documented API was mapped with offline fixtures. The catalog includes the 50 requested platform names, including separate rows for distribution and protocol variants whose access contracts differ.
+This matrix describes current application adapter support. Verified-blocked markets appear in the GUI and config, but their market-specific operations intentionally return clear unsupported-feature messages until official access, entitlements, or documented automation terms make support safe to add. Verified-blocked rows were checked against currently available official docs/pages. Space now uses its documented public REST contract for reads, orderbooks, alerts, and paper orders; the official docs still say public production release timing will be announced separately. Hedgehog Markets now uses the official HPL Parimutuel/Eclipse `MarketV1` account contract for on-chain discovery, pooled prices, alerts, and dry-run `DepositV1` intents; CLOB depth, wallet-signed live execution, and copy trading remain unsupported. Frenzy Finance now uses the official Base `BetIntent`/`BetSettled` contract for explicitly configured price-range grid specs, settlement history, alerts, and dry-run EIP-712 intent previews; public live quotes/oracle acknowledgements, orderbooks, wallet signing, live execution, and copy trading remain unsupported.
+
+Article 35 re-audited verified-blocked markets on 2026-05-26 and did not promote any blocked market. A 2026-07-15 follow-up promoted Crypto.com Predict/CDNA after Crypto.com published its official Predictions Market Data API. Context V2 was promoted after its current v2 API documentation was validated for market discovery, prices, orderbooks, and externally signed orders; live use still requires a current API key, wallet setup, chain eligibility, and explicit safety gates. Smarkets was promoted after its current v3 REST contract was validated for event/market/contract discovery, quote orderbooks, and session-authenticated orders; API application approval, written data-use permission, account eligibility, and funded execution remain external gates. Thales Market is now implemented for its documented public AMM REST contract, including grouped/ungrouped market discovery, positional prices, buy-quote fallback, and paper orders; wallet signing, collateral, settlement, and live transactions remain disabled. MetaDAO is now implemented for its documented public Futarchy DEX `/api/tickers` contract, including DAO/token-pair discovery, bid/ask/last-price reads, and paper orders; depth, wallet signing, settlement, and live execution remain disabled. Seer is now implemented for its documented public `markets-search`/`get-market` API, including chain-qualified market discovery, outcome prices, alerts, and paper orders; depth, wallet signing, settlement, and live execution remain disabled. Hyperliquid is now implemented for the official HIP-4 `outcomeMeta` and `l2Book` contracts, including outcome discovery, encoded sides, prices, orderbooks, paper orders, and guarded externally signed exchange payloads. Trueo is now implemented for its official Base `TruthMarketManager`/`TruthMarket` contracts and documented Uniswap pools, including on-chain discovery, immutable market fields, AMM prices, alerts, paper orders, and guarded externally signed transactions; CLOB depth and copy trading remain unsupported. Zeitgeist SDK / Markets is now implemented as an explicit alias over the same documented Subsquid market/asset GraphQL contract, with separate configuration and fixture coverage. Zeitgeist Prediction Pools is now implemented as a pool-scoped alias over the documented market/pool/asset GraphQL schema, requiring a valid pool identifier before quotes or paper orders; pool settlement, wallet execution, and CLOB depth remain unsupported. Reality.eth Markets is now implemented as a read-only alias over the official Reality.eth question subgraph, with question discovery, response-option listing, lifecycle status, and alert-compatible metadata; prices, orderbooks, paper orders, and trading remain unsupported because Reality.eth is an oracle/question protocol. Drift BET is now implemented for the official public Data API BET prediction-record contract, with explicit configured-symbol inventory, bounded YES/NO price derivation, alerts, and dry-run orders; the Data API has no stable market-list route, while binary DLOB depth, wallet-signed live orders, settlement, and copy trading remain disabled. IBKR ForecastTrader, ForecastEx, and CME event contracts are now implemented through the official Client Portal Web API event-contract discovery, conid, snapshot, and order routes; an authorized brokerage session and account/data entitlements remain external gates. Xmarket was added as an implemented adapter after its documented API was mapped with offline fixtures. Probable was promoted after validating its official market/CLOB API contract and adding fixture-backed adapter coverage; live orders still require an externally signed order and explicit credentials. Matchbook was promoted after validating its current official event/market, session, and offer contracts with offline fixtures; live offers still require a Matchbook account session and explicit safety gates. DFlow was promoted after validating its official Metadata/Trade API, nested event markets, outcome mints, orderbook, and wallet-signed Solana transaction flow with offline fixtures; live submission still requires API credentials, a Proof-eligible wallet, a signed transaction, and a configured Solana RPC. Fanatics Markets was subsequently promoted as a read-only alias over CDNA's official Predictions API after Fanatics documented that its intermediary product lists and prices event contracts on CDNA; Fanatics-specific orderbook, live, and copy APIs remain unsupported. Coinbase Prediction Markets was subsequently promoted as a read-only alias over the official Kalshi venue after Coinbase documented that prediction-market flow comes from Kalshi and links users to Kalshi market outcomes; Coinbase-specific live and copy APIs remain unsupported. The catalog includes the requested platform names, including separate rows for distribution and protocol variants whose access contracts differ.
+
+Hedgehog Markets was promoted on 2026-08-17 after validating the official HPL Parimutuel/Eclipse `MarketV1` custom-Borsh account layout and public Eclipse JSON-RPC contract. The adapter supports on-chain discovery, pooled outcome probabilities, alerts, dry-run `DepositV1` intents, and a guarded submission boundary for externally signed `DepositV1` transactions; CLOB depth, settlement, and copy trading remain unsupported, while live submission stays off by default.
+
+Frenzy Finance was promoted on 2026-08-17 after validating the official Base/Base Sepolia contract deployments, `BetSettled` log shape, and fixture-backed `BetIntent` preview path. The adapter supports configured grid discovery, historical settlement reads, alerts, and dry-run EIP-712 intents; the active quote/oracle acknowledgement, wallet signing, orderbook, live execution, and copy-trading paths remain fail-closed.
 
 | Market | Adapter | Alerts | Read-only data | Paper trading | Live trading | Copy trading | API required | Credentials required | Region/KYC limitation |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -491,17 +497,17 @@ Article 35 re-audited verified-blocked markets on 2026-05-26 and did not promote
 | Kalshi (`kalshi`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
 | PredictIt (`predictit`) | Implemented | Yes | Yes | Yes | No | No | Required | No | Region/account limited |
 | Robinhood Prediction Markets (`robinhood_prediction_markets`) | Verified blocked | No | No | No | No | No | Required | Brokerage account required | Region/KYC limited |
-| Fanatics Markets (`fanatics_markets`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
+| Fanatics Markets (`fanatics_markets`) | Implemented | Yes | Yes | Yes | No | No | Required | Optional API key | Region/KYC limited |
 | DraftKings Predictions (`draftkings_predictions`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
-| Interactive Brokers ForecastTrader / IBKR Prediction Markets (`ibkr_forecasttrader`) | Verified blocked | No | No | No | No | No | Required | IBKR account required | Region/KYC limited |
-| ForecastEx (`forecastex`) | Verified blocked | No | No | No | No | No | Required | Exchange/broker account required | Region/KYC limited |
-| CME Group Prediction Markets (`cme_prediction_markets`) | Verified blocked | No | No | No | No | No | Required | Broker/data entitlement required | Region/KYC limited |
+| Interactive Brokers ForecastTrader / IBKR Prediction Markets (`ibkr_forecasttrader`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | IBKR account required | Region/KYC limited |
+| ForecastEx (`forecastex`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | IBKR account required | Region/KYC limited |
+| CME Group Prediction Markets (`cme_prediction_markets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | IBKR account required | Region/KYC limited |
 | Nadex (`nadex`) | Verified blocked | No | No | No | No | No | Required | Exchange account required | Region/KYC limited |
 | Crypto.com Predict / CDNA (`crypto_com_predict`) | Implemented | Yes | Yes | Yes | No | No | Required | Optional API key | Not KYC limited |
-| Hyperliquid (`hyperliquid`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Hyperliquid (`hyperliquid`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key for reads; externally signed wallet payload required for live orders | Jurisdiction varies |
 | Myriad Markets (`myriad_markets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Optional API key | Jurisdiction varies |
-| Context V2 (`context_v2`) | Verified blocked | No | No | No | No | No | Required | API credentials required | Jurisdiction varies |
-| Frenzy Finance (`frenzy_finance`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Context V2 (`context_v2`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | API credentials required | Region/KYC limited |
+| Frenzy Finance (`frenzy_finance`) | Implemented | Yes | Yes | Yes | No (oracle/wallet gate) | No | Required | No API key; wallet/collateral required only for future live chain flow | Jurisdiction varies |
 | XO Market (`xo_market`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | API credentials required | Region/KYC limited |
 | Manifold Markets (`manifold`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Live trading only | Not KYC limited |
 | Metaculus (`metaculus`) | Implemented | Yes | Yes | No | No | No | Required | Account/API token required | Not trading/KYC limited |
@@ -516,43 +522,43 @@ Article 35 re-audited verified-blocked markets on 2026-05-26 and did not promote
 | BetMGM (`betmgm`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
 | PrizePicks (`prizepicks`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
 | Underdog Sports (`underdog_sports`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
-| Drift BET (`drift_bet`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| Thales Market (`thales_market`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| Hedgehog Markets (`hedgehog_markets`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| Omen (`omen`) | Implemented | Yes | Yes | Yes | No | No | Required | Subgraph endpoint required | Jurisdiction varies |
-| Zeitgeist (`zeitgeist`) | Implemented | Yes | Yes | Yes | No | No | Required | Not required | Jurisdiction varies |
+| Drift BET (`drift_bet`) | Implemented | Yes | Yes | Yes | No | No | Required | No API key; wallet/collateral required only for future live chain flow | Jurisdiction varies |
+| Thales Market (`thales_market`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key; externally signed wallet transaction required for live orders | Jurisdiction varies |
+| Hedgehog Markets (`hedgehog_markets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key; externally signed wallet transaction required for live orders | Jurisdiction varies |
+| Omen (`omen`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Subgraph endpoint required | Jurisdiction varies |
+| Zeitgeist (`zeitgeist`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key for reads; externally signed wallet payload required for live orders | Jurisdiction varies |
+| Zeitgeist SDK / Markets (`zeitgeist_sdk_markets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key for reads; externally signed wallet payload required for live orders | Jurisdiction varies |
 | Azuro (`azuro`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Live signed orders only | Jurisdiction varies |
 | SX Bet / SX Network (`sx_bet`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Live/WebSocket only | Jurisdiction varies |
 | Limitless Exchange (`limitless_exchange`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Live trading only | Jurisdiction varies |
 | Predict.fun (`predict_fun`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | API credentials required | Jurisdiction varies |
-| Smarkets (`smarkets`) | Verified blocked | No | No | No | No | No | Required | Exchange account required | Region/KYC limited |
+| Smarkets (`smarkets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
 | Betfair Exchange (`betfair_exchange`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
 | Probo (`probo`) | Verified blocked | No | No | No | No | No | Required | Account required | Region limited |
-| Coinbase Prediction Markets (`coinbase_prediction_markets`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
-| Probable (`probable`) | Verified blocked | No | No | No | No | No | Required | API credentials required | Jurisdiction varies |
+| Coinbase Prediction Markets (`coinbase_prediction_markets`) | Implemented | Yes | Yes | Yes | No | No | Required | No | Region/KYC limited |
+| Probable (`probable`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | API credentials required | Jurisdiction varies |
 | Kalshi via Robinhood (`kalshi_via_robinhood`) | Verified blocked | No | No | No | No | No | Required | Brokerage account required | Region/KYC limited |
 | FanDuel Predicts (`fanduel_predicts`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
-| Seer (`seer`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| DFlow (`dflow`) | Verified blocked | No | No | No | No | No | Required | API credentials required | Jurisdiction varies |
-| Space (`space`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Seer (`seer`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key; externally signed wallet transaction required for live orders | Jurisdiction varies |
+| DFlow (`dflow`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Wallet required for trading | Region limited |
+| Space (`space`) | Implemented | Yes | Yes | Yes | No | No | Required | No API key; wallet/settlement required only for future live chain flow | Jurisdiction varies |
 | Xmarket (`xmarket`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | API credentials required | Jurisdiction varies |
-| Trueo (`trueo`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Trueo (`trueo`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key; externally signed wallet transaction required for live orders | Jurisdiction varies |
 | PRDT Finance (`prdt_finance`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
 | SynStation (`synstation`) | Verified blocked | No | No | No | No | No | Required | API credentials required | Jurisdiction varies |
-| Gnosis Prediction Markets (`gnosis_prediction_markets`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| Zeitgeist SDK / Markets (`zeitgeist_sdk_markets`) | Verified blocked | No | No | No | No | No | Required | Not required | Jurisdiction varies |
-| MetaDAO (`metadao`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Gnosis Prediction Markets (`gnosis_prediction_markets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Subgraph endpoint required | Jurisdiction varies |
+| MetaDAO (`metadao`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key; externally signed wallet transaction required for live orders | Jurisdiction varies |
 | Levr Bet (`levr_bet`) | Verified blocked | No | No | No | No | No | Required | Account required | Jurisdiction varies |
 | Dexsport (`dexsport`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
 | Lamas Finance (`lamas_finance`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
 | Zetarium World (`zetarium_world`) | Verified blocked | No | No | No | No | No | Required | Account required | Jurisdiction varies |
 | Blinq (`blinq`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| Zeitgeist Prediction Pools (`zeitgeist_prediction_pools`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| Reality.eth Markets (`reality_eth_markets`) | Verified blocked | No | No | No | No | No | Required | Wallet/personhood required | Identity/jurisdiction limited |
+| Zeitgeist Prediction Pools (`zeitgeist_prediction_pools`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key for reads; externally signed wallet payload required for live orders | Jurisdiction varies |
+| Reality.eth Markets (`reality_eth_markets`) | Implemented | Yes | Yes | No | No | No | Required | Subgraph endpoint required | Identity/jurisdiction limited |
 | SportsTrade (`sportstrade`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
-| Prophet Exchange (`prophet_exchange`) | Verified blocked | No | No | No | No | No | Required | API credentials required | Region/KYC limited |
+| Prophet Exchange (`prophet_exchange`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | API credentials required | Region/KYC limited |
 | Sporttrade Prediction / Exchange Products (`sporttrade_products`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
-| Matchbook (`matchbook`) | Verified blocked | No | No | No | No | No | Required | Exchange account/API keys | Region/KYC limited |
+| Matchbook (`matchbook`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
 | SciCast (`scicast`) | Verified blocked | No | No | No | No | No | Required | Account/export access required | Not trading/KYC limited |
 | Meta Arena (`meta_arena`) | Verified blocked | No | No | No | No | No | Required | Account required | Jurisdiction varies |
 

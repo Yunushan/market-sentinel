@@ -1,0 +1,18 @@
+{
+  "success": true,
+  "records": [
+    {
+      "ts": 1787000000,
+      "txSig": "5DriftBetPredictionRecord1111111111111111111111111111111111111111",
+      "txSigIndex": 0,
+      "slot": 300000000,
+      "quoteAssetAmountFilled": "0.62",
+      "baseAssetAmountFilled": "1.0",
+      "oraclePrice": "104250.0",
+      "marketIndex": 7,
+      "marketType": "prediction",
+      "symbol": "BTC-ELECTION-BET",
+      "action": "open"
+    }
+  ]
+}

@@ -32,7 +32,9 @@ IMPLEMENTED_MARKETS = {
     "sx_bet",
     "azuro",
     "augur",
+    "reality_eth_markets",
     "omen",
+    "gnosis_prediction_markets",
     "zeitgeist",
     "myriad_markets",
     "xo_market",
@@ -41,7 +43,29 @@ IMPLEMENTED_MARKETS = {
     "predict_fun",
     "betfair_exchange",
     "crypto_com_predict",
+    "fanatics_markets",
+    "coinbase_prediction_markets",
+    "context_v2",
+    "smarkets",
+    "thales_market",
+    "metadao",
+    "seer",
+    "hyperliquid",
+    "trueo",
+    "zeitgeist_sdk_markets",
+    "zeitgeist_prediction_pools",
+    "ibkr_forecasttrader",
+    "forecastex",
+    "cme_prediction_markets",
+    "dflow",
     "xmarket",
+    "probable",
+    "matchbook",
+    "drift_bet",
+    "frenzy_finance",
+    "space",
+    "hedgehog_markets",
+    "prophet_exchange",
 }
 VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)
 
@@ -89,9 +113,10 @@ class BlockersDocTests(unittest.TestCase):
     def test_article35_reaudit_records_candidate_decisions(self) -> None:
         text = BLOCKERS.read_text(encoding="utf-8")
 
-        self.assertIn("No verified-blocked market was promoted", text)
+        self.assertIn("Frenzy Finance", text)
+        self.assertIn("BetIntent", text)
         self.assertIn("`context_v2`", text)
-        self.assertIn("sunset", text)
+        self.assertIn("current API reference", text)
         self.assertIn("`hyperliquid`", text)
         self.assertIn("outcomeMeta", text)
         self.assertIn("`thales_market`", text)

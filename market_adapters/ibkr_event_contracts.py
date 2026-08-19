@@ -1,0 +1,599 @@
+"""Interactive Brokers event-contract adapters.
+
+IBKR models ForecastEx event contracts as options and CME event contracts as
+futures options.  The official Client Portal Web API exposes the discovery,
+market-data, and order routes used here.  The adapter deliberately requires an
+already-authorized brokerage session; it never handles IBKR passwords or
+creates a session on behalf of a user.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+from .base import MarketAdapter
+from .catalog import get_market_metadata
+from .errors import MarketConfigurationError, UnsupportedFeatureError
+from .types import (
+    MarketCapabilities,
+    MarketContract,
+    MarketEvent,
+    OrderBookLevel,
+    OrderBookSnapshot,
+    PaperOrderRequest,
+    PaperOrderResult,
+    PriceSnapshot,
+)
+
+
+DEFAULT_IBKR_API_BASE_URL = "https://api.ibkr.com/v1/api"
+IBKR_REFERENCES = (
+    "https://www.interactivebrokers.com/campus/ibkr-api-page/event-contracts/",
+    "https://www.interactivebrokers.com/campus/ibkr-api-page/cpapi-v1/",
+    "https://www.interactivebrokers.com/campus/ibkr-api-page/web-api-trading/",
+)
+
+IBKR_EVENT_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=True,
+    alerts=True,
+    paper_trading=True,
+    live_trading=True,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=True,
+    kyc_required=True,
+    region_limited=True,
+)
+
+
+class IBKREventContractsAdapter(MarketAdapter):
+    """Shared implementation for IBKR ForecastEx and CME event contracts."""
+
+    metadata = get_market_metadata("ibkr_forecasttrader")
+    venue = "FORECASTX"
+    security_type = "OPT"
+    _forecastx = True
+    event_url_base = "https://forecasttrader.interactivebrokers.com/eventtrader/#/markets"
+
+    def __init__(self, config: Optional[Mapping[str, Any]] = None, *, runtime=None) -> None:
+        super().__init__(config, runtime=runtime)
+        self._underlier_cache: Dict[str, Mapping[str, Any]] = {}
+        self._accounts_ready = False
+
+    @property
+    def api_base_url(self) -> str:
+        configured = self.config.get("ibkr_api_base_url") or self.config.get("api_base_url")
+        return str(configured or DEFAULT_IBKR_API_BASE_URL).rstrip("/")
+
+    @property
+    def mode_name(self) -> str:
+        return "ForecastEx" if self._forecastx else "CME event contracts"
+
+    def health_check(self) -> Dict[str, Any]:
+        health = super().health_check()
+        session_cookie = self.resolve_credential(
+            "ibkr_session_cookie", ("IBKR_SESSION_COOKIE",), label="IBKR_SESSION_COOKIE"
+        )
+        access_token = self.resolve_credential(
+            "ibkr_access_token", ("IBKR_ACCESS_TOKEN",), label="IBKR_ACCESS_TOKEN"
+        )
+        account_id = self.resolve_credential("ibkr_account_id", ("IBKR_ACCOUNT_ID",), label="IBKR_ACCOUNT_ID")
+        health.update(
+            {
+                "api_base_url": self.api_base_url,
+                "venue": self.venue,
+                "security_type": self.security_type,
+                "mode": self.mode_name,
+                "references": list(IBKR_REFERENCES),
+                "credential_sources": [
+                    {"name": item.name, "source": item.source}
+                    for item in (session_cookie, access_token, account_id)
+                    if item is not None
+                ],
+                "live_trading_enabled": self.config_bool("live_trading_enabled", False),
+                "live_submission_enabled": self.config_bool("ibkr_submit_live_orders", False),
+            }
+        )
+        return health
+
+    def list_events(self, query: str = "", limit: int = 50) -> List[MarketEvent]:
+        self.ensure_capability("event_listing")
+        desired = max(1, min(int(limit or 50), 500))
+        needle = str(query or "").strip().lower()
+        if self._forecastx:
+            payload = self._get("/trsrv/event/category-tree")
+            events = []
+            for market in self._category_markets(payload):
+                symbol = self._symbol(market)
+                title = str(market.get("name") or market.get("label") or symbol).strip()
+                if not symbol or (needle and needle not in f"{symbol} {title}".lower()):
+                    continue
+                events.append(
+                    MarketEvent(
+                        market_id=self.market_id,
+                        event_id=self._event_id(symbol),
+                        title=title,
+                        url=str(market.get("url") or self.event_url_base),
+                        status=str(market.get("status") or "active").strip().lower(),
+                        raw=dict(market),
+                    )
+                )
+        else:
+            products = self._configured_products(query)
+            events = []
+            for symbol in products:
+                try:
+                    underlier = self._underlier(symbol)
+                except MarketConfigurationError:
+                    if query:
+                        raise
+                    continue
+                title = str(
+                    underlier.get("companyName")
+                    or underlier.get("description")
+                    or underlier.get("symbol")
+                    or symbol
+                ).strip()
+                events.append(
+                    MarketEvent(
+                        market_id=self.market_id,
+                        event_id=self._event_id(symbol),
+                        title=title,
+                        url="https://www.cmegroup.com/markets/event-contracts.html",
+                        status="active",
+                        raw=dict(underlier),
+                    )
+                )
+        events.sort(key=lambda item: item.title.lower())
+        return events[:desired]
+
+    def list_contracts(self, event_id: str) -> List[MarketContract]:
+        self.ensure_capability("event_listing")
+        symbol, requested_month = self._split_event_id(event_id)
+        underlier = self._underlier(symbol)
+        conid = self._underlier_conid(underlier)
+        months = [requested_month] if requested_month else self._months(underlier)
+        if not months:
+            configured = self._configured_months()
+            months = configured
+        if not months:
+            raise MarketConfigurationError(
+                f"{self.mode_name} event {symbol!r} did not provide contract months; "
+                "set ibkr_contract_month or ibkr_contract_months."
+            )
+
+        records: List[Mapping[str, Any]] = []
+        max_months = self._positive_int_config("ibkr_max_contract_months", default=12)
+        for month in months[:max_months]:
+            params = {
+                "conid": conid,
+                "exchange": self.venue,
+                "sectype": self.security_type,
+                "month": month,
+            }
+            if self._forecastx:
+                strikes = self._get("/iserver/secdef/strikes", params=params)
+                strike_values = self._strike_values(strikes)
+                max_strikes = self._positive_int_config("ibkr_max_strikes_per_month", default=100)
+                for strike in strike_values[:max_strikes]:
+                    info_params = dict(params)
+                    info_params["strike"] = strike
+                    info = self._get("/iserver/secdef/info", params=info_params)
+                    records.extend(self._records(info))
+            else:
+                info = self._get("/iserver/secdef/info", params=params)
+                records.extend(self._records(info))
+
+        contracts: List[MarketContract] = []
+        seen: set[str] = set()
+        for record in records:
+            contract = self._contract_from_record(record, event_id=self._event_id(symbol))
+            if contract is None or contract.contract_id in seen:
+                continue
+            seen.add(contract.contract_id)
+            contracts.append(contract)
+        return contracts
+
+    def get_price(self, contract_id: str) -> PriceSnapshot:
+        self.ensure_capability("price_reading")
+        canonical, conid = self._parse_contract_id(contract_id)
+        snapshot = self._snapshot(conid)
+        bid = self._number(snapshot.get("84"))
+        ask = self._number(snapshot.get("86"))
+        last = self._number(snapshot.get("31"))
+        midpoint = (bid + ask) / 2.0 if bid is not None and ask is not None else last
+        return PriceSnapshot(
+            market_id=self.market_id,
+            contract_id=canonical,
+            last=last,
+            bid=bid,
+            ask=ask,
+            midpoint=midpoint,
+            source="ibkr_event_contract_snapshot",
+            raw=dict(snapshot),
+        )
+
+    def get_orderbook(self, contract_id: str) -> OrderBookSnapshot:
+        self.ensure_capability("orderbook_reading")
+        canonical, conid = self._parse_contract_id(contract_id)
+        snapshot = self._snapshot(conid)
+        bid = self._number(snapshot.get("84"))
+        ask = self._number(snapshot.get("86"))
+        bid_size = self._number(snapshot.get("88"))
+        ask_size = self._number(snapshot.get("85"))
+        bids = [OrderBookLevel(bid, bid_size or 0.0)] if bid is not None else []
+        asks = [OrderBookLevel(ask, ask_size or 0.0)] if ask is not None else []
+        return OrderBookSnapshot(
+            market_id=self.market_id,
+            contract_id=canonical,
+            bids=bids,
+            asks=asks,
+            raw=dict(snapshot),
+        )
+
+    def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
+        self.ensure_capability("paper_trading")
+        self._validate_order(order)
+        canonical, conid = self._parse_contract_id(order.contract_id)
+        request = self._order_payload(order, conid=conid)
+        return PaperOrderResult(
+            market_id=self.market_id,
+            contract_id=canonical,
+            accepted=True,
+            message=f"DRY RUN: would submit {self.mode_name} {order.side.upper()} order for {order.size:g} contracts",
+            raw={"request": request, "venue": self.venue},
+        )
+
+    def place_live_order(self, order: PaperOrderRequest) -> Dict[str, Any]:
+        self.ensure_capability("live_trading")
+        self._validate_order(order)
+        preflight = self.preflight_live_order(order, feature_name=f"{self.mode_name} live trading")
+        if not self.config_bool("ibkr_submit_live_orders", False):
+            raise MarketConfigurationError(
+                f"{self.mode_name} live orders require ibkr_submit_live_orders=true after reviewing the IBKR session/order controls."
+            )
+        if order.limit_price is None:
+            raise MarketConfigurationError(f"{self.mode_name} live orders require a limit price.")
+        account = self.resolve_credential("ibkr_account_id", ("IBKR_ACCOUNT_ID",), required=True, label="IBKR_ACCOUNT_ID")
+        canonical, conid = self._parse_contract_id(order.contract_id)
+        payload = {"orders": [self._order_payload(order, conid=conid)]}
+        response = self._post(f"/iserver/account/{account.value}/orders", payload)
+        return {
+            "market_id": self.market_id,
+            "contract_id": canonical,
+            "account_id": account.redacted,
+            "venue": self.venue,
+            "live": True,
+            "preflight": preflight,
+            "request": payload,
+            "response": response,
+            "confirmation_required": self._requires_confirmation(response),
+        }
+
+    def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
+        raise UnsupportedFeatureError(
+            self.market_id,
+            "copy_trading",
+            "IBKR event-contract activity mirroring is not implemented; account activity is not treated as a copy signal.",
+        )
+
+    def _get(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> Any:
+        return self.runtime.get_json(self._url(path), params=params, headers=self._auth_headers())
+
+    def _post(self, path: str, payload: Mapping[str, Any]) -> Any:
+        return self.runtime.request_json("POST", self._url(path), json_body=payload, headers=self._auth_headers())
+
+    def _auth_headers(self) -> Dict[str, str]:
+        headers: Dict[str, str] = {}
+        session = self.resolve_credential(
+            "ibkr_session_cookie", ("IBKR_SESSION_COOKIE",), required=False, label="IBKR_SESSION_COOKIE"
+        )
+        token = self.resolve_credential(
+            "ibkr_access_token", ("IBKR_ACCESS_TOKEN",), required=False, label="IBKR_ACCESS_TOKEN"
+        )
+        if session:
+            cookie = session.value.strip()
+            headers["Cookie"] = cookie if "=" in cookie else f"api={cookie}"
+        if token:
+            headers["Authorization"] = f"Bearer {token.value}"
+        if not headers:
+            raise MarketConfigurationError(
+                f"{self.mode_name} requires an authorized IBKR Web API session; set IBKR_SESSION_COOKIE or IBKR_ACCESS_TOKEN."
+            )
+        return headers
+
+    def _snapshot(self, conid: int) -> Mapping[str, Any]:
+        if not self._accounts_ready and self.config_bool("ibkr_accounts_preflight", True):
+            self._get("/iserver/accounts")
+            self._accounts_ready = True
+        params = {"conids": str(conid), "fields": "31,84,85,86,88,7059"}
+        payload = self._get("/iserver/marketdata/snapshot", params=params)
+        snapshot = self._first_record(payload)
+        if not any(key in snapshot for key in ("31", "84", "86")):
+            payload = self._get("/iserver/marketdata/snapshot", params=params)
+            snapshot = self._first_record(payload)
+        return snapshot
+
+    def _underlier(self, symbol: str) -> Mapping[str, Any]:
+        normalized = str(symbol or "").strip().upper()
+        if not normalized:
+            raise MarketConfigurationError("IBKR event product symbol cannot be empty.")
+        cached = self._underlier_cache.get(normalized)
+        if cached is not None:
+            return cached
+        params: Dict[str, Any] = {"symbol": normalized}
+        if not self._forecastx:
+            params["secType"] = "IND"
+        payload = self._get("/iserver/secdef/search", params=params)
+        records = self._records(payload)
+        if not records:
+            raise MarketConfigurationError(f"IBKR event product {normalized!r} was not found.")
+        selected = self._select_underlier(records, normalized)
+        self._underlier_cache[normalized] = selected
+        return selected
+
+    def _select_underlier(self, records: Sequence[Mapping[str, Any]], symbol: str) -> Mapping[str, Any]:
+        for record in records:
+            sections = record.get("sections")
+            section_types = {str(item.get("secType") or "").upper() for item in sections if isinstance(item, Mapping)} if isinstance(sections, list) else set()
+            text = f"{record.get('symbol', '')} {record.get('description', '')}".upper()
+            if str(record.get("symbol") or "").upper() == symbol and (not self._forecastx and "EC" in section_types):
+                return record
+            if self._forecastx and str(record.get("symbol") or "").upper() == symbol:
+                return record
+            if symbol in text and (self._forecastx or "EC" in section_types):
+                return record
+        return records[0]
+
+    def _contract_from_record(self, record: Mapping[str, Any], *, event_id: str) -> Optional[MarketContract]:
+        conid = record.get("conid") or record.get("conidEx")
+        if conid in (None, ""):
+            return None
+        trading_class = str(record.get("tradingClass") or "").upper()
+        if not self._forecastx and trading_class and not trading_class.startswith(f"EC{event_id.split(':')[-1].upper()}"):
+            return None
+        right = str(record.get("right") or "").upper()
+        if right not in {"C", "P"}:
+            return None
+        outcome = "YES" if right == "C" else "NO"
+        canonical = self._contract_id(conid)
+        description = str(record.get("desc2") or record.get("localSymbol") or record.get("symbol") or canonical)
+        return MarketContract(
+            market_id=self.market_id,
+            contract_id=canonical,
+            event_id=event_id,
+            title=f"{description} ({outcome})",
+            outcome=outcome,
+            url=self.event_url_base if self._forecastx else "https://www.cmegroup.com/markets/event-contracts.html",
+            status="active",
+            raw=dict(record),
+        )
+
+    def _order_payload(self, order: PaperOrderRequest, *, conid: int) -> Dict[str, Any]:
+        if order.limit_price is None:
+            raise MarketConfigurationError(f"{self.mode_name} orders require a limit price.")
+        payload: Dict[str, Any] = {
+            "conid": conid,
+            "orderType": str(order.metadata.get("order_type") or "LMT").upper(),
+            "price": float(order.limit_price),
+            "side": str(order.side or "").upper(),
+            "tif": str(order.metadata.get("tif") or "DAY").upper(),
+            "quantity": float(order.size),
+        }
+        if order.metadata.get("outside_rth") is not None:
+            payload["outsideRth"] = bool(order.metadata["outside_rth"])
+        return payload
+
+    def _validate_order(self, order: PaperOrderRequest) -> None:
+        self.ensure_order_market(order)
+        self._parse_contract_id(order.contract_id)
+        side = str(order.side or "").upper()
+        allowed = {"BUY"} if self._forecastx else {"BUY", "SELL"}
+        if side not in allowed:
+            raise MarketConfigurationError(f"{self.mode_name} order side must be one of: {', '.join(sorted(allowed))}.")
+        size = self._finite_positive(order.size, "order size")
+        if not float(size).is_integer():
+            # Fractional quantities are not valid event-contract orders.
+            raise MarketConfigurationError(f"{self.mode_name} event-contract quantity must be a whole number.")
+        if order.limit_price is None:
+            raise MarketConfigurationError(f"{self.mode_name} orders require a limit price.")
+        price = self._finite_positive(order.limit_price, "limit price")
+        if price > 1.0:
+            raise MarketConfigurationError(f"{self.mode_name} event-contract price must be between 0 and 1.")
+
+    def _configured_products(self, query: str) -> List[str]:
+        configured = self.config.get("ibkr_event_products")
+        if configured in (None, ""):
+            configured = self.config.get("ibkr_product_codes")
+        if isinstance(configured, str):
+            values = [part.strip().upper() for part in configured.replace(";", ",").split(",") if part.strip()]
+        elif isinstance(configured, Iterable):
+            values = [str(part).strip().upper() for part in configured if str(part).strip()]
+        else:
+            values = []
+        needle = str(query or "").strip().upper()
+        if needle:
+            return [needle] if needle not in values else [needle]
+        return list(dict.fromkeys(values))
+
+    def _configured_months(self) -> List[str]:
+        value = self.config.get("ibkr_contract_months") or self.config.get("ibkr_contract_month")
+        if isinstance(value, str):
+            return [part.strip().upper() for part in value.replace(";", ",").split(",") if part.strip()]
+        if isinstance(value, Iterable):
+            return [str(part).strip().upper() for part in value if str(part).strip()]
+        return []
+
+    @staticmethod
+    def _category_markets(payload: Any) -> List[Mapping[str, Any]]:
+        if isinstance(payload, Mapping) and isinstance(payload.get("data"), Mapping):
+            payload = payload["data"]
+        values = payload.values() if isinstance(payload, Mapping) else payload if isinstance(payload, list) else []
+        markets: List[Mapping[str, Any]] = []
+        for category in values:
+            if not isinstance(category, Mapping):
+                continue
+            raw = category.get("markets")
+            if isinstance(raw, list):
+                markets.extend(item for item in raw if isinstance(item, Mapping))
+        return markets
+
+    def _months(self, record: Mapping[str, Any]) -> List[str]:
+        months: List[str] = []
+        sections = record.get("sections")
+        if isinstance(sections, list):
+            for section in sections:
+                if not isinstance(section, Mapping):
+                    continue
+                raw = section.get("months") or section.get("month") or section.get("opt")
+                if isinstance(raw, str):
+                    months.extend(part.strip().upper() for part in raw.split(";") if part.strip())
+        return list(dict.fromkeys(months))
+
+    @staticmethod
+    def _strike_values(payload: Any) -> List[float]:
+        values: List[float] = []
+        if isinstance(payload, Mapping):
+            for key in ("call", "put", "strikes"):
+                raw = payload.get(key)
+                if isinstance(raw, list):
+                    for item in raw:
+                        try:
+                            number = float(item)
+                        except (TypeError, ValueError):
+                            continue
+                        if number not in values:
+                            values.append(number)
+        return values
+
+    @staticmethod
+    def _records(payload: Any) -> List[Mapping[str, Any]]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, Mapping)]
+        if isinstance(payload, Mapping):
+            for key in ("data", "results", "contracts", "instruments"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, Mapping)]
+        return []
+
+    @staticmethod
+    def _first_record(payload: Any) -> Mapping[str, Any]:
+        records = IBKREventContractsAdapter._records(payload)
+        if records:
+            return records[0]
+        return dict(payload) if isinstance(payload, Mapping) else {}
+
+    @staticmethod
+    def _symbol(record: Mapping[str, Any]) -> str:
+        return str(record.get("symbol") or record.get("productCode") or record.get("ticker") or "").strip().upper()
+
+    @staticmethod
+    def _underlier_conid(record: Mapping[str, Any]) -> int:
+        raw = record.get("conid") or record.get("conidEx")
+        try:
+            return int(str(raw).split(";")[0])
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("IBKR event underlier did not include a numeric conid.") from exc
+
+    @staticmethod
+    def _event_id(symbol: str) -> str:
+        return f"IBKR:{str(symbol or '').strip().upper()}"
+
+    @staticmethod
+    def _split_event_id(event_id: str) -> Tuple[str, Optional[str]]:
+        raw = str(event_id or "").strip()
+        if not raw:
+            raise MarketConfigurationError("IBKR event id cannot be empty.")
+        parts = [part.strip().upper() for part in raw.split(":") if part.strip()]
+        if parts and parts[0] == "IBKR":
+            parts = parts[1:]
+        if not parts:
+            raise MarketConfigurationError("IBKR event id must include a product symbol.")
+        return parts[0], parts[1] if len(parts) > 1 else None
+
+    @staticmethod
+    def _contract_id(conid: Any) -> str:
+        try:
+            return f"IBKR:{int(str(conid).split(';')[0])}"
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"IBKR contract id is not numeric: {conid!r}") from exc
+
+    @staticmethod
+    def _parse_contract_id(contract_id: str) -> Tuple[str, int]:
+        raw = str(contract_id or "").strip()
+        parts = raw.split(":")
+        value = parts[-1].strip()
+        if not value.isdigit():
+            raise MarketConfigurationError("IBKR contract id must be IBKR:<numeric conid>.")
+        return IBKREventContractsAdapter._contract_id(value), int(value)
+
+    @staticmethod
+    def _number(value: Any) -> Optional[float]:
+        if value in (None, "", "-"):
+            return None
+        try:
+            return float(str(value).replace(",", ""))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _finite_positive(value: Any, label: str) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"{label} must be numeric.") from exc
+        if number <= 0 or number != number or number in {float("inf"), float("-inf")}:
+            raise MarketConfigurationError(f"{label} must be positive and finite.")
+        return number
+
+    def _url(self, path: str) -> str:
+        return f"{self.api_base_url}/{'/'.join(part for part in str(path or '').split('/') if part)}"
+
+    def _positive_int_config(self, key: str, *, default: int) -> int:
+        raw = self.config.get(key, default)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"{self.market_id} config {key} must be an integer.") from exc
+        if value <= 0:
+            raise MarketConfigurationError(f"{self.market_id} config {key} must be greater than zero.")
+        return value
+
+    @staticmethod
+    def _requires_confirmation(response: Any) -> bool:
+        if not isinstance(response, Mapping):
+            return False
+        return bool(response.get("warning") or response.get("messageIds") or response.get("confirmations"))
+
+
+class IBKRForecastTraderAdapter(IBKREventContractsAdapter):
+    """IBKR ForecastTrader view over ForecastEx event contracts."""
+
+    metadata = get_market_metadata("ibkr_forecasttrader")
+    venue = "FORECASTX"
+    security_type = "OPT"
+    _forecastx = True
+
+
+class ForecastExAdapter(IBKREventContractsAdapter):
+    """ForecastEx event contracts routed through the official IBKR Web API."""
+
+    metadata = get_market_metadata("forecastex")
+    venue = "FORECASTX"
+    security_type = "OPT"
+    _forecastx = True
+    event_url_base = "https://forecastex.com/markets/"
+
+
+class CMEPredictionMarketsAdapter(IBKREventContractsAdapter):
+    """CME event contracts routed through the official IBKR Web API."""
+
+    metadata = get_market_metadata("cme_prediction_markets")
+    venue = "CME"
+    security_type = "FOP"
+    _forecastx = False
+    event_url_base = "https://www.cmegroup.com/markets/event-contracts.html"

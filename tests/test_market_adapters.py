@@ -9,11 +9,24 @@ from market_adapters import (
     AugurAdapter,
     AzuroAdapter,
     BetfairExchangeAdapter,
+    CoinbasePredictionMarketsAdapter,
     CryptoComPredictAdapter,
+    FanaticsMarketsAdapter,
+    ContextV2Adapter,
+    DFlowAdapter,
+    DriftBetAdapter,
+    FrenzyFinanceAdapter,
     GeminiPredictionAdapter,
+    GnosisPredictionMarketsAdapter,
+    HyperliquidAdapter,
+    HedgehogMarketsAdapter,
+    IBKRForecastTraderAdapter,
+    ForecastExAdapter,
+    CMEPredictionMarketsAdapter,
     KalshiAdapter,
     LimitlessAdapter,
     ManifoldAdapter,
+    MatchbookAdapter,
     MarketAdapter,
     MarketCapabilities,
     MarketMetadata,
@@ -21,11 +34,20 @@ from market_adapters import (
     PaperOrderResult,
     PredictItAdapter,
     PredictFunAdapter,
+    ProbableAdapter,
+    ProphetExchangeAdapter,
     OmenAdapter,
+    RealityEthMarketsAdapter,
     SxBetAdapter,
+    SmarketsAdapter,
+    SeerAdapter,
+    SpaceAdapter,
+    ThalesMarketAdapter,
+    TrueoAdapter,
     StubMarketAdapter,
     UnsupportedFeatureError,
     MetaculusAdapter,
+    MetaDAOAdapter,
     MyriadAdapter,
     OpinionAdapter,
     VERIFIED_BLOCKERS,
@@ -33,6 +55,7 @@ from market_adapters import (
     XOMarketAdapter,
     XMarketAdapter,
     ZeitgeistAdapter,
+    ZeitgeistPredictionPoolsAdapter,
     build_default_registry,
     create_stub_adapter,
 )
@@ -56,6 +79,7 @@ CAPABILITY_KEYS = {
 
 IMPLEMENTED_MARKETS = {
     "polymarket",
+    "coinbase_prediction_markets",
     "kalshi",
     "predictit",
     "manifold",
@@ -65,6 +89,7 @@ IMPLEMENTED_MARKETS = {
     "azuro",
     "augur",
     "omen",
+    "gnosis_prediction_markets",
     "zeitgeist",
     "myriad_markets",
     "xo_market",
@@ -73,7 +98,29 @@ IMPLEMENTED_MARKETS = {
     "predict_fun",
     "betfair_exchange",
     "crypto_com_predict",
+    "fanatics_markets",
+    "context_v2",
+    "smarkets",
+    "thales_market",
+    "metadao",
+    "seer",
+    "hyperliquid",
+    "trueo",
+    "zeitgeist_sdk_markets",
+    "zeitgeist_prediction_pools",
+    "reality_eth_markets",
+    "ibkr_forecasttrader",
+    "forecastex",
+    "cme_prediction_markets",
+    "dflow",
+    "drift_bet",
+    "frenzy_finance",
+    "space",
+    "hedgehog_markets",
     "xmarket",
+    "probable",
+    "matchbook",
+    "prophet_exchange",
 }
 VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)
 
@@ -126,6 +173,10 @@ class AdapterFoundationTests(unittest.TestCase):
         self.assertIsInstance(registry.create("predictit"), PredictItAdapter)
         self.assertEqual(registry.get_metadata("crypto_com_predict").display_name, "Crypto.com Predict / CDNA")
         self.assertIsInstance(registry.create("crypto_com_predict"), CryptoComPredictAdapter)
+        self.assertEqual(registry.get_metadata("fanatics_markets").display_name, "Fanatics Markets")
+        self.assertIsInstance(registry.create("fanatics_markets"), FanaticsMarketsAdapter)
+        self.assertEqual(registry.get_metadata("coinbase_prediction_markets").display_name, "Coinbase Prediction Markets")
+        self.assertIsInstance(registry.create("coinbase_prediction_markets"), CoinbasePredictionMarketsAdapter)
         self.assertEqual(registry.get_metadata("manifold").display_name, "Manifold Markets")
         self.assertIsInstance(registry.create("manifold"), ManifoldAdapter)
         self.assertEqual(registry.get_metadata("metaculus").display_name, "Metaculus")
@@ -140,8 +191,22 @@ class AdapterFoundationTests(unittest.TestCase):
         self.assertIsInstance(registry.create("augur"), AugurAdapter)
         self.assertEqual(registry.get_metadata("omen").display_name, "Omen")
         self.assertIsInstance(registry.create("omen"), OmenAdapter)
+        self.assertEqual(registry.get_metadata("gnosis_prediction_markets").display_name, "Gnosis Prediction Markets")
+        self.assertIsInstance(registry.create("gnosis_prediction_markets"), GnosisPredictionMarketsAdapter)
         self.assertEqual(registry.get_metadata("zeitgeist").display_name, "Zeitgeist")
+        self.assertEqual(registry.get_metadata("reality_eth_markets").display_name, "Reality.eth Markets")
+        self.assertIsInstance(registry.create("reality_eth_markets"), RealityEthMarketsAdapter)
+        self.assertEqual(registry.get_metadata("drift_bet").display_name, "Drift BET")
+        self.assertIsInstance(registry.create("drift_bet"), DriftBetAdapter)
+        self.assertEqual(registry.get_metadata("space").display_name, "Space")
+        self.assertIsInstance(registry.create("space"), SpaceAdapter)
+        self.assertEqual(registry.get_metadata("hedgehog_markets").display_name, "Hedgehog Markets")
+        self.assertIsInstance(registry.create("hedgehog_markets"), HedgehogMarketsAdapter)
+        self.assertEqual(registry.get_metadata("frenzy_finance").display_name, "Frenzy Finance")
+        self.assertIsInstance(registry.create("frenzy_finance"), FrenzyFinanceAdapter)
         self.assertIsInstance(registry.create("zeitgeist"), ZeitgeistAdapter)
+        self.assertEqual(registry.get_metadata("zeitgeist_prediction_pools").display_name, "Zeitgeist Prediction Pools")
+        self.assertIsInstance(registry.create("zeitgeist_prediction_pools"), ZeitgeistPredictionPoolsAdapter)
         self.assertEqual(registry.get_metadata("myriad_markets").display_name, "Myriad Markets")
         self.assertIsInstance(registry.create("myriad_markets"), MyriadAdapter)
         self.assertEqual(registry.get_metadata("xo_market").display_name, "XO Market")
@@ -156,6 +221,31 @@ class AdapterFoundationTests(unittest.TestCase):
         self.assertIsInstance(registry.create("betfair_exchange"), BetfairExchangeAdapter)
         self.assertEqual(registry.get_metadata("xmarket").display_name, "Xmarket")
         self.assertIsInstance(registry.create("xmarket"), XMarketAdapter)
+        self.assertEqual(registry.get_metadata("probable").display_name, "Probable")
+        self.assertIsInstance(registry.create("probable"), ProbableAdapter)
+        self.assertEqual(registry.get_metadata("matchbook").display_name, "Matchbook")
+        self.assertIsInstance(registry.create("matchbook"), MatchbookAdapter)
+        self.assertEqual(registry.get_metadata("prophet_exchange").display_name, "Prophet Exchange")
+        self.assertIsInstance(registry.create("prophet_exchange"), ProphetExchangeAdapter)
+        self.assertEqual(registry.get_metadata("dflow").display_name, "DFlow")
+        self.assertIsInstance(registry.create("dflow"), DFlowAdapter)
+        self.assertEqual(registry.get_metadata("context_v2").display_name, "Context V2")
+        self.assertIsInstance(registry.create("context_v2"), ContextV2Adapter)
+        self.assertEqual(registry.get_metadata("smarkets").display_name, "Smarkets")
+        self.assertIsInstance(registry.create("smarkets"), SmarketsAdapter)
+        self.assertEqual(registry.get_metadata("thales_market").display_name, "Thales Market")
+        self.assertIsInstance(registry.create("thales_market"), ThalesMarketAdapter)
+        self.assertEqual(registry.get_metadata("metadao").display_name, "MetaDAO")
+        self.assertIsInstance(registry.create("metadao"), MetaDAOAdapter)
+        self.assertEqual(registry.get_metadata("seer").display_name, "Seer")
+        self.assertIsInstance(registry.create("seer"), SeerAdapter)
+        self.assertEqual(registry.get_metadata("hyperliquid").display_name, "Hyperliquid")
+        self.assertIsInstance(registry.create("hyperliquid"), HyperliquidAdapter)
+        self.assertEqual(registry.get_metadata("trueo").display_name, "Trueo")
+        self.assertIsInstance(registry.create("trueo"), TrueoAdapter)
+        self.assertIsInstance(registry.create("ibkr_forecasttrader"), IBKRForecastTraderAdapter)
+        self.assertIsInstance(registry.create("forecastex"), ForecastExAdapter)
+        self.assertIsInstance(registry.create("cme_prediction_markets"), CMEPredictionMarketsAdapter)
 
     def test_non_implemented_catalog_entries_create_stub_adapters(self) -> None:
         registry = build_default_registry()
