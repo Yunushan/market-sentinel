@@ -194,7 +194,7 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 `--require-authenticated-read-ok` fails unless at least one non-destructive authenticated read/stream check succeeds. `--include-user-websocket-connect` opens the authenticated user WebSocket and sends the subscription payload; secrets are not returned in the report. Use `--skip-public-checks` or `--skip-authenticated-read-checks` only for local readiness/debug runs, not for a production live approval.
 
 ### 4) Copy trading (paper mode by default)
-- Follows a tracked wallet’s **BUY** trades (SELL optional, guarded) for a selected market with an official wallet-activity feed (Polymarket and Opinion Labs)
+- Follows a tracked wallet’s **BUY** trades (SELL optional, guarded) for a selected market with an official wallet-activity feed (Polymarket, Opinion Labs, Manifold, Myriad, and Hyperliquid HIP-4)
 - Default mode is **SIMULATION** (logs what it *would* do)
 - Copy sizing is a bounded **0..100%** setting; `0%` watches without copying and `100%` mirrors full detected size before max-USDC caps
 - Multiple followed wallets are supported; the conflict guard skips duplicate or opposite-side same-token copies inside the guard window
@@ -504,7 +504,7 @@ Frenzy Finance was promoted on 2026-08-17 after validating the official Base/Bas
 | CME Group Prediction Markets (`cme_prediction_markets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | IBKR account required | Region/KYC limited |
 | Nadex (`nadex`) | Verified blocked | No | No | No | No | No | Required | Exchange account required | Region/KYC limited |
 | Crypto.com Predict / CDNA (`crypto_com_predict`) | Implemented | Yes | Yes | Yes | No | No | Required | Optional API key | Not KYC limited |
-| Hyperliquid (`hyperliquid`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key for reads; externally signed wallet payload required for live orders | Jurisdiction varies |
+| Hyperliquid (`hyperliquid`) | Implemented | Yes | Yes | Yes | Guarded, off by default | Yes (HIP-4 wallet fills; simulation-first) | Required | No API key for reads; externally signed wallet payload required for live orders | Jurisdiction varies |
 | Myriad Markets (`myriad_markets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | Yes, simulation-first | Required | Optional API key | Jurisdiction varies |
 | Context V2 (`context_v2`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | API credentials required | Region/KYC limited |
 | Frenzy Finance (`frenzy_finance`) | Implemented | Yes | Yes | Yes | No (oracle/wallet gate) | No | Required | No API key; wallet/collateral required only for future live chain flow | Jurisdiction varies |
@@ -660,7 +660,7 @@ In-app checks:
 - **Alerts** creates, edits, toggles, deletes, and refreshes market-scoped price alerts.
 - **Alerts** exposes last trade, midpoint, best bid, and best ask source selection for each alert.
 - **Alerts -> Refresh Prices** polls adapter-backed current price state and updates trigger status without placing orders.
-- **Wallets & Copy** manages tracked wallets for markets with an official activity feed (currently Polymarket and Opinion Labs); Polymarket also supports username/profile search, while Opinion requires a 0x wallet address.
+- **Wallets & Copy** manages tracked wallets for markets with an official activity feed (Polymarket, Opinion Labs, Manifold, Myriad, and Hyperliquid HIP-4); Polymarket also supports username/profile search, while Manifold requires `manifold:<username>` and the other feeds require a 0x wallet address.
 - **Wallets & Copy** shows recent wallet activity with the copy-trading simulation or skip reason for each item.
 - **Wallets & Copy** edits followed wallets, copy percentage, max USDC, slippage, live mode, SELL-copy permission, and the same-token conflict guard.
 - **Wallets & Copy -> Preview** runs the live-copy preflight gate for a sample activity and does not place an order.

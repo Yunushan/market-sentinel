@@ -307,7 +307,10 @@ HYPERLIQUID_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    # The documented userFills endpoint exposes public HIP-4 wallet activity;
+    # copy remains simulation-first and live submission still needs a signed
+    # HyperCore payload.
+    copy_trading=True,
     api_required=True,
     credentials_required=False,
     kyc_required=False,

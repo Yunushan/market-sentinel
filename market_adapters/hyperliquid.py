@@ -7,7 +7,8 @@ from urllib.parse import urlsplit
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, UnsupportedFeatureError
+from .errors import MarketConfigurationError
+from .identity import require_activity_identity
 from .types import MarketContract, MarketEvent, OrderBookLevel, OrderBookSnapshot, PaperOrderRequest, PaperOrderResult, PriceSnapshot
 
 
@@ -15,6 +16,7 @@ DEFAULT_HYPERLIQUID_MAINNET_URL = "https://api.hyperliquid.xyz"
 DEFAULT_HYPERLIQUID_TESTNET_URL = "https://api.hyperliquid-testnet.xyz"
 HYPERLIQUID_REFERENCES = (
     "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint/spot",
+    "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint",
     "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/asset-ids",
     "https://hyperliquid.gitbook.io/Hyperliquid-docs/for-developers/api/exchange-endpoint",
 )
@@ -71,6 +73,8 @@ class HyperliquidAdapter(MarketAdapter):
                 "live_trading_supported": True,
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "external_signature_required": True,
+                "activity_feed_supported": True,
+                "copy_trading_supported": bool(self.capabilities.copy_trading),
             }
         )
         return health
@@ -190,6 +194,64 @@ class HyperliquidAdapter(MarketAdapter):
             raw=dict(payload) if isinstance(payload, Mapping) else {"payload": payload},
         )
 
+    def list_activity(self, wallet_address: str, *, limit: int = 25) -> List[Dict[str, Any]]:
+        """Return normalized public HIP-4 fills for a wallet.
+
+        Hyperliquid's documented ``userFills`` response contains both perpetual
+        and spot fills. HIP-4 outcome assets are the synthetic ``#<encoding>``
+        coins, where the encoding is ``10 * outcome_id + side``. Only those
+        rows are exposed to the copy workflow so ordinary perp/spot activity
+        cannot be misinterpreted as a prediction-market order.
+        """
+
+        self.ensure_capability("copy_trading")
+        wallet = require_activity_identity(self.market_id, wallet_address)
+        desired = max(1, min(int(limit or 25), 100))
+        payload = self._info({"type": "userFills", "user": wallet, "aggregateByTime": True})
+        if not isinstance(payload, list):
+            raise MarketConfigurationError("Hyperliquid userFills returned an invalid payload.")
+
+        activities: List[Dict[str, Any]] = []
+        for fill in payload:
+            if not isinstance(fill, Mapping):
+                continue
+            try:
+                activity = self._activity_from_fill(wallet, fill)
+            except MarketConfigurationError:
+                continue
+            activities.append(activity)
+            if len(activities) >= desired:
+                break
+        return activities
+
+    def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
+        """Build a simulation-first paper order from a normalized HIP-4 fill."""
+
+        self.ensure_capability("copy_trading")
+        contract_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
+        if not contract_id:
+            raise MarketConfigurationError("Hyperliquid activity has no contract id.")
+        outcome_id, side_index = self._split_contract_id(contract_id)
+        canonical_contract = self._contract_id(outcome_id, side_index)
+        order_side = str(activity.get("side") or "").strip().upper()
+        if order_side not in self.live_order_sides:
+            raise MarketConfigurationError("Hyperliquid activity side must be BUY or SELL.")
+        size = self._required_positive_number(activity.get("size"), "Hyperliquid activity size")
+        raw_price = activity.get("price")
+        limit_price = None if raw_price in (None, "") else self._probability(raw_price)
+        if raw_price not in (None, "") and limit_price is None:
+            raise MarketConfigurationError("Hyperliquid activity price must be between 0 and 1.")
+        return self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=canonical_contract,
+                side=order_side,
+                size=size,
+                limit_price=limit_price,
+                metadata={"activity": dict(activity), "source": "hyperliquid_user_fills"},
+            )
+        )
+
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
         outcome_id, side = self._validate_order(order)
@@ -233,13 +295,6 @@ class HyperliquidAdapter(MarketAdapter):
             "audit": audit,
             "response": response,
         }
-
-    def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "copy_trading",
-            "Hyperliquid copy trading is unsupported because this adapter does not mirror external wallet activity into signed orders.",
-        )
 
     def _info(self, body: Mapping[str, Any]) -> Any:
         return self.runtime.request_json(
@@ -304,6 +359,51 @@ class HyperliquidAdapter(MarketAdapter):
         if order.limit_price is not None and self._probability(order.limit_price) is None:
             raise MarketConfigurationError("Hyperliquid order limit price must be between 0 and 1.")
         return outcome_id, side
+
+    def _activity_from_fill(self, wallet: str, fill: Mapping[str, Any]) -> Dict[str, Any]:
+        coin = str(fill.get("coin") or "").strip()
+        match = re.fullmatch(r"#([0-9]+)", coin)
+        if not match:
+            raise MarketConfigurationError("Hyperliquid fill is not a HIP-4 outcome asset.")
+        encoding = int(match.group(1))
+        outcome_id, side_index = divmod(encoding, 10)
+        if side_index not in {0, 1}:
+            raise MarketConfigurationError("Hyperliquid HIP-4 fill has an unknown outcome side.")
+
+        raw_side = str(fill.get("side") or "").strip().upper()
+        if raw_side in {"B", "BUY"}:
+            order_side = "BUY"
+        elif raw_side in {"A", "S", "SELL"}:
+            order_side = "SELL"
+        else:
+            raise MarketConfigurationError("Hyperliquid fill has an unknown trade side.")
+
+        size = self._required_positive_number(fill.get("sz"), "Hyperliquid fill size")
+        price = self._probability(fill.get("px"))
+        fill_id = str(fill.get("hash") or fill.get("tid") or fill.get("oid") or "").strip()
+        if not fill_id:
+            raise MarketConfigurationError("Hyperliquid fill omitted a stable identifier.")
+        timestamp = self._timestamp_seconds(fill.get("time") or fill.get("timestamp"))
+        contract_id = self._contract_id(str(outcome_id), side_index)
+        outcome = "YES" if side_index == 0 else "NO"
+        return {
+            "type": "TRADE",
+            "proxyWallet": wallet,
+            "wallet": wallet,
+            "asset": contract_id,
+            "contract_id": contract_id,
+            "marketId": str(outcome_id),
+            "side": order_side,
+            "size": size,
+            "shares": size,
+            "price": price,
+            "timestamp": timestamp,
+            "transactionHash": f"hyperliquid-fill:{fill_id}",
+            "activity_id": fill_id,
+            "slug": f"outcome:{outcome_id}",
+            "outcome": outcome,
+            "raw": dict(fill),
+        }
 
     def _validate_signed_payload(
         self, payload: Mapping[str, Any], outcome_id: str, side: int, order: PaperOrderRequest
@@ -435,3 +535,21 @@ class HyperliquidAdapter(MarketAdapter):
         except (TypeError, ValueError):
             return None
         return number if math.isfinite(number) and 0 < number < 1 else None
+
+    @staticmethod
+    def _required_positive_number(value: Any, label: str) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"{label} must be numeric.") from exc
+        if not math.isfinite(number) or number <= 0:
+            raise MarketConfigurationError(f"{label} must be positive and finite.")
+        return number
+
+    @staticmethod
+    def _timestamp_seconds(value: Any) -> int:
+        try:
+            timestamp = int(float(value or 0))
+        except (TypeError, ValueError):
+            return 0
+        return timestamp // 1000 if timestamp > 10_000_000_000 else timestamp

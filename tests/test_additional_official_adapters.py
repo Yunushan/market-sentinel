@@ -146,6 +146,42 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         with self.assertRaises(UnsupportedFeatureError):
             adapter.copy_trade_from_activity({"side": "BUY"})
 
+    def test_hyperliquid_public_hip4_fills_support_safe_simulation_copy(self) -> None:
+        wallet = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+        adapter = HyperliquidAdapter()
+        fills = load_fixture("hyperliquid", "user_fills")
+
+        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+            self.assertEqual(method, "POST")
+            self.assertIsNone(params)
+            self.assertEqual(headers["Content-Type"], "application/json")
+            self.assertEqual(json_body, {"type": "userFills", "user": wallet, "aggregateByTime": True})
+            return fills
+
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        activities = adapter.list_activity(wallet, limit=10)
+
+        self.assertTrue(adapter.capabilities.copy_trading)
+        self.assertEqual(len(activities), 2)
+        buy, sell = activities
+        self.assertEqual(buy["asset"], "outcome:1:0")
+        self.assertEqual(buy["side"], "BUY")
+        self.assertAlmostEqual(buy["size"], 5.0)
+        self.assertAlmostEqual(buy["price"], 0.63)
+        self.assertEqual(buy["timestamp"], 1788264000)
+        self.assertEqual(sell["asset"], "outcome:1:1")
+        self.assertEqual(sell["side"], "SELL")
+        self.assertAlmostEqual(sell["size"], 2.5)
+        self.assertAlmostEqual(sell["price"], 0.39)
+
+        copied = adapter.copy_trade_from_activity(sell)
+        self.assertTrue(copied.accepted)
+        self.assertEqual(copied.contract_id, "outcome:1:1")
+        self.assertAlmostEqual(copied.average_price or 0.0, 0.39)
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_activity("not-a-wallet")
+
     def test_seer_adapter_maps_official_search_prices_and_paper_orders(self) -> None:
         adapter = SeerAdapter()
         markets = load_fixture("seer", "markets_search")
@@ -298,7 +334,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertTrue(result["live"])
         self.assertEqual(result["response"]["status"], "ok")
 
-        with self.assertRaises(UnsupportedFeatureError):
+        with self.assertRaises(MarketConfigurationError):
             adapter.copy_trade_from_activity({"side": "BUY"})
 
     def test_trueo_adapter_maps_onchain_manager_pools_prices_paper_and_signed_tx(self) -> None:

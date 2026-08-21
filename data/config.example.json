@@ -237,7 +237,7 @@
         "adapter_status": "implemented",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Official HIP-4 outcome metadata, encoded outcome assets, orderbooks, alerts, paper orders, and guarded externally signed exchange payloads are implemented. Wallet signing, settlement, and funded execution remain external gates."
+        "notes": "Official HIP-4 outcome metadata, encoded outcome assets, orderbooks, alerts, paper orders, public userFills wallet activity, and simulation-first copy previews are implemented. Wallet signing, settlement, and funded execution remain external gates."
       }
     },
     "hypermind": {
