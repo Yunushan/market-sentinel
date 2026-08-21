@@ -527,11 +527,15 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
 )
 
 
-def _blocker(reason: str, *references: str) -> Dict[str, Any]:
+def _blocker(
+    reason: str,
+    *references: str,
+    last_reviewed: str = "2026-08-16",
+) -> Dict[str, Any]:
     return {
-        "reason": f"Verified 2026-08-16: {reason}",
+        "reason": f"Verified {last_reviewed}: {reason}",
         "references": list(references),
-        "last_reviewed": "2026-08-16",
+        "last_reviewed": last_reviewed,
     }
 
 
@@ -548,18 +552,23 @@ EXPANDED_VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
     "synstation": _blocker(
         "No stable official market-data and order API contract has been validated for SynStation.",
         "https://synstation.ai",
+        last_reviewed="2026-08-21",
     ),
     "levr_bet": _blocker(
         "No stable official API, contract schema, and settlement fixtures have been validated for Levr Bet.",
         "https://levr.bet",
+        last_reviewed="2026-08-21",
     ),
     "dexsport": _blocker(
-        "Dexsport documents a betting protocol, but this app lacks a validated prediction-market data, wallet, and settlement adapter.",
+        "Dexsport documents prediction markets and smart-contract betting, but its official docs publish no stable market-data API, deployment inventory, or reviewed contract schema for this app; the current web interface cannot substitute for an integration contract.",
         "https://dexsport.io/docs-home/",
+        "https://dexsport.io/prediction-markets/all/",
+        last_reviewed="2026-08-21",
     ),
     "blinq": _blocker(
-        "Blinq exposes leveraged prediction derivatives, but no validated public API and risk-controlled adapter contract is implemented.",
+        "Blinq's official site describes a live beta leveraged prediction-derivatives product, but it publishes no stable public API, deployment inventory, or risk-controlled contract schema for this app.",
         "https://blinq.fi",
+        last_reviewed="2026-08-21",
     ),
     "sportstrade": _blocker(
         "Sporttrade officially ceased all wagering on 2026-05-25; no active production market or order integration is available.",

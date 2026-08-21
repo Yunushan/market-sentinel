@@ -123,7 +123,7 @@
         "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: DraftKings Predictions is published as an app product, but no public documented Predictions API, SDK, or account activity/order automation route is available."
+        "notes": "Verified 2026-08-21: DraftKings Predictions remains an app product, but no public documented Predictions API, SDK, or account activity/order automation route is available."
       }
     },
     "drift_bet": {
@@ -215,7 +215,7 @@
         "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: public question pages exist, but no public documented API, SDK, or export endpoint is published. Do not scrape pages or automate private sessions."
+        "notes": "Verified 2026-08-21: public question pages and account-based forecasting remain available, but no public documented API, SDK, or export endpoint is published. Do not scrape pages or automate private sessions."
       }
     },
     "hedgehog_markets": {
@@ -246,7 +246,7 @@
         "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: API feeds are described as managed service deliverables, but no public API contract, SDK, or self-service endpoint is published."
+        "notes": "Verified 2026-08-21: API feeds are described as managed-service deliverables that require program access; no public API contract, SDK, or self-service endpoint is published."
       }
     },
     "ibkr_forecasttrader": {
@@ -283,7 +283,7 @@
         "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: official quote/history pages exist, but no stable documented API for discovery, contract listing, live quotes, or automated trading is published."
+        "notes": "Verified 2026-08-21: official account/practice and quote/history pages exist, but no stable documented API for discovery, contract listing, live quotes, or automated trading is published."
       }
     },
     "myriad_markets": {
@@ -388,7 +388,7 @@
         "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: Nadex event-contract trading requires eligible exchange account access and no public documented third-party event-contract API is published for this adapter."
+        "notes": "Verified 2026-08-21: Nadex continues to list regulated event contracts, but trading requires eligible exchange account access and no public documented third-party event-contract API is published for this adapter."
       }
     },
     "omen": {
@@ -473,7 +473,7 @@
         "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: Robinhood Prediction Markets is exposed as a consumer brokerage/app product, but no public documented prediction-market API, SDK, or automation permission flow is published."
+        "notes": "Verified 2026-08-21: Robinhood exposes active Prediction Markets as a consumer brokerage/app product, but no public documented prediction-market API, SDK, or automation permission flow is published."
       }
     },
     "smarkets": {
@@ -683,7 +683,7 @@
         "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: no stable official market-data and order API contract has been validated for SynStation."
+        "notes": "Verified 2026-08-21: no stable official market-data and order API contract has been validated for SynStation."
       }
     },
     "gnosis_prediction_markets": {
@@ -729,7 +729,7 @@
         "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: no stable official Levr Bet API, contract schema, and settlement fixtures have been validated."
+        "notes": "Verified 2026-08-21: Levr Bet's public model description does not provide a stable official API, deployment inventory, contract schema, or settlement fixtures for safe integration."
       }
     },
     "dexsport": {
@@ -738,7 +738,7 @@
         "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: Dexsport lacks a validated prediction-market data, wallet, and settlement adapter for this app."
+        "notes": "Verified 2026-08-21: Dexsport documents prediction markets and smart-contract settlement, but its public documentation does not provide a stable market-data API, deployment inventory, or reviewed prediction-contract ABI."
       }
     },
     "lamas_finance": {
@@ -781,7 +781,7 @@
         "adapter_status": "verified_blocked",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: Blinq lacks a validated public API and risk-controlled adapter contract."
+        "notes": "Verified 2026-08-21: Blinq's official site describes a live beta leveraged prediction-derivatives product, but publishes no stable public API, deployment inventory, or risk-controlled adapter contract."
       }
     },
     "zeitgeist_prediction_pools": {

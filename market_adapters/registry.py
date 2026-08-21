@@ -12,7 +12,7 @@ from .types import MarketMetadata
 VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
     "robinhood_prediction_markets": {
         "reason": (
-            "Verified 2026-05-26: Robinhood exposes Prediction Markets as a consumer brokerage/app "
+            "Verified 2026-08-21: Robinhood exposes Prediction Markets as a consumer brokerage/app "
             "product, but no public documented Robinhood prediction-market API, SDK, or automation "
             "permission flow is published. The adapter must not automate the consumer app or private endpoints."
         ),
@@ -20,10 +20,11 @@ VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
             "https://robinhood.com/us/en/prediction-markets",
             "https://robinhood.com/us/en/newsroom/robinhood-prediction-markets-hub/",
         ],
+        "last_reviewed": "2026-08-21",
     },
     "draftkings_predictions": {
         "reason": (
-            "Verified 2026-05-26: DraftKings Predictions is published as an app product, but no public "
+            "Verified 2026-08-21: DraftKings Predictions is published as an app product, but no public "
             "documented Predictions API, SDK, or account activity/order automation route is available. "
             "Private app endpoints are intentionally unsupported."
         ),
@@ -31,10 +32,11 @@ VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
             "https://www.draftkings.com/draftkings-debuts-predictions-app-entering-prediction-markets",
             "https://www.draftkings.com",
         ],
+        "last_reviewed": "2026-08-21",
     },
     "nadex": {
         "reason": (
-            "Verified 2026-05-26: Nadex event contracts require a Nadex account on a CFTC-regulated "
+            "Verified 2026-08-21: Nadex event contracts require a Nadex account on a CFTC-regulated "
             "exchange, and no public documented API suitable for third-party event-contract discovery, "
             "quotes, or order automation is published for this adapter."
         ),
@@ -42,6 +44,7 @@ VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
             "https://www.nadex.com/product-market/",
             "https://www.nadex.com/learning/how-to-trade-event-contracts/",
         ],
+        "last_reviewed": "2026-08-21",
     },
     "fact_machine": {
         "reason": (
@@ -54,7 +57,7 @@ VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
     },
     "good_judgment_open": {
         "reason": (
-            "Verified 2026-05-26: Good Judgment Open has public question pages and account-based "
+            "Verified 2026-08-21: Good Judgment Open has public question pages and account-based "
             "forecasting, but no public documented API, SDK, or export endpoint suitable for app integration. "
             "HTML scraping and private session automation are intentionally unsupported."
         ),
@@ -63,10 +66,11 @@ VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
             "https://www.gjopen.com/questions",
             "https://www.gjopen.com/privacy",
         ],
+        "last_reviewed": "2026-08-21",
     },
     "hypermind": {
         "reason": (
-            "Verified 2026-05-26: Hypermind describes dashboards, PDF reports, and API feeds as managed "
+            "Verified 2026-08-21: Hypermind describes dashboards, PDF reports, and API feeds as managed "
             "service deliverables, but does not publish a public API contract, SDK, or self-service data endpoint. "
             "Program or enterprise access is required before implementation."
         ),
@@ -75,10 +79,11 @@ VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
             "https://www.hypermind.com/products-services/prescience",
             "https://predict.hypermind.com",
         ],
+        "last_reviewed": "2026-08-21",
     },
     "iowa_electronic_markets": {
         "reason": (
-            "Verified 2026-05-26: Iowa Electronic Markets publishes official site pages, quote pages, and "
+            "Verified 2026-08-21: Iowa Electronic Markets publishes official site pages, quote pages, and "
             "price-history forms, but no stable documented API for discovery, contract listing, live quotes, "
             "or automated trading. Trading also requires IEM account eligibility."
         ),
@@ -87,6 +92,7 @@ VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
             "https://iemweb.biz.uiowa.edu/pricehistory/pricehistory_SelectContract.cfm",
             "https://iemweb.biz.uiowa.edu/quotes/",
         ],
+        "last_reviewed": "2026-08-21",
     },
     "infer": {
         "reason": (

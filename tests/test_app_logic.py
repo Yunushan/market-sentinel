@@ -31,6 +31,7 @@ from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAle
 from core.storage import ConfigLoadError
 from market_adapters import MARKET_IDS, build_default_registry
 from market_adapters.errors import MarketConfigurationError
+from market_adapters.registry import VERIFIED_BLOCKERS
 from market_adapters.types import (
     MarketCapabilities,
     MarketContract,
@@ -785,7 +786,7 @@ class AppLogicTests(unittest.TestCase):
         status = App._selected_market_status_text(harness)
 
         self.assertIn("Robinhood Prediction Markets: verified blocked.", status)
-        self.assertIn("Verified 2026-05-26", status)
+        self.assertIn(VERIFIED_BLOCKERS["robinhood_prediction_markets"]["reason"], status)
 
     def test_market_safety_refresh_populates_selected_market_settings(self) -> None:
         harness = SafetyHarness()
