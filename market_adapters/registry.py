@@ -241,6 +241,7 @@ def build_default_registry() -> AdapterRegistry:
     from .dflow import DFlowAdapter
     from .drift_bet import DriftBetAdapter
     from .frenzy import FrenzyFinanceAdapter
+    from .fanduel_predicts import FanDuelPredictsAdapter
     from .gemini import GeminiPredictionAdapter
     from .hyperliquid import HyperliquidAdapter
     from .hedgehog import HedgehogMarketsAdapter
@@ -299,6 +300,7 @@ def build_default_registry() -> AdapterRegistry:
         DFlowAdapter,
         DriftBetAdapter,
         FrenzyFinanceAdapter,
+        FanDuelPredictsAdapter,
         ManifoldAdapter,
         MetaculusAdapter,
         LimitlessAdapter,
@@ -346,6 +348,7 @@ def build_default_registry() -> AdapterRegistry:
     registry.register_adapter(DFlowAdapter, replace=True)
     registry.register_adapter(DriftBetAdapter, replace=True)
     registry.register_adapter(FrenzyFinanceAdapter, replace=True)
+    registry.register_adapter(FanDuelPredictsAdapter, replace=True)
     registry.register_adapter(ManifoldAdapter, replace=True)
     registry.register_adapter(MetaculusAdapter, replace=True)
     registry.register_adapter(LimitlessAdapter, replace=True)

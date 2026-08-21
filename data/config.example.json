@@ -594,10 +594,12 @@
     "fanduel_predicts": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "fanduel_predicts_api_base_url": "https://data-api.crypto.com/api/v1/predictions",
+        "credential_env_vars": ["FANDUEL_PREDICTS_API_KEY", "CRYPTO_COM_PREDICTIONS_API_KEY"],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: FanDuel Predicts is a consumer product without a public documented prediction-market API or third-party automation contract."
+        "min_request_interval_seconds": 0.6,
+        "notes": "Read-only FanDuel Predicts/OG alias using the official Crypto.com Predictions API for OG/CDNA event discovery, contracts, prices, alerts, and local dry-run orders. Anonymous reads are supported; an optional licensed API key may be supplied. CME-listed contracts remain available through cme_prediction_markets. FanDuel account orderbook, live trading, and copy trading APIs are not published; account use remains subject to KYC and regional eligibility."
       }
     },
     "seer": {

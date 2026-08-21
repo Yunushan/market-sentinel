@@ -44,6 +44,7 @@ IMPLEMENTED_MARKETS = {
     "betfair_exchange",
     "crypto_com_predict",
     "fanatics_markets",
+    "fanduel_predicts",
     "coinbase_prediction_markets",
     "context_v2",
     "smarkets",

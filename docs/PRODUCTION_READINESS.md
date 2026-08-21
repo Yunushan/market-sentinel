@@ -42,7 +42,7 @@ check does not receive local test or security points.
 
 The latest local audit on 2026-08-21 is **83/100 (not ready)**. Local
 verification passed all 624 tests (7 intentionally skipped), Ruff, the adapter
-catalog, 154 offline fixtures, documentation, workflow, secret-hygiene, and
+catalog, 157 offline fixtures, documentation, workflow, secret-hygiene, and
 packaging checks; branch coverage was 76% overall. The no-credential
 public-only Polymarket probe was attempted twice and failed because the
 external Gamma, Data, CLOB, and Bridge endpoints reset the connection from

@@ -44,6 +44,22 @@ PROBABLE_CAPABILITIES = MarketCapabilities(
 )
 
 
+FANDUEL_PREDICTS_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    alerts=True,
+    paper_trading=True,
+    live_trading=False,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=True,
+    region_limited=True,
+)
+
+
 METADAO_CAPABILITIES = MarketCapabilities(
     market_discovery=True,
     event_listing=True,
@@ -318,8 +334,14 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
     MarketMetadata(
         market_id="fanduel_predicts",
         display_name="FanDuel Predicts",
-        homepage_url="https://www.fanduel.com/",
-        description="Verified blocked: FanDuel Predicts is a consumer product without a public documented prediction-market API or third-party automation contract.",
+        homepage_url="https://www.fanduel.com/predicts",
+        description=(
+            "Read-only FanDuel Predicts/OG alias using the official Crypto.com Predictions API for "
+            "OG/CDNA event discovery, contracts, prices, alerts, and local dry-run orders. CME-listed "
+            "contracts remain available through cme_prediction_markets; FanDuel account execution and "
+            "copy trading are not automated."
+        ),
+        capabilities=FANDUEL_PREDICTS_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="seer",
@@ -544,10 +566,6 @@ EXPANDED_VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
         "Robinhood's distribution surface does not publish a separate public automation contract for Kalshi-through-Robinhood accounts; private brokerage endpoints are not supported.",
         "https://robinhood.com/us/en/prediction-markets",
         "https://kalshi.com/",
-    ),
-    "fanduel_predicts": _blocker(
-        "FanDuel Predicts is a consumer product without a public documented prediction-market API or third-party automation contract.",
-        "https://www.fanduel.com/",
     ),
     "synstation": _blocker(
         "No stable official market-data and order API contract has been validated for SynStation.",

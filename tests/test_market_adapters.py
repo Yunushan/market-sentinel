@@ -12,6 +12,7 @@ from market_adapters import (
     CoinbasePredictionMarketsAdapter,
     CryptoComPredictAdapter,
     FanaticsMarketsAdapter,
+    FanDuelPredictsAdapter,
     ContextV2Adapter,
     DFlowAdapter,
     DriftBetAdapter,
@@ -102,6 +103,7 @@ IMPLEMENTED_MARKETS = {
     "betfair_exchange",
     "crypto_com_predict",
     "fanatics_markets",
+    "fanduel_predicts",
     "context_v2",
     "smarkets",
     "thales_market",
@@ -181,6 +183,8 @@ class AdapterFoundationTests(unittest.TestCase):
         self.assertIsInstance(registry.create("crypto_com_predict"), CryptoComPredictAdapter)
         self.assertEqual(registry.get_metadata("fanatics_markets").display_name, "Fanatics Markets")
         self.assertIsInstance(registry.create("fanatics_markets"), FanaticsMarketsAdapter)
+        self.assertEqual(registry.get_metadata("fanduel_predicts").display_name, "FanDuel Predicts")
+        self.assertIsInstance(registry.create("fanduel_predicts"), FanDuelPredictsAdapter)
         self.assertEqual(registry.get_metadata("coinbase_prediction_markets").display_name, "Coinbase Prediction Markets")
         self.assertIsInstance(registry.create("coinbase_prediction_markets"), CoinbasePredictionMarketsAdapter)
         self.assertEqual(registry.get_metadata("manifold").display_name, "Manifold Markets")

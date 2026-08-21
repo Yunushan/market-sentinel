@@ -10,6 +10,7 @@ from .context_v2 import ContextV2Adapter
 from .dflow import DFlowAdapter
 from .drift_bet import DriftBetAdapter
 from .frenzy import FrenzyFinanceAdapter
+from .fanduel_predicts import FanDuelPredictsAdapter
 from .errors import MarketAdapterError, MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
 from .gemini import GeminiPredictionAdapter
 from .hyperliquid import HyperliquidAdapter
@@ -76,6 +77,7 @@ __all__ = [
     "DFlowAdapter",
     "DriftBetAdapter",
     "FrenzyFinanceAdapter",
+    "FanDuelPredictsAdapter",
     "GeminiPredictionAdapter",
     "GnosisPredictionMarketsAdapter",
     "HyperliquidAdapter",
