@@ -493,6 +493,8 @@ Frenzy Finance was promoted on 2026-08-17 after validating the official Base/Bas
 
 Nadex is represented by a fixture-backed read-only alias over the official Crypto.com Predictions API used for the CDNA/Nadex prediction-event data surface. Nadex account trading, DCM/FIX depth, knock-out products, and copy trading remain unsupported until a documented public automation contract is available.
 
+Blinq is represented by a fixture-backed read-only alias over the official Polymarket data surface because Blinq's product page explicitly says it trades Polymarket markets. Blinq leverage, deposits, private account actions, live wallet execution, and copy trading remain unsupported until Blinq publishes a separate documented automation contract.
+
 | Market | Adapter | Alerts | Read-only data | Paper trading | Live trading | Copy trading | API required | Credentials required | Region/KYC limitation |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Polymarket (`polymarket`) | Implemented | Yes | Yes | Yes | Guarded, off by default | Yes, dry-run default | Yes | Live trading only | Trading may be region/KYC limited |
@@ -554,7 +556,7 @@ Nadex is represented by a fixture-backed read-only alias over the official Crypt
 | Dexsport (`dexsport`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
 | Lamas Finance (`lamas_finance`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Solana RPC; externally signed wallet transaction required for live orders | Devnet example; production deployment must be reviewed |
 | Zetarium World (`zetarium_world`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key; externally signed wallet transaction required for live orders | Jurisdiction varies |
-| Blinq (`blinq`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| Blinq (`blinq`) | Implemented | Yes | Yes | Yes | No | No | Required | No | Region limited |
 | Zeitgeist Prediction Pools (`zeitgeist_prediction_pools`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key for reads; externally signed wallet payload required for live orders | Jurisdiction varies |
 | Reality.eth Markets (`reality_eth_markets`) | Implemented | Yes | Yes | No | No | No | Required | Subgraph endpoint required | Identity/jurisdiction limited |
 | SportsTrade (`sportstrade`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |

@@ -24,6 +24,7 @@ REQUIRED_COLUMNS = (
 )
 IMPLEMENTED_MARKETS = {
     "polymarket",
+    "blinq",
     "kalshi",
     "predictit",
     "manifold",

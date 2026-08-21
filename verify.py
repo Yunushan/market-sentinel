@@ -77,6 +77,7 @@ WORKFLOW_ACTION_REF_RE = re.compile(
 
 IMPLEMENTED_ADAPTER_FIXTURE_TESTS = {
     "polymarket": ("polymarket", "test_polymarket_adapter.py"),
+    "blinq": ("blinq", "test_blinq_adapter.py"),
     "context_v2": ("context_v2", "test_additional_official_adapters.py"),
     "smarkets": ("smarkets", "test_additional_official_adapters.py"),
     "thales_market": ("thales_market", "test_additional_official_adapters.py"),
@@ -580,6 +581,9 @@ def run_fixture_check() -> None:
         fixture_root / "nadex" / "events.json",
         fixture_root / "nadex" / "contracts.json",
         fixture_root / "nadex" / "price.json",
+        fixture_root / "blinq" / "market.json",
+        fixture_root / "blinq" / "event.json",
+        fixture_root / "blinq" / "orderbook.json",
     }
     missing = [str(path.relative_to(ROOT)) for path in sorted(required) if not path.exists()]
     if missing:

@@ -111,13 +111,13 @@ This project is not 100% feature-complete across every listed market. The comple
 Current catalog snapshot:
 
 - Total markets: 68
-- Implemented or partially implemented adapters: 48
-- Verified-blocked/stub adapters: 20
-- Market/event discovery supported: 48 yes, 20 no
-- Alerts supported: 47 yes, 21 no
-- Read-only price data supported: 46 yes, 22 no
-- Orderbook reading supported: 23 yes, 45 no
-- Paper trading supported: 45 yes, 23 no
+- Implemented or partially implemented adapters: 49
+- Verified-blocked/stub adapters: 19
+- Market/event discovery supported: 49 yes, 19 no
+- Alerts supported: 48 yes, 20 no
+- Read-only price data supported: 47 yes, 21 no
+- Orderbook reading supported: 24 yes, 44 no
+- Paper trading supported: 46 yes, 22 no
 - Live trading supported: 34 guarded/off by default, 34 no
 - Copy trading supported: 5 yes, 63 no (Polymarket, Opinion Labs, Manifold, Myriad, and Hyperliquid HIP-4 wallet fills; all simulation-first and guarded)
 
@@ -263,6 +263,7 @@ These articles completed the catalog, adapter architecture, verification, docs, 
 - Article 124 Manifold Public Activity and Simulation Copy Adapter: scope complete for this pass; the official public `/v0/bets?username=...` feed is fixture-backed and normalized into the common activity shape behind a safe `manifold:<username>` identity, selected-market wallet/copy API and desktop paths accept the identity, and simulation-first copy previews preserve Manifold amount-versus-share semantics. Live MANA betting remains separately guarded, and CLOB orderbook reading remains unsupported.
 - Article 125 Myriad Public Wallet Activity and Simulation Copy Adapter: scope complete for this pass; the official public `GET /users/:address/events` feed is fixture-backed and normalized into the common activity shape with EVM identity validation, buy-value versus sell-share semantics, selected-market API/desktop copy preview parity, and guarded simulation-first paper intents. Live Myriad execution remains behind signed-order and shared live-safety gates.
 - Article 126 Nadex/CDNA Read-only Adapter: scope complete for this pass; Nadex's official product/rules pages and Crypto.com's documented Predictions Market Data API support a fixture-backed alias for prediction-event discovery, contracts, bid/ask/mid/probability reads, alerts, and local paper orders. Nadex account automation, DCM/FIX depth, knock-out products, live trading, and copy trading remain explicitly unsupported.
+- Article 127 Blinq/Polymarket Read-only Data Alias: scope complete for this pass; Blinq's official product page says its leverage layer trades Polymarket markets, so a fixture-backed `blinq` alias now maps the documented public Polymarket discovery, contracts, prices, orderbooks, alerts, and local paper orders. Blinq leverage, deposits, private account actions, live wallet execution, and copy trading remain explicitly unsupported until a separate official contract is published.
 
 ## Active continuation goals
 

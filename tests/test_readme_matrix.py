@@ -69,6 +69,7 @@ CONCRETE_REQUIREMENT_VALUES = (
 )
 IMPLEMENTED_MARKETS = {
     "polymarket",
+    "blinq",
     "kalshi",
     "predictit",
     "manifold",

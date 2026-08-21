@@ -3,6 +3,7 @@ from __future__ import annotations
 from .azuro import AzuroAdapter
 from .base import MarketAdapter
 from .betfair import BetfairExchangeAdapter
+from .blinq import BlinqAdapter
 from .coinbase_prediction import CoinbasePredictionMarketsAdapter
 from .catalog import MARKET_CATALOG, MARKET_IDS, get_market_metadata
 from .crypto_com_predict import CryptoComPredictAdapter, FanaticsMarketsAdapter
@@ -71,6 +72,7 @@ __all__ = [
     "AugurAdapter",
     "AzuroAdapter",
     "BetfairExchangeAdapter",
+    "BlinqAdapter",
     "CoinbasePredictionMarketsAdapter",
     "CryptoComPredictAdapter",
     "FanaticsMarketsAdapter",

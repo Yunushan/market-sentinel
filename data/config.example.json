@@ -785,10 +785,11 @@
     "blinq": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-21: Blinq's official site describes a live beta leveraged prediction-derivatives product, but publishes no stable public API, deployment inventory, or risk-controlled adapter contract."
+        "copy_trading_enabled": false,
+        "notes": "Read-only alias over official Polymarket public market data for markets surfaced by Blinq. Discovery, contracts, prices, orderbooks, alerts, and local paper orders are supported; Blinq leverage, deposits, private account actions, live wallet execution, and copy trading remain unsupported."
       }
     },
     "zeitgeist_prediction_pools": {

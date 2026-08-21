@@ -223,6 +223,7 @@ def build_default_registry() -> AdapterRegistry:
         registry.register_metadata(metadata)
     from .azuro import AzuroAdapter
     from .betfair import BetfairExchangeAdapter
+    from .blinq import BlinqAdapter
     from .coinbase_prediction import CoinbasePredictionMarketsAdapter
     from .crypto_com_predict import CryptoComPredictAdapter, FanaticsMarketsAdapter
     from .context_v2 import ContextV2Adapter
@@ -272,6 +273,7 @@ def build_default_registry() -> AdapterRegistry:
 
     implemented_adapters = (
         PolymarketAdapter,
+        BlinqAdapter,
         CoinbasePredictionMarketsAdapter,
         ProbableAdapter,
         ProphetExchangeAdapter,
@@ -321,6 +323,7 @@ def build_default_registry() -> AdapterRegistry:
         NadexAdapter,
     )
     registry.register_adapter(PolymarketAdapter, replace=True)
+    registry.register_adapter(BlinqAdapter, replace=True)
     registry.register_adapter(CoinbasePredictionMarketsAdapter, replace=True)
     registry.register_adapter(ProbableAdapter, replace=True)
     registry.register_adapter(ProphetExchangeAdapter, replace=True)

@@ -6,7 +6,7 @@ This file documents why each market is either implemented, guarded, or stubbed. 
 
 ## Summary
 
-- Polymarket, Kalshi, PredictIt, Crypto.com Predict/CDNA, Nadex/CDNA, Fanatics Markets/CDNA, FanDuel Predicts/OG, Manifold, Metaculus, Myriad, Opinion, Gemini, Predict.fun, XO, Betfair, Limitless Exchange, SX Bet, Azuro, Augur, Omen, Gnosis Prediction Markets, Zeitgeist, Zeitgeist SDK / Markets, Zeitgeist Prediction Pools, Reality.eth Markets, Xmarket, Probable, Matchbook, DFlow, Context V2, Smarkets, Thales Market, MetaDAO, Seer, Hyperliquid, Trueo, Frenzy Finance, Hedgehog Markets, IBKR ForecastTrader, ForecastEx, CME event contracts, Prophet Exchange, PRDT Finance, Zetarium World, and Lamas Finance are implemented adapters today.
+- Polymarket, Kalshi, PredictIt, Crypto.com Predict/CDNA, Nadex/CDNA, Fanatics Markets/CDNA, FanDuel Predicts/OG, Blinq/Polymarket, Manifold, Metaculus, Myriad, Opinion, Gemini, Predict.fun, XO, Betfair, Limitless Exchange, SX Bet, Azuro, Augur, Omen, Gnosis Prediction Markets, Zeitgeist, Zeitgeist SDK / Markets, Zeitgeist Prediction Pools, Reality.eth Markets, Xmarket, Probable, Matchbook, DFlow, Context V2, Smarkets, Thales Market, MetaDAO, Seer, Hyperliquid, Trueo, Frenzy Finance, Hedgehog Markets, IBKR ForecastTrader, ForecastEx, CME event contracts, Prophet Exchange, PRDT Finance, Zetarium World, and Lamas Finance are implemented adapters today.
 - All other markets are present in config and GUI through verified-blocked adapters with exact blocker reasons.
 - Live trading remains disabled by default for every market.
 - Credentials must stay in `.env`, shell environment variables, OS keychain tooling, or external credential files. They must not be stored in `data/config.json`.
@@ -84,10 +84,12 @@ managed-service deliverables that require program access, not a public contract.
 Good Judgment Open remains an account-based forecasting site without a public
 export/API contract.
 
-Blinq's official site describes a live beta leveraged-derivatives product, while
-Levr Bet's public whitepaper describes its tokenized sports model; neither
-publishes a stable API, deployment inventory, or reviewed contract schema for
-safe fixture-backed integration. Dexsport's current official site lists
+Blinq's official site explicitly says its leverage layer trades Polymarket
+markets. It is therefore represented by a read-only Polymarket data alias only;
+Blinq leverage, deposits, private account actions, live wallet execution, and
+copy trading remain unsupported. Levr Bet's public whitepaper describes its
+tokenized sports model but does not publish a stable API, deployment inventory,
+or reviewed contract schema for safe fixture-backed integration. Dexsport's current official site lists
 prediction markets and smart-contract settlement, but its public documentation
 does not provide a stable market-data API, deployment inventory, or reviewed
 prediction-contract ABI. SynStation, Fact Machine, and the remaining consumer
@@ -106,6 +108,17 @@ automation, DCM/FIX market-data depth, knock-out products, live orders, or copy
 trading. Anonymous reads remain subject to the published personal-use and rate
 limits; licensed API access is required for commercial redistribution or model
 training.
+
+## 2026-08-22 Blinq/Polymarket data-alias promotion note
+
+Blinq's official product page says that its leverage layer trades Polymarket
+markets, and its predictions page links that market experience. Because Blinq
+does not publish a separate public market-data, leverage, wallet, or execution
+API, the new `blinq` adapter is a narrow alias over Polymarket's documented
+public data surface. It provides fixture-backed discovery, contracts, prices,
+orderbooks, alerts, and local paper orders for the underlying markets. It does
+not automate Blinq leverage, deposits, private account actions, live wallet
+execution, or copy trading.
 
 ## Market Blockers
 
@@ -170,7 +183,7 @@ training.
 | `dexsport` | Verified blocked | Verified 2026-08-21: Dexsport documents prediction markets and smart-contract settlement, but its public documentation does not provide a stable market-data API, deployment inventory, or reviewed prediction-contract ABI for this app. | Add official market-data and wallet-safe paper support before live capability. | [Dexsport docs](https://dexsport.io/docs-home/), [Dexsport prediction markets](https://dexsport.io/prediction-markets/all/) |
 | `lamas_finance` | Implemented | The official Lamas Finance repository documents Anchor `PricePredict` and `UpOrDown` programs with devnet identifiers. The adapter reads `RoundResult` accounts through Solana JSON-RPC, derives pooled Up/Down prices, exposes the PricePredict reference price, emits alerts and local paper intents, and guards externally signed `predict` transactions. CLOB depth, wallet signing, settlement, and copy trading remain unsupported. | Keep the documented devnet deployment as the default example; independently review any production program/mint inventory before enabling live forwarding, require `lamas_finance_submit_signed_transactions=true`, and keep settlement outside this adapter. | [Lamas Finance docs](https://docs.lamas.co/1.0), [official Lamas Finance repository](https://github.com/LamasFinance/LamasFinance), [Solana `getProgramAccounts`](https://solana.com/docs/rpc/http/getprogramaccounts) |
 | `zetarium_world` | Implemented | Reviewed BSC `PredictionMarket` deployment and the published V2 contract model are mapped to on-chain market discovery, binary/multi-outcome pool-share prices, alerts, local paper intents, and a guarded externally signed BUY transaction boundary. The adapter uses the reviewed verified deployment address by default and supports explicit address/inventory overrides; CLOB depth, wallet signing, settlement, and copy trading remain unsupported. | Keep paper mode as default; review the configured BSC deployment and market inventory, require `zetarium_submit_signed_transactions=true` plus a narrow `zetarium_live_transaction_targets` allow-list for live submission, and add settlement lifecycle only through documented contract methods with fixtures. | [Zetarium Prediction Market V2](https://docs.zetarium.world/docs/products/prediction), [Zetarium smart contracts](https://docs.zetarium.world/docs/overview/smart-contracts), [reviewed PredictionMarket deployment](https://bscscan.com/address/0xfc5fa5bb5f6a812600c303b4b83ee8dbdc021d99) |
-| `blinq` | Verified blocked | Verified 2026-08-21: Blinq's official site describes a live beta leveraged prediction-derivatives product, but it publishes no stable public API, deployment inventory, or risk-controlled contract schema for this app. | Require official API docs and derivatives-specific risk/settlement fixtures. | [Blinq](https://blinq.fi) |
+| `blinq` | Implemented | Official Blinq product pages say the leverage layer trades Polymarket markets. The adapter maps the documented public Polymarket discovery, contracts, prices, orderbooks, alerts, and local paper orders for that underlying surface. Blinq leverage, deposits, private account actions, live wallet execution, and copy trading remain unsupported. | Keep this adapter read-only; use the official Polymarket public data endpoints and do not infer Blinq leverage or wallet contracts until Blinq publishes them. | [Blinq](https://blinq.fi/), [Blinq Predictions](https://predictions.blinq.fi/), [Polymarket docs](https://docs.polymarket.com/) |
 | `zeitgeist_prediction_pools` | Implemented | Pool-scoped Zeitgeist adapter uses the documented market/pool/asset GraphQL schema, validates pool identifiers, maps discovery, pool-backed outcome prices, alerts, and dry-run paper orders, and forwards only reviewed externally signed HybridRouter calls whose pool metadata matches. Pool accounting, settlement, wallet signing, CLOB depth, and copy trading remain unsupported. | Keep the pool endpoint and paper mode explicit/default, require `zeitgeist_submit_signed_extrinsics=true` plus reviewed `pool_id` metadata and an explicit RPC, and add settlement lifecycle only through documented SDK/RPC flows with fixtures. | [Zeitgeist fetching markets](https://docs.zeitgeist.pm/docs/build/sdk/v2/fetch-markets), [Zeitgeist indexer](https://docs.zeitgeist.pm/docs/build/sdk/v2/indexer), [Zeitgeist Hybrid Router](https://github.com/zeitgeistpm/zeitgeist/tree/main/zrml/hybrid-router) |
 | `reality_eth_markets` | Implemented | Read-only Reality.eth question discovery, response-option listing, lifecycle status, and alert-compatible metadata are implemented through the official subgraph schema. Prices, orderbooks, paper orders, and trading remain unsupported because Reality.eth is an oracle/question protocol rather than a traded market. | Keep the GraphQL endpoint configured explicitly, keep this adapter read-only, and add answer submission only as a separate wallet-signed oracle workflow with fixtures and user approval. | [Reality.eth contract docs](https://reality.eth.limo/app/docs/html/contracts.html), [Reality.eth subgraph](https://github.com/RealityETH/reality-eth-monorepo/tree/main/packages/graph), [Reality.eth schema](https://raw.githubusercontent.com/RealityETH/reality-eth-monorepo/master/packages/graph/schema.graphql) |
 | `sportstrade` | Verified blocked | Verified 2026-08-16: Sporttrade officially ceased all wagering on 2026-05-25; no active production market or order integration is available. | Keep the adapter fail-closed unless Sporttrade officially resumes wagering and publishes a supported integration contract. | [Sporttrade](https://getsporttrade.com/) |

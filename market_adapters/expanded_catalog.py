@@ -239,6 +239,24 @@ SPACE_CAPABILITIES = MarketCapabilities(
 )
 
 
+BLINQ_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=True,
+    alerts=True,
+    paper_trading=True,
+    # Blinq does not publish a leverage or wallet-execution API.  The adapter
+    # is deliberately limited to the underlying public Polymarket surface.
+    live_trading=False,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=False,
+    region_limited=True,
+)
+
+
 COINBASE_PREDICTION_CAPABILITIES = MarketCapabilities(
     market_discovery=True,
     event_listing=True,
@@ -480,7 +498,12 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="blinq",
         display_name="Blinq",
         homepage_url="https://blinq.fi",
-        description="Verified blocked: Blinq exposes leveraged prediction derivatives, but no validated public API and risk-controlled adapter contract is implemented.",
+        description=(
+            "Read-only Blinq alias over the official Polymarket market-data APIs for markets surfaced "
+            "by Blinq. Discovery, prices, orderbooks, alerts, and local paper orders are supported; "
+            "Blinq leverage, deposits, live wallet execution, and copy trading remain unsupported."
+        ),
+        capabilities=BLINQ_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="zeitgeist_prediction_pools",
@@ -581,11 +604,6 @@ EXPANDED_VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
         "Dexsport documents prediction markets and smart-contract betting, but its official docs publish no stable market-data API, deployment inventory, or reviewed contract schema for this app; the current web interface cannot substitute for an integration contract.",
         "https://dexsport.io/docs-home/",
         "https://dexsport.io/prediction-markets/all/",
-        last_reviewed="2026-08-21",
-    ),
-    "blinq": _blocker(
-        "Blinq's official site describes a live beta leveraged prediction-derivatives product, but it publishes no stable public API, deployment inventory, or risk-controlled contract schema for this app.",
-        "https://blinq.fi",
         last_reviewed="2026-08-21",
     ),
     "sportstrade": _blocker(

@@ -9,6 +9,7 @@ from market_adapters import (
     AugurAdapter,
     AzuroAdapter,
     BetfairExchangeAdapter,
+    BlinqAdapter,
     CoinbasePredictionMarketsAdapter,
     CryptoComPredictAdapter,
     FanaticsMarketsAdapter,
@@ -84,6 +85,7 @@ CAPABILITY_KEYS = {
 
 IMPLEMENTED_MARKETS = {
     "polymarket",
+    "blinq",
     "coinbase_prediction_markets",
     "kalshi",
     "predictit",
@@ -177,6 +179,8 @@ class AdapterFoundationTests(unittest.TestCase):
         self.assertTrue(all(registry.has_adapter(market_id) for market_id in MARKET_IDS))
         self.assertEqual(registry.get_metadata("polymarket").display_name, "Polymarket")
         self.assertEqual(registry.create("polymarket").market_id, "polymarket")
+        self.assertEqual(registry.get_metadata("blinq").display_name, "Blinq")
+        self.assertIsInstance(registry.create("blinq"), BlinqAdapter)
         self.assertEqual(registry.get_metadata("kalshi").display_name, "Kalshi")
         self.assertIsInstance(registry.create("kalshi"), KalshiAdapter)
         self.assertEqual(registry.get_metadata("predictit").display_name, "PredictIt")
