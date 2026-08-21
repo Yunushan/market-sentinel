@@ -531,6 +531,8 @@ export interface CopyPayload {
   simulation_first: boolean;
   copy_trading_supported: boolean;
   adapter: string;
+  market_id?: string;
+  activity_identity_hint?: string;
   live_gate: {
     market_enabled: boolean;
     live_trading_enabled: boolean;

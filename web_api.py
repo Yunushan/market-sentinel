@@ -33,6 +33,7 @@ from market_adapters import build_default_registry
 from market_adapters.registry import AdapterRegistry
 from market_adapters.catalog import MARKET_CATALOG, MARKET_IDS
 from market_adapters.errors import UnsupportedFeatureError
+from market_adapters.identity import activity_identity_hint, normalize_activity_identity
 from market_adapters.types import (
     MarketCapabilities,
     MarketMetadata,
@@ -2776,10 +2777,17 @@ def find_wallet(cfg: AppConfig, wallet_id: str) -> WalletWatch:
     raise ValueError(f"Unknown wallet id: {normalized}")
 
 
-def wallet_from_payload(payload: Mapping[str, Any], existing: Optional[WalletWatch] = None) -> WalletWatch:
+def wallet_from_payload(
+    payload: Mapping[str, Any],
+    existing: Optional[WalletWatch] = None,
+    *,
+    market_id: str = "polymarket",
+) -> WalletWatch:
     raw_wallet = str(payload.get("wallet") if "wallet" in payload else (existing.wallet if existing else "")).strip()
-    wallet = normalize_wallet(raw_wallet)
+    wallet = normalize_activity_identity(market_id, raw_wallet)
     if not wallet:
+        if str(market_id or "").strip().lower() == "manifold":
+            raise ValueError("wallet must use the safe manifold:<username> activity identity format.")
         raise ValueError("wallet must be a valid 0x wallet/proxyWallet address.")
     display_name = str(
         payload.get("display_name") if "display_name" in payload else (existing.display_name if existing else "")
@@ -2800,8 +2808,8 @@ def wallet_from_payload(payload: Mapping[str, Any], existing: Optional[WalletWat
 
 
 def add_wallet_watch(cfg: AppConfig, payload: Mapping[str, Any]) -> WalletWatch:
-    require_selected_market(cfg, "Wallet tracking")
-    wallet = wallet_from_payload(payload)
+    market_id = require_selected_market(cfg, "Wallet tracking")
+    wallet = wallet_from_payload(payload, market_id=market_id)
     if any(item.wallet == wallet.wallet for item in cfg.wallets):
         raise ValueError("This wallet is already being tracked.")
     cfg.wallets.append(wallet)
@@ -2809,8 +2817,9 @@ def add_wallet_watch(cfg: AppConfig, payload: Mapping[str, Any]) -> WalletWatch:
 
 
 def update_wallet_watch(cfg: AppConfig, wallet_id: str, payload: Mapping[str, Any]) -> WalletWatch:
+    market_id = require_selected_market(cfg, "Wallet tracking")
     wallet = find_wallet(cfg, wallet_id)
-    wallet_from_payload(payload, existing=wallet)
+    wallet_from_payload(payload, existing=wallet, market_id=market_id)
     duplicates = [item for item in cfg.wallets if item.wallet == wallet.wallet and item.id != wallet.id]
     if duplicates:
         raise ValueError("This wallet is already being tracked.")
@@ -2865,11 +2874,18 @@ def copy_payload(
         "simulation_first": not cfg.copytrading.live,
         "copy_trading_supported": bool(capability),
         "adapter": adapter_name,
+        "market_id": market_id,
+        "activity_identity_hint": activity_identity_hint(market_id),
         "live_gate": live_gate,
     }
 
 
-def _wallets_from_copy_payload(payload: Mapping[str, Any], existing: CopyTradeSettings) -> List[str]:
+def _wallets_from_copy_payload(
+    payload: Mapping[str, Any],
+    existing: CopyTradeSettings,
+    *,
+    market_id: str = "polymarket",
+) -> List[str]:
     raw_values: List[Any] = []
     if "follow_wallets" in payload:
         raw = payload.get("follow_wallets")
@@ -2889,16 +2905,23 @@ def _wallets_from_copy_payload(payload: Mapping[str, Any], existing: CopyTradeSe
         raw_wallet = str(raw or "").strip().lower()
         if not raw_wallet:
             continue
-        normalized = normalize_wallet(raw_wallet)
+        normalized = normalize_activity_identity(market_id, raw_wallet)
         if not normalized:
+            if str(market_id or "").strip().lower() == "manifold":
+                raise ValueError("follow_wallets must contain only safe manifold:<username> activity identities.")
             raise ValueError("follow_wallets must contain only valid 0x wallet/proxyWallet addresses.")
         if normalized not in wallets:
             wallets.append(normalized)
     return wallets
 
 
-def copy_settings_from_payload(payload: Mapping[str, Any], existing: CopyTradeSettings) -> CopyTradeSettings:
-    follow_wallets = _wallets_from_copy_payload(payload, existing)
+def copy_settings_from_payload(
+    payload: Mapping[str, Any],
+    existing: CopyTradeSettings,
+    *,
+    market_id: str = "polymarket",
+) -> CopyTradeSettings:
+    follow_wallets = _wallets_from_copy_payload(payload, existing, market_id=market_id)
     percentage_keys = ("copy_percentage", "scale_percent", "percentage")
     percentage_value = next((payload[key] for key in percentage_keys if key in payload), None)
     if percentage_value is not None:
@@ -2939,8 +2962,8 @@ def copy_settings_from_payload(payload: Mapping[str, Any], existing: CopyTradeSe
 
 
 def apply_copy_settings_patch(cfg: AppConfig, payload: Mapping[str, Any]) -> CopyTradeSettings:
-    require_selected_market(cfg, "Copy trading settings")
-    cfg.copytrading = copy_settings_from_payload(payload, cfg.copytrading)
+    market_id = require_selected_market(cfg, "Copy trading settings")
+    cfg.copytrading = copy_settings_from_payload(payload, cfg.copytrading, market_id=market_id)
     return cfg.copytrading
 
 
@@ -3045,7 +3068,14 @@ def copy_trade_preview_from_activity(
         limit_price = max(0.0, float(reference_price if reference_price is not None else 0.01) - slippage)
     max_usdc = max(0.01, float(settings.max_usdc_per_trade))
     capped = False
-    if limit_price > 0:
+    # Manifold BUY activity sizes are MANA amounts, while SELL activity sizes
+    # are shares. Do not divide a BUY budget by probability a second time.
+    manifold_buy_budget = market_id == "manifold" and side == "BUY"
+    if manifold_buy_budget:
+        if size > max_usdc:
+            size = max_usdc
+            capped = True
+    elif limit_price > 0:
         max_shares = max_usdc / limit_price
         if size > max_shares:
             size = max_shares
@@ -3055,14 +3085,22 @@ def copy_trade_preview_from_activity(
     conflict_reason = copy_trade_conflict_reason(settings, activity, conflict_state)
     if conflict_reason:
         return {"status": "skipped", "reason": conflict_reason, "conflict_guard": True}
+    order_metadata: Dict[str, Any] = {
+        "source": "copy_trading",
+        "tif": "FOK",
+        "activity_key": activity_key(activity),
+    }
+    if market_id == "manifold" and side == "SELL":
+        order_metadata["shares"] = activity.get("shares") or size
     order = PaperOrderRequest(
         market_id=market_id,
         contract_id=token_id,
         side=side,
         size=size,
         limit_price=limit_price,
-        metadata={"source": "copy_trading", "tif": "FOK", "activity_key": activity_key(activity)},
+        metadata=order_metadata,
     )
+    approx_notional = order.size if manifold_buy_budget else order.size * float(order.limit_price or 0.0)
     result: Dict[str, Any] = {
         "status": "live_preflight" if settings.live else "simulation",
         "live": bool(settings.live),
@@ -3073,7 +3111,7 @@ def copy_trade_preview_from_activity(
             "side": order.side,
             "size": order.size,
             "limit_price": order.limit_price,
-            "approx_notional": order.size * float(order.limit_price or 0.0),
+            "approx_notional": approx_notional,
         },
         "pricing": {
             "raw_price": raw_price,

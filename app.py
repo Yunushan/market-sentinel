@@ -26,6 +26,7 @@ from core.storage import ConfigLoadError, load_config, save_config
 from market_adapters import build_default_registry
 from market_adapters.base import MarketAdapter
 from market_adapters.errors import MarketConfigurationError, UnsupportedFeatureError
+from market_adapters.identity import activity_identity_hint, normalize_activity_identity
 from market_adapters.polymarket import PolymarketAdapter
 from market_adapters.types import (
     MarketContract,
@@ -2013,7 +2014,9 @@ class App(tk.Tk):
         top = ttk.Frame(frm)
         top.pack(fill="x", padx=10, pady=10)
 
-        ttk.Label(top, text="Username/pseudonym or wallet (0x...):").grid(row=0, column=0, sticky="w")
+        market_id = str(self.cfg.selected_market_id or "polymarket").strip().lower()
+        identity_hint = activity_identity_hint(market_id)
+        ttk.Label(top, text=f"Activity identity ({identity_hint}):").grid(row=0, column=0, sticky="w")
         self.wallet_search_entry = ttk.Entry(top, width=50)
         self.wallet_search_entry.grid(row=0, column=1, padx=5)
         ttk.Button(top, text="Search/Add", command=self.search_or_add_wallet).grid(row=0, column=2, padx=5)
@@ -2689,7 +2692,8 @@ class App(tk.Tk):
         self.ct_live_var = tk.BooleanVar(value=self.cfg.copytrading.live)
         ttk.Checkbutton(form, text="LIVE mode (places real orders)", variable=self.ct_live_var).grid(row=0, column=1, sticky="w", padx=5, pady=5)
 
-        ttk.Label(form, text="Follow wallets:").grid(row=1, column=0, sticky="e", padx=5, pady=5)
+        market_id = str(self.cfg.selected_market_id or "polymarket").strip().lower()
+        ttk.Label(form, text=f"Follow identities ({activity_identity_hint(market_id)}):").grid(row=1, column=0, sticky="e", padx=5, pady=5)
         self.ct_follow_var = tk.StringVar(value=", ".join(self.cfg.copytrading.normalized_follow_wallets()))
         self.ct_follow_combo = ttk.Combobox(form, textvariable=self.ct_follow_var, values=self._wallet_choices(), width=50)
         self.ct_follow_combo.grid(row=1, column=1, sticky="w", padx=5, pady=5)
@@ -4201,19 +4205,21 @@ class App(tk.Tk):
         if not q:
             return
 
-        # Opinion's documented OpenAPI exposes wallet trades but not the
-        # Polymarket profile-search endpoint. Require a wallet address there.
-        if str(self.cfg.selected_market_id or "polymarket").strip().lower() != "polymarket":
+        # Non-Polymarket activity feeds use their documented identity format.
+        market_id = str(self.cfg.selected_market_id or "polymarket").strip().lower()
+        if market_id != "polymarket":
             if not self._require_selected_market_capability("Wallet tracking", "copy_trading"):
                 return
-            wallet = normalize_wallet(q)
+            wallet = normalize_activity_identity(market_id, q)
             if not wallet:
+                expected = "manifold:<username>" if market_id == "manifold" else "a 0x wallet address"
                 messagebox.showerror(
                     "Wallet tracking",
-                    "The selected market requires a 0x wallet address; username search is unavailable.",
+                    f"The selected market requires {expected}; username search is unavailable.",
                 )
                 return
-            self._add_wallet_watch(wallet, display_name=wallet[:10] + "...")
+            display_name = wallet.split(":", 1)[1] if market_id == "manifold" else wallet[:10] + "..."
+            self._add_wallet_watch(wallet, display_name=display_name)
             return
 
         if not self._require_polymarket_selected("Wallet tracking"):
@@ -4269,10 +4275,13 @@ class App(tk.Tk):
             self.status_var.set("Profile search error.")
 
     def _add_wallet_watch(self, wallet: str, display_name: str = ""):
-        wallet = wallet.lower().strip()
-        if not is_wallet_address(wallet):
-            messagebox.showerror("Error", "Not a valid 0x wallet/proxyWallet address.")
+        market_id = str(self.cfg.selected_market_id or "polymarket").strip().lower()
+        normalized = normalize_activity_identity(market_id, wallet)
+        if not normalized:
+            expected = "manifold:<username>" if market_id == "manifold" else "0x wallet/proxyWallet address"
+            messagebox.showerror("Error", f"Not a valid {expected}.")
             return
+        wallet = normalized
         if any(w.wallet == wallet for w in self.cfg.wallets):
             messagebox.showinfo("Already tracked", "This wallet is already being tracked.")
             return
@@ -4323,14 +4332,16 @@ class App(tk.Tk):
 
     def _copy_follow_wallets_from_text(self) -> Optional[List[str]]:
         raw = str(self.ct_follow_var.get() or "")
+        market_id = str(self.cfg.selected_market_id or "polymarket").strip().lower()
         wallets: List[str] = []
         for part in re.split(r"[,;\s]+", raw):
             candidate = part.strip().lower()
             if not candidate:
                 continue
-            wallet = normalize_wallet(candidate)
+            wallet = normalize_activity_identity(market_id, candidate)
             if not wallet:
-                messagebox.showerror("Copy trading settings", f"Invalid follow wallet: {candidate}")
+                hint = activity_identity_hint(market_id)
+                messagebox.showerror("Copy trading settings", f"Invalid follow identity: {candidate} (use {hint}).")
                 return None
             if wallet not in wallets:
                 wallets.append(wallet)
@@ -4507,7 +4518,11 @@ class App(tk.Tk):
 
         # Enforce max USDC exposure by shrinking share size
         max_usdc = max(0.01, float(s.max_usdc_per_trade))
-        if limit_price > 0:
+        manifold_buy_budget = market_id == "manifold" and side == "BUY"
+        if manifold_buy_budget:
+            if size > max_usdc:
+                size = max_usdc
+        elif limit_price > 0:
             max_shares = max_usdc / limit_price
             if size > max_shares:
                 size = max_shares
@@ -4520,13 +4535,16 @@ class App(tk.Tk):
             return
 
         if not s.live:
+            order_metadata: Dict[str, Any] = {"source": "copy_trading", "activity": dict(item)}
+            if market_id == "manifold" and side == "SELL":
+                order_metadata["shares"] = item.get("shares") or size
             order = PaperOrderRequest(
                 market_id=market_id,
                 contract_id=token_id,
                 side=side,
                 size=size,
                 limit_price=limit_price,
-                metadata={"source": "copy_trading", "activity": dict(item)},
+                metadata=order_metadata,
             )
             try:
                 paper_result = adapter.place_paper_order(order)

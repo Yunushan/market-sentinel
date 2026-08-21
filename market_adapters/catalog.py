@@ -44,7 +44,7 @@ MANIFOLD_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    copy_trading=True,
     api_required=True,
     credentials_required=True,
     kyc_required=False,
@@ -556,7 +556,10 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="manifold",
         display_name="Manifold Markets",
         homepage_url="https://manifold.markets",
-        description="Official Manifold REST API adapter for market discovery, probabilities, dry-run orders, and guarded MANA betting.",
+        description=(
+            "Official Manifold REST API adapter for market discovery, probabilities, public user-bet activity, "
+            "simulation-first copy intents, dry-run orders, and guarded MANA betting."
+        ),
         capabilities=MANIFOLD_CAPABILITIES,
     ),
     MarketMetadata(

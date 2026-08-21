@@ -862,6 +862,32 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(preview["order"]["contract_id"], "77:YES:0xyes")
         self.assertTrue(preview["pricing"]["capped_by_max_usdc"])
 
+    def test_manifold_wallet_and_copy_settings_use_prefixed_public_identity(self) -> None:
+        cfg = AppConfig()
+        cfg.selected_market_id = "manifold"
+        cfg.markets["manifold"].enabled = True
+
+        wallet = add_wallet_watch(cfg, {"wallet": "Manifold:ForecastUser", "display_name": "ForecastUser"})
+        settings = apply_copy_settings_patch(
+            cfg,
+            {
+                "enabled": True,
+                "follow_wallets": ["MANIFOLD:ForecastUser"],
+                "copy_percentage": 100,
+                "max_usdc_per_trade": 5,
+                "slippage": 0.01,
+            },
+        )
+        payload = copy_payload(cfg, FakeRegistry(FakePolymarketAdapter()))
+
+        self.assertEqual(wallet.wallet, "manifold:forecastuser")
+        self.assertEqual(settings.normalized_follow_wallets(), ["manifold:forecastuser"])
+        self.assertTrue(payload["copy_trading_supported"])
+        self.assertEqual(payload["activity_identity_hint"], "manifold:<username>")
+
+        with self.assertRaises(ValueError):
+            add_wallet_watch(cfg, {"wallet": "ForecastUser"})
+
     def test_copy_settings_and_live_preview_use_shared_preflight_without_ordering(self) -> None:
         cfg = AppConfig()
         cfg.markets["polymarket"].enabled = True

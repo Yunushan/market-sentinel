@@ -354,7 +354,7 @@
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
-        "notes": "Read-only market discovery, probabilities, and local paper trading are implemented through the official Manifold API. Authenticated MANA betting is guarded by live_trading_enabled and MANIFOLD_API_KEY."
+        "notes": "Read-only market discovery, probabilities, public manifold:<username> bet activity, simulation-first copy previews, and local paper trading are implemented through the official Manifold API. Authenticated MANA betting is guarded by live_trading_enabled and MANIFOLD_API_KEY."
       }
     },
     "metaculus": {

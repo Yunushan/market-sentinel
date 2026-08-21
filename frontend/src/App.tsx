@@ -4055,6 +4055,7 @@ function WalletsCopyView({
   onWalletSubmit: (event: FormEvent<HTMLFormElement>) => void;
   wallets: WalletsPayload | null;
 }) {
+  const identityHint = copy?.activity_identity_hint ?? "0x wallet address";
   return (
     <div className="content-grid">
       <section className="panel span-2">
@@ -4064,8 +4065,8 @@ function WalletsCopyView({
         </div>
         <form className="wallet-form" onSubmit={onWalletSubmit}>
           <label>
-            <span>Wallet</span>
-            <input value={form.wallet} onChange={(event) => onWalletFormChange({ ...form, wallet: event.target.value })} placeholder="0x..." />
+            <span>Activity identity</span>
+            <input value={form.wallet} onChange={(event) => onWalletFormChange({ ...form, wallet: event.target.value })} placeholder={identityHint} />
           </label>
           <label>
             <span>Name</span>
@@ -4191,12 +4192,12 @@ function WalletsCopyView({
             <span>Live mode</span>
           </label>
           <label>
-            <span>Follow wallets</span>
+            <span>Follow identities</span>
             <input
               list="wallet-choices"
               value={copyForm.follow_wallets}
               onChange={(event) => onCopyFormChange({ ...copyForm, follow_wallets: event.target.value })}
-              placeholder="0x..., 0x..."
+              placeholder={`${identityHint}, ${identityHint}`}
             />
             <datalist id="wallet-choices">
               {(copy?.wallet_choices ?? []).map((wallet) => (
@@ -4263,7 +4264,7 @@ function WalletsCopyView({
         </div>
         <div className="copy-form">
           <label>
-            <span>Proxy wallet</span>
+            <span>{copy?.market_id === "manifold" ? "Activity identity" : "Proxy wallet"}</span>
             <input value={copyPreviewForm.proxyWallet} onChange={(event) => onCopyPreviewFormChange({ ...copyPreviewForm, proxyWallet: event.target.value })} />
           </label>
           <label>
