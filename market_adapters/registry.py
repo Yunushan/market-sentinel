@@ -34,18 +34,6 @@ VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
         ],
         "last_reviewed": "2026-08-21",
     },
-    "nadex": {
-        "reason": (
-            "Verified 2026-08-21: Nadex event contracts require a Nadex account on a CFTC-regulated "
-            "exchange, and no public documented API suitable for third-party event-contract discovery, "
-            "quotes, or order automation is published for this adapter."
-        ),
-        "references": [
-            "https://www.nadex.com/product-market/",
-            "https://www.nadex.com/learning/how-to-trade-event-contracts/",
-        ],
-        "last_reviewed": "2026-08-21",
-    },
     "fact_machine": {
         "reason": (
             "Verified 2026-05-26: Fact Machine does not publish a public documented API/SDK or stable "
@@ -263,6 +251,7 @@ def build_default_registry() -> AdapterRegistry:
     from .metaculus import MetaculusAdapter
     from .metadao import MetaDAOAdapter
     from .myriad import MyriadAdapter
+    from .nadex import NadexAdapter
     from .opinion import OpinionAdapter
     from .polymarket import PolymarketAdapter
     from .probable import ProbableAdapter
@@ -329,6 +318,7 @@ def build_default_registry() -> AdapterRegistry:
         SpaceAdapter,
         HedgehogMarketsAdapter,
         ZetariumWorldAdapter,
+        NadexAdapter,
     )
     registry.register_adapter(PolymarketAdapter, replace=True)
     registry.register_adapter(CoinbasePredictionMarketsAdapter, replace=True)
@@ -377,6 +367,7 @@ def build_default_registry() -> AdapterRegistry:
     registry.register_adapter(SpaceAdapter, replace=True)
     registry.register_adapter(HedgehogMarketsAdapter, replace=True)
     registry.register_adapter(ZetariumWorldAdapter, replace=True)
+    registry.register_adapter(NadexAdapter, replace=True)
     for metadata in MARKET_CATALOG:
         if metadata.market_id in {adapter.metadata.market_id for adapter in implemented_adapters}:
             continue

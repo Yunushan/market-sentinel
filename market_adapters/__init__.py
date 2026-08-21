@@ -33,6 +33,7 @@ from .matchbook import MatchbookAdapter
 from .metaculus import MetaculusAdapter
 from .metadao import MetaDAOAdapter
 from .myriad import MyriadAdapter
+from .nadex import NadexAdapter
 from .opinion import OpinionAdapter
 from .polymarket import PolymarketAdapter
 from .probable import ProbableAdapter
@@ -104,6 +105,7 @@ __all__ = [
     "MetaculusAdapter",
     "MetaDAOAdapter",
     "MyriadAdapter",
+    "NadexAdapter",
     "OpinionAdapter",
     "OrderBookLevel",
     "OrderBookSnapshot",

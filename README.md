@@ -491,6 +491,8 @@ Hedgehog Markets was promoted on 2026-08-17 after validating the official HPL Pa
 
 Frenzy Finance was promoted on 2026-08-17 after validating the official Base/Base Sepolia contract deployments, `BetSettled` log shape, and fixture-backed `BetIntent` preview path. The adapter supports configured grid discovery, historical settlement reads, alerts, and dry-run EIP-712 intents; the active quote/oracle acknowledgement, wallet signing, orderbook, live execution, and copy-trading paths remain fail-closed.
 
+Nadex is represented by a fixture-backed read-only alias over the official Crypto.com Predictions API used for the CDNA/Nadex prediction-event data surface. Nadex account trading, DCM/FIX depth, knock-out products, and copy trading remain unsupported until a documented public automation contract is available.
+
 | Market | Adapter | Alerts | Read-only data | Paper trading | Live trading | Copy trading | API required | Credentials required | Region/KYC limitation |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Polymarket (`polymarket`) | Implemented | Yes | Yes | Yes | Guarded, off by default | Yes, dry-run default | Yes | Live trading only | Trading may be region/KYC limited |
@@ -502,7 +504,7 @@ Frenzy Finance was promoted on 2026-08-17 after validating the official Base/Bas
 | Interactive Brokers ForecastTrader / IBKR Prediction Markets (`ibkr_forecasttrader`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | IBKR account required | Region/KYC limited |
 | ForecastEx (`forecastex`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | IBKR account required | Region/KYC limited |
 | CME Group Prediction Markets (`cme_prediction_markets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | IBKR account required | Region/KYC limited |
-| Nadex (`nadex`) | Verified blocked | No | No | No | No | No | Required | Exchange account required | Region/KYC limited |
+| Nadex (`nadex`) | Implemented | Yes | Yes | Yes | No | No | Required | Optional API key | Region/KYC limited |
 | Crypto.com Predict / CDNA (`crypto_com_predict`) | Implemented | Yes | Yes | Yes | No | No | Required | Optional API key | Not KYC limited |
 | Hyperliquid (`hyperliquid`) | Implemented | Yes | Yes | Yes | Guarded, off by default | Yes (HIP-4 wallet fills; simulation-first) | Required | No API key for reads; externally signed wallet payload required for live orders | Jurisdiction varies |
 | Myriad Markets (`myriad_markets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | Yes, simulation-first | Required | Optional API key | Jurisdiction varies |

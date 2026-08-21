@@ -105,6 +105,7 @@ IMPLEMENTED_ADAPTER_FIXTURE_TESTS = {
     "crypto_com_predict": ("crypto_com_predict", "test_crypto_com_predict_adapter.py"),
     "fanatics_markets": ("fanatics_markets", "test_fanatics_markets_adapter.py"),
     "fanduel_predicts": ("fanduel_predicts", "test_fanduel_predicts_adapter.py"),
+    "nadex": ("nadex", "test_nadex_adapter.py"),
     "coinbase_prediction_markets": ("coinbase_prediction_markets", "test_coinbase_prediction_adapter.py"),
     "manifold": ("manifold", "test_manifold_adapter.py"),
     "metaculus": ("metaculus", "test_metaculus_adapter.py"),
@@ -576,6 +577,9 @@ def run_fixture_check() -> None:
         fixture_root / "prdt_finance" / "rpc_responses.json",
         fixture_root / "zetarium_world" / "rpc_responses.json",
         fixture_root / "lamas_finance" / "rpc_responses.json",
+        fixture_root / "nadex" / "events.json",
+        fixture_root / "nadex" / "contracts.json",
+        fixture_root / "nadex" / "price.json",
     }
     missing = [str(path.relative_to(ROOT)) for path in sorted(required) if not path.exists()]
     if missing:

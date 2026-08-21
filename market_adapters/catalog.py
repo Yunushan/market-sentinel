@@ -111,6 +111,21 @@ FANATICS_MARKETS_CAPABILITIES = MarketCapabilities(
     region_limited=True,
 )
 
+NADEX_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    alerts=True,
+    paper_trading=True,
+    live_trading=False,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=True,
+    region_limited=True,
+)
+
 LIMITLESS_CAPABILITIES = MarketCapabilities(
     market_discovery=True,
     event_listing=True,
@@ -503,7 +518,17 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         ),
         capabilities=IBKR_EVENT_CAPABILITIES,
     ),
-    MarketMetadata(market_id="nadex", display_name="Nadex", homepage_url="https://www.nadex.com"),
+    MarketMetadata(
+        market_id="nadex",
+        display_name="Nadex",
+        homepage_url="https://www.nadex.com",
+        description=(
+            "Read-only Nadex/CDNA prediction-event alias backed by the official Crypto.com Predictions "
+            "Market Data API for event discovery, contracts, prices, alerts, and local dry-run orders. "
+            "Nadex account trading, DCM/FIX depth, knock-out products, and copy trading remain unsupported."
+        ),
+        capabilities=NADEX_CAPABILITIES,
+    ),
     MarketMetadata(
         market_id="crypto_com_predict",
         display_name="Crypto.com Predict / CDNA",

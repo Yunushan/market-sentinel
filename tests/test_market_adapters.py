@@ -53,6 +53,7 @@ from market_adapters import (
     MetaculusAdapter,
     MetaDAOAdapter,
     MyriadAdapter,
+    NadexAdapter,
     OpinionAdapter,
     VERIFIED_BLOCKERS,
     VerifiedBlockedAdapter,
@@ -129,6 +130,7 @@ IMPLEMENTED_MARKETS = {
     "prdt_finance",
     "zetarium_world",
     "lamas_finance",
+    "nadex",
 }
 VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)
 
@@ -183,6 +185,8 @@ class AdapterFoundationTests(unittest.TestCase):
         self.assertIsInstance(registry.create("crypto_com_predict"), CryptoComPredictAdapter)
         self.assertEqual(registry.get_metadata("fanatics_markets").display_name, "Fanatics Markets")
         self.assertIsInstance(registry.create("fanatics_markets"), FanaticsMarketsAdapter)
+        self.assertEqual(registry.get_metadata("nadex").display_name, "Nadex")
+        self.assertIsInstance(registry.create("nadex"), NadexAdapter)
         self.assertEqual(registry.get_metadata("fanduel_predicts").display_name, "FanDuel Predicts")
         self.assertIsInstance(registry.create("fanduel_predicts"), FanDuelPredictsAdapter)
         self.assertEqual(registry.get_metadata("coinbase_prediction_markets").display_name, "Coinbase Prediction Markets")

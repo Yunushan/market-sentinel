@@ -385,10 +385,15 @@
     "nadex": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "nadex_api_base_url": "https://data-api.crypto.com/api/v1/predictions",
+        "credential_env_vars": [
+          "NADEX_PREDICTIONS_API_KEY",
+          "CRYPTO_COM_PREDICTIONS_API_KEY"
+        ],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-21: Nadex continues to list regulated event contracts, but trading requires eligible exchange account access and no public documented third-party event-contract API is published for this adapter."
+        "min_request_interval_seconds": 0.6,
+        "notes": "Read-only Nadex/CDNA prediction-event alias through the official Crypto.com Predictions Market Data API. Anonymous reads and local paper orders are supported; account trading, DCM/FIX depth, knock-out products, live orders, and copy trading are intentionally unsupported. Commercial redistribution/model training requires a Market Data License."
       }
     },
     "omen": {

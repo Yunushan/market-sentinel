@@ -1,19 +1,19 @@
 # Blockers
 
-Last reviewed: 2026-08-21
+Last reviewed: 2026-08-22
 
 This file documents why each market is either implemented, guarded, or stubbed. The project rule is: use official APIs, SDKs, documented endpoints, or protocol contracts only. Do not scrape private data, bypass authentication, or enable live trading/copy trading by default.
 
 ## Summary
 
-- Polymarket, Kalshi, PredictIt, Crypto.com Predict/CDNA, FanDuel Predicts/OG, Manifold, Metaculus, Myriad, Opinion, Gemini, Predict.fun, XO, Betfair, Limitless Exchange, SX Bet, Azuro, Augur, Omen, Gnosis Prediction Markets, Zeitgeist, Zeitgeist SDK / Markets, Zeitgeist Prediction Pools, Reality.eth Markets, Xmarket, Probable, Matchbook, DFlow, Context V2, Smarkets, Thales Market, MetaDAO, Seer, Hyperliquid, Trueo, Frenzy Finance, Hedgehog Markets, IBKR ForecastTrader, ForecastEx, CME event contracts, Prophet Exchange, PRDT Finance, Zetarium World, and Lamas Finance are implemented adapters today.
+- Polymarket, Kalshi, PredictIt, Crypto.com Predict/CDNA, Nadex/CDNA, Fanatics Markets/CDNA, FanDuel Predicts/OG, Manifold, Metaculus, Myriad, Opinion, Gemini, Predict.fun, XO, Betfair, Limitless Exchange, SX Bet, Azuro, Augur, Omen, Gnosis Prediction Markets, Zeitgeist, Zeitgeist SDK / Markets, Zeitgeist Prediction Pools, Reality.eth Markets, Xmarket, Probable, Matchbook, DFlow, Context V2, Smarkets, Thales Market, MetaDAO, Seer, Hyperliquid, Trueo, Frenzy Finance, Hedgehog Markets, IBKR ForecastTrader, ForecastEx, CME event contracts, Prophet Exchange, PRDT Finance, Zetarium World, and Lamas Finance are implemented adapters today.
 - All other markets are present in config and GUI through verified-blocked adapters with exact blocker reasons.
 - Live trading remains disabled by default for every market.
 - Credentials must stay in `.env`, shell environment variables, OS keychain tooling, or external credential files. They must not be stored in `data/config.json`.
 
 ## 2026-05-26 Re-Audit Notes
 
-Article 35 re-checked verified-blocked markets against current official pages and docs. No verified-blocked market was promoted in that pass because every candidate still failed at least one project rule: official production API availability, account/entitlement access, market-data licensing, documented order semantics, wallet/contract safety, or offline fixture coverage. Subsequent 2026-08-17 reviews promoted Drift BET, Frenzy Finance, Hedgehog Markets, and Coinbase Prediction Markets after their official public/contract surfaces and offline fixture coverage were validated. Drift inventory remains explicitly configured because its public OpenAPI contract has no stable market-list endpoint; Frenzy is limited to configured grid specs, `BetSettled` history, and dry-run intents because active quotes/oracle acknowledgements are off-chain; Hedgehog now includes a guarded externally signed `DepositV1` submission boundary while keeping signing and settlement operator-owned; Coinbase is limited to the public Kalshi venue alias because Coinbase-specific account execution APIs are not published.
+Article 35 re-checked verified-blocked markets against current official pages and docs. No verified-blocked market was promoted in that pass because every candidate still failed at least one project rule: official production API availability, account/entitlement access, market-data licensing, documented order semantics, wallet/contract safety, or offline fixture coverage. Subsequent reviews promoted Drift BET, Frenzy Finance, Hedgehog Markets, Coinbase Prediction Markets, and Nadex/CDNA after their official public/contract surfaces and offline fixture coverage were validated. Drift inventory remains explicitly configured because its public OpenAPI contract has no stable market-list endpoint; Frenzy is limited to configured grid specs, `BetSettled` history, and dry-run intents because active quotes/oracle acknowledgements are off-chain; Hedgehog now includes a guarded externally signed `DepositV1` submission boundary while keeping signing and settlement operator-owned; Coinbase is limited to the public Kalshi venue alias because Coinbase-specific account execution APIs are not published; Nadex is limited to the documented Crypto.com Predictions API prediction-event data surface because account trading, DCM/FIX depth, and knock-out products are not automated.
 
 Notable re-audit outcomes:
 
@@ -74,8 +74,10 @@ Reality.eth Markets was promoted on 2026-08-17 after validating the official que
 
 The remaining blocked entries were checked again against their first-party
 surfaces. Robinhood and DraftKings now expose active consumer prediction-market
-pages, and Nadex continues to list regulated event contracts, but none publishes
-a stable third-party market-data/order API or an automation permission contract.
+pages, but neither publishes a stable third-party market-data/order API or an
+automation permission contract. Nadex was separately promoted to a read-only
+CDNA alias after its official Crypto.com Predictions API surface was validated;
+this does not cover Nadex account automation, DCM/FIX depth, or knock-out products.
 Iowa Electronic Markets still exposes account/practice pages and quote/history
 forms without a documented integration API. Hypermind describes API feeds as
 managed-service deliverables that require program access, not a public contract.
@@ -92,6 +94,19 @@ prediction-contract ABI. SynStation, Fact Machine, and the remaining consumer
 products likewise still lack a validated official integration surface. No entry
 was promoted through web scraping, private endpoints, or guessed deployments.
 
+## 2026-08-22 Nadex/CDNA promotion note
+
+Nadex's current rules identify the exchange group as Crypto.com Derivatives
+North America (CDNA), and Crypto.com publishes a documented Predictions Market
+Data API with public event, contract, and price reads. The new `nadex` adapter is
+therefore a read-only alias over that official data surface, with fixture-backed
+discovery, contracts, prices, alerts, and local paper orders. This promotion is
+deliberately limited to prediction-event data: it does not claim Nadex account
+automation, DCM/FIX market-data depth, knock-out products, live orders, or copy
+trading. Anonymous reads remain subject to the published personal-use and rate
+limits; licensed API access is required for commercial redistribution or model
+training.
+
 ## Market Blockers
 
 | Market id | Current adapter | Blocker | Required before full support | Reference |
@@ -105,7 +120,7 @@ was promoted through web scraping, private endpoints, or guessed deployments.
 | `ibkr_forecasttrader` | Implemented | Official IBKR Client Portal event-contract workflow maps ForecastTrader/ForecastEx category discovery, conids, top-of-book snapshots, alerts, paper orders, and guarded limit orders. | Keep `IBKR_SESSION_COOKIE`/`IBKR_ACCESS_TOKEN` and `IBKR_ACCOUNT_ID` outside config, require account/data entitlements, keep `ibkr_submit_live_orders` disabled by default, and treat response confirmations as manual gates. | [IBKR event contracts](https://www.interactivebrokers.com/campus/ibkr-api-page/event-contracts/), [IBKR Web API](https://www.interactivebrokers.com/campus/ibkr-api-page/cpapi-v1/), [IBKR trading](https://www.interactivebrokers.com/campus/ibkr-api-page/web-api-trading/) |
 | `forecastex` | Implemented | ForecastEx contracts are mapped through the documented IBKR `FORECASTX` search, strikes, instrument-info, snapshot, and order routes. ForecastEx positions are buy-only; the adapter rejects sell orders. | Keep an authorized IBKR session and ForecastEx permissions required, keep paper mode default, and validate live confirmations manually. | [IBKR event contracts](https://www.interactivebrokers.com/campus/ibkr-api-page/event-contracts/), [ForecastEx markets](https://forecastex.com/markets/) |
 | `cme_prediction_markets` | Implemented | CME event contracts are discovered through IBKR index/EC records and `FOP` instrument-info, with documented snapshot prices, top-of-book levels, alerts, paper orders, and guarded orders. | Keep CME/IBKR market-data and trading entitlements required, keep paper mode default, and use only the documented broker route. | [IBKR event contracts](https://www.interactivebrokers.com/campus/ibkr-api-page/event-contracts/), [CME event contracts](https://www.cmegroup.com/markets/event-contracts.html) |
-| `nadex` | Verified blocked | Verified 2026-08-21: Nadex event contracts require a Nadex account on a CFTC-regulated exchange, and no public documented API suitable for third-party discovery, quotes, or order automation is published. | Implement only if Nadex publishes official API docs and account terms that allow integration. | [Nadex products/regulation](https://www.nadex.com/product-market/), [Nadex event contracts](https://www.nadex.com/learning/how-to-trade-event-contracts/) |
+| `nadex` | Implemented | Read-only Nadex/CDNA prediction-event discovery, contract listing, bid/ask/mid/probability reads, alerts, and local paper orders use the official Crypto.com Predictions Market Data API. Nadex account trading, DCM/FIX depth, knock-out products, live orders, and copy trading remain unsupported. | Keep the alias read-only, keep paper mode default, honor anonymous rate limits and Market Data License terms, and add any execution only through a documented Nadex/CDNA order contract with fixtures and explicit safety gates. | [Nadex products](https://www.nadex.com/product-market/), [Nadex rules](https://www.nadex.com/rules/), [Crypto.com Predictions API](https://data-api.crypto.com/docs), [Crypto.com quickstart](https://data.crypto.com/quickstart) |
 | `crypto_com_predict` | Implemented | Official anonymous read-only event discovery/search, contract listing, and bid/ask/mid/probability reads are implemented, with alerts and local dry-run paper orders. Full orderbook depth, live orders, and copy trading remain unsupported because the official API is market-data-only. | Keep live trading disabled, honor anonymous rate limits, send an API key only for a licensed tier, and require a Market Data License for redistribution, commercial use, or model training. | [Crypto.com Predictions API](https://data.crypto.com/docs), [Crypto.com Predictions quickstart](https://data.crypto.com/quickstart) |
 | `hyperliquid` | Implemented | Official Hyperliquid HIP-4 `outcomeMeta`, encoded outcome assets, `l2Book`, and public `userFills` responses are mapped to discovery, prices, orderbooks, alerts, paper orders, simulation-first wallet-copy previews, and guarded externally signed exchange payloads with fixture-backed validation. Private-key handling, wallet signing, settlement, and funded execution remain external gates. | Keep paper mode as default, filter wallet fills to synthetic `#<encoding>` HIP-4 outcome assets, require complete externally signed payloads, enforce live gates, and add funded evidence only through a dedicated reviewed environment. | [Hyperliquid asset IDs](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/asset-ids), [Hyperliquid info endpoint](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint), [Hyperliquid outcome info](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint/spot), [Hyperliquid exchange endpoint](https://hyperliquid.gitbook.io/Hyperliquid-docs/for-developers/api/exchange-endpoint) |
 | `myriad_markets` | Implemented | Public question/market discovery, outcome price reads, orderbooks, alerts, local paper quote payloads, public wallet buy/sell activity, simulation-first copy intents, and guarded signed order submission are implemented through the official Myriad API. Live copy/order submission remains guarded and never occurs from a feed event automatically. | Keep live order posting disabled by default, require user-signed EIP-712 order payloads, validate EVM activity identities and network scoping, and add cancels/positions only through documented endpoints with tests. | [Myriad API reference](https://docs.myriad.markets/builders/myriad-api-reference), [Myriad user events](https://docs.myriad.markets/builders/myriad-api-reference#users), [Myriad order book](https://docs.myriad.markets/builders/myriad-order-book), [Myriad Order Book API](https://docs.myriad.markets/builders/myriad-order-book/order-book-api) |
