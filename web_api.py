@@ -4446,8 +4446,9 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         """Return the supported static files beneath a trusted build directory."""
         try:
             configured_root = frontend_dir if frontend_dir is not None else DEFAULT_FRONTEND_DIR
-            # codeql[py/path-injection] Deployment-time server configuration is
-            # validated by the immutable catalog before any HTTP path lookup.
+            # Deployment-time server configuration is validated by the
+            # immutable catalog before any HTTP path lookup.
+            # codeql[py/path-injection]
             root = configured_root.resolve()
         except (OSError, RuntimeError, ValueError):
             return {}
@@ -4460,8 +4461,9 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
 
         def add_file(relative_path: str, candidate: Path) -> None:
             try:
-                # codeql[py/path-injection] Candidates come only from the
-                # validated root and are confined with relative_to below.
+                # Candidates come only from the validated root and are
+                # confined with relative_to below.
+                # codeql[py/path-injection]
                 target = candidate.resolve()
                 target.relative_to(root)
             except (OSError, RuntimeError, ValueError):
