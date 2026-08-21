@@ -1354,6 +1354,21 @@ def require_polymarket_selected(cfg: AppConfig, feature: str) -> None:
     require_market_enabled(cfg, "polymarket", feature)
 
 
+def require_selected_market(cfg: AppConfig, feature: str) -> str:
+    """Require an enabled selected market and return its normalized id.
+
+    Wallet tracking and simulation-first copy workflows are market-scoped now;
+    Polymarket analytics remains intentionally protected by
+    ``require_polymarket_selected`` above.
+    """
+
+    market_id = str(cfg.selected_market_id or "").strip().lower()
+    if not market_id:
+        raise ValueError(f"{feature} requires a selected market.")
+    require_market_enabled(cfg, market_id, feature)
+    return market_id
+
+
 def wallet_payload(wallet: WalletWatch) -> Dict[str, Any]:
     return {
         **wallet.to_dict(),
@@ -2785,7 +2800,7 @@ def wallet_from_payload(payload: Mapping[str, Any], existing: Optional[WalletWat
 
 
 def add_wallet_watch(cfg: AppConfig, payload: Mapping[str, Any]) -> WalletWatch:
-    require_polymarket_selected(cfg, "Wallet tracking")
+    require_selected_market(cfg, "Wallet tracking")
     wallet = wallet_from_payload(payload)
     if any(item.wallet == wallet.wallet for item in cfg.wallets):
         raise ValueError("This wallet is already being tracked.")
@@ -2813,7 +2828,8 @@ def copy_payload(
     registry: Optional[AdapterRegistry] = None,
 ) -> Dict[str, Any]:
     registry = registry or build_default_registry()
-    market_cfg = cfg.markets.get("polymarket")
+    market_id = str(cfg.selected_market_id or "").strip().lower() or "polymarket"
+    market_cfg = cfg.markets.get(market_id)
     settings = market_cfg.settings if market_cfg else {}
     status = "simulation"
     if not cfg.copytrading.enabled:
@@ -2831,12 +2847,12 @@ def copy_payload(
         "max_notional": _safe_float(settings.get("live_trading_max_notional"), None),
     }
     try:
-        adapter = adapter_for_market(cfg, "polymarket", registry)
+        adapter = adapter_for_market(cfg, market_id, registry)
         capability = adapter.capabilities.copy_trading
         adapter_name = adapter.display_name
     except Exception:
         capability = False
-        adapter_name = "polymarket"
+        adapter_name = market_id
     followed_wallets = cfg.copytrading.normalized_follow_wallets()
     tracked_wallets = {wallet.wallet for wallet in cfg.wallets}
     return {
@@ -2923,7 +2939,7 @@ def copy_settings_from_payload(payload: Mapping[str, Any], existing: CopyTradeSe
 
 
 def apply_copy_settings_patch(cfg: AppConfig, payload: Mapping[str, Any]) -> CopyTradeSettings:
-    require_polymarket_selected(cfg, "Copy trading settings")
+    require_selected_market(cfg, "Copy trading settings")
     cfg.copytrading = copy_settings_from_payload(payload, cfg.copytrading)
     return cfg.copytrading
 
@@ -2987,11 +3003,16 @@ def copy_trade_preview_from_activity(
     activity: Mapping[str, Any],
     conflict_state: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    if str(cfg.selected_market_id or "").strip().lower() != "polymarket":
-        return {"status": "skipped", "reason": "selected market is not polymarket"}
+    market_id = require_selected_market(cfg, "Copy trading preview")
     settings = cfg.copytrading
     if not settings.enabled:
         return {"status": "skipped", "reason": "copy trading disabled"}
+    adapter = adapter_for_market(cfg, market_id, registry)
+    if not adapter.capabilities.copy_trading:
+        return {
+            "status": "skipped",
+            "reason": f"{adapter.display_name} does not expose an official account-activity copy feed",
+        }
     followed_wallets = settings.normalized_follow_wallets()
     if not followed_wallets:
         return {"status": "skipped", "reason": "follow wallet is not set"}
@@ -3002,13 +3023,12 @@ def copy_trade_preview_from_activity(
         return {"status": "skipped", "reason": "activity side is not BUY or SELL"}
     if side == "SELL" and not settings.allow_sells:
         return {"status": "skipped", "reason": "SELL copying disabled"}
-    token_id = str(activity.get("asset") or "").strip()
+    token_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
     if not token_id:
         return {"status": "skipped", "reason": "activity has no asset token"}
     raw_size = _safe_float(activity.get("size"), 0.0) or 0.0
     raw_price = _safe_float(activity.get("price"), None)
     size = max(0.0, raw_size * float(settings.scale))
-    adapter = adapter_for_market(cfg, "polymarket", registry)
     best_bid = best_ask = None
     try:
         orderbook = adapter.get_orderbook(token_id)
@@ -3036,7 +3056,7 @@ def copy_trade_preview_from_activity(
     if conflict_reason:
         return {"status": "skipped", "reason": conflict_reason, "conflict_guard": True}
     order = PaperOrderRequest(
-        market_id="polymarket",
+        market_id=market_id,
         contract_id=token_id,
         side=side,
         size=size,
@@ -3082,11 +3102,11 @@ def copy_trade_preview_from_activity(
 
 
 def copy_preview_payload(cfg: AppConfig, registry: AdapterRegistry, payload: Mapping[str, Any]) -> Dict[str, Any]:
-    require_polymarket_selected(cfg, "Copy trading preview")
+    require_selected_market(cfg, "Copy trading preview")
     default_wallets = cfg.copytrading.normalized_follow_wallets()
     activity = {
         "proxyWallet": payload.get("proxyWallet") or payload.get("proxy_wallet") or (default_wallets[0] if default_wallets else ""),
-        "asset": payload.get("asset") or payload.get("token_id") or "",
+        "asset": payload.get("asset") or payload.get("contract_id") or payload.get("token_id") or "",
         "side": payload.get("side") or "BUY",
         "size": payload.get("size") if "size" in payload else 0,
         "price": payload.get("price") if "price" in payload else None,
@@ -3105,7 +3125,13 @@ def poll_wallet_activity(
     *,
     limit: int = 25,
 ) -> Dict[str, Any]:
-    require_polymarket_selected(cfg, "Wallet polling")
+    market_id = require_selected_market(cfg, "Wallet polling")
+    adapter = adapter_for_market(cfg, market_id, registry)
+    activity_loader = getattr(adapter, "list_activity", None)
+    if not callable(activity_loader) and market_id != "polymarket":
+        raise ValueError(
+            f"{adapter.display_name} does not expose an official wallet activity feed for tracking."
+        )
     emitted: List[Dict[str, Any]] = []
     problems: List[str] = []
     copy_conflicts: Dict[str, Dict[str, Any]] = {}
@@ -3113,18 +3139,23 @@ def poll_wallet_activity(
         if not wallet.enabled:
             continue
         try:
-            items = data_api.get_activity(wallet.wallet, limit=limit, types=["TRADE"])
+            if callable(activity_loader):
+                items = activity_loader(wallet.wallet, limit=limit)
+            else:
+                items = data_api.get_activity(wallet.wallet, limit=limit, types=["TRADE"])
         except Exception as exc:
             problems.append(f"{wallet.wallet}: {exc}")
             continue
         seen_keys = set(wallet.seen_activity_keys or [])
         new_items: List[Tuple[str, Mapping[str, Any]]] = []
-        for item in reversed(items):
+        for item in reversed(items or []):
+            if not isinstance(item, Mapping):
+                continue
             key = activity_key(item)
             if key in seen_keys:
                 continue
             timestamp = int(item.get("timestamp") or 0)
-            tx = str(item.get("transactionHash") or "")
+            tx = str(item.get("transactionHash") or item.get("transaction_hash") or "")
             if timestamp > (wallet.last_seen_ts or 0):
                 new_items.append((key, item))
                 seen_keys.add(key)
@@ -3135,7 +3166,7 @@ def poll_wallet_activity(
             if wallet.only_market_slug and str(item.get("slug") or "") != wallet.only_market_slug:
                 continue
             wallet.last_seen_ts = max(wallet.last_seen_ts or 0, int(item.get("timestamp") or 0))
-            wallet.last_seen_tx = str(item.get("transactionHash") or wallet.last_seen_tx or "")
+            wallet.last_seen_tx = str(item.get("transactionHash") or item.get("transaction_hash") or wallet.last_seen_tx or "")
             wallet.seen_activity_keys.append(key)
             if len(wallet.seen_activity_keys) > 200:
                 wallet.seen_activity_keys = wallet.seen_activity_keys[-200:]

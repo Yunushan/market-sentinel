@@ -193,6 +193,35 @@ class FakePolymarketAdapter(MarketAdapter):
         )
 
 
+class FakeOpinionCopyAdapter(FakePolymarketAdapter):
+    metadata = MarketMetadata(
+        market_id="opinion_labs",
+        display_name="Opinion Labs",
+        capabilities=MarketCapabilities(
+            price_reading=True,
+            alerts=True,
+            orderbook_reading=True,
+            paper_trading=True,
+            copy_trading=True,
+        ),
+    )
+
+    def list_activity(self, wallet: str, *, limit: int = 25) -> list[dict]:
+        return [
+            {
+                "transactionHash": "opinion-tx-1",
+                "timestamp": 101,
+                "proxyWallet": wallet,
+                "asset": "77:YES:0xyes",
+                "side": "BUY",
+                "price": "0.44",
+                "size": "10",
+                "slug": "77",
+                "outcome": "Yes",
+            }
+        ][:limit]
+
+
 class FakeRegistry:
     def __init__(self, adapter: MarketAdapter) -> None:
         self.adapter = adapter
@@ -806,6 +835,32 @@ class WebApiTests(unittest.TestCase):
         self.assertFalse(preview["live"])
         self.assertTrue(preview["pricing"]["capped_by_max_usdc"])
         self.assertAlmostEqual(preview["order"]["limit_price"], 0.47)
+
+    def test_opinion_wallet_activity_uses_official_feed_and_copy_simulation(self) -> None:
+        cfg = AppConfig()
+        cfg.selected_market_id = "opinion_labs"
+        cfg.markets["opinion_labs"].enabled = True
+        cfg.wallets = [WalletWatch(wallet=WALLET, display_name="tracked")]
+        cfg.copytrading = CopyTradeSettings(
+            enabled=True,
+            live=False,
+            follow_wallet=WALLET,
+            follow_wallets=[WALLET],
+            scale=1.0,
+            max_usdc_per_trade=1.0,
+            slippage=0.02,
+        )
+        recent: list[dict] = []
+
+        result = poll_wallet_activity(cfg, FakeRegistry(FakeOpinionCopyAdapter()), recent)
+
+        self.assertEqual(result["problems"], [])
+        self.assertEqual(len(result["activity"]), 1)
+        preview = result["activity"][0]["copy_preview"]
+        self.assertEqual(preview["status"], "simulation")
+        self.assertEqual(preview["order"]["market_id"], "opinion_labs")
+        self.assertEqual(preview["order"]["contract_id"], "77:YES:0xyes")
+        self.assertTrue(preview["pricing"]["capped_by_max_usdc"])
 
     def test_copy_settings_and_live_preview_use_shared_preflight_without_ordering(self) -> None:
         cfg = AppConfig()

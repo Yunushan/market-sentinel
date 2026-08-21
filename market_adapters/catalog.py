@@ -241,7 +241,10 @@ OPINION_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=False,
-    copy_trading=False,
+    # The documented OpenAPI exposes filled user trades by wallet.  Those
+    # trades can produce simulation-first copy intents; live execution stays
+    # disabled because it belongs to the separate Opinion CLOB SDK.
+    copy_trading=True,
     api_required=True,
     credentials_required=True,
     kyc_required=False,
@@ -592,7 +595,11 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="opinion_labs",
         display_name="Opinion Labs",
         homepage_url="https://opinion.trade",
-        description="Official Opinion OpenAPI adapter for authenticated read-only market data, orderbooks, prices, and dry-run orders.",
+        description=(
+            "Official Opinion OpenAPI adapter for authenticated market data, orderbooks, prices, "
+            "filled wallet-trade activity, and simulation-first copy intents; live trading remains "
+            "disabled because order signing belongs to the separate CLOB SDK."
+        ),
         capabilities=OPINION_CAPABILITIES,
     ),
     MarketMetadata(

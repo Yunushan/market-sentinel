@@ -194,11 +194,11 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 `--require-authenticated-read-ok` fails unless at least one non-destructive authenticated read/stream check succeeds. `--include-user-websocket-connect` opens the authenticated user WebSocket and sends the subscription payload; secrets are not returned in the report. Use `--skip-public-checks` or `--skip-authenticated-read-checks` only for local readiness/debug runs, not for a production live approval.
 
 ### 4) Copy trading (paper mode by default)
-- Follows a tracked wallet’s **BUY** trades (SELL optional, guarded)
+- Follows a tracked wallet’s **BUY** trades (SELL optional, guarded) for a selected market with an official wallet-activity feed (Polymarket and Opinion Labs)
 - Default mode is **SIMULATION** (logs what it *would* do)
 - Copy sizing is a bounded **0..100%** setting; `0%` watches without copying and `100%` mirrors full detected size before max-USDC caps
 - Multiple followed wallets are supported; the conflict guard skips duplicate or opposite-side same-token copies inside the guard window
-- Enable **LIVE** mode only after the adapter live preflight settings are explicitly acknowledged
+- Enable **LIVE** mode only after the selected adapter live preflight settings are explicitly acknowledged; Opinion remains simulation-only until its separate CLOB SDK signing path is integrated
 - The React Wallets & Copy tab edits simulation-first copy settings and previews guarded live-copy preflight without placing orders
 
 ### 5) Adapter-backed paper trading
@@ -516,7 +516,7 @@ Frenzy Finance was promoted on 2026-08-17 after validating the official Base/Bas
 | Iowa Electronic Markets (`iowa_electronic_markets`) | Verified blocked | No | No | No | No | No | Required | IEM account required | Eligibility limited |
 | INFER / INFER-pub (`infer`) | Verified blocked | No | No | No | No | No | Required | Account/export access required | Not trading/KYC limited |
 | Fact Machine (`fact_machine`) | Verified blocked | No | No | No | No | No | Required | Wallet/personhood required | Identity/jurisdiction limited |
-| Opinion Labs (`opinion_labs`) | Implemented | Yes | Yes | Yes | No | No | Required | API credentials required | Jurisdiction varies |
+| Opinion Labs (`opinion_labs`) | Implemented | Yes | Yes | Yes | No | Yes, simulation only | Required | API credentials required | Jurisdiction varies |
 | Gemini Titan / Gemini Predictions (`gemini_titan`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Live trading only | Region/KYC limited |
 | Augur (`augur`) | Implemented | No | Yes | No | No | No | Required | Subgraph endpoint required | Jurisdiction varies |
 | BetMGM (`betmgm`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
@@ -660,7 +660,7 @@ In-app checks:
 - **Alerts** creates, edits, toggles, deletes, and refreshes market-scoped price alerts.
 - **Alerts** exposes last trade, midpoint, best bid, and best ask source selection for each alert.
 - **Alerts -> Refresh Prices** polls adapter-backed current price state and updates trigger status without placing orders.
-- **Wallets & Copy** manages tracked Polymarket proxy wallets and manual Data API activity polling.
+- **Wallets & Copy** manages tracked wallets for markets with an official activity feed (currently Polymarket and Opinion Labs); Polymarket also supports username/profile search, while Opinion requires a 0x wallet address.
 - **Wallets & Copy** shows recent wallet activity with the copy-trading simulation or skip reason for each item.
 - **Wallets & Copy** edits followed wallets, copy percentage, max USDC, slippage, live mode, SELL-copy permission, and the same-token conflict guard.
 - **Wallets & Copy -> Preview** runs the live-copy preflight gate for a sample activity and does not place an order.

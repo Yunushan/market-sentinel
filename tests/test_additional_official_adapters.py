@@ -1198,6 +1198,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         market = load_fixture("opinion_labs", "market")
         price_payload = load_fixture("opinion_labs", "price")
         orderbook = load_fixture("opinion_labs", "orderbook")
+        trades = load_fixture("opinion_labs", "trades")
 
         def fake_get_json(url: str, *, params=None, headers=None):
             self.assertEqual(headers["apikey"], "opinion-key")
@@ -1209,6 +1210,8 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 return price_payload
             if url.endswith("/token/orderbook"):
                 return orderbook
+            if url.endswith("/trade/user/0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"):
+                return trades
             raise AssertionError(f"unexpected Opinion URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
@@ -1222,12 +1225,22 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             price = adapter.get_price("77:YES:0xyes")
             book = adapter.get_orderbook("77:YES:0xyes")
             paper = adapter.place_paper_order(PaperOrderRequest("opinion_labs", "77:YES:0xyes", "SELL", 4, 0.64))
+            activity = adapter.list_activity("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            copied = adapter.copy_trade_from_activity(activity[0])
 
         self.assertEqual(events[0].event_id, "77")
         self.assertEqual([contract.contract_id for contract in contracts], ["77:YES:0xyes", "77:NO:0xno"])
         self.assertEqual(price.last, 0.65)
         self.assertEqual([level.price for level in book.bids], [0.64, 0.62])
         self.assertTrue(paper.accepted)
+        self.assertEqual(len(activity), 2)
+        self.assertEqual(activity[0]["asset"], "77:YES:0xyes")
+        self.assertEqual(activity[0]["side"], "BUY")
+        self.assertEqual(activity[0]["timestamp"], 1733312400)
+        self.assertTrue(copied.accepted)
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_activity("not-a-wallet")
 
     def test_predict_fun_adapter_maps_markets_orderbooks_and_no_prices(self) -> None:
         adapter = PredictFunAdapter()

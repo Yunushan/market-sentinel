@@ -119,7 +119,7 @@ Current catalog snapshot:
 - Orderbook reading supported: 23 yes, 45 no
 - Paper trading supported: 44 yes, 24 no
 - Live trading supported: 34 guarded/off by default, 34 no
-- Copy trading supported: 1 yes, 67 no
+- Copy trading supported: 2 yes, 66 no
 
 Important status rules:
 
@@ -259,6 +259,7 @@ These articles completed the catalog, adapter architecture, verification, docs, 
 - Article 120 Lamas Finance Solana Anchor Adapter: scope complete for this pass; the official Lamas Finance `PricePredict` and `UpOrDown` programs are represented by fixture-backed `getProgramAccounts`/`getAccountInfo` reads, pooled Up/Down prices, PricePredict reference prices, alerts, local paper intents, and a guarded externally signed Anchor `predict` boundary. The adapter validates the reviewed program, round account, outcome, amount, and instruction bytes before forwarding; it never signs, settles, reads CLOB depth, or performs copy trading.
 - Article 121 Fresh Blocked-Market Audit: scope complete for this pass; Robinhood, DraftKings, Nadex, Iowa Electronic Markets, Hypermind, Good Judgment Open, Blinq, Levr Bet, Dexsport, and SynStation were rechecked against current first-party surfaces on 2026-08-21. No stable official API, deployment inventory, or reviewed contract surface met the fixture-backed integration rule, so no market was promoted through scraping, private endpoints, or guessed deployments.
 - Article 122 FanDuel Predicts/OG Read-only Adapter: scope complete for this pass; FanDuel's current product and June 2026 press release document contracts listed by CME Group and Crypto.com's OG Prediction Markets/CDNA. A fixture-backed alias now covers the documented OG/CDNA discovery, contracts, prices, alerts, and local dry-run orders through the official Crypto.com Predictions API. CME-listed contracts remain available through the CME/IBKR adapter; FanDuel account execution, orderbook depth, and copy trading remain explicitly unsupported.
+- Article 123 Opinion Wallet Activity and Simulation Copy Adapter: scope complete for this pass; the official Opinion OpenAPI wallet-trade feed is fixture-backed and normalized into the common activity shape, Opinion copy capability now produces bounded simulation-first paper intents, and the selected-market wallet/copy API path no longer assumes Polymarket. Opinion live execution remains disabled because order signing belongs to the separate CLOB SDK.
 
 ## Active continuation goals
 

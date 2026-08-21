@@ -22,6 +22,8 @@ OPINION_REFERENCES = (
     "https://docs.opinion.trade/developer-guide/opinion-open-api/overview",
     "https://docs.opinion.trade/developer-guide/opinion-open-api/market",
     "https://docs.opinion.trade/developer-guide/opinion-open-api/token",
+    "https://docs.opinion.trade/developer-guide/opinion-open-api/trade",
+    "https://docs.opinion.trade/developer-guide/opinion-open-api/position",
 )
 
 
@@ -39,6 +41,8 @@ class OpinionAdapter(MarketAdapter):
                 "references": list(OPINION_REFERENCES),
                 "credential_sources": [{"name": api_key.name, "source": api_key.source}] if api_key else [],
                 "live_trading_supported": False,
+                "copy_trading_supported": bool(self.capabilities.copy_trading),
+                "activity_feed_supported": True,
             }
         )
         return health
@@ -127,12 +131,83 @@ class OpinionAdapter(MarketAdapter):
             "Opinion live trading requires the separate Opinion CLOB SDK and wallet/order signing.",
         )
 
+    def list_activity(self, wallet_address: str, *, limit: int = 25) -> List[Dict[str, Any]]:
+        """Return normalized filled trades for an official Opinion wallet feed.
+
+        Opinion's OpenAPI exposes filled user trades by wallet address.  The
+        adapter keeps this read-only and normalizes the response to the common
+        wallet-activity shape consumed by the local copy-preview workflow.
+        """
+
+        self.ensure_capability("copy_trading")
+        wallet = self._normalize_wallet(wallet_address)
+        desired = max(1, min(int(limit or 25), 20))
+        params: Dict[str, Any] = {"page": 1, "limit": desired}
+        market_id = str(self.config.get("opinion_activity_market_id") or "").strip()
+        chain_id = str(self.config.get("opinion_activity_chain_id") or "").strip()
+        if market_id:
+            params["marketId"] = market_id
+        if chain_id:
+            params["chainId"] = chain_id
+        payload = self._get(f"/trade/user/{wallet}", params=params)
+        return [self._activity_from_trade(wallet, item) for item in self._result_list(payload)]
+
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "copy_trading",
-            "Opinion copy trading is unsupported because this adapter only uses public market-data endpoints.",
+        self.ensure_capability("copy_trading")
+        contract_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
+        if not contract_id:
+            raise MarketConfigurationError("Opinion activity has no contract token id.")
+        side = str(activity.get("side") or "").strip().upper()
+        if side not in {"BUY", "SELL"}:
+            raise MarketConfigurationError("Opinion activity side must be BUY or SELL.")
+        size = self._required_positive_number(activity.get("size"), "Opinion activity size")
+        price = activity.get("price")
+        limit_price = None if price in (None, "") else self._safe_probability(price)
+        if price not in (None, "") and limit_price is None:
+            raise MarketConfigurationError("Opinion activity price must be between 0 and 1.")
+        return self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=contract_id,
+                side=side,
+                size=size,
+                limit_price=limit_price,
+                metadata={"activity": dict(activity), "source": "opinion_trade_feed"},
+            )
         )
+
+    def _activity_from_trade(self, wallet: str, trade: Mapping[str, Any]) -> Dict[str, Any]:
+        market_id = self._market_id(trade)
+        outcome = self._outcome_from_trade(trade)
+        token_id = str(
+            trade.get("tokenId")
+            or trade.get("token_id")
+            or trade.get("outcomeTokenId")
+            or trade.get("outcome_token_id")
+            or ""
+        ).strip()
+        if not token_id:
+            raise MarketConfigurationError(
+                "Opinion trade response omitted tokenId; cannot safely map the trade to a contract."
+            )
+        contract_id = self._contract_id(market_id, outcome, token_id)
+        return {
+            "type": "TRADE",
+            "proxyWallet": wallet,
+            "wallet": wallet,
+            "asset": contract_id,
+            "contract_id": contract_id,
+            "marketId": market_id,
+            "side": self._side_from_trade(trade),
+            "size": trade.get("shares") or trade.get("orderShares") or trade.get("size") or 0,
+            "price": trade.get("price"),
+            "timestamp": self._timestamp_seconds(trade.get("createdAt") or trade.get("timestamp")),
+            "transactionHash": str(trade.get("txHash") or trade.get("transactionHash") or ""),
+            "slug": str(trade.get("marketSlug") or market_id),
+            "outcome": str(trade.get("outcome") or outcome),
+            "pseudonym": str(trade.get("marketTitle") or ""),
+            "raw": dict(trade),
+        }
 
     def _get_market(self, market_id: str) -> Mapping[str, Any]:
         clean = str(market_id or "").strip()
@@ -261,6 +336,53 @@ class OpinionAdapter(MarketAdapter):
     def _search_text(market: Mapping[str, Any]) -> str:
         values = [market.get("marketId"), market.get("marketTitle"), market.get("title"), market.get("rules")]
         return " ".join(str(value or "") for value in values).lower()
+
+    @staticmethod
+    def _normalize_wallet(wallet_address: str) -> str:
+        wallet = str(wallet_address or "").strip().lower()
+        if len(wallet) != 42 or not wallet.startswith("0x"):
+            raise MarketConfigurationError("Opinion wallet address must be a 20-byte 0x address.")
+        try:
+            int(wallet[2:], 16)
+        except ValueError as exc:
+            raise MarketConfigurationError("Opinion wallet address must be hexadecimal.") from exc
+        return wallet
+
+    @staticmethod
+    def _outcome_from_trade(trade: Mapping[str, Any]) -> str:
+        raw = str(trade.get("outcomeSideEnum") or trade.get("outcome") or trade.get("outcomeSide") or "").strip()
+        if raw.lower() in {"1", "yes", "true"} or raw.lower().startswith("yes"):
+            return "YES"
+        if raw.lower() in {"0", "no", "false"} or raw.lower().startswith("no"):
+            return "NO"
+        raise MarketConfigurationError("Opinion trade response has an unknown outcome side.")
+
+    @staticmethod
+    def _side_from_trade(trade: Mapping[str, Any]) -> str:
+        raw = str(trade.get("side") or trade.get("sideEnum") or "").strip().upper()
+        if raw in {"BUY", "SELL"}:
+            return raw
+        if raw in {"0", "1"}:
+            return "BUY" if raw == "0" else "SELL"
+        raise MarketConfigurationError("Opinion trade response has an unknown trade side.")
+
+    @staticmethod
+    def _timestamp_seconds(value: Any) -> int:
+        try:
+            timestamp = int(float(value or 0))
+        except (TypeError, ValueError):
+            return 0
+        return timestamp // 1000 if timestamp > 10_000_000_000 else timestamp
+
+    @staticmethod
+    def _required_positive_number(value: Any, label: str) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"{label} must be numeric.") from exc
+        if not math.isfinite(number) or number <= 0:
+            raise MarketConfigurationError(f"{label} must be positive.")
+        return number
 
     @staticmethod
     def _value_at(data: Mapping[str, Any], *keys: str) -> Any:

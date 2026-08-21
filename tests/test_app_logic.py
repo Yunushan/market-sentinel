@@ -295,6 +295,57 @@ class FakePolymarketAdapter:
         return {"approx_notional": float(order.size) * float(order.limit_price or 1.0)}
 
 
+class FakeOpinionActivityAdapter:
+    market_id = "opinion_labs"
+    display_name = "Opinion Labs"
+    capabilities = MarketCapabilities(
+        orderbook_reading=True,
+        paper_trading=True,
+        copy_trading=True,
+    )
+
+    def __init__(self) -> None:
+        self.activity_calls = []
+        self.paper_orders = []
+        self.stopper = None
+
+    def list_activity(self, wallet: str, *, limit: int = 25):
+        self.activity_calls.append((wallet, limit))
+        if len(self.activity_calls) >= 2 and self.stopper:
+            self.stopper()
+        return [
+            {
+                "timestamp": 100,
+                "transactionHash": "opinion-tx-1",
+                "proxyWallet": wallet,
+                "asset": "77:YES:0xyes",
+                "side": "BUY",
+                "size": 2,
+                "price": 0.5,
+                "slug": "77",
+            }
+        ]
+
+    def get_orderbook(self, contract_id: str) -> OrderBookSnapshot:
+        return OrderBookSnapshot(
+            market_id=self.market_id,
+            contract_id=contract_id,
+            bids=[OrderBookLevel(price=0.48, size=10.0)],
+            asks=[OrderBookLevel(price=0.50, size=10.0)],
+        )
+
+    def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
+        self.paper_orders.append(order)
+        return PaperOrderResult(
+            market_id=order.market_id,
+            contract_id=order.contract_id,
+            accepted=True,
+            message="DRY RUN accepted",
+            filled_size=order.size,
+            average_price=order.limit_price,
+        )
+
+
 class FakePriceAdapter:
     market_id = "kalshi"
     display_name = "Kalshi"
@@ -2010,6 +2061,52 @@ class AppLogicTests(unittest.TestCase):
         self.assertEqual([item[2]["transactionHash"] for item in activity], ["tx1", "tx2"])
         self.assertEqual(cfg.wallets[0].last_seen_ts, 100)
         self.assertEqual(set(cfg.wallets[0].seen_activity_keys), {"tx:tx1", "tx:tx2"})
+
+    def test_wallet_poller_uses_selected_market_activity_adapter(self) -> None:
+        cfg = AppConfig(
+            selected_market_id="opinion_labs",
+            wallets=[WalletWatch(wallet=WALLET, display_name="tracked")],
+        )
+        cfg.markets["opinion_labs"].enabled = True
+        ui_queue: "queue.Queue[tuple]" = queue.Queue()
+        adapter = FakeOpinionActivityAdapter()
+        registry = FakeRegistry(adapter)
+        poller = WalletPoller(ui_queue, cfg, poll_interval=0.01, adapter_registry=registry)
+        adapter.stopper = poller.stop
+
+        poller._run()
+
+        drained = []
+        while not ui_queue.empty():
+            drained.append(ui_queue.get_nowait())
+        activity = [item for item in drained if item[0] == "wallet_activity"]
+        self.assertEqual(len(activity), 1)
+        self.assertEqual(activity[0][2]["asset"], "77:YES:0xyes")
+        self.assertEqual(adapter.activity_calls[0], (WALLET, 25))
+        self.assertTrue(all(call[0] == "opinion_labs" for call in registry.calls))
+
+    def test_opinion_desktop_copy_uses_selected_market_paper_adapter(self) -> None:
+        harness = CopyHarness()
+        harness.cfg.selected_market_id = "opinion_labs"
+        harness.cfg.markets["opinion_labs"].enabled = True
+        adapter = FakeOpinionActivityAdapter()
+        harness.opinion_adapter = adapter
+        harness._get_selected_market_adapter = lambda: harness.opinion_adapter
+        item = {
+            "proxyWallet": WALLET,
+            "side": "BUY",
+            "asset": "77:YES:0xyes",
+            "size": "2",
+            "price": "0.45",
+        }
+
+        App._copy_trade_from_activity(harness, item)
+
+        self.assertEqual(len(adapter.paper_orders), 1)
+        self.assertEqual(adapter.paper_orders[0].market_id, "opinion_labs")
+        kind, message = harness.ui_queue.get_nowait()
+        self.assertEqual(kind, "log")
+        self.assertIn("[copy SIM] opinion_labs BUY", message)
 
 
 if __name__ == "__main__":
