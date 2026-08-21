@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+import time
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urlsplit
 
 from .base import MarketAdapter
@@ -47,8 +48,15 @@ class PRDTFinanceAdapter(MarketAdapter):
     metadata = get_market_metadata("prdt_finance")
     live_order_sides = ("BUY",)
 
-    def __init__(self, config: Optional[Mapping[str, Any]] = None, *, runtime=None) -> None:
+    def __init__(
+        self,
+        config: Optional[Mapping[str, Any]] = None,
+        *,
+        runtime=None,
+        clock: Optional[Callable[[], float]] = None,
+    ) -> None:
         super().__init__(config, runtime=runtime)
+        self._clock = clock or time.time
         self._event_cache: Dict[str, Dict[str, Any]] = {}
 
     @property
@@ -190,6 +198,11 @@ class PRDTFinanceAdapter(MarketAdapter):
                 raise MarketConfigurationError("PRDT limit price must be greater than 0 and at most 1.")
         bucket = self._event_bucket(canonical)
         prediction = bucket["prediction"]
+        status = self._status(prediction)
+        if status != "open":
+            raise MarketConfigurationError(
+                f"PRDT round {prediction['epoch']} is {status}; paper intents are accepted only before the lock timestamp."
+            )
         if limit_price is None:
             limit_price = self.get_price(f"{canonical}:{position}").last
         spec = bucket["spec"]
@@ -197,6 +210,11 @@ class PRDTFinanceAdapter(MarketAdapter):
         amount_raw = int(round(size * amount_scale))
         if amount_raw <= 0:
             raise MarketConfigurationError("PRDT order size is below the configured raw-unit precision.")
+        minimum_bet_amount = int(prediction["min_bet_amount"])
+        if amount_raw < minimum_bet_amount:
+            raise MarketConfigurationError(
+                f"PRDT order amount {amount_raw} is below the contract minimum {minimum_bet_amount}."
+            )
         factory_address = spec.get("factory_address")
         factory_index = spec.get("factory_index")
         unsigned_call = None
@@ -223,7 +241,7 @@ class PRDTFinanceAdapter(MarketAdapter):
                 "amount": size,
                 "amount_raw": amount_raw,
                 "amount_scale": amount_scale,
-                "minimum_bet_amount_raw": prediction["min_bet_amount"],
+                "minimum_bet_amount_raw": minimum_bet_amount,
                 "bet_token": prediction["bet_token"],
                 "unsigned_factory_call": unsigned_call,
                 "wallet_transaction_required": True,
@@ -283,11 +301,11 @@ class PRDTFinanceAdapter(MarketAdapter):
         return row
 
     def _event_bucket(self, event_id: str) -> Dict[str, Any]:
-        canonical, _ = self._split_event_id(event_id)
+        address, epoch = self._split_event_id(event_id)
+        canonical = self._event_id(address, epoch)
         cached = self._event_cache.get(canonical)
         if cached is not None:
             return cached
-        address, epoch = self._split_event_id(canonical)
         spec = self._spec_for_address(address)
         prediction = self._read_prediction(spec)
         if int(prediction["epoch"]) != epoch:
@@ -390,14 +408,11 @@ class PRDTFinanceAdapter(MarketAdapter):
             raise MarketConfigurationError("PRDT amount scale must be positive.")
         return scale
 
-    @staticmethod
-    def _status(row: Mapping[str, Any]) -> str:
+    def _status(self, row: Mapping[str, Any]) -> str:
         if bool(row["round"]["oracle_called"]):
             return "settled"
         timestamps = row["timestamps"]
-        now = int(row.get("now", 0))
-        if now <= 0:
-            return "open"
+        now = int(self._clock())
         if now < int(timestamps["lock"]):
             return "open"
         if now < int(timestamps["close"]):
@@ -458,4 +473,3 @@ class PRDTFinanceAdapter(MarketAdapter):
             return tuple(decode(list(types), bytes.fromhex(value[2:])))
         except (ImportError, ValueError, TypeError, OverflowError) as exc:
             raise MarketConfigurationError("PRDT RPC returned data that did not match the documented ABI.") from exc
-

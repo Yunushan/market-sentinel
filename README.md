@@ -544,14 +544,14 @@ Frenzy Finance was promoted on 2026-08-17 after validating the official Base/Bas
 | Space (`space`) | Implemented | Yes | Yes | Yes | No | No | Required | No API key; wallet/settlement required only for future live chain flow | Jurisdiction varies |
 | Xmarket (`xmarket`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | API credentials required | Jurisdiction varies |
 | Trueo (`trueo`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key; externally signed wallet transaction required for live orders | Jurisdiction varies |
-| PRDT Finance (`prdt_finance`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
+| PRDT Finance (`prdt_finance`) | Implemented | Yes | Yes | Yes | No | No | Required | No API key; wallet required only for future live chain flow | Jurisdiction varies |
 | SynStation (`synstation`) | Verified blocked | No | No | No | No | No | Required | API credentials required | Jurisdiction varies |
 | Gnosis Prediction Markets (`gnosis_prediction_markets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Subgraph endpoint required | Jurisdiction varies |
 | MetaDAO (`metadao`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key; externally signed wallet transaction required for live orders | Jurisdiction varies |
 | Levr Bet (`levr_bet`) | Verified blocked | No | No | No | No | No | Required | Account required | Jurisdiction varies |
 | Dexsport (`dexsport`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| Lamas Finance (`lamas_finance`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
-| Zetarium World (`zetarium_world`) | Verified blocked | No | No | No | No | No | Required | Account required | Jurisdiction varies |
+| Lamas Finance (`lamas_finance`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Solana RPC; externally signed wallet transaction required for live orders | Devnet example; production deployment must be reviewed |
+| Zetarium World (`zetarium_world`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key; externally signed wallet transaction required for live orders | Jurisdiction varies |
 | Blinq (`blinq`) | Verified blocked | No | No | No | No | No | Required | Wallet required for trading | Jurisdiction varies |
 | Zeitgeist Prediction Pools (`zeitgeist_prediction_pools`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key for reads; externally signed wallet payload required for live orders | Jurisdiction varies |
 | Reality.eth Markets (`reality_eth_markets`) | Implemented | Yes | Yes | No | No | No | Required | Subgraph endpoint required | Identity/jurisdiction limited |

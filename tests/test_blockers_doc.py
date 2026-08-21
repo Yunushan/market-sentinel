@@ -66,6 +66,9 @@ IMPLEMENTED_MARKETS = {
     "space",
     "hedgehog_markets",
     "prophet_exchange",
+    "prdt_finance",
+    "zetarium_world",
+    "lamas_finance",
 }
 VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)
 

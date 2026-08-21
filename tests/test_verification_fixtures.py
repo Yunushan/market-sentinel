@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import unittest
 from pathlib import Path
 
@@ -333,6 +334,53 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertTrue(rpc["yesPool"].startswith("0x"))
         self.assertGreater(rpc["poolSqrtPriceX96"], "0")
         self.assertTrue(rpc["signedTransaction"].startswith("0x"))
+
+    def test_prdt_fixture_covers_prediction_contract_rpc_shapes(self) -> None:
+        rpc = json.loads((FIXTURE_ROOT / "prdt_finance" / "rpc_responses.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(rpc["prediction_address"].startswith("0x"))
+        self.assertTrue(rpc["factory_address"].startswith("0x"))
+        self.assertEqual(rpc["epoch"], 42)
+        self.assertEqual(set(rpc["responses"]), {
+            "current_epoch",
+            "interval_seconds",
+            "min_bet_amount",
+            "bet_token",
+            "oracle",
+            "round",
+            "timestamps",
+        })
+        for value in rpc["responses"].values():
+            if isinstance(value, list):
+                self.assertTrue(all(len(word) == 64 for word in value))
+            else:
+                self.assertTrue(value.startswith("0x"))
+
+    def test_zetarium_fixture_covers_prediction_market_rpc_shapes(self) -> None:
+        rpc = json.loads((FIXTURE_ROOT / "zetarium_world" / "rpc_responses.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(rpc["prediction_market_address"].startswith("0x"))
+        self.assertTrue(rpc["stake_token"].startswith("0x"))
+        self.assertEqual(set(rpc["markets"]), {"1", "2"})
+        self.assertEqual(set(rpc["stakes"]), {"1:0", "1:1", "2:0", "2:1"})
+        self.assertTrue(rpc["signed_transaction"].startswith("0x"))
+        self.assertTrue(rpc["transaction_data"].startswith("0xda866c48"))
+
+    def test_lamas_fixture_covers_anchor_round_result_shapes(self) -> None:
+        rpc = json.loads((FIXTURE_ROOT / "lamas_finance" / "rpc_responses.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(rpc["account_discriminator"], "d80b15c4d5f075eb")
+        for _game, rows in rpc["program_accounts"].items():
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            account = row["account"]
+            self.assertEqual(account["owner"], row["program_id"] if "program_id" in row else account["owner"])
+            self.assertEqual(account["data"][1], "base64")
+            raw = base64.b64decode(account["data"][0], validate=True)
+            self.assertGreater(len(raw), 8)
+            self.assertEqual(raw[:8].hex(), rpc["account_discriminator"])
+
+        self.assertEqual(set(rpc["account_info"]), {"up_or_down", "price_predict"})
 
     def test_ibkr_event_contract_fixtures_cover_forecastx_and_cme_shapes(self) -> None:
         forecast_search = json.loads((FIXTURE_ROOT / "ibkr_forecasttrader" / "search.json").read_text(encoding="utf-8"))

@@ -40,14 +40,16 @@ check does not receive local test or security points.
 | Platform evidence | 10 | 5 | Reviewed platform CI and platform JSON evidence |
 | Live acceptance | 5 | 0 | Reachable public endpoints, credentialed read evidence, and approved funded audit |
 
-The latest local audit on 2026-08-18 is **83/100 (not ready)**. Local
-verification passed all 608 tests (7 intentionally skipped), Ruff, the adapter
-catalog, fixtures, documentation, workflow, secret-hygiene, and packaging
-checks; branch coverage was 76% overall. The no-credential public-only
-Polymarket probe was not run in this refresh; credentialed and funded checks
-remain blocked. No live evidence is invented to compensate for that gap. The
-score therefore reflects repeatable repository proof plus explicitly supplied
-evidence, not a production certification.
+The latest local audit on 2026-08-21 is **83/100 (not ready)**. Local
+verification passed all 624 tests (7 intentionally skipped), Ruff, the adapter
+catalog, 154 offline fixtures, documentation, workflow, secret-hygiene, and
+packaging checks; branch coverage was 76% overall. The no-credential
+public-only Polymarket probe was attempted twice and failed because the
+external Gamma, Data, CLOB, and Bridge endpoints reset the connection from
+this environment; credentialed and funded checks remain blocked. No live
+evidence is invented to compensate for that gap. The score therefore reflects
+repeatable repository proof plus explicitly supplied evidence, not a
+production certification.
 
 The scorer never treats a workflow matrix as proof that a runner completed.
 It also does not promote Polymarket credentialed or funded tiers from a local

@@ -93,6 +93,8 @@ IMPLEMENTED_ADAPTER_FIXTURE_TESTS = {
     "matchbook": ("matchbook", "test_additional_official_adapters.py"),
     "prophet_exchange": ("prophet_exchange", "test_prophet_exchange_adapter.py"),
     "prdt_finance": ("prdt_finance", "test_prdt_finance_adapter.py"),
+    "zetarium_world": ("zetarium_world", "test_zetarium_adapter.py"),
+    "lamas_finance": ("lamas_finance", "test_lamas_finance_adapter.py"),
     "dflow": ("dflow", "test_additional_official_adapters.py"),
     "drift_bet": ("drift_bet", "test_drift_bet_adapter.py"),
     "frenzy_finance": ("frenzy_finance", "test_frenzy_finance_adapter.py"),
@@ -571,6 +573,8 @@ def run_fixture_check() -> None:
         fixture_root / "hedgehog_markets" / "program_accounts.json",
         fixture_root / "frenzy_finance" / "rpc_responses.json",
         fixture_root / "prdt_finance" / "rpc_responses.json",
+        fixture_root / "zetarium_world" / "rpc_responses.json",
+        fixture_root / "lamas_finance" / "rpc_responses.json",
     }
     missing = [str(path.relative_to(ROOT)) for path in sorted(required) if not path.exists()]
     if missing:

@@ -64,6 +64,8 @@ CONCRETE_REQUIREMENT_VALUES = (
     "Account or wallet required",
     "Gemini account required",
     "Region limited",
+    "Solana RPC; externally signed wallet transaction required for live orders",
+    "Devnet example; production deployment must be reviewed",
 )
 IMPLEMENTED_MARKETS = {
     "polymarket",
@@ -109,6 +111,9 @@ IMPLEMENTED_MARKETS = {
     "space",
     "hedgehog_markets",
     "prophet_exchange",
+    "prdt_finance",
+    "zetarium_world",
+    "lamas_finance",
 }
 VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)
 

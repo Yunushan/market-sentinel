@@ -13,6 +13,7 @@ from .types import MarketContract, MarketEvent, OrderBookSnapshot, PaperOrderReq
 
 DEFAULT_TRUEO_RPC_URL = "https://mainnet.base.org"
 DEFAULT_TRUEO_MANAGER = "0x61A98Bef11867c69489B91f340fE545eEfc695d7"
+DEFAULT_TRUEO_CHAIN_ID = 8453
 TRUEO_REFERENCES = (
     "https://docs.trueo.com/deployments",
     "https://docs.trueo.com/markets",
@@ -78,16 +79,44 @@ class TrueoAdapter(MarketAdapter):
         value = self.config.get("trueo_manager_address") or DEFAULT_TRUEO_MANAGER
         return self._address(value, label="manager address")
 
+    @property
+    def chain_id(self) -> int:
+        value = self.config.get("trueo_chain_id", DEFAULT_TRUEO_CHAIN_ID)
+        if isinstance(value, bool):
+            raise MarketConfigurationError("Trueo chain ID must be a positive integer.")
+        try:
+            chain_id = int(str(value).strip())
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Trueo chain ID must be a positive integer.") from exc
+        if chain_id <= 0:
+            raise MarketConfigurationError("Trueo chain ID must be a positive integer.")
+        return chain_id
+
+    @property
+    def live_transaction_targets(self) -> Tuple[str, ...]:
+        configured = self.config.get("trueo_live_transaction_targets")
+        if configured in (None, ""):
+            return ()
+        values = configured if isinstance(configured, (list, tuple, set)) else str(configured).split(",")
+        addresses: List[str] = []
+        for value in values:
+            address = self._address(value, label="live transaction target")
+            if address.casefold() not in {item.casefold() for item in addresses}:
+                addresses.append(address)
+        return tuple(addresses)
+
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
         health.update(
             {
                 "rpc_url": self.rpc_url,
                 "manager_address": self.manager_address,
+                "chain_id": self.chain_id,
                 "network": "Base mainnet",
                 "references": list(TRUEO_REFERENCES),
                 "public_api": False,
                 "onchain_reading": True,
+                "allowlisted_live_transaction_target_count": len(self.live_transaction_targets),
                 "wallet_transaction_required": True,
                 "settlement_required": True,
             }
@@ -216,20 +245,70 @@ class TrueoAdapter(MarketAdapter):
 
     def place_live_order(self, order: PaperOrderRequest) -> Dict[str, Any]:
         self.ensure_order_market(order)
+        market_address, outcome_index = self._split_contract_id(order.contract_id)
         audit = self.preflight_live_order(order, feature_name="Trueo live trading")
         if not self.config_bool("trueo_submit_signed_transactions", False):
             raise MarketConfigurationError(
                 "Trueo live trading requires trueo_submit_signed_transactions=true after reviewing the signed transaction."
             )
-        signed = order.metadata.get("signed_transaction")
-        if not isinstance(signed, str) or not re.fullmatch(r"0x[0-9a-fA-F]+", signed) or len(signed) % 2:
+        allowlisted_targets = self.live_transaction_targets
+        if not allowlisted_targets:
             raise MarketConfigurationError(
-                "Trueo live orders require an externally signed raw transaction in metadata['signed_transaction']."
+                "Trueo live orders require at least one explicitly reviewed trueo_live_transaction_targets entry."
             )
+
+        metadata = dict(order.metadata or {})
+        signed = metadata.get("signed_transaction")
+        decoded = self._decode_signed_transaction(signed)
+
+        reviewed_chain_id = self._metadata_int(metadata, "chain_id", label="reviewed chain ID")
+        if reviewed_chain_id != self.chain_id or decoded["chain_id"] != self.chain_id:
+            raise MarketConfigurationError("Trueo signed transaction targets a different chain than the configured network.")
+
+        reviewed_target = self._address(metadata.get("transaction_to"), label="reviewed transaction target")
+        decoded_target = str(decoded["to"])
+        if reviewed_target.casefold() != decoded_target.casefold():
+            raise MarketConfigurationError("Trueo signed transaction recipient does not match reviewed transaction metadata.")
+        if not any(decoded_target.casefold() == target.casefold() for target in allowlisted_targets):
+            raise MarketConfigurationError("Trueo signed transaction recipient is outside the reviewed target allow-list.")
+
+        reviewed_data = self._calldata(metadata.get("transaction_data"), label="reviewed transaction calldata")
+        if reviewed_data.casefold() != str(decoded["data"]).casefold():
+            raise MarketConfigurationError("Trueo signed transaction calldata does not match reviewed transaction metadata.")
+
+        reviewed_value = self._metadata_int(metadata, "transaction_value", label="reviewed transaction value", minimum=0)
+        if reviewed_value != decoded["value"]:
+            raise MarketConfigurationError("Trueo signed transaction value does not match reviewed transaction metadata.")
+
+        reviewed_market = self._address(metadata.get("market_address"), label="reviewed market address")
+        if reviewed_market.casefold() != market_address.casefold():
+            raise MarketConfigurationError("Trueo signed transaction metadata targets a different market.")
+        reviewed_outcome = self._metadata_int(metadata, "outcome_index", label="reviewed outcome index", minimum=0)
+        if reviewed_outcome != outcome_index:
+            raise MarketConfigurationError("Trueo signed transaction metadata targets a different outcome.")
+
+        reviewed_side = str(metadata.get("side") or "").strip().upper()
+        if reviewed_side != str(order.side or "").upper():
+            raise MarketConfigurationError("Trueo signed transaction metadata uses a different order side.")
+        self._validate_reviewed_number(metadata, "size", order.size, label="order size")
+        self._validate_reviewed_limit_price(metadata, order.limit_price)
+
         response = self._rpc("eth_sendRawTransaction", [signed])
-        if not isinstance(response, str) or not response.startswith("0x"):
+        if not isinstance(response, str) or not re.fullmatch(r"0x[0-9a-fA-F]{64}", response):
             raise MarketHTTPError("Trueo RPC did not return a transaction hash.")
-        return {"live": True, "tx_hash": response, "audit": audit, "signed_transaction_submitted": True}
+        return {
+            "live": True,
+            "tx_hash": response,
+            "audit": audit,
+            "signed_transaction_submitted": True,
+            "chain_id": decoded["chain_id"],
+            "transaction_to": decoded_target,
+            "transaction_value": decoded["value"],
+            "transaction_type": decoded["type"],
+            "calldata_selector": reviewed_data[:10],
+            "market_address": market_address,
+            "outcome_index": outcome_index,
+        }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
         raise UnsupportedFeatureError(
@@ -285,6 +364,113 @@ class TrueoAdapter(MarketAdapter):
                 raise MarketConfigurationError("Trueo token decimals are outside the supported range.")
             self._token_decimals_cache[key] = value
         return self._token_decimals_cache[key]
+
+    @classmethod
+    def _decode_signed_transaction(cls, value: Any) -> Dict[str, Any]:
+        if (
+            not isinstance(value, str)
+            or len(value) < 2 + 65 * 2
+            or len(value) > 2 + 1_000_000 * 2
+            or not re.fullmatch(r"0x[0-9a-fA-F]+", value)
+            or len(value) % 2
+        ):
+            raise MarketConfigurationError(
+                "Trueo live orders require a canonical 0x-prefixed externally signed raw transaction."
+            )
+        raw = bytes.fromhex(value[2:])
+
+        try:
+            from eth_account._utils.legacy_transactions import Transaction
+            from eth_account.typed_transactions import TypedTransaction
+            from hexbytes import HexBytes
+        except ImportError as exc:
+            raise MarketConfigurationError(
+                "Trueo live transaction verification requires the eth-account project dependency."
+            ) from exc
+
+        try:
+            if raw[0] <= 0x7F:
+                transaction = TypedTransaction.from_bytes(HexBytes(raw)).as_dict()
+                transaction_type = int(transaction.get("type", raw[0]))
+                chain_id = int(transaction["chainId"])
+            else:
+                transaction = Transaction.from_bytes(raw).as_dict()
+                transaction_type = 0
+                signature_v = int(transaction["v"])
+                if signature_v < 35:
+                    raise ValueError("legacy transaction is not EIP-155 chain protected")
+                chain_id = (signature_v - 35) // 2
+
+            target_raw = bytes(transaction["to"])
+            if len(target_raw) != 20:
+                raise ValueError("contract creation transactions are not supported")
+            data_raw = bytes(transaction.get("data", b""))
+            value_int = int(transaction.get("value", 0))
+            if chain_id <= 0 or value_int < 0:
+                raise ValueError("transaction chain ID or value is invalid")
+        except Exception as exc:
+            raise MarketConfigurationError(
+                "Trueo signed_transaction could not be decoded as a chain-protected EVM transaction."
+            ) from exc
+
+        return {
+            "chain_id": chain_id,
+            "to": "0x" + target_raw.hex(),
+            "data": "0x" + data_raw.hex(),
+            "value": value_int,
+            "type": transaction_type,
+        }
+
+    @staticmethod
+    def _metadata_int(
+        metadata: Mapping[str, Any],
+        key: str,
+        *,
+        label: str,
+        minimum: int = 1,
+    ) -> int:
+        value = metadata.get(key)
+        if isinstance(value, bool):
+            raise MarketConfigurationError(f"Trueo live orders require an integer {label}.")
+        try:
+            parsed = int(str(value).strip(), 0)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Trueo live orders require an integer {label}.") from exc
+        if parsed < minimum:
+            raise MarketConfigurationError(f"Trueo live orders require {label} to be at least {minimum}.")
+        return parsed
+
+    @staticmethod
+    def _calldata(value: Any, *, label: str) -> str:
+        text = str(value or "").strip()
+        if not re.fullmatch(r"0x[0-9a-fA-F]+", text) or len(text) % 2 or len(text) < 10:
+            raise MarketConfigurationError(f"Trueo live orders require hexadecimal {label} with a 4-byte selector.")
+        if len(text) > 2 + 1_000_000 * 2:
+            raise MarketConfigurationError(f"Trueo {label} exceeds the 1 MB safety limit.")
+        return "0x" + text[2:].lower()
+
+    @classmethod
+    def _validate_reviewed_number(
+        cls,
+        metadata: Mapping[str, Any],
+        key: str,
+        expected: Any,
+        *,
+        label: str,
+    ) -> None:
+        reviewed = cls._finite_float(metadata.get(key), f"reviewed {label}")
+        requested = cls._finite_float(expected, label)
+        if reviewed != requested:
+            raise MarketConfigurationError(f"Trueo signed transaction metadata uses a different {label}.")
+
+    @classmethod
+    def _validate_reviewed_limit_price(cls, metadata: Mapping[str, Any], expected: Any) -> None:
+        reviewed = metadata.get("limit_price")
+        if expected is None:
+            if reviewed is not None:
+                raise MarketConfigurationError("Trueo signed transaction metadata uses a different limit price.")
+            return
+        cls._validate_reviewed_number(metadata, "limit_price", expected, label="limit price")
 
     def _rpc(self, method: str, params: List[Any]) -> Any:
         payload = self.runtime.request_json(
@@ -356,4 +542,3 @@ class TrueoAdapter(MarketAdapter):
             6: "escalated_dispute_raised",
             7: "finalized",
         }.get(value, f"unknown:{value}")
-

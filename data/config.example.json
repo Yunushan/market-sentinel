@@ -654,18 +654,27 @@
       "enabled": false,
       "settings": {
         "adapter_status": "implemented",
+        "trueo_chain_id": 8453,
+        "trueo_live_transaction_targets": [],
+        "trueo_submit_signed_transactions": false,
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Official Base TruthMarketManager/TruthMarket and documented Uniswap pool reads, discovery, prices, alerts, paper orders, and guarded externally signed transactions are implemented. CLOB depth and copy trading remain unsupported."
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
+        "notes": "Official Base TruthMarketManager/TruthMarket and documented Uniswap pool reads, discovery, prices, alerts, paper orders, and guarded externally signed transactions are implemented. Live forwarding also requires an explicit reviewed target allow-list and exact decoded transaction/order metadata. CLOB depth and copy trading remain unsupported."
       }
     },
     "prdt_finance": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "prdt_rpc_url": "",
+        "prdt_prediction_contracts": [],
+        "prdt_amount_scale": 1.0,
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: PRDT Finance lacks a validated public market-data/order adapter and offline fixtures in this app."
+        "notes": "Official legacy Prediction-contract reads, bull/bear pool-share prices, alerts, and open-round paper intents are implemented. Configure the RPC and explicit deployed Prediction addresses; the adapter never guesses deployments. Live execution, CLOB depth, settlement, and copy trading remain unsupported."
       }
     },
     "synstation": {
@@ -735,19 +744,35 @@
     "lamas_finance": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "lamas_finance_rpc_url": "https://api.devnet.solana.com",
+        "lamas_finance_cluster": "devnet",
+        "lamas_finance_price_program_id": "SqFtqbsedB3HVwYd89wxTwL4UXV5JASq3JoPcApjNMJ",
+        "lamas_finance_up_down_program_id": "BbCEshx6obrBjzWPXBRxq99GcFVPB8ioe48pUYr711zy",
+        "lamas_finance_price_mint": "HEy1zzM3LFUFy8TbHEoEKQMYmPx1Uz3o51RZYRqCtDrs",
+        "lamas_finance_up_down_mint": "9a7TwLHkA2AaJd9E7qsdhaTPhQL5wQ9VXYo7J2pXHixV",
+        "lamas_finance_amount_scale": 1000000000,
+        "lamas_finance_price_scale": 1000000000000,
+        "lamas_finance_submit_signed_transactions": false,
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: Lamas Finance lacks a validated public API and fixture-backed contract integration here."
+        "notes": "Official Lamas Finance Anchor PricePredict and UpOrDown programs are mapped to Solana JSON-RPC discovery, pooled prices, alerts, local paper intents, and a guarded externally signed predict boundary. The default deployment is the documented devnet example; confirm any production program/mint inventory before enabling it. CLOB depth, settlement, and copy trading remain unsupported."
       }
     },
     "zetarium_world": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "zetarium_rpc_url": "https://bsc-dataseed.binance.org",
+        "zetarium_prediction_market_address": "0xfc5fa5bb5f6a812600c303b4b83ee8dbdc021d99",
+        "zetarium_chain_id": 56,
+        "zetarium_market_ids": [],
+        "zetarium_max_market_scan": 500,
+        "zetarium_live_transaction_targets": [],
+        "zetarium_submit_signed_transactions": false,
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16; re-verified 2026-08-17: Zetarium publishes a Prediction Market V2 design, but no deployed prediction contract addresses, public query/order schema, or reproducible market fixtures are published for a stable integration."
+        "notes": "Reviewed BSC PredictionMarket deployment and documented V2 contract model: on-chain discovery, pari-mutuel YES/NO pool prices, alerts, local paper intents, and guarded externally signed BUY transactions are fixture-backed. Keep market IDs explicit when operating a bounded inventory; live submission remains disabled by default and requires a reviewed target allow-list. CLOB depth, wallet signing, settlement, and copy trading remain unsupported."
       }
     },
     "blinq": {

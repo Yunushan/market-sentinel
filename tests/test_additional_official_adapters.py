@@ -377,11 +377,76 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         with self.assertRaises(UnsupportedFeatureError):
             adapter.get_orderbook(order.contract_id)
 
-        live = TrueoAdapter({"live_trading_enabled": True, "live_trading_confirmed": True, "trueo_submit_signed_transactions": True})
+        live = TrueoAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "trueo_submit_signed_transactions": True,
+                "trueo_chain_id": fixture["transactionChainId"],
+                "trueo_live_transaction_targets": [fixture["transactionTo"]],
+            }
+        )
         live.runtime.request_json = fake_request_json  # type: ignore[method-assign]
-        result = live.place_live_order(PaperOrderRequest("trueo", f"{market}:0", "BUY", 1, 0.5, {"signed_transaction": fixture["signedTransaction"]}))
+        reviewed_metadata = {
+            "signed_transaction": fixture["signedTransaction"],
+            "chain_id": fixture["transactionChainId"],
+            "transaction_to": fixture["transactionTo"],
+            "transaction_data": fixture["transactionData"],
+            "transaction_value": fixture["transactionValue"],
+            "market_address": market,
+            "outcome_index": 0,
+            "side": "BUY",
+            "size": 1,
+            "limit_price": 0.5,
+        }
+        result = live.place_live_order(
+            PaperOrderRequest("trueo", f"{market}:0", "BUY", 1, 0.5, reviewed_metadata)
+        )
         self.assertTrue(result["live"])
         self.assertEqual(result["tx_hash"], fixture["transactionHash"])
+        self.assertEqual(result["chain_id"], fixture["transactionChainId"])
+        self.assertEqual(result["transaction_to"].lower(), fixture["transactionTo"].lower())
+        self.assertEqual(result["transaction_value"], fixture["transactionValue"])
+        self.assertEqual(result["calldata_selector"], fixture["transactionData"])
+
+        rejected_cases = {
+            "chain": {**reviewed_metadata, "chain_id": 1},
+            "recipient": {**reviewed_metadata, "transaction_to": no_pool},
+            "calldata": {**reviewed_metadata, "transaction_data": "0x87654321"},
+            "value": {**reviewed_metadata, "transaction_value": 1},
+            "market": {**reviewed_metadata, "market_address": no_pool},
+            "outcome": {**reviewed_metadata, "outcome_index": 1},
+            "side": {**reviewed_metadata, "side": "SELL"},
+            "size": {**reviewed_metadata, "size": 2},
+            "limit_price": {**reviewed_metadata, "limit_price": 0.6},
+        }
+        for label, metadata in rejected_cases.items():
+            with self.subTest(label=label), self.assertRaises(MarketConfigurationError):
+                live.place_live_order(PaperOrderRequest("trueo", f"{market}:0", "BUY", 1, 0.5, metadata))
+
+        without_allowlist = TrueoAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "trueo_submit_signed_transactions": True,
+            }
+        )
+        with self.assertRaises(MarketConfigurationError):
+            without_allowlist.place_live_order(
+                PaperOrderRequest("trueo", f"{market}:0", "BUY", 1, 0.5, reviewed_metadata)
+            )
+
+        with self.assertRaises(MarketConfigurationError):
+            live.place_live_order(
+                PaperOrderRequest(
+                    "trueo",
+                    f"{market}:0",
+                    "BUY",
+                    1,
+                    0.5,
+                    {**reviewed_metadata, "signed_transaction": "0xdeadbeef"},
+                )
+            )
         with self.assertRaises(UnsupportedFeatureError):
             adapter.copy_trade_from_activity({"side": "BUY"})
 

@@ -240,6 +240,7 @@ def build_default_registry() -> AdapterRegistry:
     from .hedgehog import HedgehogMarketsAdapter
     from .ibkr_event_contracts import CMEPredictionMarketsAdapter, ForecastExAdapter, IBKRForecastTraderAdapter
     from .kalshi import KalshiAdapter
+    from .lamas_finance import LamasFinanceAdapter
     from .legacy_web3 import (
         AugurAdapter,
         GnosisPredictionMarketsAdapter,
@@ -268,6 +269,7 @@ def build_default_registry() -> AdapterRegistry:
     from .space import SpaceAdapter
     from .thales import ThalesMarketAdapter
     from .trueo import TrueoAdapter
+    from .zetarium import ZetariumWorldAdapter
     from .stub import create_stub_adapter, create_verified_blocked_adapter
     from .xo import XOMarketAdapter
     from .xmarket import XMarketAdapter
@@ -278,6 +280,7 @@ def build_default_registry() -> AdapterRegistry:
         ProbableAdapter,
         ProphetExchangeAdapter,
         PRDTFinanceAdapter,
+        LamasFinanceAdapter,
         KalshiAdapter,
         PredictItAdapter,
         CryptoComPredictAdapter,
@@ -317,12 +320,14 @@ def build_default_registry() -> AdapterRegistry:
         MetaDAOAdapter,
         SpaceAdapter,
         HedgehogMarketsAdapter,
+        ZetariumWorldAdapter,
     )
     registry.register_adapter(PolymarketAdapter, replace=True)
     registry.register_adapter(CoinbasePredictionMarketsAdapter, replace=True)
     registry.register_adapter(ProbableAdapter, replace=True)
     registry.register_adapter(ProphetExchangeAdapter, replace=True)
     registry.register_adapter(PRDTFinanceAdapter, replace=True)
+    registry.register_adapter(LamasFinanceAdapter, replace=True)
     registry.register_adapter(KalshiAdapter, replace=True)
     registry.register_adapter(PredictItAdapter, replace=True)
     registry.register_adapter(CryptoComPredictAdapter, replace=True)
@@ -362,6 +367,7 @@ def build_default_registry() -> AdapterRegistry:
     registry.register_adapter(MetaDAOAdapter, replace=True)
     registry.register_adapter(SpaceAdapter, replace=True)
     registry.register_adapter(HedgehogMarketsAdapter, replace=True)
+    registry.register_adapter(ZetariumWorldAdapter, replace=True)
     for metadata in MARKET_CATALOG:
         if metadata.market_id in {adapter.metadata.market_id for adapter in implemented_adapters}:
             continue

@@ -2709,6 +2709,17 @@ class WebApiTests(unittest.TestCase):
                 asset.resolve(),
             )
 
+    def test_static_file_catalog_uses_server_frontend_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            frontend_dir = Path(tmpdir) / "dist"
+            frontend_dir.mkdir()
+            index = frontend_dir / "index.html"
+            index.write_text("<html></html>", encoding="utf-8")
+
+            static_files = ReactGuiHandler._static_file_catalog(frontend_dir)
+
+        self.assertEqual(static_files, {"index.html": index.resolve()})
+
     def test_app_state_payload_combines_initial_react_gui_state(self) -> None:
         cfg = AppConfig()
         cfg.selected_market_id = "kalshi"

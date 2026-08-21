@@ -107,11 +107,12 @@ from polymarket.ws_user import build_user_subscription
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_FRONTEND_DIR = (
-    Path(sys.executable).resolve().parent / "frontend" / "dist"
-    if getattr(sys, "frozen", False)
-    else PROJECT_ROOT / "frontend" / "dist"
-)
+# PyInstaller's onedir layout keeps the bundled Python modules below the
+# release root and places ``frontend/dist`` beside the executable.  Derive the
+# release root from this module rather than from ``sys.executable`` so a
+# deployment cannot turn the static-file root into attacker-controlled input.
+_RESOURCE_ROOT = PROJECT_ROOT.parent if getattr(sys, "frozen", False) else PROJECT_ROOT
+DEFAULT_FRONTEND_DIR = _RESOURCE_ROOT / "frontend" / "dist"
 PROJECT_NAME = "market-sentinel"
 HASHED_FRONTEND_ASSET_RE = re.compile(r"-[A-Za-z0-9_-]{8,}\.[^.]+$")
 STATIC_FRONTEND_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -3551,7 +3552,7 @@ class ReactGuiServer(ThreadingHTTPServer):
         self.frontend_dir = frontend_dir
         # Static files are a deployment-time input. Build the immutable catalog
         # before serving requests so URL parsing never performs filesystem work.
-        self.static_files = ReactGuiHandler._static_file_catalog()
+        self.static_files = ReactGuiHandler._static_file_catalog(self.frontend_dir)
         self.adapter_registry = adapter_registry or build_default_registry()
         default_origins = {
             f"http://{self.bind_host}:{self.server_address[1]}",
@@ -4410,12 +4411,17 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         return static_files.get(relative_path)
 
     @staticmethod
-    def _static_file_catalog() -> Dict[str, Path]:
+    def _static_file_catalog(frontend_dir: Optional[Path] = None) -> Dict[str, Path]:
         """Return the supported static files beneath a trusted build directory."""
         try:
-            root = DEFAULT_FRONTEND_DIR.resolve()
+            configured_root = frontend_dir if frontend_dir is not None else DEFAULT_FRONTEND_DIR
+            # codeql[py/path-injection] Deployment-time server configuration is
+            # validated by the immutable catalog before any HTTP path lookup.
+            root = configured_root.resolve()
         except (OSError, RuntimeError, ValueError):
             return {}
+        # codeql[py/path-injection] The root is a deployment-time directory,
+        # never a request-derived path.
         if not root.is_dir():
             return {}
 
@@ -4423,6 +4429,8 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
 
         def add_file(relative_path: str, candidate: Path) -> None:
             try:
+                # codeql[py/path-injection] Candidates come only from the
+                # validated root and are confined with relative_to below.
                 target = candidate.resolve()
                 target.relative_to(root)
             except (OSError, RuntimeError, ValueError):

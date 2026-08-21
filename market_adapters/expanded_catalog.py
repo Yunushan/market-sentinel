@@ -255,6 +255,38 @@ PRDT_FINANCE_CAPABILITIES = MarketCapabilities(
 )
 
 
+LAMAS_FINANCE_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    alerts=True,
+    paper_trading=True,
+    live_trading=True,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=False,
+    region_limited=True,
+)
+
+
+ZETARIUM_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    alerts=True,
+    paper_trading=True,
+    live_trading=True,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=False,
+    region_limited=True,
+)
+
+
 EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
     MarketMetadata(
         market_id="coinbase_prediction_markets",
@@ -404,13 +436,23 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="lamas_finance",
         display_name="Lamas Finance",
         homepage_url="https://docs.lamas.co/1.0",
-        description="Verified blocked: Lamas Finance is a Solana game/prediction protocol without a validated public API and fixture-backed contract integration here.",
+        description=(
+            "Official Lamas Finance Solana Anchor adapter for PricePredict and UpOrDown round discovery, "
+            "pooled prices, alerts, local paper intents, and guarded externally signed predict transactions. "
+            "CLOB depth, settlement, and copy trading remain unsupported."
+        ),
+        capabilities=LAMAS_FINANCE_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="zetarium_world",
         display_name="Zetarium World",
         homepage_url="https://docs.zetarium.world/docs",
-        description="Verified blocked: Zetarium World prediction-market V2/API support is not a stable production integration target in this repository.",
+        description=(
+            "Reviewed BSC PredictionMarket adapter for Zetarium World V2: on-chain event discovery, "
+            "pari-mutuel outcome prices, alerts, local paper intents, and guarded externally signed BUY "
+            "transactions are implemented. CLOB depth, wallet signing, settlement, and copy trading remain unsupported."
+        ),
+        capabilities=ZETARIUM_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="blinq",
@@ -514,15 +556,6 @@ EXPANDED_VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
     "dexsport": _blocker(
         "Dexsport documents a betting protocol, but this app lacks a validated prediction-market data, wallet, and settlement adapter.",
         "https://dexsport.io/docs-home/",
-    ),
-    "lamas_finance": _blocker(
-        "Lamas Finance is a Solana game/prediction protocol without a validated public API and fixture-backed contract integration here.",
-        "https://docs.lamas.co/1.0",
-    ),
-    "zetarium_world": _blocker(
-        "Zetarium World prediction-market V2/API support is not a stable production integration target in this repository.",
-        "https://docs.zetarium.world/docs",
-        "https://docs.zetarium.world/docs/overview/roadmap",
     ),
     "blinq": _blocker(
         "Blinq exposes leveraged prediction derivatives, but no validated public API and risk-controlled adapter contract is implemented.",

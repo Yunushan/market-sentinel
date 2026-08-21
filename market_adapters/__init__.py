@@ -16,6 +16,7 @@ from .hyperliquid import HyperliquidAdapter
 from .hedgehog import HedgehogMarketsAdapter
 from .ibkr_event_contracts import CMEPredictionMarketsAdapter, ForecastExAdapter, IBKREventContractsAdapter, IBKRForecastTraderAdapter
 from .kalshi import KalshiAdapter
+from .lamas_finance import LamasFinanceAdapter
 from .legacy_web3 import (
     AugurAdapter,
     GnosisPredictionMarketsAdapter,
@@ -45,6 +46,7 @@ from .seer import SeerAdapter
 from .space import SpaceAdapter
 from .thales import ThalesMarketAdapter
 from .trueo import TrueoAdapter
+from .zetarium import ZetariumWorldAdapter
 from .stub import StubMarketAdapter, VerifiedBlockedAdapter, create_stub_adapter, create_verified_blocked_adapter
 from .sx_bet import SxBetAdapter
 from .xo import XOMarketAdapter
@@ -93,6 +95,7 @@ __all__ = [
     "MarketHTTPError",
     "MarketMetadata",
     "KalshiAdapter",
+    "LamasFinanceAdapter",
     "LimitlessAdapter",
     "ManifoldAdapter",
     "MatchbookAdapter",
@@ -121,6 +124,7 @@ __all__ = [
     "SpaceAdapter",
     "ThalesMarketAdapter",
     "TrueoAdapter",
+    "ZetariumWorldAdapter",
     "StubMarketAdapter",
     "UnsupportedFeatureError",
     "VERIFIED_BLOCKERS",

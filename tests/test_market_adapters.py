@@ -35,6 +35,7 @@ from market_adapters import (
     PredictItAdapter,
     PredictFunAdapter,
     ProbableAdapter,
+    PRDTFinanceAdapter,
     ProphetExchangeAdapter,
     OmenAdapter,
     RealityEthMarketsAdapter,
@@ -44,6 +45,8 @@ from market_adapters import (
     SpaceAdapter,
     ThalesMarketAdapter,
     TrueoAdapter,
+    ZetariumWorldAdapter,
+    LamasFinanceAdapter,
     StubMarketAdapter,
     UnsupportedFeatureError,
     MetaculusAdapter,
@@ -121,6 +124,9 @@ IMPLEMENTED_MARKETS = {
     "probable",
     "matchbook",
     "prophet_exchange",
+    "prdt_finance",
+    "zetarium_world",
+    "lamas_finance",
 }
 VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)
 
@@ -227,6 +233,8 @@ class AdapterFoundationTests(unittest.TestCase):
         self.assertIsInstance(registry.create("matchbook"), MatchbookAdapter)
         self.assertEqual(registry.get_metadata("prophet_exchange").display_name, "Prophet Exchange")
         self.assertIsInstance(registry.create("prophet_exchange"), ProphetExchangeAdapter)
+        self.assertEqual(registry.get_metadata("prdt_finance").display_name, "PRDT Finance")
+        self.assertIsInstance(registry.create("prdt_finance"), PRDTFinanceAdapter)
         self.assertEqual(registry.get_metadata("dflow").display_name, "DFlow")
         self.assertIsInstance(registry.create("dflow"), DFlowAdapter)
         self.assertEqual(registry.get_metadata("context_v2").display_name, "Context V2")
@@ -243,6 +251,10 @@ class AdapterFoundationTests(unittest.TestCase):
         self.assertIsInstance(registry.create("hyperliquid"), HyperliquidAdapter)
         self.assertEqual(registry.get_metadata("trueo").display_name, "Trueo")
         self.assertIsInstance(registry.create("trueo"), TrueoAdapter)
+        self.assertEqual(registry.get_metadata("zetarium_world").display_name, "Zetarium World")
+        self.assertIsInstance(registry.create("zetarium_world"), ZetariumWorldAdapter)
+        self.assertEqual(registry.get_metadata("lamas_finance").display_name, "Lamas Finance")
+        self.assertIsInstance(registry.create("lamas_finance"), LamasFinanceAdapter)
         self.assertIsInstance(registry.create("ibkr_forecasttrader"), IBKRForecastTraderAdapter)
         self.assertIsInstance(registry.create("forecastex"), ForecastExAdapter)
         self.assertIsInstance(registry.create("cme_prediction_markets"), CMEPredictionMarketsAdapter)
