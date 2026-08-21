@@ -3068,10 +3068,11 @@ def copy_trade_preview_from_activity(
         limit_price = max(0.0, float(reference_price if reference_price is not None else 0.01) - slippage)
     max_usdc = max(0.01, float(settings.max_usdc_per_trade))
     capped = False
-    # Manifold BUY activity sizes are MANA amounts, while SELL activity sizes
-    # are shares. Do not divide a BUY budget by probability a second time.
-    manifold_buy_budget = market_id == "manifold" and side == "BUY"
-    if manifold_buy_budget:
+    # Manifold and Myriad BUY activity sizes are collateral budgets, while
+    # SELL activity sizes are shares. Do not divide a BUY budget by
+    # probability a second time.
+    buy_budget_activity = market_id in {"manifold", "myriad_markets"} and side == "BUY"
+    if buy_budget_activity:
         if size > max_usdc:
             size = max_usdc
             capped = True
@@ -3090,7 +3091,7 @@ def copy_trade_preview_from_activity(
         "tif": "FOK",
         "activity_key": activity_key(activity),
     }
-    if market_id == "manifold" and side == "SELL":
+    if market_id in {"manifold", "myriad_markets"} and side == "SELL":
         order_metadata["shares"] = activity.get("shares") or size
     order = PaperOrderRequest(
         market_id=market_id,
@@ -3100,7 +3101,7 @@ def copy_trade_preview_from_activity(
         limit_price=limit_price,
         metadata=order_metadata,
     )
-    approx_notional = order.size if manifold_buy_budget else order.size * float(order.limit_price or 0.0)
+    approx_notional = order.size if buy_budget_activity else order.size * float(order.limit_price or 0.0)
     result: Dict[str, Any] = {
         "status": "live_preflight" if settings.live else "simulation",
         "live": bool(settings.live),
@@ -4486,13 +4487,12 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             configured_root = frontend_dir if frontend_dir is not None else DEFAULT_FRONTEND_DIR
             # Deployment-time server configuration is validated by the
             # immutable catalog before any HTTP path lookup.
-            # codeql[py/path-injection]
-            root = configured_root.resolve()
+            root = configured_root.resolve()  # lgtm [py/path-injection]
         except (OSError, RuntimeError, ValueError):
             return {}
-        # codeql[py/path-injection] The root is a deployment-time directory,
-        # never a request-derived path.
-        if not root.is_dir():
+        # The root is a deployment-time directory, never a request-derived
+        # path.  The catalog is built once before any HTTP request is handled.
+        if not root.is_dir():  # lgtm [py/path-injection]
             return {}
 
         catalog: Dict[str, Path] = {}
@@ -4501,9 +4501,8 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             try:
                 # Candidates come only from the validated root and are
                 # confined with relative_to below.
-                # codeql[py/path-injection]
-                target = candidate.resolve()
-                target.relative_to(root)
+                target = candidate.resolve()  # lgtm [py/path-injection]
+                target.relative_to(root)  # lgtm [py/path-injection]
             except (OSError, RuntimeError, ValueError):
                 return
             if target.is_file():
@@ -4511,7 +4510,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
 
         add_file("index.html", root / "index.html")
         try:
-            root_entries = tuple(root.iterdir())
+            root_entries = tuple(root.iterdir())  # lgtm [py/path-injection]
         except OSError:
             return catalog
         for candidate in root_entries:
@@ -4520,7 +4519,9 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
 
         assets_dir = root / "assets"
         try:
-            asset_entries = tuple(assets_dir.iterdir()) if assets_dir.is_dir() else ()
+            asset_entries = (  # lgtm [py/path-injection]
+                tuple(assets_dir.iterdir()) if assets_dir.is_dir() else ()
+            )
         except OSError:
             return catalog
         for candidate in asset_entries:

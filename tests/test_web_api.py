@@ -222,6 +222,37 @@ class FakeOpinionCopyAdapter(FakePolymarketAdapter):
         ][:limit]
 
 
+class FakeMyriadCopyAdapter(FakePolymarketAdapter):
+    metadata = MarketMetadata(
+        market_id="myriad_markets",
+        display_name="Myriad Markets",
+        capabilities=MarketCapabilities(
+            price_reading=True,
+            alerts=True,
+            orderbook_reading=True,
+            paper_trading=True,
+            copy_trading=True,
+        ),
+    )
+
+    def list_activity(self, wallet: str, *, limit: int = 25) -> list[dict]:
+        return [
+            {
+                "transactionHash": "myriad-tx-1",
+                "timestamp": 201,
+                "proxyWallet": wallet,
+                "asset": "501:1",
+                "side": "BUY",
+                "price": 0.61,
+                "size": 12.2,
+                "value": 12.2,
+                "shares": 20.0,
+                "slug": "btc-above-100k-2026",
+                "outcome": "Yes",
+            }
+        ][:limit]
+
+
 class FakeRegistry:
     def __init__(self, adapter: MarketAdapter) -> None:
         self.adapter = adapter
@@ -860,6 +891,34 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(preview["status"], "simulation")
         self.assertEqual(preview["order"]["market_id"], "opinion_labs")
         self.assertEqual(preview["order"]["contract_id"], "77:YES:0xyes")
+        self.assertTrue(preview["pricing"]["capped_by_max_usdc"])
+
+    def test_myriad_wallet_activity_uses_public_feed_and_collateral_budget_copy(self) -> None:
+        cfg = AppConfig()
+        cfg.selected_market_id = "myriad_markets"
+        cfg.markets["myriad_markets"].enabled = True
+        cfg.wallets = [WalletWatch(wallet=WALLET, display_name="tracked")]
+        cfg.copytrading = CopyTradeSettings(
+            enabled=True,
+            live=False,
+            follow_wallet=WALLET,
+            follow_wallets=[WALLET],
+            scale=1.0,
+            max_usdc_per_trade=1.0,
+            slippage=0.02,
+        )
+        recent: list[dict] = []
+
+        result = poll_wallet_activity(cfg, FakeRegistry(FakeMyriadCopyAdapter()), recent)
+
+        self.assertEqual(result["problems"], [])
+        self.assertEqual(len(result["activity"]), 1)
+        preview = result["activity"][0]["copy_preview"]
+        self.assertEqual(preview["status"], "simulation")
+        self.assertEqual(preview["order"]["market_id"], "myriad_markets")
+        self.assertEqual(preview["order"]["contract_id"], "501:1")
+        self.assertAlmostEqual(preview["order"]["size"], 1.0)
+        self.assertAlmostEqual(preview["order"]["approx_notional"], 1.0)
         self.assertTrue(preview["pricing"]["capped_by_max_usdc"])
 
     def test_manifold_wallet_and_copy_settings_use_prefixed_public_identity(self) -> None:

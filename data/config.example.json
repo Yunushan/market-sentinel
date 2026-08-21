@@ -299,7 +299,7 @@
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.25,
-        "notes": "Public question/market discovery, outcome price reads, orderbooks, alerts, local paper quote payloads, and guarded signed order submission are implemented through the official Myriad API. Live trading stays disabled by default; copy trading remains unsupported."
+        "notes": "Public question/market discovery, outcome price reads, orderbooks, alerts, public wallet buy/sell activity, simulation-first copy intents, local paper quote payloads, and guarded signed order submission are implemented through the official Myriad API. Live trading stays disabled by default; live copy/order submission remains guarded."
       }
     },
     "kalshi": {

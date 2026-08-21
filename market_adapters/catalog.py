@@ -226,7 +226,10 @@ MYRIAD_CAPABILITIES = MarketCapabilities(
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    # The documented public /users/:address/events feed supports
+    # simulation-first wallet activity copy. Live execution remains guarded
+    # behind the signed Myriad order path.
+    copy_trading=True,
     api_required=True,
     credentials_required=False,
     kyc_required=False,
@@ -522,7 +525,10 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="myriad_markets",
         display_name="Myriad Markets",
         homepage_url="https://myriad.markets",
-        description="Official Myriad Protocol API adapter for public question/market discovery, outcome prices, orderbooks, dry-run quote payloads, and guarded signed order submission.",
+        description=(
+            "Official Myriad Protocol API adapter for public question/market discovery, outcome prices, orderbooks, "
+            "public wallet-event activity, simulation-first copy intents, dry-run quote payloads, and guarded signed order submission."
+        ),
         capabilities=MYRIAD_CAPABILITIES,
     ),
     MarketMetadata(

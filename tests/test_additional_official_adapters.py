@@ -1192,6 +1192,43 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(calls[0][2]["network_id"], 56)
         self.assertEqual(calls[0][3]["x-api-key"], "myriad-key")
 
+    def test_myriad_public_wallet_events_support_safe_simulation_copy(self) -> None:
+        wallet = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+        adapter = MyriadAdapter({"myriad_network_id": 56})
+        events = load_fixture("myriad_markets", "user_events")
+
+        def fake_get_json(url: str, *, params=None, headers=None):
+            self.assertTrue(url.endswith(f"/users/{wallet}/events"))
+            self.assertEqual(params["page"], 1)
+            self.assertEqual(params["limit"], 25)
+            self.assertEqual(params["trading_model"], "all")
+            self.assertEqual(params["only_relevant"], "true")
+            self.assertEqual(params["network_id"], 56)
+            return events
+
+        adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+        activities = adapter.list_activity(wallet)
+
+        self.assertTrue(adapter.capabilities.copy_trading)
+        self.assertEqual(len(activities), 2)
+        buy, sell = activities
+        self.assertEqual(buy["asset"], "501:1")
+        self.assertEqual(buy["side"], "BUY")
+        self.assertAlmostEqual(buy["size"], 12.2)
+        self.assertAlmostEqual(buy["price"], 0.61)
+        self.assertEqual(sell["asset"], "501:2")
+        self.assertEqual(sell["side"], "SELL")
+        self.assertAlmostEqual(sell["size"], 4.0)
+        self.assertAlmostEqual(sell["price"], 0.39)
+
+        result = adapter.copy_trade_from_activity(sell)
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.raw["request"]["action"], "sell")
+        self.assertEqual(result.raw["request"]["shares"], 4.0)
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_activity("not-a-wallet")
+
     def test_opinion_adapter_requires_key_and_maps_market_data(self) -> None:
         adapter = OpinionAdapter()
         markets = load_fixture("opinion_labs", "markets")

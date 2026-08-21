@@ -5,7 +5,8 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
+from .errors import MarketConfigurationError, MarketHTTPError
+from .identity import require_activity_identity
 from .types import (
     MarketContract,
     MarketEvent,
@@ -39,6 +40,8 @@ class MyriadAdapter(MarketAdapter):
                 "references": list(MYRIAD_REFERENCES),
                 "credential_sources": [{"name": api_key.name, "source": api_key.source}] if api_key else [],
                 "live_trading_supported": True,
+                "activity_feed_supported": bool(self.capabilities.copy_trading),
+                "copy_trading_supported": bool(self.capabilities.copy_trading),
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
             }
         )
@@ -133,11 +136,118 @@ class MyriadAdapter(MarketAdapter):
         }
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "copy_trading",
-            "Myriad copy trading is unsupported because this adapter does not mirror wallet/account activity.",
+        self.ensure_capability("copy_trading")
+        contract_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
+        if not contract_id:
+            raise MarketConfigurationError("Myriad activity has no market/outcome contract id.")
+        side = str(activity.get("side") or "").strip().upper()
+        if side not in {"BUY", "SELL"}:
+            raise MarketConfigurationError("Myriad activity side must be BUY or SELL.")
+        size = self._required_positive_number(activity.get("size"), "Myriad activity size")
+        raw_price = activity.get("price")
+        limit_price = None if raw_price in (None, "") else self._safe_probability(raw_price)
+        if raw_price not in (None, "") and limit_price is None:
+            raise MarketConfigurationError("Myriad activity reference price must be between 0 and 1.")
+        metadata: Dict[str, Any] = {"activity": dict(activity), "source": "myriad_user_event_feed"}
+        if side == "SELL":
+            metadata["shares"] = activity.get("shares") or size
+        return self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=contract_id,
+                side=side,
+                size=size,
+                limit_price=limit_price,
+                metadata=metadata,
+            )
         )
+
+    def list_activity(self, wallet_address: str, *, limit: int = 25) -> List[Dict[str, Any]]:
+        """Return normalized public buy/sell events for an EVM wallet.
+
+        Myriad documents ``GET /users/:address/events`` as a public read for
+        any wallet.  Only trade actions are admitted to the copy workflow;
+        liquidity, claim, split, merge, and other account events are ignored.
+        The normalized BUY size is collateral value and SELL size is shares,
+        matching the Myriad quote contract.
+        """
+
+        self.ensure_capability("copy_trading")
+        wallet = require_activity_identity(self.market_id, wallet_address)
+        desired = max(1, min(int(limit or 25), 100))
+        params: Dict[str, Any] = {
+            "page": 1,
+            "limit": desired,
+            "trading_model": str(self.config.get("myriad_activity_trading_model") or "all"),
+            "only_relevant": "true",
+        }
+        network_id = self.config.get("myriad_activity_network_id", self.config.get("myriad_network_id"))
+        if network_id not in (None, ""):
+            params["network_id"] = network_id
+        market_id = str(self.config.get("myriad_activity_market_id") or "").strip()
+        if market_id:
+            params["market_id"] = market_id
+        market_slug = str(self.config.get("myriad_activity_market_slug") or "").strip()
+        if market_slug:
+            params["market_slug"] = market_slug
+        payload = self._get(f"/users/{wallet}/events", params=params)
+        activities: List[Dict[str, Any]] = []
+        configured_network = str(network_id).strip() if network_id not in (None, "") else ""
+        for event in self._activity_rows(payload):
+            action = str(event.get("action") or "").strip().lower()
+            if action not in {"buy", "sell"}:
+                continue
+            event_network = event.get("networkId") or event.get("network_id")
+            if configured_network and event_network not in (None, "") and str(event_network).strip() != configured_network:
+                continue
+            try:
+                activities.append(self._activity_from_event(wallet, event))
+            except MarketConfigurationError:
+                # A malformed public event must never become an order intent.
+                continue
+        return activities[:desired]
+
+    def _activity_from_event(self, wallet: str, event: Mapping[str, Any]) -> Dict[str, Any]:
+        market_id = str(event.get("marketId") or event.get("market_id") or "").strip()
+        outcome_id = str(event.get("outcomeId") or event.get("outcome_id") or "").strip()
+        if not market_id or not outcome_id:
+            raise MarketConfigurationError("Myriad user event omitted marketId or outcomeId.")
+        action = str(event.get("action") or "").strip().lower()
+        side = {"buy": "BUY", "sell": "SELL"}.get(action)
+        if side is None:
+            raise MarketConfigurationError("Myriad user event has an unsupported action.")
+        shares = self._finite_number(event.get("shares"))
+        value = self._finite_number(event.get("value"))
+        size = value if side == "BUY" else shares
+        if size is None or size <= 0:
+            raise MarketConfigurationError("Myriad user event did not contain a positive trade size.")
+        price = None
+        if value is not None and shares is not None and shares > 0:
+            price = self._safe_probability(value / shares)
+        tx_hash = str(event.get("txId") or event.get("txHash") or event.get("transactionHash") or "").strip()
+        timestamp = self._timestamp_seconds(event.get("timestamp") or event.get("createdAt"))
+        stable_id = tx_hash or f"{market_id}:{outcome_id}:{timestamp}:{side}:{size}"
+        contract_id = self._contract_id(market_id, outcome_id)
+        return {
+            "type": "TRADE",
+            "proxyWallet": wallet,
+            "wallet": wallet,
+            "asset": contract_id,
+            "contract_id": contract_id,
+            "marketId": market_id,
+            "networkId": event.get("networkId") or event.get("network_id"),
+            "side": side,
+            "size": size,
+            "value": value,
+            "shares": shares,
+            "price": price,
+            "timestamp": timestamp,
+            "transactionHash": tx_hash or f"myriad-event:{stable_id}",
+            "slug": str(event.get("marketSlug") or market_id),
+            "outcome": str(event.get("outcomeTitle") or outcome_id),
+            "pseudonym": str(event.get("marketTitle") or ""),
+            "raw": dict(event),
+        }
 
     def _get_question(self, question_id: str) -> Mapping[str, Any]:
         clean = str(question_id or "").strip()
@@ -371,6 +481,49 @@ class MyriadAdapter(MarketAdapter):
             if isinstance(data, list):
                 return [item for item in data if isinstance(item, Mapping)]
         return []
+
+    @staticmethod
+    def _activity_rows(payload: Any) -> List[Mapping[str, Any]]:
+        """Extract the list from the documented paginated user-events shape."""
+
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, Mapping)]
+        if isinstance(payload, Mapping):
+            for key in ("data", "events", "results", "items"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, Mapping)]
+                if isinstance(value, Mapping):
+                    for nested_key in ("data", "events", "results", "items"):
+                        nested = value.get(nested_key)
+                        if isinstance(nested, list):
+                            return [item for item in nested if isinstance(item, Mapping)]
+        return []
+
+    @staticmethod
+    def _finite_number(value: Any) -> Optional[float]:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+
+    @staticmethod
+    def _required_positive_number(value: Any, label: str) -> float:
+        number = MyriadAdapter._finite_number(value)
+        if number is None:
+            raise MarketConfigurationError(f"{label} must be numeric.")
+        if number <= 0:
+            raise MarketConfigurationError(f"{label} must be positive.")
+        return number
+
+    @staticmethod
+    def _timestamp_seconds(value: Any) -> int:
+        number = MyriadAdapter._finite_number(value)
+        if number is None or number <= 0:
+            return 0
+        timestamp = int(number)
+        return timestamp // 1000 if timestamp > 10_000_000_000 else timestamp
 
     @staticmethod
     def _status_from_question(question: Mapping[str, Any]) -> str:

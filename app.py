@@ -4518,8 +4518,8 @@ class App(tk.Tk):
 
         # Enforce max USDC exposure by shrinking share size
         max_usdc = max(0.01, float(s.max_usdc_per_trade))
-        manifold_buy_budget = market_id == "manifold" and side == "BUY"
-        if manifold_buy_budget:
+        buy_budget_activity = market_id in {"manifold", "myriad_markets"} and side == "BUY"
+        if buy_budget_activity:
             if size > max_usdc:
                 size = max_usdc
         elif limit_price > 0:
@@ -4536,7 +4536,7 @@ class App(tk.Tk):
 
         if not s.live:
             order_metadata: Dict[str, Any] = {"source": "copy_trading", "activity": dict(item)}
-            if market_id == "manifold" and side == "SELL":
+            if market_id in {"manifold", "myriad_markets"} and side == "SELL":
                 order_metadata["shares"] = item.get("shares") or size
             order = PaperOrderRequest(
                 market_id=market_id,

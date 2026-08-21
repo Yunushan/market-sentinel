@@ -119,7 +119,7 @@ Current catalog snapshot:
 - Orderbook reading supported: 23 yes, 45 no
 - Paper trading supported: 44 yes, 24 no
 - Live trading supported: 34 guarded/off by default, 34 no
-- Copy trading supported: 3 yes, 65 no
+- Copy trading supported: 4 yes, 64 no
 
 Important status rules:
 
@@ -261,6 +261,7 @@ These articles completed the catalog, adapter architecture, verification, docs, 
 - Article 122 FanDuel Predicts/OG Read-only Adapter: scope complete for this pass; FanDuel's current product and June 2026 press release document contracts listed by CME Group and Crypto.com's OG Prediction Markets/CDNA. A fixture-backed alias now covers the documented OG/CDNA discovery, contracts, prices, alerts, and local dry-run orders through the official Crypto.com Predictions API. CME-listed contracts remain available through the CME/IBKR adapter; FanDuel account execution, orderbook depth, and copy trading remain explicitly unsupported.
 - Article 123 Opinion Wallet Activity and Simulation Copy Adapter: scope complete for this pass; the official Opinion OpenAPI wallet-trade feed is fixture-backed and normalized into the common activity shape, Opinion copy capability now produces bounded simulation-first paper intents, and the selected-market wallet/copy API path no longer assumes Polymarket. Opinion live execution remains disabled because order signing belongs to the separate CLOB SDK.
 - Article 124 Manifold Public Activity and Simulation Copy Adapter: scope complete for this pass; the official public `/v0/bets?username=...` feed is fixture-backed and normalized into the common activity shape behind a safe `manifold:<username>` identity, selected-market wallet/copy API and desktop paths accept the identity, and simulation-first copy previews preserve Manifold amount-versus-share semantics. Live MANA betting remains separately guarded, and CLOB orderbook reading remains unsupported.
+- Article 125 Myriad Public Wallet Activity and Simulation Copy Adapter: scope complete for this pass; the official public `GET /users/:address/events` feed is fixture-backed and normalized into the common activity shape with EVM identity validation, buy-value versus sell-share semantics, selected-market API/desktop copy preview parity, and guarded simulation-first paper intents. Live Myriad execution remains behind signed-order and shared live-safety gates.
 
 ## Active continuation goals
 
