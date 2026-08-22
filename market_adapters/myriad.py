@@ -380,6 +380,7 @@ class MyriadAdapter(MarketAdapter):
         )
         return {"x-api-key": credential.value} if credential else {}
 
+    @staticmethod
     def _trade_limit(value: Any) -> int:
         try:
             desired = int(value)
