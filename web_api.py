@@ -3579,6 +3579,19 @@ def market_account_payload(
             "status": _query_value(query_params, "status"),
             "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 1000),
         }
+    elif normalized_market_id == "probable":
+        kwargs = {
+            "page": _clamp_int(_query_value(query_params, "page", "1"), 1, 1, 10000),
+            "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 50),
+            "event_id": _query_value(query_params, "event_id"),
+            "token_ids": query_params.get("token_ids") or query_params.get("token_id") or [],
+        }
+        if normalized_operation == "order":
+            kwargs = {
+                "order_id": _query_value(query_params, "order_id"),
+                "token_id": _query_value(query_params, "token_id"),
+                "client_order_id": _query_value(query_params, "client_order_id"),
+            }
     elif normalized_market_id == "kalshi":
         raw_contract = _query_value(query_params, "contract_id")
         ticker = _query_value(query_params, "ticker") or raw_contract.split(":", 1)[0]
@@ -3841,6 +3854,10 @@ def market_order_management_payload(
         )
     for key in (
         "order_id",
+        "order_ids",
+        "token_id",
+        "token_ids",
+        "event_id",
         "offer_id",
         "offer_ids",
         "event_ids",

@@ -1551,6 +1551,93 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         with self.assertRaises(UnsupportedFeatureError):
             live_adapter.copy_trade_from_activity({"side": "BUY"})
 
+    def test_probable_account_reads_and_guarded_cancellations_use_fixed_signed_paths(self) -> None:
+        adapter = ProbableAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "probable_order_management_enabled": True,
+                "probable_address": "0x0000000000000000000000000000000000000001",
+                "probable_api_key": "prob-key",
+                "probable_api_secret": "c2VjcmV0",
+                "probable_api_passphrase": "prob-pass",
+            }
+        )
+        open_orders = load_fixture("probable", "open_orders")
+        order_detail = load_fixture("probable", "order_detail")
+        cancel_response = load_fixture("probable", "cancel_order_response")
+        calls = []
+
+        def fake_request(method: str, url: str, *, data=None, headers=None, timeout=None):
+            calls.append((method, url, data, headers, timeout))
+            if method == "GET" and "/orders/56/open?" in url:
+                return FakeResponse(open_orders)
+            if method == "GET" and "/order/56/123?tokenId=token-yes" in url:
+                return FakeResponse(order_detail)
+            if method == "DELETE":
+                return FakeResponse(cancel_response)
+            raise AssertionError(f"unexpected Probable request: {method} {url}")
+
+        adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
+        self.assertEqual(adapter.health_check()["account_recovery_operations"], ["open_orders", "order"])
+        self.assertEqual(
+            adapter.health_check()["order_management_operations"],
+            ["cancel_order", "cancel_orders", "cancel_all_orders"],
+        )
+
+        open_result = adapter.account_recovery(
+            "open_orders",
+            page=2,
+            limit=2,
+            event_id="162",
+            token_ids=["token-yes"],
+        )
+        detail_result = adapter.account_recovery("order", order_id="123", token_id="token-yes")
+        self.assertEqual(open_result["orders"][0]["orderId"], 123)
+        self.assertEqual(detail_result["status"], "OPEN")
+        self.assertIn("PROB_SIGNATURE", calls[0][3])
+        self.assertIn("eventId=162", calls[0][1])
+        self.assertIn("tokenIds=token-yes", calls[0][1])
+
+        confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+        single = adapter.manage_orders(
+            "cancel_order",
+            order_id="123",
+            token_id="token-yes",
+            confirm_order_management=confirmation,
+        )
+        batch = adapter.manage_orders(
+            "cancel_orders",
+            order_ids=["123", "124"],
+            token_id="token-yes",
+            confirm_order_management=confirmation,
+        )
+        all_orders = adapter.manage_orders(
+            "cancel_all_orders",
+            confirm_order_management=confirmation,
+            confirm_global_cancel="CANCEL ALL PROBABLE ORDERS",
+        )
+        self.assertEqual(single["response"]["status"], "CANCELED")
+        self.assertEqual(len(batch["response"]), 2)
+        self.assertEqual(len(all_orders["response"]), 2)
+        delete_urls = [call[1] for call in calls if call[0] == "DELETE"]
+        self.assertTrue(delete_urls)
+        self.assertTrue(all("/order/56/" in url and "tokenId=" in url for url in delete_urls))
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders(
+                "cancel_all_orders",
+                confirm_order_management=confirmation,
+                confirm_global_cancel="wrong",
+            )
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders(
+                "cancel_order",
+                order_id="../outside",
+                token_id="token-yes",
+                confirm_order_management=confirmation,
+            )
+
     def test_xmarket_adapter_maps_markets_orderbooks_paper_orders_and_guarded_live_orders(self) -> None:
         adapter = XMarketAdapter()
         markets = load_fixture("xmarket", "markets")

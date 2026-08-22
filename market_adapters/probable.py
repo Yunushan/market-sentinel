@@ -8,6 +8,7 @@ import math
 import re
 import time
 from typing import Any, Dict, List, Mapping, Optional, Tuple
+from urllib.parse import urlencode
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
@@ -28,6 +29,11 @@ from .types import (
 DEFAULT_PROBABLE_MARKET_BASE_URL = "https://market-api.probable.markets/public/api/v1"
 DEFAULT_PROBABLE_CLOB_BASE_URL = "https://api.probable.markets/public/api/v1"
 PROBABLE_CHAIN_ID = 56
+PROBABLE_ACCOUNT_OPERATIONS = ("open_orders", "order")
+PROBABLE_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_orders", "cancel_all_orders")
+PROBABLE_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+PROBABLE_GLOBAL_CANCEL_CONFIRMATION = "CANCEL ALL PROBABLE ORDERS"
+PROBABLE_MAX_ORDER_BATCH = 50
 PROBABLE_REFERENCES = (
     "https://developer.probable.markets/",
     "https://www.npmjs.com/package/@prob/clob",
@@ -45,6 +51,8 @@ class ProbableAdapter(MarketAdapter):
     """
 
     metadata = get_market_metadata("probable")
+    account_recovery_operations = PROBABLE_ACCOUNT_OPERATIONS
+    order_management_operations = PROBABLE_ORDER_MANAGEMENT_OPERATIONS
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -68,6 +76,16 @@ class ProbableAdapter(MarketAdapter):
                 "live_trading_supported": True,
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "signed_order_required": True,
+                "account_recovery_operations": list(self.account_recovery_operations),
+                "authenticated_account_endpoints": [
+                    "/orders/{chain_id}/open",
+                    "/order/{chain_id}/{order_id}",
+                ],
+                "order_management_operations": list(self.order_management_operations),
+                "order_management_enabled": self.config_bool("probable_order_management_enabled", False),
+                "authenticated_order_management_endpoints": [
+                    "/order/{chain_id}/{order_id} (DELETE)",
+                ],
             }
         )
         return health
@@ -358,6 +376,119 @@ class ProbableAdapter(MarketAdapter):
             "response": response,
         }
 
+    def account_recovery(self, operation: str, **kwargs: Any) -> Any:
+        """Read Probable's documented authenticated order endpoints.
+
+        The official SDK exposes ``getOpenOrders`` and ``getOrder`` through
+        the L2-authenticated CLOB API.  Requests are signed against the full
+        path, including query parameters, and only the fixed order routes are
+        accepted here.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.account_recovery_operations:
+            supported = ", ".join(self.account_recovery_operations)
+            raise MarketConfigurationError(f"Probable account recovery supports only: {supported}.")
+
+        if normalized == "open_orders":
+            path = self._open_orders_path(kwargs)
+            return self._l2_request("GET", path)
+
+        order_id = self._safe_identifier(kwargs.get("order_id"), "order")
+        token_id = self._safe_identifier(kwargs.get("token_id"), "token")
+        query: Dict[str, str] = {"tokenId": token_id}
+        client_order_id = kwargs.get("client_order_id") or kwargs.get("orig_client_order_id")
+        if client_order_id:
+            query["origClientOrderId"] = self._safe_identifier(client_order_id, "client order")
+        path = self._with_query(f"/order/{self.chain_id}/{order_id}", query)
+        return self._l2_request("GET", path)
+
+    def manage_orders(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Run guarded Probable order cancellations through fixed API paths.
+
+        Probable documents a single-order ``DELETE /order/{chain}/{id}``
+        operation.  Batch and cancel-all requests are deliberately composed
+        from that fixed endpoint after bounded local validation; this avoids
+        guessing an undocumented bulk path while preserving the SDK's public
+        cancellation surface.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.order_management_operations:
+            supported = ", ".join(self.order_management_operations)
+            raise MarketConfigurationError(
+                f"Probable order-management operation must be one of: {supported}."
+            )
+        self.ensure_capability("live_trading")
+        if not self.config_bool("probable_order_management_enabled", False):
+            raise MarketConfigurationError(
+                "Probable order management is disabled by adapter config. "
+                "Set probable_order_management_enabled=true only after reviewing live-order risk controls."
+            )
+        self.ensure_live_trading_enabled("Probable order management")
+        if str(kwargs.get("confirm_order_management") or "").strip() != PROBABLE_ORDER_MANAGEMENT_CONFIRMATION:
+            raise MarketConfigurationError(
+                "Probable order management requires exact confirmation text "
+                f"{PROBABLE_ORDER_MANAGEMENT_CONFIRMATION}."
+            )
+        # Resolve credentials before any mutation or account read used by a
+        # composed cancellation operation.
+        self._l2_credentials()
+
+        responses: List[Any] = []
+        requests: List[Dict[str, Any]] = []
+        if normalized == "cancel_order":
+            order_id, token_id, client_order_id = self._order_identity(kwargs)
+            response = self._cancel_order(order_id, token_id, client_order_id)
+            responses.append(response)
+            requests.append(self._order_request_details(order_id, token_id, client_order_id))
+        elif normalized == "cancel_orders":
+            identities = self._order_identities(kwargs)
+            for order_id, token_id, client_order_id in identities:
+                responses.append(self._cancel_order(order_id, token_id, client_order_id))
+                requests.append(self._order_request_details(order_id, token_id, client_order_id))
+        else:
+            if str(kwargs.get("confirm_global_cancel") or "").strip() != PROBABLE_GLOBAL_CANCEL_CONFIRMATION:
+                raise MarketConfigurationError(
+                    "Probable cancel_all_orders requires exact global confirmation text "
+                    f"{PROBABLE_GLOBAL_CANCEL_CONFIRMATION}."
+                )
+            open_orders = self.account_recovery(
+                "open_orders",
+                event_id=kwargs.get("event_id"),
+                token_ids=kwargs.get("token_ids"),
+                page=kwargs.get("page", 1),
+                limit=kwargs.get("limit", PROBABLE_MAX_ORDER_BATCH),
+            )
+            rows = self._list_from_payload(open_orders, "orders", "data")
+            identities = [self._order_identity(row) for row in rows]
+            if len(identities) > PROBABLE_MAX_ORDER_BATCH:
+                raise MarketConfigurationError(
+                    f"Probable cancel_all_orders is capped at {PROBABLE_MAX_ORDER_BATCH} open orders per request."
+                )
+            for order_id, token_id, client_order_id in identities:
+                responses.append(self._cancel_order(order_id, token_id, client_order_id))
+                requests.append(self._order_request_details(order_id, token_id, client_order_id))
+
+        return {
+            "market_id": self.market_id,
+            "operation": normalized,
+            "live": True,
+            "preflight": {
+                "market_id": self.market_id,
+                "display_name": self.display_name,
+                "feature": "order management",
+                "operation": normalized,
+                "live_trading_enabled": True,
+                "order_management_enabled": True,
+                "confirmed": True,
+                "requires_credentials": True,
+                "references": list(PROBABLE_REFERENCES),
+            },
+            "request": {"orders": requests},
+            "response": responses if normalized != "cancel_order" else responses[0],
+        }
+
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
         raise UnsupportedFeatureError(
             self.market_id,
@@ -469,16 +600,20 @@ class ProbableAdapter(MarketAdapter):
     def _clob_get(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> Any:
         return self.runtime.get_json(self._url(self.clob_api_base_url, path), params=params)
 
-    def _request_json(self, method: str, path: str, body: str, headers: Mapping[str, str]) -> Any:
+    def _request_json(self, method: str, path: str, body: Optional[str], headers: Mapping[str, str]) -> Any:
         self.runtime.rate_limiter.wait()
         request_headers = {"Accept": "application/json", "User-Agent": self.runtime.user_agent, **dict(headers)}
+        request_kwargs: Dict[str, Any] = {
+            "headers": request_headers,
+            "timeout": self.runtime.timeout_seconds,
+        }
+        if body is not None:
+            request_kwargs["data"] = body
         try:
             response = self.runtime.session.request(
                 method.upper(),
                 self._url(self.clob_api_base_url, path),
-                data=body,
-                headers=request_headers,
-                timeout=self.runtime.timeout_seconds,
+                **request_kwargs,
             )
         except Exception as exc:
             raise MarketHTTPError(f"{self.market_id} HTTP request failed: {exc}") from exc
@@ -490,15 +625,128 @@ class ProbableAdapter(MarketAdapter):
         except ValueError as exc:
             raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
 
+    def _l2_request(self, method: str, path: str, body: Optional[Any] = None) -> Any:
+        credentials = self._l2_credentials()
+        if body is None:
+            body_text = ""
+            request_body = None
+        elif isinstance(body, str):
+            body_text = body
+            request_body = body
+        else:
+            body_text = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+            request_body = body_text
+        headers = self._l2_headers(method, path, body_text, credentials)
+        return self._request_json(method, path, request_body, headers)
+
+    def _open_orders_path(self, kwargs: Mapping[str, Any]) -> str:
+        page = self._bounded_limit(kwargs.get("page", 1), maximum=10_000, label="Probable order page")
+        limit = self._bounded_limit(
+            kwargs.get("limit", PROBABLE_MAX_ORDER_BATCH),
+            maximum=PROBABLE_MAX_ORDER_BATCH,
+            label="Probable open-order limit",
+        )
+        query: List[Tuple[str, str]] = [("page", str(page)), ("limit", str(limit))]
+        event_id = kwargs.get("event_id")
+        if event_id:
+            query.append(("eventId", self._safe_identifier(event_id, "event")))
+        token_ids = self._identifier_list(kwargs.get("token_ids") or kwargs.get("token_id"), "token")
+        query.extend(("tokenIds", token_id) for token_id in token_ids)
+        return self._with_query(f"/orders/{self.chain_id}/open", query)
+
+    def _cancel_order(self, order_id: str, token_id: str, client_order_id: Optional[str]) -> Any:
+        query: Dict[str, str] = {"tokenId": token_id}
+        if client_order_id:
+            query["origClientOrderId"] = client_order_id
+        return self._l2_request("DELETE", self._with_query(f"/order/{self.chain_id}/{order_id}", query))
+
+    def _order_identity(self, value: Mapping[str, Any]) -> Tuple[str, str, Optional[str]]:
+        if not isinstance(value, Mapping):
+            raise MarketConfigurationError("Probable order identity must be an object.")
+        order_id = self._safe_identifier(value.get("order_id") or value.get("orderId"), "order")
+        token_id = self._safe_identifier(
+            value.get("token_id") or value.get("tokenId") or value.get("ctfTokenId"),
+            "token",
+        )
+        client_order_id = value.get("client_order_id") or value.get("clientOrderId") or value.get("origClientOrderId")
+        if client_order_id:
+            client_order_id = self._safe_identifier(client_order_id, "client order")
+        return order_id, token_id, client_order_id
+
+    def _order_identities(self, kwargs: Mapping[str, Any]) -> List[Tuple[str, str, Optional[str]]]:
+        raw_orders = kwargs.get("orders")
+        if raw_orders is not None:
+            if not isinstance(raw_orders, list) or not raw_orders:
+                raise MarketConfigurationError("Probable cancel_orders requires a non-empty orders array.")
+            if len(raw_orders) > PROBABLE_MAX_ORDER_BATCH:
+                raise MarketConfigurationError(
+                    f"Probable cancel_orders is capped at {PROBABLE_MAX_ORDER_BATCH} orders."
+                )
+            identities = [self._order_identity(row) for row in raw_orders]
+        else:
+            order_ids = self._identifier_list(kwargs.get("order_ids") or kwargs.get("order_id"), "order")
+            if not order_ids:
+                raise MarketConfigurationError("Probable cancel_orders requires order_ids.")
+            if len(order_ids) > PROBABLE_MAX_ORDER_BATCH:
+                raise MarketConfigurationError(
+                    f"Probable cancel_orders is capped at {PROBABLE_MAX_ORDER_BATCH} orders."
+                )
+            token_id = self._safe_identifier(kwargs.get("token_id"), "token")
+            identities = [(order_id, token_id, None) for order_id in order_ids]
+        seen = set()
+        for order_id, token_id, _client_order_id in identities:
+            key = (order_id, token_id)
+            if key in seen:
+                raise MarketConfigurationError("Probable cancel_orders cannot contain duplicate order/token pairs.")
+            seen.add(key)
+        return identities
+
+    @staticmethod
+    def _order_request_details(order_id: str, token_id: str, client_order_id: Optional[str]) -> Dict[str, Any]:
+        details: Dict[str, Any] = {"order_id": order_id, "token_id": token_id}
+        if client_order_id:
+            details["client_order_id"] = client_order_id
+        return details
+
+    @staticmethod
+    def _identifier_list(value: Any, label: str) -> List[str]:
+        if value in (None, ""):
+            return []
+        raw_values = value if isinstance(value, (list, tuple)) else str(value).split(",")
+        if not raw_values:
+            return []
+        identifiers = []
+        for raw in raw_values:
+            clean = ProbableAdapter._safe_identifier(raw, label)
+            if clean not in identifiers:
+                identifiers.append(clean)
+        return identifiers
+
+    @staticmethod
+    def _safe_identifier(value: Any, label: str) -> str:
+        clean = str(value or "").strip()
+        if not clean or len(clean) > 256 or not re.fullmatch(r"[A-Za-z0-9._:-]+", clean):
+            raise MarketConfigurationError(f"Probable {label} identifier is invalid.")
+        return clean
+
+    @staticmethod
+    def _with_query(path: str, query: Mapping[str, Any] | List[Tuple[str, str]]) -> str:
+        if isinstance(query, Mapping):
+            items = list(query.items())
+        else:
+            items = list(query)
+        encoded = urlencode(items, doseq=True)
+        return f"{path}?{encoded}" if encoded else path
+
     def _l2_credentials(self) -> Dict[str, str]:
         values: Dict[str, str] = {}
-        for key, env_vars, label in (
-            ("address", ("PROB_ADDRESS", "PROBABLE_ADDRESS", "PROB_WALLET_ADDRESS"), "PROB_ADDRESS"),
-            ("api_key", ("PROB_API_KEY", "PROBABLE_API_KEY"), "PROB_API_KEY"),
-            ("secret", ("PROB_API_SECRET", "PROBABLE_API_SECRET"), "PROB_API_SECRET"),
-            ("passphrase", ("PROB_PASSPHRASE", "PROBABLE_API_PASSPHRASE"), "PROB_PASSPHRASE"),
+        for key, config_key, env_vars, label in (
+            ("address", "probable_address", ("PROB_ADDRESS", "PROBABLE_ADDRESS", "PROB_WALLET_ADDRESS"), "PROB_ADDRESS"),
+            ("api_key", "probable_api_key", ("PROB_API_KEY", "PROBABLE_API_KEY"), "PROB_API_KEY"),
+            ("secret", "probable_api_secret", ("PROB_API_SECRET", "PROBABLE_API_SECRET"), "PROB_API_SECRET"),
+            ("passphrase", "probable_api_passphrase", ("PROB_PASSPHRASE", "PROBABLE_API_PASSPHRASE"), "PROB_PASSPHRASE"),
         ):
-            credential = self.resolve_credential(f"probable_{key}", env_vars, required=True, label=label)
+            credential = self.resolve_credential(config_key, env_vars, required=True, label=label)
             assert credential is not None
             values[key] = credential.value
         return values

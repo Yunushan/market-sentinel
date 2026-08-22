@@ -1344,6 +1344,7 @@ KALSHI_ACCOUNT_OPERATIONS = (
 LIMITLESS_ACCOUNT_OPERATIONS = ("positions", "account_history", "user_orders")
 XMARKET_ACCOUNT_OPERATIONS = ("positions", "user_orders", "market_orders")
 SMARKETS_ACCOUNT_OPERATIONS = ("order_history", "account")
+PROBABLE_ACCOUNT_OPERATIONS = ("open_orders", "order")
 OPINION_ACCOUNT_OPERATIONS = ("order_history", "order_detail", "positions")
 OPINION_ORDER_MANAGEMENT_OPERATIONS = (
     "cancel_order",
@@ -1381,6 +1382,7 @@ MARKET_ACCOUNT_OPERATIONS = tuple(
         + LIMITLESS_ACCOUNT_OPERATIONS
         + XMARKET_ACCOUNT_OPERATIONS
         + SMARKETS_ACCOUNT_OPERATIONS
+        + PROBABLE_ACCOUNT_OPERATIONS
         + OPINION_ACCOUNT_OPERATIONS
         + BETFAIR_ACCOUNT_OPERATIONS
         + MATCHBOOK_ACCOUNT_OPERATIONS
@@ -1418,6 +1420,21 @@ def run_market_account(args: argparse.Namespace) -> int:
             "status": str(getattr(args, "status", "") or "").strip().lower(),
             "limit": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 1000),
         }
+    elif market_id == "probable":
+        kwargs = {
+            "page": _cli_clamp_int(getattr(args, "page", "1"), 1, 1, 10000),
+            "limit": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 50),
+            "event_id": str(getattr(args, "account_event_id", "") or "").strip() or None,
+            "token_ids": str(getattr(args, "token_ids", "") or "").strip() or None,
+        }
+        if operation == "order":
+            kwargs.update(
+                {
+                    "order_id": str(args.order_id or "").strip(),
+                    "token_id": str(getattr(args, "token_id", "") or "").strip(),
+                    "client_order_id": str(getattr(args, "client_order_id", "") or "").strip() or None,
+                }
+            )
     elif market_id == "kalshi":
         ticker = str(args.ticker or "").strip()
         if not ticker and args.contract:
@@ -1664,6 +1681,7 @@ MYRIAD_ORDER_MANAGEMENT_OPERATIONS = (
 )
 LIMITLESS_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "batch_cancel_orders", "cancel_all_orders")
 SMARKETS_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_orders")
+PROBABLE_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_orders", "cancel_all_orders")
 MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
     dict.fromkeys(
         BETFAIR_ORDER_MANAGEMENT_OPERATIONS
@@ -1675,6 +1693,7 @@ MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
         + OPINION_ORDER_MANAGEMENT_OPERATIONS
         + LIMITLESS_ORDER_MANAGEMENT_OPERATIONS
         + SMARKETS_ORDER_MANAGEMENT_OPERATIONS
+        + PROBABLE_ORDER_MANAGEMENT_OPERATIONS
     )
 )
 
@@ -1727,6 +1746,10 @@ def run_market_order_management(args: argparse.Namespace) -> int:
     _put_optional(payload, "confirm_global_cancel", getattr(args, "confirm_global_cancel", None))
     for key, argument in (
         ("order_id", "order_id"),
+        ("order_ids", "order_ids"),
+        ("token_id", "token_id"),
+        ("token_ids", "token_ids"),
+        ("event_id", "event_id"),
         ("offer_id", "offer_id"),
         ("offer_ids", "offer_ids"),
         ("event_ids", "event_ids"),
@@ -2735,6 +2758,9 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--market-slug", default=None, help="Limitless market slug for user_orders.")
     market_account.add_argument("--on-behalf-of", default=None, help="Optional Limitless delegated profile.")
     market_account.add_argument("--order-id", default=None, help="Optional order id for order-detail/fill reads.")
+    market_account.add_argument("--token-id", default=None, help="Probable token id for authenticated order reads.")
+    market_account.add_argument("--token-ids", default=None, help="Probable comma-separated token ids for open-order reads.")
+    market_account.add_argument("--client-order-id", default=None, help="Optional Probable client order id.")
     market_account.add_argument("--trade-id", default=None, help="Optional Polymarket trade id for fill reads.")
     market_account.add_argument("--page", default="1", help="Opinion account page (1-10000).")
     market_account.add_argument("--account-market-id", default="", help="Opinion numeric market filter.")
@@ -2804,6 +2830,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exact global-cancel text is required (venue-specific; e.g. CANCEL ALL BETS, CANCEL ALL LIMITLESS ORDERS, CANCEL ALL MATCHBOOK OFFERS, or CANCEL ALL OPINION ORDERS).",
     )
     market_orders.add_argument("--order-id", default=None, help="Venue order identifier for single-order mutations.")
+    market_orders.add_argument("--order-ids", default=None, help="Probable comma-separated order ids for batch cancellation.")
+    market_orders.add_argument("--token-id", default=None, help="Probable token id for order cancellation.")
+    market_orders.add_argument("--token-ids", default=None, help="Probable comma-separated token ids for scoped reads.")
+    market_orders.add_argument("--event-id", default=None, help="Probable event id for cancel-all scoping.")
     market_orders.add_argument("--offer-id", default=None, help="Matchbook offer identifier for single-offer mutations.")
     market_orders.add_argument("--offer-ids", default=None, help="Matchbook comma-separated offer ids for cancel_offers.")
     market_orders.add_argument("--event-ids", default=None, help="Matchbook comma-separated event ids for scoped cancellation.")

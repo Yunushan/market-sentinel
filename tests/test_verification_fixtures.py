@@ -359,6 +359,9 @@ class VerificationFixtureTests(unittest.TestCase):
         orderbook = json.loads((FIXTURE_ROOT / "probable" / "orderbook.json").read_text(encoding="utf-8"))
         activity = json.loads((FIXTURE_ROOT / "probable" / "activity.json").read_text(encoding="utf-8"))
         prices_history = json.loads((FIXTURE_ROOT / "probable" / "prices_history.json").read_text(encoding="utf-8"))
+        open_orders = json.loads((FIXTURE_ROOT / "probable" / "open_orders.json").read_text(encoding="utf-8"))
+        order_detail = json.loads((FIXTURE_ROOT / "probable" / "order_detail.json").read_text(encoding="utf-8"))
+        cancel_order = json.loads((FIXTURE_ROOT / "probable" / "cancel_order_response.json").read_text(encoding="utf-8"))
 
         self.assertIsInstance(events.get("events"), list)
         self.assertIsInstance(event.get("markets"), list)
@@ -373,6 +376,10 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIsInstance(prices_history.get("history"), list)
         self.assertIn("t", prices_history["history"][0])
         self.assertIn("p", prices_history["history"][0])
+        self.assertIsInstance(open_orders.get("orders"), list)
+        self.assertIn("orderId", open_orders["orders"][0])
+        self.assertIn("tokenId", order_detail)
+        self.assertEqual(cancel_order.get("status"), "CANCELED")
 
     def test_matchbook_fixtures_cover_exchange_payload_shapes(self) -> None:
         events = json.loads((FIXTURE_ROOT / "matchbook" / "events.json").read_text(encoding="utf-8"))
