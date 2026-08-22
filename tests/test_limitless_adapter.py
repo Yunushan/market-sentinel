@@ -66,6 +66,10 @@ class LimitlessAdapterTests(unittest.TestCase):
         self.assertIn("api.limitless.exchange", health["api_base_url"])
         self.assertIn("ws.limitless.exchange", health["websocket_url"])
         self.assertEqual(health["websocket_namespace"], "/markets")
+        self.assertEqual(
+            health["account_recovery_operations"],
+            ["positions", "account_history", "user_orders"],
+        )
 
     def test_list_events_uses_active_market_endpoint_and_filters_query(self) -> None:
         adapter = self.make_adapter()
@@ -297,8 +301,16 @@ class LimitlessAdapterTests(unittest.TestCase):
         secret = base64.b64encode(b"unit-test-secret").decode("ascii")
 
         with patch.dict("os.environ", {"LIMITLESS_TOKEN_ID": "token-id", "LIMITLESS_TOKEN_SECRET": secret}):
-            self.assertEqual(adapter.get_positions(), positions)
-            self.assertEqual(adapter.list_account_history(), history)
+            self.assertEqual(adapter.account_recovery("positions"), positions)
+            self.assertEqual(adapter.account_recovery("account_history"), history)
+            self.assertEqual(
+                adapter.account_recovery(
+                    "user_orders",
+                    market_slug="doge-above-021652-sep-1-1200-utc",
+                    on_behalf_of="profile-456",
+                ),
+                orders,
+            )
             self.assertEqual(
                 adapter.list_user_orders(
                     "doge-above-021652-sep-1-1200-utc",
@@ -307,12 +319,13 @@ class LimitlessAdapterTests(unittest.TestCase):
                 orders,
             )
 
-        self.assertEqual([call[0] for call in calls], ["GET", "GET", "GET"])
+        self.assertEqual([call[0] for call in calls], ["GET", "GET", "GET", "GET"])
         self.assertTrue(all(call[2]["lmts-api-key"] == "token-id" for call in calls))
         self.assertTrue(all(call[2]["lmts-signature"] for call in calls))
         self.assertEqual(calls[0][2]["x-on-behalf-of"], "profile-123")
         self.assertEqual(calls[1][2]["x-on-behalf-of"], "profile-123")
         self.assertEqual(calls[2][2]["x-on-behalf-of"], "profile-456")
+        self.assertEqual(calls[3][2]["x-on-behalf-of"], "profile-456")
         self.assertTrue(all(call[3] > 0 for call in calls))
 
         with self.assertRaises(MarketConfigurationError):

@@ -164,6 +164,8 @@ interface MarketReadForm {
   account_cursor: string;
   account_subaccount: string;
   account_count_filter: string;
+  account_market_slug: string;
+  account_on_behalf_of: string;
   account_historical: boolean;
   resolution: string;
   from: string;
@@ -367,6 +369,8 @@ function emptyMarketReadForm(): MarketReadForm {
     account_cursor: "",
     account_subaccount: "",
     account_count_filter: "",
+    account_market_slug: "",
+    account_on_behalf_of: "",
     account_historical: false,
     resolution: "1h",
     from: "",
@@ -763,6 +767,8 @@ export default function App() {
             cursor: form.account_cursor.trim() || undefined,
             subaccount: form.account_subaccount.trim() || undefined,
             count_filter: form.account_count_filter.trim() || undefined,
+            market_slug: form.account_market_slug.trim() || undefined,
+            on_behalf_of: form.account_on_behalf_of.trim() || undefined,
             historical: form.account_historical,
             event_ticker: form.event_id.trim() || undefined,
             from: form.from.trim() || undefined,
@@ -1930,6 +1936,22 @@ function MarketsView({
                 value={marketReadForm.account_count_filter}
                 onChange={(event) => onMarketReadFormChange({ account_count_filter: event.target.value })}
                 placeholder="position,total_traded"
+              />
+            </label>
+            <label>
+              <span>Limitless market slug</span>
+              <input
+                value={marketReadForm.account_market_slug}
+                onChange={(event) => onMarketReadFormChange({ account_market_slug: event.target.value })}
+                placeholder="For Limitless user orders"
+              />
+            </label>
+            <label>
+              <span>Delegated profile</span>
+              <input
+                value={marketReadForm.account_on_behalf_of}
+                onChange={(event) => onMarketReadFormChange({ account_on_behalf_of: event.target.value })}
+                placeholder="Optional x-on-behalf-of"
               />
             </label>
             <label>

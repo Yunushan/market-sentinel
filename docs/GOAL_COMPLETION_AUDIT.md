@@ -46,6 +46,14 @@ and queue positions are mapped only to documented endpoint paths. Order/fill
 history can opt into the documented historical feeds. The read-only Kalshi
 distribution aliases intentionally publish no private account operations.
 
+Limitless's documented HMAC account reads now use the same bounded surface:
+positions, portfolio history, and market-scoped user orders are available only
+through the adapter's explicit operation allow-list. User-order slugs and
+optional delegated profiles are validated before request construction, and the
+CLI/API/React controls forward only those validated values. Credentials,
+delegated-signing scope, linked-account eligibility, and funding remain external
+gates.
+
 ## Polymarket Evidence Tiers
 
 Polymarket public and local safety paths are implemented and tested. The

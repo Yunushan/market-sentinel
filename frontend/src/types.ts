@@ -176,7 +176,9 @@ export type MarketAccountOperation =
   | "balance"
   | "queue_positions"
   | "settled_positions"
-  | "volume_metrics";
+  | "volume_metrics"
+  | "account_history"
+  | "user_orders";
 
 export interface MarketAccountPayload {
   market_id: string;

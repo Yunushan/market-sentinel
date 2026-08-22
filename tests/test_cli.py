@@ -178,6 +178,48 @@ class MarketSentinelCliTests(unittest.TestCase):
         self.assertEqual(payload["parameters"]["limit"], 12)
         self.assertEqual(payload["parameters"]["subaccount"], 2)
 
+    def test_limitless_account_command_forwards_delegated_read_parameters(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="limitless_exchange")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("user_orders",),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+                "orders": [{"order_id": "order-1"}],
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "user_orders",
+                        "--market-slug",
+                        "doge-above-021652-sep-1-1200-utc",
+                        "--on-behalf-of",
+                        "profile-123",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["operation"], "user_orders")
+        self.assertEqual(
+            payload["parameters"],
+            {
+                "on_behalf_of": "profile-123",
+                "market_slug": "doge-above-021652-sep-1-1200-utc",
+            },
+        )
+        self.assertEqual(payload["data"]["orders"][0]["order_id"], "order-1")
+
     def test_polymarket_leaderboard_cli_builds_unlimited_scan_params(self) -> None:
         parser = market_sentinel_cli.build_parser()
         args = parser.parse_args(

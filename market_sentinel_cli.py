@@ -1341,7 +1341,10 @@ KALSHI_ACCOUNT_OPERATIONS = (
     "balance",
     "queue_positions",
 )
-MARKET_ACCOUNT_OPERATIONS = tuple(dict.fromkeys(GEMINI_ACCOUNT_OPERATIONS + KALSHI_ACCOUNT_OPERATIONS))
+LIMITLESS_ACCOUNT_OPERATIONS = ("positions", "account_history", "user_orders")
+MARKET_ACCOUNT_OPERATIONS = tuple(
+    dict.fromkeys(GEMINI_ACCOUNT_OPERATIONS + KALSHI_ACCOUNT_OPERATIONS + LIMITLESS_ACCOUNT_OPERATIONS)
+)
 
 
 def run_market_account(args: argparse.Namespace) -> int:
@@ -1350,7 +1353,13 @@ def run_market_account(args: argparse.Namespace) -> int:
     _cfg, market_id, adapter = _market_read_context(args, "account recovery")
     operation = str(args.operation or "").strip().lower()
     kwargs: Dict[str, Any] = {}
-    if market_id == "kalshi":
+    if market_id == "limitless_exchange":
+        kwargs = {
+            "on_behalf_of": str(getattr(args, "on_behalf_of", "") or "").strip() or None,
+        }
+        if operation == "user_orders":
+            kwargs["market_slug"] = str(getattr(args, "market_slug", "") or "").strip()
+    elif market_id == "kalshi":
         ticker = str(args.ticker or "").strip()
         if not ticker and args.contract:
             ticker = str(args.contract).split(":", 1)[0].strip()
@@ -2405,12 +2414,14 @@ def build_parser() -> argparse.ArgumentParser:
     market_account = markets_sub.add_parser(
         "account",
         parents=[common],
-        help="Read an explicitly documented authenticated account feed (Gemini or Kalshi).",
+        help="Read an explicitly documented authenticated account feed (Gemini, Kalshi, or Limitless).",
     )
     market_account.add_argument("operation", choices=MARKET_ACCOUNT_OPERATIONS)
     market_account.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
     market_account.add_argument("--contract", default=None, help="Optional canonical contract id for order feeds.")
     market_account.add_argument("--ticker", default=None, help="Kalshi market ticker for account reads.")
+    market_account.add_argument("--market-slug", default=None, help="Limitless market slug for user_orders.")
+    market_account.add_argument("--on-behalf-of", default=None, help="Optional Limitless delegated profile.")
     market_account.add_argument("--order-id", default=None, help="Optional Kalshi order id for fill reads.")
     market_account.add_argument("--event-ticker", default=None, help="Optional event ticker for position/volume feeds.")
     market_account.add_argument("--status", default="", help="Documented account order status (venue-specific).")

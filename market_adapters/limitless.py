@@ -44,6 +44,10 @@ class LimitlessAdapter(MarketAdapter):
     """Limitless Exchange adapter using documented REST market data and HMAC trading APIs."""
 
     metadata = get_market_metadata("limitless_exchange")
+    # Private account reads are exposed only through these documented,
+    # validated operations.  The shared CLI/API surfaces consume this
+    # allow-list so callers cannot request arbitrary authenticated paths.
+    account_recovery_operations = ("positions", "account_history", "user_orders")
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -76,6 +80,7 @@ class LimitlessAdapter(MarketAdapter):
                     "/portfolio/history",
                     "/markets/:slug/user-orders",
                 ],
+                "account_recovery_operations": list(self.account_recovery_operations),
                 "references": list(LIMITLESS_REFERENCES),
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "credential_sources": credential_sources,
@@ -350,6 +355,26 @@ class LimitlessAdapter(MarketAdapter):
 
         slug = self._validated_market_slug(market_slug)
         return self._get_account_json(f"/markets/{slug}/user-orders", on_behalf_of=on_behalf_of)
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Any:
+        """Dispatch one of the documented authenticated account reads."""
+
+        normalized = str(operation or "").strip().lower()
+        on_behalf_of = kwargs.get("on_behalf_of")
+        if normalized == "positions":
+            return self.get_positions(on_behalf_of=on_behalf_of)
+        if normalized == "account_history":
+            return self.list_account_history(on_behalf_of=on_behalf_of)
+        if normalized == "user_orders":
+            return self.list_user_orders(
+                str(kwargs.get("market_slug") or ""),
+                on_behalf_of=on_behalf_of,
+            )
+        supported = ", ".join(self.account_recovery_operations)
+        raise MarketConfigurationError(
+            f"{self.market_id} does not support account operation {normalized or '<empty>'}. "
+            f"Supported operations: {supported}."
+        )
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")

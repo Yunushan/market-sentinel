@@ -657,6 +657,46 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["parameters"]["subaccount"], 2)
         self.assertEqual(payload["data"]["fills"][0]["fill_id"], "fill-1")
 
+    def test_limitless_account_payload_forwards_delegated_read_parameters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="limitless_exchange",
+            display_name="Limitless Exchange",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("user_orders",)  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "orders": [{"order_id": "order-1"}],
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["limitless_exchange"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "limitless_exchange",
+            "user_orders",
+            {
+                "market_slug": ["doge-above-021652-sep-1-1200-utc"],
+                "on_behalf_of": ["profile-123"],
+            },
+        )
+        self.assertEqual(payload["operation"], "user_orders")
+        self.assertEqual(
+            payload["parameters"],
+            {
+                "on_behalf_of": "profile-123",
+                "market_slug": "doge-above-021652-sep-1-1200-utc",
+            },
+        )
+        self.assertEqual(payload["data"]["orders"][0]["order_id"], "order-1")
+
     def test_markets_payload_includes_diagnostics_without_secret_values(self) -> None:
         cfg = AppConfig()
         cfg.markets["kalshi"].enabled = True

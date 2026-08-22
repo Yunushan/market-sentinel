@@ -3554,7 +3554,14 @@ def market_account_payload(
         )
 
     kwargs: Dict[str, Any] = {}
-    if normalized_market_id == "kalshi":
+    if normalized_market_id == "limitless_exchange":
+        kwargs = {"on_behalf_of": _query_value(query_params, "on_behalf_of") or None}
+        if normalized_operation == "user_orders":
+            raw_market_slug = _query_value(query_params, "market_slug")
+            if not raw_market_slug:
+                raw_market_slug = _query_value(query_params, "contract_id").split(":", 1)[0]
+            kwargs["market_slug"] = raw_market_slug
+    elif normalized_market_id == "kalshi":
         raw_contract = _query_value(query_params, "contract_id")
         ticker = _query_value(query_params, "ticker") or raw_contract.split(":", 1)[0]
         raw_subaccount = _query_value(query_params, "subaccount")
@@ -3602,7 +3609,7 @@ def market_account_payload(
                 "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
             }
         )
-    if normalized_market_id != "kalshi" and normalized_operation == "order_history":
+    if normalized_market_id not in {"kalshi", "limitless_exchange"} and normalized_operation == "order_history":
         kwargs.update(
             {
                 "status": _query_value(query_params, "status", "filled").lower(),
@@ -3610,7 +3617,7 @@ def market_account_payload(
                 "to_timestamp": _query_float(query_params, "to"),
             }
         )
-    elif normalized_market_id != "kalshi" and normalized_operation == "positions":
+    elif normalized_market_id not in {"kalshi", "limitless_exchange"} and normalized_operation == "positions":
         raw_limit = _query_value(query_params, "limit")
         kwargs.update(
             {
@@ -3620,7 +3627,7 @@ def market_account_payload(
                 "sort": _query_value(query_params, "sort") or None,
             }
         )
-    elif normalized_market_id != "kalshi" and normalized_operation == "settled_positions":
+    elif normalized_market_id not in {"kalshi", "limitless_exchange"} and normalized_operation == "settled_positions":
         kwargs.update(
             {
                 "event_ticker": _query_value(query_params, "event_ticker"),
@@ -3632,7 +3639,7 @@ def market_account_payload(
                 "with_cash_outs": _query_bool(query_params, "with_cash_outs", False),
             }
         )
-    elif normalized_market_id != "kalshi" and normalized_operation == "volume_metrics":
+    elif normalized_market_id not in {"kalshi", "limitless_exchange"} and normalized_operation == "volume_metrics":
         kwargs.update(
             {
                 "event_ticker": _query_value(query_params, "event_ticker"),
