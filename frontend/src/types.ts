@@ -181,6 +181,10 @@ export type MarketAccountOperation =
   | "account_history"
   | "user_orders"
   | "cleared_orders"
+  | "settled_bets"
+  | "current_bets"
+  | "current_offers"
+  | "account"
   | "portfolio"
   | "subaccounts"
   | "spot_balances";

@@ -172,6 +172,14 @@ interface MarketReadForm {
   account_bet_id: string;
   account_group_by: string;
   account_include_item_description: boolean;
+  account_sport_id: string;
+  account_side: string;
+  account_offer_status: string;
+  account_aggregation_type: string;
+  account_odds_type: string;
+  account_interval: string;
+  account_cancellation_reason: string;
+  account_include_edits: boolean;
   account_subaccount: string;
   account_count_filter: string;
   account_market_slug: string;
@@ -387,6 +395,14 @@ function emptyMarketReadForm(): MarketReadForm {
     account_bet_id: "",
     account_group_by: "BET",
     account_include_item_description: false,
+    account_sport_id: "",
+    account_side: "",
+    account_offer_status: "",
+    account_aggregation_type: "none",
+    account_odds_type: "DECIMAL",
+    account_interval: "",
+    account_cancellation_reason: "",
+    account_include_edits: false,
     account_subaccount: "",
     account_count_filter: "",
     account_market_slug: "",
@@ -800,6 +816,14 @@ export default function App() {
             bet_id: form.account_bet_id.trim() || undefined,
             group_by: form.account_group_by.trim() || undefined,
             include_item_description: form.account_include_item_description,
+            sport_id: form.account_sport_id.trim() || undefined,
+            side: form.account_side.trim() || undefined,
+            offer_status: form.account_offer_status.trim() || undefined,
+            aggregation_type: form.account_aggregation_type.trim() || undefined,
+            odds_type: form.account_odds_type.trim() || undefined,
+            interval: form.account_interval.trim() || undefined,
+            cancellation_reason: form.account_cancellation_reason.trim() || undefined,
+            include_edits: form.account_include_edits,
             subaccount: form.account_subaccount.trim() || undefined,
             count_filter: form.account_count_filter.trim() || undefined,
             market_slug: form.account_market_slug.trim() || undefined,
@@ -808,7 +832,7 @@ export default function App() {
             event_ticker: form.event_id.trim() || undefined,
             from: form.from.trim() || undefined,
             to: form.to.trim() || undefined,
-            limit: marketId === "hyperliquid" ? 2000 : marketId === "opinion_labs" ? 20 : marketId === "betfair_exchange" ? 100 : 50,
+            limit: marketId === "hyperliquid" ? 2000 : marketId === "opinion_labs" ? 20 : marketId === "betfair_exchange" ? 100 : marketId === "matchbook" && form.account_operation === "current_offers" ? 20 : 50,
             page: marketId === "opinion_labs" ? 1 : undefined
           });
           setMarketRead((current) => ({ ...current, account: payload }));
@@ -2037,6 +2061,70 @@ function MarketsView({
                 onChange={(event) => onMarketReadFormChange({ account_include_item_description: event.target.checked })}
               />
               <span>Include Betfair item descriptions</span>
+            </label>
+            <label>
+              <span>Matchbook sport id</span>
+              <input
+                value={marketReadForm.account_sport_id}
+                onChange={(event) => onMarketReadFormChange({ account_sport_id: event.target.value })}
+                placeholder="Optional numeric id(s)"
+              />
+            </label>
+            <label>
+              <span>Matchbook offer side</span>
+              <input
+                value={marketReadForm.account_side}
+                onChange={(event) => onMarketReadFormChange({ account_side: event.target.value })}
+                placeholder="back, lay, win, lose"
+              />
+            </label>
+            <label>
+              <span>Matchbook offer status</span>
+              <input
+                value={marketReadForm.account_offer_status}
+                onChange={(event) => onMarketReadFormChange({ account_offer_status: event.target.value })}
+                placeholder="open, matched, unmatched"
+              />
+            </label>
+            <label>
+              <span>Matchbook aggregation</span>
+              <input
+                value={marketReadForm.account_aggregation_type}
+                onChange={(event) => onMarketReadFormChange({ account_aggregation_type: event.target.value })}
+                placeholder="none, summary, average"
+              />
+            </label>
+            <label>
+              <span>Matchbook odds type</span>
+              <input
+                value={marketReadForm.account_odds_type}
+                onChange={(event) => onMarketReadFormChange({ account_odds_type: event.target.value })}
+                placeholder="DECIMAL, US, HK, MALAY, INDO, %"
+              />
+            </label>
+            <label>
+              <span>Matchbook interval</span>
+              <input
+                value={marketReadForm.account_interval}
+                onChange={(event) => onMarketReadFormChange({ account_interval: event.target.value })}
+                placeholder="Seconds (optional)"
+              />
+            </label>
+            <label>
+              <span>Cancellation reason</span>
+              <input
+                value={marketReadForm.account_cancellation_reason}
+                onChange={(event) => onMarketReadFormChange({ account_cancellation_reason: event.target.value })}
+                placeholder="user_request or heartbeat_expiry"
+              />
+            </label>
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={marketReadForm.account_include_edits}
+                onChange={(event) => onMarketReadFormChange({ account_include_edits: event.target.checked })}
+              />
+              <span>Include Matchbook offer edits</span>
             </label>
             <label>
               <span>Subaccount</span>

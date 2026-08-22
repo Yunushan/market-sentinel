@@ -1344,6 +1344,13 @@ KALSHI_ACCOUNT_OPERATIONS = (
 LIMITLESS_ACCOUNT_OPERATIONS = ("positions", "account_history", "user_orders")
 OPINION_ACCOUNT_OPERATIONS = ("order_history", "order_detail", "positions")
 BETFAIR_ACCOUNT_OPERATIONS = ("cleared_orders",)
+MATCHBOOK_ACCOUNT_OPERATIONS = (
+    "settled_bets",
+    "current_bets",
+    "current_offers",
+    "balance",
+    "account",
+)
 HYPERLIQUID_ACCOUNT_OPERATIONS = (
     "active_orders",
     "order_history",
@@ -1359,6 +1366,7 @@ MARKET_ACCOUNT_OPERATIONS = tuple(
         + LIMITLESS_ACCOUNT_OPERATIONS
         + OPINION_ACCOUNT_OPERATIONS
         + BETFAIR_ACCOUNT_OPERATIONS
+        + MATCHBOOK_ACCOUNT_OPERATIONS
         + HYPERLIQUID_ACCOUNT_OPERATIONS
     )
 )
@@ -1452,6 +1460,37 @@ def run_market_account(args: argparse.Namespace) -> int:
                 "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
                 "from_timestamp": _cli_history_float(args.from_timestamp, "from"),
                 "to_timestamp": _cli_history_float(args.to_timestamp, "to"),
+            }
+    elif market_id == "matchbook":
+        if operation in {"balance", "account"}:
+            kwargs = {}
+        elif operation in {"settled_bets", "current_bets"}:
+            kwargs = {
+                "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
+                "limit": _cli_clamp_int(args.limit, 50, 1, 1000),
+                "sport_id": str(getattr(args, "account_sport_id", "") or "").strip(),
+                "event_id": str(getattr(args, "account_event_id", "") or "").strip(),
+                "market_id": str(getattr(args, "account_market_id", "") or "").strip(),
+                "odds_type": str(getattr(args, "account_odds_type", "DECIMAL") or "DECIMAL").strip(),
+                "from_timestamp": _cli_history_float(args.from_timestamp, "from"),
+                "to_timestamp": _cli_history_float(args.to_timestamp, "to"),
+            }
+        elif operation == "current_offers":
+            raw_interval = str(getattr(args, "account_interval", "") or "").strip()
+            kwargs = {
+                "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
+                "limit": _cli_clamp_int(args.limit, 20, 1, 1000),
+                "sport_id": str(getattr(args, "account_sport_id", "") or "").strip(),
+                "event_id": str(getattr(args, "account_event_id", "") or "").strip(),
+                "market_id": str(getattr(args, "account_market_id", "") or "").strip(),
+                "runner_id": str(getattr(args, "runner_id", "") or "").strip(),
+                "side": str(getattr(args, "account_side", "") or "").strip(),
+                "status": str(getattr(args, "account_offer_status", "") or "").strip(),
+                "interval": _cli_clamp_int(raw_interval, 0, 0, 2147483647) if raw_interval else None,
+                "include_edits": bool(getattr(args, "account_include_edits", False)),
+                "cancellation_reason": str(getattr(args, "account_cancellation_reason", "") or "").strip(),
+                "aggregation_type": str(getattr(args, "account_aggregation_type", "none") or "none").strip(),
+                "odds_type": str(getattr(args, "account_odds_type", "DECIMAL") or "DECIMAL").strip(),
             }
     elif market_id == "hyperliquid":
         if operation in {"active_orders", "positions"}:
@@ -2471,7 +2510,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_account = markets_sub.add_parser(
         "account",
         parents=[common],
-        help="Read an explicitly documented authenticated account feed (Gemini, Kalshi, Limitless, Opinion, Betfair, or Hyperliquid).",
+        help="Read an explicitly documented authenticated account feed (Gemini, Kalshi, Limitless, Opinion, Betfair, Matchbook, or Hyperliquid).",
     )
     market_account.add_argument("operation", choices=MARKET_ACCOUNT_OPERATIONS)
     market_account.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
@@ -2485,6 +2524,14 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--chain-id", default="", help="Opinion numeric chain filter.")
     market_account.add_argument("--event-type-id", default="", help="Betfair event type id filter.")
     market_account.add_argument("--account-event-id", default="", help="Betfair event id filter.")
+    market_account.add_argument("--account-sport-id", default="", help="Matchbook sport id filter.")
+    market_account.add_argument("--account-side", default="", help="Matchbook offer side filter (back/lay/win/lose).")
+    market_account.add_argument("--account-offer-status", default="", help="Matchbook offer status filter.")
+    market_account.add_argument("--account-aggregation-type", default="none", help="Matchbook offer aggregation (none/summary/average).")
+    market_account.add_argument("--account-odds-type", default="DECIMAL", help="Matchbook odds type (DECIMAL/US/HK/MALAY/INDO/percent).")
+    market_account.add_argument("--account-interval", default="", help="Matchbook offer interval in seconds.")
+    market_account.add_argument("--account-cancellation-reason", default="", help="Matchbook cancellation reason.")
+    market_account.add_argument("--account-include-edits", action="store_true", help="Include Matchbook offer edits.")
     market_account.add_argument("--runner-id", default="", help="Betfair runner id filter.")
     market_account.add_argument("--bet-id", default="", help="Betfair bet id filter.")
     market_account.add_argument("--group-by", default="BET", help="Betfair cleared-order roll-up.")

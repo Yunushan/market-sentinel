@@ -336,6 +336,11 @@ class VerificationFixtureTests(unittest.TestCase):
         market = json.loads((FIXTURE_ROOT / "matchbook" / "market.json").read_text(encoding="utf-8"))
         login = json.loads((FIXTURE_ROOT / "matchbook" / "login_response.json").read_text(encoding="utf-8"))
         order = json.loads((FIXTURE_ROOT / "matchbook" / "order_response.json").read_text(encoding="utf-8"))
+        settled = json.loads((FIXTURE_ROOT / "matchbook" / "settled_bets.json").read_text(encoding="utf-8"))
+        current = json.loads((FIXTURE_ROOT / "matchbook" / "current_bets.json").read_text(encoding="utf-8"))
+        offers = json.loads((FIXTURE_ROOT / "matchbook" / "current_offers.json").read_text(encoding="utf-8"))
+        balance = json.loads((FIXTURE_ROOT / "matchbook" / "balance.json").read_text(encoding="utf-8"))
+        account = json.loads((FIXTURE_ROOT / "matchbook" / "account.json").read_text(encoding="utf-8"))
 
         self.assertIsInstance(events.get("events"), list)
         self.assertIsInstance(markets.get("markets"), list)
@@ -343,6 +348,11 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIsInstance(market["runners"][0].get("prices"), list)
         self.assertIn("session-token", login)
         self.assertIsInstance(order.get("offers"), list)
+        self.assertIsInstance(settled.get("data", {}).get("bets"), list)
+        self.assertIsInstance(current.get("data", {}).get("bets"), list)
+        self.assertIsInstance(offers.get("offers"), list)
+        self.assertIn("balance", balance)
+        self.assertIn("id", account)
 
     def test_betmgm_fixtures_cover_partner_sports_api_shapes(self) -> None:
         payload = json.loads((FIXTURE_ROOT / "betmgm" / "fixtures.json").read_text(encoding="utf-8"))

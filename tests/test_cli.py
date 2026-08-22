@@ -269,6 +269,94 @@ class MarketSentinelCliTests(unittest.TestCase):
         self.assertEqual(parameters["from_timestamp"], 1780308000.0)
         self.assertEqual(parameters["to_timestamp"], 1780394400.0)
 
+    def test_matchbook_account_command_forwards_report_and_offer_filters(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="matchbook")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("settled_bets", "current_bets", "current_offers", "balance", "account"),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+                "data": {"operation": operation},
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "settled_bets",
+                        "--market",
+                        "matchbook",
+                        "--account-sport-id",
+                        "1",
+                        "--account-event-id",
+                        "101",
+                        "--account-market-id",
+                        "202",
+                        "--limit",
+                        "10",
+                        "--offset",
+                        "2",
+                        "--from",
+                        "1780344000",
+                        "--to",
+                        "1780347600",
+                        "--account-odds-type",
+                        "DECIMAL",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        parameters = json.loads(stdout.getvalue())["parameters"]
+        self.assertEqual(parameters["sport_id"], "1")
+        self.assertEqual(parameters["event_id"], "101")
+        self.assertEqual(parameters["market_id"], "202")
+        self.assertEqual(parameters["limit"], 10)
+        self.assertEqual(parameters["offset"], 2)
+        self.assertEqual(parameters["from_timestamp"], 1780344000.0)
+
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "current_offers",
+                        "--market",
+                        "matchbook",
+                        "--account-side",
+                        "back",
+                        "--account-offer-status",
+                        "open,matched",
+                        "--account-interval",
+                        "30",
+                        "--account-include-edits",
+                        "--account-aggregation-type",
+                        "average",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        parameters = json.loads(stdout.getvalue())["parameters"]
+        self.assertEqual(parameters["side"], "back")
+        self.assertEqual(parameters["status"], "open,matched")
+        self.assertEqual(parameters["interval"], 30)
+        self.assertTrue(parameters["include_edits"])
+        self.assertEqual(parameters["aggregation_type"], "average")
+
     def test_kalshi_account_command_forwards_signed_read_parameters(self) -> None:
         cfg = SimpleNamespace(selected_market_id="kalshi")
         adapter = SimpleNamespace(

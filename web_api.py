@@ -3618,6 +3618,37 @@ def market_account_payload(
             }
             if normalized_operation == "order_history":
                 kwargs["status"] = _query_value(query_params, "status")
+    elif normalized_market_id == "matchbook":
+        if normalized_operation in {"balance", "account"}:
+            kwargs = {}
+        elif normalized_operation in {"settled_bets", "current_bets"}:
+            kwargs = {
+                "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+                "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 1000),
+                "sport_id": _query_value(query_params, "sport_id"),
+                "event_id": _query_value(query_params, "event_id"),
+                "market_id": _query_value(query_params, "market_id"),
+                "odds_type": _query_value(query_params, "odds_type", "DECIMAL"),
+                "from_timestamp": _query_float(query_params, "from"),
+                "to_timestamp": _query_float(query_params, "to"),
+            }
+        elif normalized_operation == "current_offers":
+            raw_interval = _query_value(query_params, "interval")
+            kwargs = {
+                "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+                "limit": _clamp_int(_query_value(query_params, "limit", "20"), 20, 1, 1000),
+                "sport_id": _query_value(query_params, "sport_id"),
+                "event_id": _query_value(query_params, "event_id"),
+                "market_id": _query_value(query_params, "market_id"),
+                "runner_id": _query_value(query_params, "runner_id"),
+                "side": _query_value(query_params, "side"),
+                "status": _query_value(query_params, "offer_status"),
+                "interval": _clamp_int(raw_interval, 0, 0, 2147483647) if raw_interval else None,
+                "include_edits": _query_bool(query_params, "include_edits", False),
+                "cancellation_reason": _query_value(query_params, "cancellation_reason"),
+                "aggregation_type": _query_value(query_params, "aggregation_type", "none"),
+                "odds_type": _query_value(query_params, "odds_type", "DECIMAL"),
+            }
     elif normalized_market_id == "betfair_exchange":
         if normalized_operation == "cleared_orders":
             market_id_filter = _query_value(query_params, "market_id")

@@ -789,6 +789,74 @@ class WebApiTests(unittest.TestCase):
             },
         )
 
+    def test_matchbook_account_payload_forwards_report_and_offer_filters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="matchbook",
+            display_name="Matchbook",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("settled_bets", "current_bets", "current_offers", "balance", "account")  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "data": {"operation": operation},
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["matchbook"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "matchbook",
+            "settled_bets",
+            {
+                "sport_id": ["1"],
+                "event_id": ["101"],
+                "market_id": ["202"],
+                "limit": ["12"],
+                "offset": ["2"],
+                "from": ["1780344000"],
+                "to": ["1780347600"],
+                "odds_type": ["DECIMAL"],
+            },
+        )
+        self.assertEqual(
+            payload["parameters"],
+            {
+                "offset": 2,
+                "limit": 12,
+                "sport_id": "1",
+                "event_id": "101",
+                "market_id": "202",
+                "odds_type": "DECIMAL",
+                "from_timestamp": 1780344000.0,
+                "to_timestamp": 1780347600.0,
+            },
+        )
+        offers = market_account_payload(
+            cfg,
+            Registry(),
+            "matchbook",
+            "current_offers",
+            {
+                "side": ["back"],
+                "offer_status": ["open,matched"],
+                "interval": ["30"],
+                "include_edits": ["true"],
+                "aggregation_type": ["average"],
+            },
+        )
+        self.assertEqual(offers["parameters"]["side"], "back")
+        self.assertEqual(offers["parameters"]["status"], "open,matched")
+        self.assertEqual(offers["parameters"]["interval"], 30)
+        self.assertTrue(offers["parameters"]["include_edits"])
+        self.assertEqual(offers["parameters"]["aggregation_type"], "average")
+
     def test_limitless_account_payload_forwards_delegated_read_parameters(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(

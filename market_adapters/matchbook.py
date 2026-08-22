@@ -37,6 +37,12 @@ MATCHBOOK_REFERENCES = (
     "https://developers.matchbook.com/reference/login",
     "https://developers.matchbook.com/reference/submit-offers-v2",
     "https://developers.matchbook.com/reference/get-aggregated-matched-bets",
+    "https://developers.matchbook.com/reference/get-settled-bets-v2",
+    "https://developers.matchbook.com/reference/get-current-bets-v2",
+    "https://developers.matchbook.com/reference/get-offers-v2",
+    "https://developers.matchbook.com/reference/get-current-offers-v2",
+    "https://developers.matchbook.com/reference/get-new-wallet-balance",
+    "https://developers.matchbook.com/reference/get-account",
 )
 
 
@@ -45,6 +51,13 @@ class MatchbookAdapter(MarketAdapter):
 
     live_order_sides = ("BUY", "SELL", "BACK", "LAY")
     metadata = get_market_metadata("matchbook")
+    account_recovery_operations = (
+        "settled_bets",
+        "current_bets",
+        "current_offers",
+        "balance",
+        "account",
+    )
 
     def __init__(self, config: Optional[Mapping[str, Any]] = None, **kwargs: Any) -> None:
         super().__init__(config, **kwargs)
@@ -73,6 +86,14 @@ class MatchbookAdapter(MarketAdapter):
                 "live_trading_supported": True,
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "session_token_required_for_live": True,
+                "account_recovery_operations": list(self.account_recovery_operations),
+                "authenticated_account_endpoints": [
+                    "/reports/v2/bets/settled",
+                    "/reports/v2/bets/current",
+                    "/v2/offers",
+                    "/account/balance",
+                    "/account",
+                ],
             }
         )
         return health
@@ -241,6 +262,169 @@ class MatchbookAdapter(MarketAdapter):
                 break
         return trades
 
+    def list_settled_bets(
+        self,
+        *,
+        offset: int = 0,
+        limit: int = 50,
+        sport_id: str = "",
+        event_id: str = "",
+        market_id: str = "",
+        from_timestamp: Any = None,
+        to_timestamp: Any = None,
+        odds_type: str = "DECIMAL",
+    ) -> Any:
+        """Read the authenticated Matchbook settled-bets report."""
+
+        params = self._account_bet_params(
+            offset=offset,
+            limit=limit,
+            sport_id=sport_id,
+            event_id=event_id,
+            market_id=market_id,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+            odds_type=odds_type,
+        )
+        return self._request_json("GET", "/reports/v2/bets/settled", params=params, auth=True)
+
+    def list_current_bets(
+        self,
+        *,
+        offset: int = 0,
+        limit: int = 50,
+        sport_id: str = "",
+        event_id: str = "",
+        market_id: str = "",
+        from_timestamp: Any = None,
+        to_timestamp: Any = None,
+        odds_type: str = "DECIMAL",
+    ) -> Any:
+        """Read the authenticated Matchbook current-bets report."""
+
+        params = self._account_bet_params(
+            offset=offset,
+            limit=limit,
+            sport_id=sport_id,
+            event_id=event_id,
+            market_id=market_id,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+            odds_type=odds_type,
+        )
+        return self._request_json("GET", "/reports/v2/bets/current", params=params, auth=True)
+
+    def list_current_offers(
+        self,
+        *,
+        offset: int = 0,
+        limit: int = 20,
+        sport_id: str = "",
+        event_id: str = "",
+        market_id: str = "",
+        runner_id: str = "",
+        side: str = "",
+        status: str = "",
+        interval: Any = None,
+        include_edits: bool = False,
+        cancellation_reason: str = "",
+        aggregation_type: str = "none",
+        odds_type: str = "DECIMAL",
+    ) -> Any:
+        """Read the authenticated current-offers surface."""
+
+        params: Dict[str, Any] = {
+            "offset": self._account_offset(offset),
+            "per-page": self._account_limit(limit),
+            "aggregation-type": self._account_aggregation(aggregation_type),
+            "odds-type": self._account_odds_type(odds_type),
+        }
+        for parameter, value, label in (
+            ("sport-ids", sport_id, "sport_id"),
+            ("event-ids", event_id, "event_id"),
+            ("market-ids", market_id, "market_id"),
+            ("runner-ids", runner_id, "runner_id"),
+        ):
+            normalized = self._account_ids(value, label)
+            if normalized:
+                params[parameter] = normalized
+        for parameter, value, allowed, label in (
+            ("side", side, ("back", "lay", "win", "lose"), "side"),
+            ("status", status, ("open", "cancelled", "edited", "flushed", "matched", "unmatched"), "status"),
+        ):
+            normalized = self._account_values(value, allowed, label)
+            if normalized:
+                params[parameter] = normalized
+        if interval not in (None, ""):
+            params["interval"] = self._account_interval(interval)
+        if include_edits:
+            params["include-edits"] = True
+        normalized_reason = self._account_values(
+            cancellation_reason,
+            ("user_request", "heartbeat_expiry"),
+            "cancellation_reason",
+        )
+        if normalized_reason:
+            params["cancellation-reason"] = normalized_reason
+        return self._request_json("GET", "/v2/offers", params=params, auth=True)
+
+    def get_balance(self) -> Any:
+        """Read the authenticated Matchbook wallet balance."""
+
+        return self._request_json("GET", "/account/balance", auth=True)
+
+    def get_account(self) -> Any:
+        """Read the authenticated Matchbook account profile."""
+
+        return self._request_json("GET", "/account", auth=True)
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Any:
+        normalized = str(operation or "").strip().lower()
+        if normalized == "settled_bets":
+            return self.list_settled_bets(
+                offset=kwargs.get("offset", 0),
+                limit=kwargs.get("limit", 50),
+                sport_id=kwargs.get("sport_id", ""),
+                event_id=kwargs.get("event_id", ""),
+                market_id=kwargs.get("market_id", ""),
+                from_timestamp=kwargs.get("from_timestamp"),
+                to_timestamp=kwargs.get("to_timestamp"),
+                odds_type=kwargs.get("odds_type", "DECIMAL"),
+            )
+        if normalized == "current_bets":
+            return self.list_current_bets(
+                offset=kwargs.get("offset", 0),
+                limit=kwargs.get("limit", 50),
+                sport_id=kwargs.get("sport_id", ""),
+                event_id=kwargs.get("event_id", ""),
+                market_id=kwargs.get("market_id", ""),
+                from_timestamp=kwargs.get("from_timestamp"),
+                to_timestamp=kwargs.get("to_timestamp"),
+                odds_type=kwargs.get("odds_type", "DECIMAL"),
+            )
+        if normalized == "current_offers":
+            return self.list_current_offers(
+                offset=kwargs.get("offset", 0),
+                limit=kwargs.get("limit", 20),
+                sport_id=kwargs.get("sport_id", ""),
+                event_id=kwargs.get("event_id", ""),
+                market_id=kwargs.get("market_id", ""),
+                runner_id=kwargs.get("runner_id", ""),
+                side=kwargs.get("side", ""),
+                status=kwargs.get("status", ""),
+                interval=kwargs.get("interval"),
+                include_edits=bool(kwargs.get("include_edits", False)),
+                cancellation_reason=kwargs.get("cancellation_reason", ""),
+                aggregation_type=kwargs.get("aggregation_type", "none"),
+                odds_type=kwargs.get("odds_type", "DECIMAL"),
+            )
+        if normalized == "balance":
+            return self.get_balance()
+        if normalized == "account":
+            return self.get_account()
+        supported = ", ".join(self.account_recovery_operations)
+        raise MarketConfigurationError(f"Matchbook account recovery supports only: {supported}.")
+
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
         self._validate_order(order)
@@ -393,6 +577,128 @@ class MatchbookAdapter(MarketAdapter):
             raise MarketConfigurationError("Matchbook login response did not include a session token.")
         self._session_token = str(session)
         return self._session_token
+
+    def _account_bet_params(
+        self,
+        *,
+        offset: Any,
+        limit: Any,
+        sport_id: Any,
+        event_id: Any,
+        market_id: Any,
+        from_timestamp: Any,
+        to_timestamp: Any,
+        odds_type: Any,
+    ) -> Dict[str, Any]:
+        after = self._account_date(from_timestamp, "from")
+        before = self._account_date(to_timestamp, "to")
+        if after and before and after > before:
+            raise MarketConfigurationError("Matchbook account history requires to at or after from.")
+        params: Dict[str, Any] = {
+            "offset": self._account_offset(offset),
+            "per-page": self._account_limit(limit),
+            "odds-type": self._account_odds_type(odds_type),
+        }
+        for parameter, value, label in (
+            ("sport-ids", sport_id, "sport_id"),
+            ("event-ids", event_id, "event_id"),
+            ("market-ids", market_id, "market_id"),
+        ):
+            normalized = self._account_ids(value, label)
+            if normalized:
+                params[parameter] = normalized
+        if after:
+            params["after"] = after
+        if before:
+            params["before"] = before
+        return params
+
+    @staticmethod
+    def _account_ids(value: Any, label: str) -> str:
+        clean = str(value or "").strip()
+        if not clean:
+            return ""
+        values = [part.strip() for part in clean.split(",")]
+        if len(values) > 100 or any(not part or len(part) > 32 or not part.isdigit() for part in values):
+            raise MarketConfigurationError(
+                f"Matchbook {label} must be a comma-separated list of numeric ids."
+            )
+        return ",".join(values)
+
+    @staticmethod
+    def _account_limit(value: Any) -> int:
+        if isinstance(value, bool):
+            raise MarketConfigurationError("Matchbook account limit must be an integer between 1 and 1000.")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Matchbook account limit must be an integer between 1 and 1000.") from exc
+        if parsed < 1 or parsed > 1000:
+            raise MarketConfigurationError("Matchbook account limit must be an integer between 1 and 1000.")
+        return parsed
+
+    @staticmethod
+    def _account_offset(value: Any) -> int:
+        if isinstance(value, bool):
+            raise MarketConfigurationError("Matchbook account offset must be an integer between 0 and 100000.")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Matchbook account offset must be an integer between 0 and 100000.") from exc
+        if parsed < 0 or parsed > 100000:
+            raise MarketConfigurationError("Matchbook account offset must be an integer between 0 and 100000.")
+        return parsed
+
+    @staticmethod
+    def _account_odds_type(value: Any) -> str:
+        normalized = str(value or "DECIMAL").strip().upper()
+        if normalized not in {"DECIMAL", "US", "HK", "MALAY", "INDO", "%"}:
+            raise MarketConfigurationError("Matchbook odds_type must be DECIMAL, US, HK, MALAY, INDO, or %.")
+        return normalized
+
+    @staticmethod
+    def _account_values(value: Any, allowed: Tuple[str, ...], label: str) -> str:
+        clean = str(value or "").strip().lower()
+        if not clean:
+            return ""
+        values = [part.strip() for part in clean.split(",")]
+        if any(part not in allowed for part in values):
+            raise MarketConfigurationError(
+                f"Matchbook {label} must contain only: {', '.join(allowed)}."
+            )
+        return ",".join(values)
+
+    @staticmethod
+    def _account_interval(value: Any) -> int:
+        if isinstance(value, bool):
+            raise MarketConfigurationError("Matchbook interval must be an integer between 0 and 2147483647.")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Matchbook interval must be an integer between 0 and 2147483647.") from exc
+        if parsed < 0 or parsed > 2_147_483_647:
+            raise MarketConfigurationError("Matchbook interval must be an integer between 0 and 2147483647.")
+        return parsed
+
+    @staticmethod
+    def _account_aggregation(value: Any) -> str:
+        normalized = str(value or "none").strip().lower()
+        if normalized not in {"none", "summary", "average"}:
+            raise MarketConfigurationError("Matchbook aggregation_type must be none, summary, or average.")
+        return normalized
+
+    @classmethod
+    def _account_date(cls, value: Any, label: str) -> Optional[str]:
+        if value in (None, ""):
+            return None
+        timestamp = cls._timestamp_seconds(value)
+        if timestamp is None or not math.isfinite(timestamp) or timestamp < 0:
+            raise MarketConfigurationError(f"Matchbook {label} must be a valid epoch or ISO-8601 timestamp.")
+        return cls._timestamp_iso(timestamp)
+
+    @staticmethod
+    def _timestamp_iso(value: float) -> str:
+        return datetime.fromtimestamp(value, tz=timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
     @staticmethod
     def _trade_limit(value: Any) -> int:

@@ -1133,6 +1133,11 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         markets = load_fixture("matchbook", "markets")
         market = load_fixture("matchbook", "market")
         matched_bets = load_fixture("matchbook", "matched_bets")
+        settled_bets = load_fixture("matchbook", "settled_bets")
+        current_bets = load_fixture("matchbook", "current_bets")
+        current_offers = load_fixture("matchbook", "current_offers")
+        balance = load_fixture("matchbook", "balance")
+        account = load_fixture("matchbook", "account")
 
         def fake_get_json(url: str, *, params=None, headers=None):
             if url.endswith("/events"):
@@ -1169,7 +1174,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             calls.append((method, url, params, json, headers, timeout))
             if url.endswith("/security/session"):
                 return FakeResponse(load_fixture("matchbook", "login_response"))
-            if url.endswith("/v2/offers"):
+            if url.endswith("/v2/offers") and method == "POST":
                 return FakeResponse(load_fixture("matchbook", "order_response"))
             if url.endswith("/v2/matched-bets/aggregated"):
                 self.assertEqual(params["event-ids"], "101")
@@ -1177,6 +1182,22 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 self.assertEqual(params["runner-ids"], "303")
                 self.assertEqual(params["aggregation-type"], "average")
                 return FakeResponse(matched_bets)
+            if url.endswith("/reports/v2/bets/settled"):
+                self.assertEqual(params["market-ids"], "202")
+                self.assertTrue(params["after"].endswith("Z"))
+                return FakeResponse(settled_bets)
+            if url.endswith("/reports/v2/bets/current"):
+                self.assertEqual(params["event-ids"], "101")
+                return FakeResponse(current_bets)
+            if url.endswith("/v2/offers") and method == "GET":
+                self.assertEqual(params["status"], "open,matched")
+                self.assertEqual(params["side"], "back")
+                self.assertTrue(params["include-edits"])
+                return FakeResponse(current_offers)
+            if url.endswith("/account/balance"):
+                return FakeResponse(balance)
+            if url.endswith("/account"):
+                return FakeResponse(account)
             raise AssertionError(f"unexpected Matchbook request URL: {url}")
 
         live_adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
@@ -1204,6 +1225,35 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual([trade.trade_id for trade in trades], ["mb-303-1"])
         self.assertEqual(trades[0].side, "BUY")
         self.assertAlmostEqual(trades[0].price, 0.4)
+
+        settled = live_adapter.account_recovery(
+            "settled_bets",
+            market_id="202",
+            limit=10,
+            offset=2,
+            from_timestamp=1780344000,
+            to_timestamp=1780347600,
+        )
+        current = live_adapter.account_recovery("current_bets", event_id="101")
+        offers = live_adapter.account_recovery(
+            "current_offers",
+            side="back",
+            status="open,matched",
+            include_edits=True,
+            aggregation_type="summary",
+        )
+        self.assertEqual(settled["data"]["bets"][0]["id"], "settled-303-1")
+        self.assertEqual(current["data"]["bets"][0]["id"], "current-303-1")
+        self.assertEqual(offers["offers"][0]["id"], 405)
+        self.assertEqual(live_adapter.account_recovery("balance")["balance"]["available"], 100.0)
+        self.assertEqual(live_adapter.account_recovery("account")["id"], "account-1")
+
+        with self.assertRaises(MarketConfigurationError):
+            live_adapter.account_recovery("settled_bets", market_id="../outside")
+        with self.assertRaises(MarketConfigurationError):
+            live_adapter.account_recovery("current_offers", status="open,unknown")
+        with self.assertRaises(MarketConfigurationError):
+            live_adapter.account_recovery("current_offers", interval=-1)
         self.assertEqual(trades[0].size, 4.0)
         self.assertEqual(trades[0].timestamp, 1780344003.0)
 
