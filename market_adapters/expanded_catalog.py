@@ -33,6 +33,8 @@ PROBABLE_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -382,7 +384,8 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://developer.probable.markets/",
         description=(
             "Official Probable market and CLOB API adapter for discovery, token prices, orderbooks, "
-            "alerts, paper orders, and guarded signed-order submission."
+            "public wallet activity trade history, point price history, alerts, paper orders, and "
+            "guarded signed-order submission."
         ),
         capabilities=PROBABLE_CAPABILITIES,
     ),

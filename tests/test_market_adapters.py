@@ -171,6 +171,7 @@ HISTORY_CAPABILITIES = {
     "iowa_electronic_markets": {"candle_history"},
     "space": {"trade_history", "candle_history"},
     "scicast": {"trade_history", "candle_history"},
+    "probable": {"trade_history", "candle_history"},
 }
 
 

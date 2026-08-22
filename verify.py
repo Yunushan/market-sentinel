@@ -577,6 +577,8 @@ def run_fixture_check() -> None:
         fixture_root / "opinion_labs" / "price.json",
         fixture_root / "opinion_labs" / "orderbook.json",
         fixture_root / "opinion_labs" / "price_history.json",
+        fixture_root / "probable" / "activity.json",
+        fixture_root / "probable" / "prices_history.json",
         fixture_root / "ibkr_forecasttrader" / "history.json",
         fixture_root / "iowa_electronic_markets" / "market.json",
         fixture_root / "iowa_electronic_markets" / "powell_price_data.txt",

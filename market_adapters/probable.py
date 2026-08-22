@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import math
+import re
 import time
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -12,8 +13,10 @@ from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
 from .types import (
+    MarketCandle,
     MarketContract,
     MarketEvent,
+    MarketTrade,
     OrderBookLevel,
     OrderBookSnapshot,
     PaperOrderRequest,
@@ -159,6 +162,167 @@ class ProbableAdapter(MarketAdapter):
             raw=dict(orderbook.raw),
         )
 
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Return normalized wallet activity from Probable's public feed.
+
+        Probable's documented ``/activity`` endpoint is public, but it is
+        wallet-scoped.  The adapter therefore requires an explicit wallet
+        address and requests only ``TRADE`` records.  The response is narrowed
+        to the requested token locally because the upstream activity contract
+        filters by condition id rather than by outcome token.
+        """
+
+        self.ensure_capability("trade_history")
+        wallet = self._wallet_address()
+        market_id, token_ref = self._split_contract_id(contract_id)
+        token_id, canonical_contract_id, market = self._resolve_token_details(market_id, token_ref)
+        desired = self._bounded_limit(limit, maximum=500, label="Probable trade limit")
+        before_ts = self._timestamp_seconds(before, "before") if before is not None else None
+        after_ts = self._timestamp_seconds(after, "after") if after is not None else None
+        if before_ts is not None and after_ts is not None and before_ts < after_ts:
+            raise MarketConfigurationError("Probable trade history requires before to be at or after after.")
+
+        params: Dict[str, Any] = {
+            "user": wallet,
+            "limit": desired,
+            "offset": 0,
+            "type": ["TRADE"],
+            "sortBy": "TIMESTAMP",
+            "sortDirection": "DESC",
+        }
+        condition_id = self._condition_id(market)
+        if condition_id:
+            # The SDK types this filter as string[], and requests encodes it
+            # as a repeated query parameter for the public activity endpoint.
+            params["market"] = [condition_id]
+
+        payload = self._clob_get("/activity", params=params)
+        rows = self._list_from_payload(payload, "activity", "transactions", "data")
+        trades: List[MarketTrade] = []
+        for row in rows:
+            raw_asset = str(
+                row.get("asset")
+                or row.get("tokenId")
+                or row.get("token_id")
+                or ""
+            ).strip()
+            if raw_asset and raw_asset != token_id:
+                continue
+            raw_condition = str(row.get("conditionId") or row.get("condition_id") or "").strip()
+            if condition_id and raw_condition and raw_condition != condition_id:
+                continue
+            activity_type = str(row.get("type") or "").strip().upper()
+            if activity_type and activity_type != "TRADE":
+                continue
+            trade_id = str(
+                row.get("transactionHash")
+                or row.get("transaction_hash")
+                or row.get("tradeId")
+                or row.get("trade_id")
+                or row.get("id")
+                or ""
+            ).strip()
+            side = str(row.get("side") or "").strip().upper()
+            price = self._safe_probability(row.get("price"))
+            size = self._positive_number(row.get("size"))
+            timestamp = self._optional_timestamp(row.get("timestamp"))
+            if not trade_id or side not in {"BUY", "SELL"} or price is None or size is None:
+                continue
+            if after_ts is not None and (timestamp is None or timestamp < after_ts):
+                continue
+            if before_ts is not None and (timestamp is None or timestamp > before_ts):
+                continue
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=canonical_contract_id,
+                    trade_id=trade_id,
+                    side=side,
+                    price=price,
+                    size=size,
+                    timestamp=timestamp,
+                    raw=dict(row),
+                )
+            )
+            if len(trades) >= desired:
+                break
+        return trades
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Return Probable's documented point price history as flat candles."""
+
+        self.ensure_capability("candle_history")
+        market_id, token_ref = self._split_contract_id(contract_id)
+        token_id, canonical_contract_id, _market = self._resolve_token_details(market_id, token_ref)
+        clean_resolution = str(resolution or "").strip().lower()
+        if clean_resolution not in {"max", "1m", "1w", "1d", "6h", "1h"}:
+            raise MarketConfigurationError(
+                "Probable price-history interval must be one of max, 1m, 1w, 1d, 6h, or 1h."
+            )
+
+        start_ts = self._timestamp_seconds(from_timestamp, "from_timestamp") if from_timestamp is not None else None
+        end_ts = self._timestamp_seconds(to_timestamp, "to_timestamp") if to_timestamp is not None else None
+        if start_ts is not None and end_ts is not None and end_ts <= start_ts:
+            raise MarketConfigurationError(
+                "Probable price history requires to_timestamp greater than from_timestamp."
+            )
+        params: Dict[str, Any] = {"market": token_id, "interval": clean_resolution}
+        if start_ts is not None:
+            params["startTs"] = self._milliseconds(start_ts)
+        if end_ts is not None:
+            params["endTs"] = self._milliseconds(end_ts)
+
+        payload = self._clob_get("/prices-history", params=params)
+        if isinstance(payload, Mapping):
+            history = payload.get("history")
+            if not isinstance(history, list):
+                history = payload.get("data")
+        else:
+            history = payload
+        if not isinstance(history, list):
+            return []
+
+        candles: List[MarketCandle] = []
+        for row in history:
+            if not isinstance(row, Mapping):
+                continue
+            timestamp = self._optional_timestamp(row.get("t") if row.get("t") is not None else row.get("timestamp"))
+            price_value = row.get("p") if row.get("p") is not None else row.get("price")
+            price = self._safe_probability(price_value)
+            if timestamp is None or price is None:
+                continue
+            if start_ts is not None and timestamp < start_ts:
+                continue
+            if end_ts is not None and timestamp > end_ts:
+                continue
+            candles.append(
+                MarketCandle(
+                    market_id=self.market_id,
+                    contract_id=canonical_contract_id,
+                    timestamp=timestamp,
+                    open=price,
+                    high=price,
+                    low=price,
+                    close=price,
+                    raw=dict(row),
+                )
+            )
+        return candles
+
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
         self._validate_order(order)
@@ -216,6 +380,10 @@ class ProbableAdapter(MarketAdapter):
         return market
 
     def _resolve_token(self, market_id: str, token_ref: str) -> Tuple[str, str]:
+        token_id, canonical_contract_id, _market = self._resolve_token_details(market_id, token_ref)
+        return token_id, canonical_contract_id
+
+    def _resolve_token_details(self, market_id: str, token_ref: str) -> Tuple[str, str, Mapping[str, Any]]:
         clean_ref = str(token_ref or "").strip()
         if not clean_ref:
             raise MarketConfigurationError("Probable contract token or outcome cannot be empty.")
@@ -227,10 +395,73 @@ class ProbableAdapter(MarketAdapter):
             if clean_ref == token_id or clean_ref.upper() == outcome.upper():
                 if not token_id:
                     break
-                return token_id, f"{market_id}:{token_id}"
+                return token_id, f"{market_id}:{token_id}", market
         if clean_ref not in {"YES", "NO"}:
-            return clean_ref, f"{market_id}:{clean_ref}"
+            return clean_ref, f"{market_id}:{clean_ref}", market
         raise MarketConfigurationError(f"Probable market {market_id!r} has no {clean_ref} token.")
+
+    def _wallet_address(self) -> str:
+        credential = self.resolve_credential(
+            "probable_address",
+            ("PROB_ADDRESS", "PROBABLE_ADDRESS", "PROB_WALLET_ADDRESS"),
+            required=True,
+            label="PROB_ADDRESS",
+        )
+        assert credential is not None
+        wallet = str(credential.value).strip()
+        if not re.fullmatch(r"0x[a-fA-F0-9]{40}", wallet):
+            raise MarketConfigurationError("Probable wallet address must be a 0x-prefixed 40-hex-character address.")
+        return wallet
+
+    @staticmethod
+    def _condition_id(market: Mapping[str, Any]) -> str:
+        return str(market.get("condition_id") or market.get("conditionId") or "").strip()
+
+    @staticmethod
+    def _bounded_limit(value: Any, *, maximum: int, label: str) -> int:
+        try:
+            desired = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"{label} must be an integer between 1 and {maximum}.") from exc
+        if desired < 1 or desired > maximum:
+            raise MarketConfigurationError(f"{label} must be between 1 and {maximum}.")
+        return desired
+
+    @staticmethod
+    def _timestamp_seconds(value: Any, label: str) -> float:
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Probable {label} must be a finite Unix timestamp.") from exc
+        if not math.isfinite(timestamp) or timestamp < 0:
+            raise MarketConfigurationError(f"Probable {label} must be a finite, non-negative Unix timestamp.")
+        return timestamp
+
+    @staticmethod
+    def _milliseconds(timestamp: float) -> int:
+        return int(round(timestamp * 1000.0))
+
+    @staticmethod
+    def _optional_timestamp(value: Any) -> Optional[float]:
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(timestamp) or timestamp < 0:
+            return None
+        if timestamp > 100_000_000_000:
+            timestamp /= 1000.0
+        return timestamp
+
+    @staticmethod
+    def _positive_number(value: Any) -> Optional[float]:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(number) or number <= 0:
+            return None
+        return number
 
     def _public_get(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> Any:
         return self.runtime.get_json(self._url(self.market_api_base_url, path), params=params)

@@ -278,13 +278,22 @@ class VerificationFixtureTests(unittest.TestCase):
         event = json.loads((FIXTURE_ROOT / "probable" / "event.json").read_text(encoding="utf-8"))
         market = json.loads((FIXTURE_ROOT / "probable" / "market.json").read_text(encoding="utf-8"))
         orderbook = json.loads((FIXTURE_ROOT / "probable" / "orderbook.json").read_text(encoding="utf-8"))
+        activity = json.loads((FIXTURE_ROOT / "probable" / "activity.json").read_text(encoding="utf-8"))
+        prices_history = json.loads((FIXTURE_ROOT / "probable" / "prices_history.json").read_text(encoding="utf-8"))
 
         self.assertIsInstance(events.get("events"), list)
         self.assertIsInstance(event.get("markets"), list)
         self.assertIsInstance(market.get("tokens"), list)
         self.assertEqual(market["tokens"][0].get("outcome"), "Yes")
+        self.assertEqual(market.get("condition_id"), "condition-1")
         self.assertIsInstance(orderbook.get("bids"), list)
         self.assertIsInstance(orderbook.get("asks"), list)
+        self.assertIsInstance(activity, list)
+        self.assertIn("transactionHash", activity[0])
+        self.assertEqual(activity[0].get("type"), "TRADE")
+        self.assertIsInstance(prices_history.get("history"), list)
+        self.assertIn("t", prices_history["history"][0])
+        self.assertIn("p", prices_history["history"][0])
 
     def test_matchbook_fixtures_cover_exchange_payload_shapes(self) -> None:
         events = json.loads((FIXTURE_ROOT / "matchbook" / "events.json").read_text(encoding="utf-8"))

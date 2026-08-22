@@ -1090,6 +1090,8 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         market = load_fixture("probable", "market")
         orderbook = load_fixture("probable", "orderbook")
         order_response = load_fixture("probable", "order_response")
+        activity = load_fixture("probable", "activity")
+        prices_history = load_fixture("probable", "prices_history")
 
         def fake_get_json(url: str, *, params=None, headers=None):
             if url.endswith("/events"):
@@ -1101,6 +1103,17 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             if url.endswith("/book"):
                 self.assertEqual(params["token_id"], "token-yes")
                 return orderbook
+            if url.endswith("/activity"):
+                self.assertEqual(params["user"], "0x0000000000000000000000000000000000000001")
+                self.assertEqual(params["type"], ["TRADE"])
+                self.assertEqual(params["market"], ["condition-1"])
+                return activity
+            if url.endswith("/prices-history"):
+                self.assertEqual(params["market"], "token-yes")
+                self.assertEqual(params["interval"], "1h")
+                self.assertEqual(params["startTs"], 1780344000000)
+                self.assertEqual(params["endTs"], 1780347600000)
+                return prices_history
             raise AssertionError(f"unexpected Probable URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
@@ -1118,6 +1131,40 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual([level.price for level in book.asks], [0.45, 0.47])
         self.assertAlmostEqual(price.midpoint or 0.0, 0.435)
         self.assertTrue(paper.accepted)
+
+        history_adapter = ProbableAdapter(
+            {"probable_address": "0x0000000000000000000000000000000000000001"}
+        )
+        history_adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+        trades = history_adapter.list_trades(
+            "market-1:token-yes",
+            limit=1,
+            after=1780344000,
+            before=1780344004,
+        )
+        candles = history_adapter.list_candles(
+            "market-1:token-yes",
+            resolution="1h",
+            from_timestamp=1780344000,
+            to_timestamp=1780347600,
+        )
+
+        self.assertEqual([trade.trade_id for trade in trades], ["0xprobabletrade1"])
+        self.assertEqual([trade.side for trade in trades], ["BUY"])
+        self.assertEqual([trade.price for trade in trades], [0.44])
+        self.assertEqual([trade.size for trade in trades], [4.0])
+        self.assertEqual([trade.timestamp for trade in trades], [1780344003.0])
+        self.assertEqual([candle.close for candle in candles], [0.42, 0.44])
+        self.assertEqual([candle.volume for candle in candles], [None, None])
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades("market-1:token-yes")
+        with self.assertRaises(MarketConfigurationError):
+            ProbableAdapter({"probable_address": "not-an-address"}).list_trades("market-1:token-yes")
+        with self.assertRaises(MarketConfigurationError):
+            history_adapter.list_candles("market-1:token-yes", resolution="5m")
+        with self.assertRaises(MarketConfigurationError):
+            history_adapter.list_trades("market-1:token-yes", before=10, after=20)
 
         with self.assertRaises(MarketConfigurationError):
             adapter.place_live_order(order)
