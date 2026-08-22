@@ -518,8 +518,11 @@ def run_fixture_check() -> None:
         fixture_root / "polymarket" / "event.json",
         fixture_root / "polymarket" / "orderbook.json",
         fixture_root / "polymarket" / "activity_buy.json",
+        fixture_root / "polymarket" / "clob_trades.json",
         fixture_root / "kalshi" / "markets.json",
         fixture_root / "kalshi" / "orderbook.json",
+        fixture_root / "kalshi" / "trades.json",
+        fixture_root / "kalshi" / "candlesticks.json",
         fixture_root / "manifold" / "search_markets.json",
         fixture_root / "manifold" / "market_binary.json",
         fixture_root / "manifold" / "market_multi.json",
@@ -1532,3 +1535,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

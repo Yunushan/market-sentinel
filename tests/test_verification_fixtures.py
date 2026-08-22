@@ -29,6 +29,7 @@ class VerificationFixtureTests(unittest.TestCase):
         event = json.loads((FIXTURE_ROOT / "polymarket" / "event.json").read_text(encoding="utf-8"))
         orderbook = json.loads((FIXTURE_ROOT / "polymarket" / "orderbook.json").read_text(encoding="utf-8"))
         activity = json.loads((FIXTURE_ROOT / "polymarket" / "activity_buy.json").read_text(encoding="utf-8"))
+        clob_trades = json.loads((FIXTURE_ROOT / "polymarket" / "clob_trades.json").read_text(encoding="utf-8"))
 
         self.assertIn("clobTokenIds", market)
         self.assertIn("outcomes", market)
@@ -37,10 +38,14 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("asks", orderbook)
         self.assertEqual(activity.get("side"), "BUY")
         self.assertIn("asset", activity)
+        self.assertIsInstance(clob_trades.get("data"), list)
+        self.assertIn("asset_id", clob_trades["data"][0])
 
     def test_kalshi_fixtures_cover_core_payload_shapes(self) -> None:
         markets = json.loads((FIXTURE_ROOT / "kalshi" / "markets.json").read_text(encoding="utf-8"))
         orderbook = json.loads((FIXTURE_ROOT / "kalshi" / "orderbook.json").read_text(encoding="utf-8"))
+        trades = json.loads((FIXTURE_ROOT / "kalshi" / "trades.json").read_text(encoding="utf-8"))
+        candles = json.loads((FIXTURE_ROOT / "kalshi" / "candlesticks.json").read_text(encoding="utf-8"))
 
         self.assertIsInstance(markets.get("markets"), list)
         self.assertGreaterEqual(len(markets["markets"]), 1)
@@ -49,6 +54,10 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("orderbook_fp", orderbook)
         self.assertIn("yes_dollars", orderbook["orderbook_fp"])
         self.assertIn("no_dollars", orderbook["orderbook_fp"])
+        self.assertIsInstance(trades.get("trades"), list)
+        self.assertIn("trade_id", trades["trades"][0])
+        self.assertIsInstance(candles.get("candlesticks"), list)
+        self.assertIn("price", candles["candlesticks"][0])
 
     def test_manifold_fixtures_cover_core_payload_shapes(self) -> None:
         search = json.loads((FIXTURE_ROOT / "manifold" / "search_markets.json").read_text(encoding="utf-8"))
@@ -406,3 +415,4 @@ class VerificationFixtureTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

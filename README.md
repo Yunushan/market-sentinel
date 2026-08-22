@@ -236,6 +236,7 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 ### 8) Kalshi adapter support
 - Lists Kalshi events/contracts through official REST market-data endpoints
 - Reads binary orderbooks and derives YES/NO best bid/ask prices
+- Reads public trade history and normalized OHLCV candlesticks for each YES/NO outcome
 - Supports dry-run/paper orders; live orders are opt-in and require signed API credentials
 
 ### 8) Manifold adapter support
@@ -413,7 +414,7 @@ Useful local API endpoints:
 - `GET /api/health` returns API version, route metadata, React dev/build/prod commands, build availability, and confirms the Tkinter fallback remains `run_gui.bat` or `python app.py`.
 - `PATCH /api/config` updates shared local config fields such as selected market, theme, and Tkinter UI design.
 - `GET /api/markets` returns market capabilities, health, status text, credential source diagnostics without secret values, and live-safety settings.
-- `GET /api/markets/{market_id}/trades?contract_id=...` and `GET /api/markets/{market_id}/candles?contract_id=...&resolution=1h` expose normalized public history for adapters that document those feeds (currently Space); unsupported adapters fail closed with a structured error.
+- `GET /api/markets/{market_id}/trades?contract_id=...` and `GET /api/markets/{market_id}/candles?contract_id=...&resolution=1h` expose normalized history for adapters that document those feeds (currently Kalshi and Space; Polymarket trade history requires explicit operator-supplied CLOB L2 headers); unsupported adapters fail closed with a structured error.
 - `PATCH /api/markets/{market_id}` toggles a market and persists live-safety settings such as enablement, acknowledgement, kill switch, max size, and max notional.
 - `GET /api/alerts` returns alert rows enriched with adapter-backed status and current in-memory price state.
 - `POST /api/alerts` creates a market-scoped price alert after validating the selected adapter supports alerts.
