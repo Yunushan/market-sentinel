@@ -1,3 +1,4 @@
+| `iowa_electronic_markets` | Implemented | Archive-only implementation: IEM publishes an official historical price archive and documented fixed-width/text price-file format. The adapter uses explicit archive inventory for daily historical candles, latest archived prices, alerts, and dry-run orders; current quote pages, orderbooks, live trading, and copy activity remain unsupported because no stable public automation API is documented. | Keep the inventory explicit, validate official IEM archive hosts, keep paper mode local/dry-run, and add current quotes or live orders only after IEM publishes a supported API and account terms for automation. | [Iowa historical archive](https://iemweb.biz.uiowa.edu/historicaldata/), [IEM price-file format](https://iemweb.biz.uiowa.edu/historicaldata/uspoliticalmarkets/1996elections/1996powellnomination_wta/1996powellnomination_wta_fileformat.txt), [Iowa Electronic Markets](https://iem.uiowa.edu/) |
 # Blockers
 
 Last reviewed: 2026-08-22
@@ -78,8 +79,7 @@ pages, but neither publishes a stable third-party market-data/order API or an
 automation permission contract. Nadex was separately promoted to a read-only
 CDNA alias after its official Crypto.com Predictions API surface was validated;
 this does not cover Nadex account automation, DCM/FIX depth, or knock-out products.
-Iowa Electronic Markets still exposes account/practice pages and quote/history
-forms without a documented integration API. Hypermind describes API feeds as
+Iowa Electronic Markets now has an archive-only adapter for its official historical price files; current quote pages, orderbooks, live trading, and copy activity remain unsupported because no stable automation API is documented. Hypermind describes API feeds as
 managed-service deliverables that require program access, not a public contract.
 Good Judgment Open remains an account-based forecasting site without a public
 export/API contract.

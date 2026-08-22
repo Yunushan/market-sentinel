@@ -23,6 +23,7 @@ from market_adapters import (
     HyperliquidAdapter,
     HedgehogMarketsAdapter,
     IBKRForecastTraderAdapter,
+    IowaElectronicMarketsAdapter,
     ForecastExAdapter,
     CMEPredictionMarketsAdapter,
     KalshiAdapter,
@@ -133,6 +134,7 @@ IMPLEMENTED_MARKETS = {
     "zetarium_world",
     "lamas_finance",
     "nadex",
+    "iowa_electronic_markets",
 }
 VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)
 
@@ -191,6 +193,7 @@ class AdapterFoundationTests(unittest.TestCase):
         self.assertIsInstance(registry.create("fanatics_markets"), FanaticsMarketsAdapter)
         self.assertEqual(registry.get_metadata("nadex").display_name, "Nadex")
         self.assertIsInstance(registry.create("nadex"), NadexAdapter)
+        self.assertIsInstance(registry.create("iowa_electronic_markets"), IowaElectronicMarketsAdapter)
         self.assertEqual(registry.get_metadata("fanduel_predicts").display_name, "FanDuel Predicts")
         self.assertIsInstance(registry.create("fanduel_predicts"), FanDuelPredictsAdapter)
         self.assertEqual(registry.get_metadata("coinbase_prediction_markets").display_name, "Coinbase Prediction Markets")

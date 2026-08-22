@@ -447,6 +447,232 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertEqual(history["data"][1]["c"], 0.47)
 
 
+    def test_iowa_electronic_markets_fixture_uses_documented_price_file_shape(self) -> None:
+        market = json.loads((FIXTURE_ROOT / "iowa_electronic_markets" / "market.json").read_text(encoding="utf-8"))
+        lines = (FIXTURE_ROOT / "iowa_electronic_markets" / "powell_price_data.txt").read_text(encoding="utf-8").splitlines()
+        self.assertTrue(market.get("archive_only"))
+        self.assertEqual(len(market.get("contracts", [])), 2)
+        self.assertGreaterEqual(len(lines), 1)
+        fields = lines[0].split()
+        self.assertGreaterEqual(len(fields), 9)
+        self.assertRegex(fields[0], r"^\d{2}/\d{2}/\d{2}$")
+        self.assertIn(fields[2], {"P.YES", "P.NO"})
+        self.assertEqual(len(fields[3:9]), 6)
+
+    def test_probable_fixtures_cover_market_and_clob_payload_shapes(self) -> None:
+        events = json.loads((FIXTURE_ROOT / "probable" / "events.json").read_text(encoding="utf-8"))
+        event = json.loads((FIXTURE_ROOT / "probable" / "event.json").read_text(encoding="utf-8"))
+        market = json.loads((FIXTURE_ROOT / "probable" / "market.json").read_text(encoding="utf-8"))
+        orderbook = json.loads((FIXTURE_ROOT / "probable" / "orderbook.json").read_text(encoding="utf-8"))
+
+        self.assertIsInstance(events.get("events"), list)
+        self.assertIsInstance(event.get("markets"), list)
+        self.assertIsInstance(market.get("tokens"), list)
+        self.assertEqual(market["tokens"][0].get("outcome"), "Yes")
+        self.assertIsInstance(orderbook.get("bids"), list)
+        self.assertIsInstance(orderbook.get("asks"), list)
+
+    def test_matchbook_fixtures_cover_exchange_payload_shapes(self) -> None:
+        events = json.loads((FIXTURE_ROOT / "matchbook" / "events.json").read_text(encoding="utf-8"))
+        markets = json.loads((FIXTURE_ROOT / "matchbook" / "markets.json").read_text(encoding="utf-8"))
+        market = json.loads((FIXTURE_ROOT / "matchbook" / "market.json").read_text(encoding="utf-8"))
+        login = json.loads((FIXTURE_ROOT / "matchbook" / "login_response.json").read_text(encoding="utf-8"))
+        order = json.loads((FIXTURE_ROOT / "matchbook" / "order_response.json").read_text(encoding="utf-8"))
+
+        self.assertIsInstance(events.get("events"), list)
+        self.assertIsInstance(markets.get("markets"), list)
+        self.assertIsInstance(market.get("runners"), list)
+        self.assertIsInstance(market["runners"][0].get("prices"), list)
+        self.assertIn("session-token", login)
+        self.assertIsInstance(order.get("offers"), list)
+
+    def test_dflow_fixtures_cover_nested_market_and_orderbook_shapes(self) -> None:
+        events = json.loads((FIXTURE_ROOT / "dflow" / "events.json").read_text(encoding="utf-8"))
+        orderbook = json.loads((FIXTURE_ROOT / "dflow" / "orderbook.json").read_text(encoding="utf-8"))
+        rpc = json.loads((FIXTURE_ROOT / "dflow" / "rpc_response.json").read_text(encoding="utf-8"))
+
+        self.assertIsInstance(events.get("events"), list)
+        market = events["events"][0]["markets"][0]
+        self.assertIsInstance(market.get("accounts"), dict)
+        self.assertIn("yesMint", next(iter(market["accounts"].values())))
+        self.assertIsInstance(orderbook.get("yes_bids"), dict)
+        self.assertIsInstance(orderbook.get("no_bids"), dict)
+        self.assertEqual(rpc.get("result"), "signature-123")
+
+    def test_context_v2_fixtures_cover_market_prices_orderbook_and_order_shapes(self) -> None:
+        markets = json.loads((FIXTURE_ROOT / "context_v2" / "markets.json").read_text(encoding="utf-8"))
+        market = json.loads((FIXTURE_ROOT / "context_v2" / "market.json").read_text(encoding="utf-8"))
+        orderbook = json.loads((FIXTURE_ROOT / "context_v2" / "orderbook.json").read_text(encoding="utf-8"))
+        order = json.loads((FIXTURE_ROOT / "context_v2" / "order_response.json").read_text(encoding="utf-8"))
+
+        self.assertIsInstance(markets.get("markets"), list)
+        self.assertEqual(market["outcomeTokens"][0].startswith("0x"), True)
+        self.assertIsInstance(market.get("outcomePrices"), list)
+        self.assertIsInstance(orderbook.get("outcomes"), list)
+        self.assertEqual(order.get("success"), True)
+
+    def test_smarkets_fixtures_cover_exchange_hierarchy_quotes_and_order_shapes(self) -> None:
+        events = json.loads((FIXTURE_ROOT / "smarkets" / "events.json").read_text(encoding="utf-8"))
+        markets = json.loads((FIXTURE_ROOT / "smarkets" / "markets.json").read_text(encoding="utf-8"))
+        contracts = json.loads((FIXTURE_ROOT / "smarkets" / "contracts.json").read_text(encoding="utf-8"))
+        quotes = json.loads((FIXTURE_ROOT / "smarkets" / "quotes.json").read_text(encoding="utf-8"))
+        order = json.loads((FIXTURE_ROOT / "smarkets" / "order_response.json").read_text(encoding="utf-8"))
+
+        self.assertIsInstance(events.get("events"), list)
+        self.assertIsInstance(markets.get("markets"), list)
+        self.assertIsInstance(contracts.get("contracts"), list)
+        self.assertIsInstance(quotes["quotes"][0].get("back_offers"), list)
+        self.assertIsInstance(order.get("orders"), list)
+
+    def test_hedgehog_fixture_covers_market_v1_program_account_shape(self) -> None:
+        payload = json.loads(
+            (FIXTURE_ROOT / "hedgehog_markets" / "program_accounts.json").read_text(encoding="utf-8")
+        )
+        self.assertIsInstance(payload.get("result"), list)
+        self.assertGreaterEqual(len(payload["result"]), 1)
+        first = payload["result"][0]
+        self.assertIn("pubkey", first)
+        self.assertEqual(first["account"]["data"][1], "base64")
+        self.assertEqual(first["account"]["owner"], "PARrVs6F5egaNuz8g6pKJyU4ze3eX5xGZCFb3GLiVvu")
+
+    def test_frenzy_fixture_covers_bet_settled_log_shape(self) -> None:
+        payload = json.loads((FIXTURE_ROOT / "frenzy_finance" / "rpc_responses.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["block_number"].get("result"), "0x200")
+        logs = payload["settled_logs"].get("result")
+        self.assertIsInstance(logs, list)
+        self.assertGreaterEqual(len(logs), 1)
+        self.assertEqual(len(logs[0].get("topics", [])), 4)
+        self.assertEqual(logs[0]["topics"][0], "0x8d80dcfb835e27822f1d1a72e3f508bda35ef2bb31371a566c6dce20963761c7")
+        self.assertEqual(len(logs[0].get("data", "")[2:]), 256)
+
+    def test_thales_fixtures_cover_grouped_markets_quotes_and_amm_shapes(self) -> None:
+        markets = json.loads((FIXTURE_ROOT / "thales_market" / "markets.json").read_text(encoding="utf-8"))
+        market = json.loads((FIXTURE_ROOT / "thales_market" / "market.json").read_text(encoding="utf-8"))
+        quote = json.loads((FIXTURE_ROOT / "thales_market" / "buy_quote.json").read_text(encoding="utf-8"))
+
+        self.assertIsInstance(markets.get("BTC"), dict)
+        grouped = markets["BTC"]["2026-12-31T12:00:00.000Z"]
+        self.assertIsInstance(grouped.get("UP"), list)
+        self.assertIn("address", grouped["UP"][0])
+        self.assertEqual(market.get("position"), "UP")
+        self.assertIn("price", market)
+        self.assertIn("pricePerPosition", quote)
+
+    def test_metadao_fixtures_cover_official_ticker_shapes(self) -> None:
+        tickers = json.loads((FIXTURE_ROOT / "metadao" / "tickers.json").read_text(encoding="utf-8"))
+
+        self.assertIsInstance(tickers.get("tickers"), list)
+        self.assertIn("ticker_id", tickers["tickers"][0])
+        self.assertIn("base_currency", tickers["tickers"][0])
+        self.assertIn("last_price", tickers["tickers"][0])
+        self.assertIn("liquidity_in_usd", tickers["tickers"][0])
+
+    def test_seer_fixtures_cover_official_search_and_market_shapes(self) -> None:
+        search = json.loads((FIXTURE_ROOT / "seer" / "markets_search.json").read_text(encoding="utf-8"))
+        market = json.loads((FIXTURE_ROOT / "seer" / "market.json").read_text(encoding="utf-8"))
+
+        self.assertIsInstance(search.get("markets"), list)
+        self.assertEqual(search["markets"][0].get("chainId"), 100)
+        self.assertTrue(search["markets"][0].get("id", "").startswith("0x"))
+        self.assertIsInstance(search["markets"][0].get("odds"), list)
+        self.assertEqual(market.get("outcomes"), ["Yes", "No"])
+        self.assertEqual(len(market.get("wrappedTokens", [])), 2)
+
+    def test_hyperliquid_fixtures_cover_hip4_metadata_book_activity_and_exchange_shapes(self) -> None:
+        metadata = json.loads((FIXTURE_ROOT / "hyperliquid" / "outcome_meta.json").read_text(encoding="utf-8"))
+        book = json.loads((FIXTURE_ROOT / "hyperliquid" / "l2_book.json").read_text(encoding="utf-8"))
+        fills = json.loads((FIXTURE_ROOT / "hyperliquid" / "user_fills.json").read_text(encoding="utf-8"))
+        candles = json.loads((FIXTURE_ROOT / "hyperliquid" / "candles.json").read_text(encoding="utf-8"))
+        exchange = json.loads((FIXTURE_ROOT / "hyperliquid" / "exchange_response.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(metadata["outcomes"][0].get("outcome"), 1)
+        self.assertEqual([side["name"] for side in metadata["outcomes"][0]["sideSpecs"]], ["Yes", "No"])
+        self.assertEqual(book.get("coin"), "#10")
+        self.assertEqual(len(book.get("levels", [])), 2)
+        self.assertEqual(fills[0].get("coin"), "#10")
+        self.assertEqual(fills[1].get("coin"), "BTC")
+        self.assertIsInstance(candles, list)
+        self.assertEqual(candles[0].get("s"), "#10")
+        self.assertIn("o", candles[0])
+        self.assertIn("v", candles[0])
+        self.assertEqual(exchange.get("status"), "ok")
+
+    def test_trueo_fixtures_cover_onchain_manager_pool_and_signed_transaction_shapes(self) -> None:
+        rpc = json.loads((FIXTURE_ROOT / "trueo" / "rpc.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(rpc["manager"].startswith("0x"))
+        self.assertTrue(rpc["market"].startswith("0x"))
+        self.assertTrue(rpc["yesPool"].startswith("0x"))
+        self.assertGreater(rpc["poolSqrtPriceX96"], "0")
+        self.assertTrue(rpc["signedTransaction"].startswith("0x"))
+
+    def test_prdt_fixture_covers_prediction_contract_rpc_shapes(self) -> None:
+        rpc = json.loads((FIXTURE_ROOT / "prdt_finance" / "rpc_responses.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(rpc["prediction_address"].startswith("0x"))
+        self.assertTrue(rpc["factory_address"].startswith("0x"))
+        self.assertEqual(rpc["epoch"], 42)
+        self.assertEqual(set(rpc["responses"]), {
+            "current_epoch",
+            "interval_seconds",
+            "min_bet_amount",
+            "bet_token",
+            "oracle",
+            "round",
+            "timestamps",
+        })
+        for value in rpc["responses"].values():
+            if isinstance(value, list):
+                self.assertTrue(all(len(word) == 64 for word in value))
+            else:
+                self.assertTrue(value.startswith("0x"))
+
+    def test_zetarium_fixture_covers_prediction_market_rpc_shapes(self) -> None:
+        rpc = json.loads((FIXTURE_ROOT / "zetarium_world" / "rpc_responses.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(rpc["prediction_market_address"].startswith("0x"))
+        self.assertTrue(rpc["stake_token"].startswith("0x"))
+        self.assertEqual(set(rpc["markets"]), {"1", "2"})
+        self.assertEqual(set(rpc["stakes"]), {"1:0", "1:1", "2:0", "2:1"})
+        self.assertTrue(rpc["signed_transaction"].startswith("0x"))
+        self.assertTrue(rpc["transaction_data"].startswith("0xda866c48"))
+
+    def test_lamas_fixture_covers_anchor_round_result_shapes(self) -> None:
+        rpc = json.loads((FIXTURE_ROOT / "lamas_finance" / "rpc_responses.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(rpc["account_discriminator"], "d80b15c4d5f075eb")
+        for _game, rows in rpc["program_accounts"].items():
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            account = row["account"]
+            self.assertEqual(account["owner"], row["program_id"] if "program_id" in row else account["owner"])
+            self.assertEqual(account["data"][1], "base64")
+            raw = base64.b64decode(account["data"][0], validate=True)
+            self.assertGreater(len(raw), 8)
+            self.assertEqual(raw[:8].hex(), rpc["account_discriminator"])
+
+        self.assertEqual(set(rpc["account_info"]), {"up_or_down", "price_predict"})
+
+    def test_ibkr_event_contract_fixtures_cover_forecastx_and_cme_shapes(self) -> None:
+        forecast_search = json.loads((FIXTURE_ROOT / "ibkr_forecasttrader" / "search.json").read_text(encoding="utf-8"))
+        forecast_strikes = json.loads((FIXTURE_ROOT / "forecastex" / "strikes.json").read_text(encoding="utf-8"))
+        forecast_info = json.loads((FIXTURE_ROOT / "forecastex" / "info.json").read_text(encoding="utf-8"))
+        cme_search = json.loads((FIXTURE_ROOT / "cme_prediction_markets" / "search.json").read_text(encoding="utf-8"))
+        cme_info = json.loads((FIXTURE_ROOT / "cme_prediction_markets" / "info.json").read_text(encoding="utf-8"))
+        snapshot = json.loads((FIXTURE_ROOT / "ibkr_forecasttrader" / "snapshot.json").read_text(encoding="utf-8"))
+        history = json.loads((FIXTURE_ROOT / "ibkr_forecasttrader" / "history.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(forecast_search[0]["symbol"], "FF")
+        self.assertIn(4.875, forecast_strikes["call"])
+        self.assertEqual({record["right"] for record in forecast_info}, {"C", "P"})
+        self.assertEqual(cme_search[0]["sections"][-1]["secType"], "EC")
+        self.assertEqual({record["tradingClass"] for record in cme_info}, {"ECNQ", "Q4A"})
+        self.assertEqual(snapshot[0]["conid"], 721095497)
+        self.assertEqual(history["barLength"], 3600)
+        self.assertEqual(len(history["data"]), 4)
+        self.assertEqual(history["data"][1]["c"], 0.47)
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -111,13 +111,13 @@ This project is not 100% feature-complete across every listed market. The comple
 Current catalog snapshot:
 
 - Total markets: 68
-- Implemented or partially implemented adapters: 49
-- Verified-blocked/stub adapters: 19
-- Market/event discovery supported: 49 yes, 19 no
-- Alerts supported: 48 yes, 20 no
-- Read-only price data supported: 47 yes, 21 no
+- Implemented or partially implemented adapters: 50
+- Verified-blocked/stub adapters: 18
+- Market/event discovery supported: 50 yes, 18 no
+- Alerts supported: 49 yes, 19 no
+- Read-only price data supported: 48 yes, 20 no
 - Orderbook reading supported: 24 yes, 44 no
-- Paper trading supported: 46 yes, 22 no
+- Paper trading supported: 47 yes, 21 no
 - Live trading supported: 35 guarded/off by default, 33 no
 - Copy trading supported: 5 yes, 63 no (Polymarket, Opinion Labs, Manifold, Myriad, and Hyperliquid HIP-4 wallet fills; all simulation-first and guarded)
 
@@ -257,7 +257,7 @@ These articles completed the catalog, adapter architecture, verification, docs, 
 - Article 118 Zeitgeist Guarded HybridRouter Boundary: scope complete for this pass; the official Zeitgeist HybridRouter pallet's `buy`/`sell` call contract is represented by fixture-backed GraphQL reads and a guarded `author_submitExtrinsic` boundary. The adapter requires an externally signed canonical extrinsic, reviewed pallet/call/market/asset/amount/price/order/strategy metadata, a matching runtime spec version, an explicit Substrate RPC, and shared live-safety gates; it never signs, approves, settles, or reads CLOB depth.
 - Article 119 Zetarium World BSC PredictionMarket Adapter: scope complete for this pass; the published Zetarium V2 contract model and reviewed BSC `PredictionMarket` deployment are represented by fixture-backed market discovery, binary/multi-outcome pool-share prices, alerts, local paper intents, and a guarded externally signed `placeBet` boundary. The adapter validates chain, target, value, calldata, market/outcome/side/size metadata, and shared live-safety gates before forwarding; it never signs, approves, settles, reads CLOB depth, or performs copy trading.
 - Article 120 Lamas Finance Solana Anchor Adapter: scope complete for this pass; the official Lamas Finance `PricePredict` and `UpOrDown` programs are represented by fixture-backed `getProgramAccounts`/`getAccountInfo` reads, pooled Up/Down prices, PricePredict reference prices, alerts, local paper intents, and a guarded externally signed Anchor `predict` boundary. The adapter validates the reviewed program, round account, outcome, amount, and instruction bytes before forwarding; it never signs, settles, reads CLOB depth, or performs copy trading.
-- Article 121 Fresh Blocked-Market Audit: scope complete for this pass; Robinhood, DraftKings, Iowa Electronic Markets, Hypermind, Good Judgment Open, Blinq, Levr Bet, Dexsport, and SynStation were rechecked against current first-party surfaces on 2026-08-21. Nadex was re-audited separately and promoted only for the documented read-only CDNA/Nadex prediction-event API surface; account trading, DCM/FIX depth, and knock-out products remain unsupported.
+- Article 121 Fresh Blocked-Market Audit: scope complete for this pass; Robinhood, DraftKings, Hypermind, Good Judgment Open, Blinq, Levr Bet, Dexsport, and SynStation were rechecked against current first-party surfaces on 2026-08-21. Nadex was re-audited separately and promoted only for the documented read-only CDNA/Nadex prediction-event API surface; account trading, DCM/FIX depth, and knock-out products remain unsupported.
 - Article 122 FanDuel Predicts/OG Read-only Adapter: scope complete for this pass; FanDuel's current product and June 2026 press release document contracts listed by CME Group and Crypto.com's OG Prediction Markets/CDNA. A fixture-backed alias now covers the documented OG/CDNA discovery, contracts, prices, alerts, and local dry-run orders through the official Crypto.com Predictions API. CME-listed contracts remain available through the CME/IBKR adapter; FanDuel account execution, orderbook depth, and copy trading remain explicitly unsupported.
 - Article 123 Opinion Wallet Activity and Simulation Copy Adapter: scope complete for this pass; the official Opinion OpenAPI wallet-trade feed is fixture-backed and normalized into the common activity shape, Opinion copy capability now produces bounded simulation-first paper intents, and the selected-market wallet/copy API path no longer assumes Polymarket. Opinion live execution remains separately guarded by the CLOB boundary documented in Article 128.
 - Article 124 Manifold Public Activity and Simulation Copy Adapter: scope complete for this pass; the official public `/v0/bets?username=...` feed is fixture-backed and normalized into the common activity shape behind a safe `manifold:<username>` identity, selected-market wallet/copy API and desktop paths accept the identity, and simulation-first copy previews preserve Manifold amount-versus-share semantics. Live MANA betting remains separately guarded, and CLOB orderbook reading remains unsupported.
@@ -273,6 +273,8 @@ These articles completed the catalog, adapter architecture, verification, docs, 
 - Article 134 Limitless Finalized Trade History: scope complete for this pass; the official public `/markets/{slug}/events` endpoint is normalized through `list_trades` with documented page/limit validation, YES/NO token filtering, numeric side mapping, ISO timestamp conversion, and six-decimal matched-size scaling. The endpoint is finalized public CLOB activity and has no timestamp query filters, so shared bounds are applied locally to the newest page; private account history and copy trading remain separate unsupported or credentialed paths.
 
 - Article 135 Myriad Order-Book Trade History: scope complete for this pass; the official `GET /markets/:id/trades` endpoint is normalized through `list_trades` with documented outcome/pagination filters, buy/sell/split/merge side preservation, smallest-unit amount scaling, local timestamp bounds, and fixture-backed response coverage. Myriad AMM actions, wallet activity, order submission, settlement, and copy execution remain separately modeled and guarded.
+
+- Article 136 Iowa Electronic Markets Historical Archive Adapter: scope complete for this pass; the official IEM historical price-file format is represented by an explicit inventory adapter with archive event/contract metadata, daily candle normalization, latest archived prices, alerts, local dry-run orders, host/path validation, and offline fixture coverage. Current quote pages, orderbooks, live trading, and copy trading remain unsupported until IEM publishes a stable automation API and account terms.
 
 ## Active continuation goals
 

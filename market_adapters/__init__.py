@@ -17,6 +17,7 @@ from .gemini import GeminiPredictionAdapter
 from .hyperliquid import HyperliquidAdapter
 from .hedgehog import HedgehogMarketsAdapter
 from .ibkr_event_contracts import CMEPredictionMarketsAdapter, ForecastExAdapter, IBKREventContractsAdapter, IBKRForecastTraderAdapter
+from .iowa_electronic_markets import IowaElectronicMarketsAdapter
 from .kalshi import KalshiAdapter
 from .lamas_finance import LamasFinanceAdapter
 from .legacy_web3 import (
@@ -89,6 +90,7 @@ __all__ = [
     "HedgehogMarketsAdapter",
     "IBKREventContractsAdapter",
     "IBKRForecastTraderAdapter",
+    "IowaElectronicMarketsAdapter",
     "ForecastExAdapter",
     "CMEPredictionMarketsAdapter",
     "MARKET_CATALOG",

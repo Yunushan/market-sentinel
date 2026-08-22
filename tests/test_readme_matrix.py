@@ -118,6 +118,7 @@ IMPLEMENTED_MARKETS = {
     "zetarium_world",
     "lamas_finance",
     "nadex",
+    "iowa_electronic_markets",
 }
 VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)
 

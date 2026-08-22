@@ -415,7 +415,7 @@ Useful local API endpoints:
 - `GET /api/health` returns API version, route metadata, React dev/build/prod commands, build availability, and confirms the Tkinter fallback remains `run_gui.bat` or `python app.py`.
 - `PATCH /api/config` updates shared local config fields such as selected market, theme, and Tkinter UI design.
 - `GET /api/markets` returns market capabilities, health, status text, credential source diagnostics without secret values, and live-safety settings.
-- `GET /api/markets/{market_id}/trades?contract_id=...` and `GET /api/markets/{market_id}/candles?contract_id=...&resolution=1h` expose normalized history for adapters that document those feeds (currently Kalshi, Hyperliquid candles, Manifold trades, Myriad trades, Opinion price history, Polymarket price history, IBKR event-contract candles, and Space; Opinion and Polymarket's one-price-per-timestamp feeds are represented as flat OHLC points; Polymarket trade history still requires explicit operator-supplied CLOB L2 headers); unsupported adapters fail closed with a structured error.
+- `GET /api/markets/{market_id}/trades?contract_id=...` and `GET /api/markets/{market_id}/candles?contract_id=...&resolution=1h` expose normalized history for adapters that document those feeds (currently Kalshi, Hyperliquid candles, Manifold trades, Myriad trades, Opinion price history, Polymarket price history, IBKR event-contract candles, Space, and Iowa Electronic Markets archive candles; Opinion and Polymarket's one-price-per-timestamp feeds are represented as flat OHLC points; Polymarket trade history still requires explicit operator-supplied CLOB L2 headers); unsupported adapters fail closed with a structured error.
 - `PATCH /api/markets/{market_id}` toggles a market and persists live-safety settings such as enablement, acknowledgement, kill switch, max size, and max notional.
 - `GET /api/alerts` returns alert rows enriched with adapter-backed status and current in-memory price state.
 - `POST /api/alerts` creates a market-scoped price alert after validating the selected adapter supports alerts.
@@ -520,7 +520,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | Metaculus (`metaculus`) | Implemented | Yes | Yes (forecast snapshots) | No | No | No | Required | Account/API token required | Not trading/KYC limited |
 | Good Judgment Open (`good_judgment_open`) | Verified blocked | No | No | No | No | No | Required | Account/export access required | Not trading/KYC limited |
 | Hypermind (`hypermind`) | Verified blocked | No | No | No | No | No | Required | Program access required | Program access limited |
-| Iowa Electronic Markets (`iowa_electronic_markets`) | Verified blocked | No | No | No | No | No | Required | IEM account required | Eligibility limited |
+| Iowa Electronic Markets (`iowa_electronic_markets`) | Implemented | Yes | Yes | Yes | No | No | Required | Not required | Not trading/KYC limited |
 | INFER / INFER-pub (`infer`) | Verified blocked | No | No | No | No | No | Required | Account/export access required | Not trading/KYC limited |
 | Fact Machine (`fact_machine`) | Verified blocked | No | No | No | No | No | Required | Wallet/personhood required | Identity/jurisdiction limited |
 | Opinion Labs (`opinion_labs`) | Implemented | Yes | Yes | Yes | Guarded, off by default | Yes, simulation only | Required | API credentials required | Jurisdiction varies |

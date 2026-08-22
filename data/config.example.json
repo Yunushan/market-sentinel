@@ -280,10 +280,23 @@
     "iowa_electronic_markets": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "iem_allow_custom_data_host": false,
+        "iem_historical_markets": [
+          {
+            "market_id": "1996-powell-nomination",
+            "title": "1996 Powell Nomination Winner Takes All",
+            "status": "closed",
+            "data_url": "https://iemweb.biz.uiowa.edu/historicaldata/uspoliticalmarkets/1996elections/1996powellnomination_wta/powellpricedata.txt",
+            "contracts": {
+              "P.YES": "Powell's name is placed in nomination",
+              "P.NO": "Powell's name is not placed in nomination"
+            }
+          }
+        ],
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-21: official account/practice and quote/history pages exist, but no stable documented API for discovery, contract listing, live quotes, or automated trading is published."
+        "notes": "Archive-only support uses the official IEM historical price-file format; current quote pages, orderbooks, live trading, and copy trading remain unsupported."
       }
     },
     "myriad_markets": {

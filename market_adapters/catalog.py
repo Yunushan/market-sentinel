@@ -442,6 +442,56 @@ HEDGEHOG_CAPABILITIES = MarketCapabilities(
     region_limited=True,
 )
 
+IEM_CAPABILITIES = MarketCapabilities(
+    # IEM's documented surface is an explicit inventory of official
+    # historical price files; it does not publish dynamic discovery or a
+    # current quote/order API.
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    alerts=True,
+    paper_trading=True,
+    live_trading=False,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=False,
+    region_limited=False,
+)
+
+FRENZY_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    alerts=True,
+    paper_trading=True,
+    # Frenzy live bets require an oracle-signed BetAck in addition to a
+    # wallet signature; this adapter only emits a paper EIP-712 intent.
+    live_trading=False,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=False,
+    region_limited=True,
+)
+
+HEDGEHOG_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    alerts=True,
+    paper_trading=True,
+    live_trading=True,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=False,
+    region_limited=True,
+)
+
 STUB_CAPABILITIES = MarketCapabilities()
 
 MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
@@ -619,7 +669,11 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="iowa_electronic_markets",
         display_name="Iowa Electronic Markets",
         homepage_url="https://iem.uiowa.edu",
-        description="Verified blocked: public quote/history pages exist, but no stable documented API is published.",
+        description=(
+            "Official historical price-file adapter with explicit archive inventory, daily candles, latest "
+            "archived prices, alerts, and dry-run orders; current quote/order APIs remain unsupported."
+        ),
+        capabilities=IEM_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="infer",

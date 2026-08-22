@@ -69,19 +69,6 @@ VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
         ],
         "last_reviewed": "2026-08-21",
     },
-    "iowa_electronic_markets": {
-        "reason": (
-            "Verified 2026-08-21: Iowa Electronic Markets publishes official site pages, quote pages, and "
-            "price-history forms, but no stable documented API for discovery, contract listing, live quotes, "
-            "or automated trading. Trading also requires IEM account eligibility."
-        ),
-        "references": [
-            "https://iem.uiowa.edu",
-            "https://iemweb.biz.uiowa.edu/pricehistory/pricehistory_SelectContract.cfm",
-            "https://iemweb.biz.uiowa.edu/quotes/",
-        ],
-        "last_reviewed": "2026-08-21",
-    },
     "infer": {
         "reason": (
             "Verified 2026-05-26; re-verified 2026-08-17: INFER-pub now redirects to the RAND Forecasting Initiative "
@@ -235,6 +222,7 @@ def build_default_registry() -> AdapterRegistry:
     from .hyperliquid import HyperliquidAdapter
     from .hedgehog import HedgehogMarketsAdapter
     from .ibkr_event_contracts import CMEPredictionMarketsAdapter, ForecastExAdapter, IBKRForecastTraderAdapter
+    from .iowa_electronic_markets import IowaElectronicMarketsAdapter
     from .kalshi import KalshiAdapter
     from .lamas_finance import LamasFinanceAdapter
     from .legacy_web3 import (
@@ -309,6 +297,7 @@ def build_default_registry() -> AdapterRegistry:
         IBKRForecastTraderAdapter,
         ForecastExAdapter,
         CMEPredictionMarketsAdapter,
+        IowaElectronicMarketsAdapter,
         MyriadAdapter,
         OpinionAdapter,
         PredictFunAdapter,
@@ -359,6 +348,7 @@ def build_default_registry() -> AdapterRegistry:
     registry.register_adapter(IBKRForecastTraderAdapter, replace=True)
     registry.register_adapter(ForecastExAdapter, replace=True)
     registry.register_adapter(CMEPredictionMarketsAdapter, replace=True)
+    registry.register_adapter(IowaElectronicMarketsAdapter, replace=True)
     registry.register_adapter(MyriadAdapter, replace=True)
     registry.register_adapter(OpinionAdapter, replace=True)
     registry.register_adapter(PredictFunAdapter, replace=True)
