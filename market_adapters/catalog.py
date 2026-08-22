@@ -400,6 +400,8 @@ CONTEXT_V2_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -645,7 +647,7 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://context.markets",
         description=(
             "Official Context Markets v2 API adapter for market discovery, outcome prices, orderbooks, "
-            "paper orders, and guarded wallet-signed order submission."
+            "market activity trades, binary price history, paper orders, and guarded wallet-signed order submission."
         ),
         capabilities=CONTEXT_V2_CAPABILITIES,
     ),

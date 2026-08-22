@@ -342,12 +342,16 @@ class VerificationFixtureTests(unittest.TestCase):
         markets = json.loads((FIXTURE_ROOT / "context_v2" / "markets.json").read_text(encoding="utf-8"))
         market = json.loads((FIXTURE_ROOT / "context_v2" / "market.json").read_text(encoding="utf-8"))
         orderbook = json.loads((FIXTURE_ROOT / "context_v2" / "orderbook.json").read_text(encoding="utf-8"))
+        activity = json.loads((FIXTURE_ROOT / "context_v2" / "activity.json").read_text(encoding="utf-8"))
+        prices = json.loads((FIXTURE_ROOT / "context_v2" / "prices.json").read_text(encoding="utf-8"))
         order = json.loads((FIXTURE_ROOT / "context_v2" / "order_response.json").read_text(encoding="utf-8"))
 
         self.assertIsInstance(markets.get("markets"), list)
         self.assertEqual(market["outcomeTokens"][0].startswith("0x"), True)
         self.assertIsInstance(market.get("outcomePrices"), list)
         self.assertIsInstance(orderbook.get("outcomes"), list)
+        self.assertEqual(activity["activity"][0]["type"], "trade")
+        self.assertIsInstance(prices.get("prices"), list)
         self.assertEqual(order.get("success"), True)
 
     def test_smarkets_fixtures_cover_exchange_hierarchy_quotes_and_order_shapes(self) -> None:

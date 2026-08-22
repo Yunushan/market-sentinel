@@ -172,6 +172,7 @@ HISTORY_CAPABILITIES = {
     "space": {"trade_history", "candle_history"},
     "scicast": {"trade_history", "candle_history"},
     "probable": {"trade_history", "candle_history"},
+    "context_v2": {"trade_history", "candle_history"},
 }
 
 

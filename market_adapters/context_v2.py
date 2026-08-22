@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
@@ -9,6 +10,8 @@ from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatur
 from .types import (
     MarketContract,
     MarketEvent,
+    MarketCandle,
+    MarketTrade,
     OrderBookLevel,
     OrderBookSnapshot,
     PaperOrderRequest,
@@ -21,8 +24,11 @@ DEFAULT_CONTEXT_API_BASE_URL = "https://api.context.markets/v2"
 CONTEXT_REFERENCES = (
     "https://docs.context.markets/developers/guides/api-keys",
     "https://docs.context.markets/api-reference/markets/list-markets",
+    "https://docs.context.markets/api-reference/markets/get-market-activity",
+    "https://docs.context.markets/api-reference/markets/get-market-price-history",
     "https://docs.context.markets/api-reference/orders/create-order",
     "https://docs.context.markets/api-reference/orders/cancel-order",
+    "https://github.com/contextwtf/context-sdk/blob/main/skills/api-reference.md",
     "https://docs.context.markets/agents/react-sdk/index",
 )
 
@@ -136,6 +142,149 @@ class ContextV2Adapter(MarketAdapter):
             asks=asks,
             raw={"orderbook": self._mapping_payload(payload), "outcome_index": outcome_index},
         )
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Return Context's documented market activity trade feed.
+
+        Context's activity schema reports the traded outcome (``yes``/``no``)
+        in ``data.side`` rather than a BUY/SELL direction.  We preserve that
+        upstream meaning in the normalized ``side`` field instead of guessing
+        an order direction that the feed does not publish.  The API supports
+        ISO ``startTime``/``endTime`` filters; the shared numeric bounds are
+        also applied locally so fixture and live behavior stay identical.
+        """
+
+        self.ensure_capability("trade_history")
+        market_id, outcome_index = self._split_contract_id(contract_id)
+        desired = self._bounded_limit(limit, maximum=500, label="Context trade limit")
+        before_ts = self._history_timestamp(before, "before") if before is not None else None
+        after_ts = self._history_timestamp(after, "after") if after is not None else None
+        if before_ts is not None and after_ts is not None and before_ts < after_ts:
+            raise MarketConfigurationError("Context trade history requires before to be at or after after.")
+
+        params: Dict[str, Any] = {"limit": desired, "types": "trade"}
+        if after_ts is not None:
+            params["startTime"] = self._iso_timestamp(after_ts)
+        if before_ts is not None:
+            params["endTime"] = self._iso_timestamp(before_ts)
+        payload = self._get(f"/markets/{market_id}/activity", params=params)
+        rows = self._rows(payload, "activity", "data")
+        canonical = self._contract_id(market_id, outcome_index)
+        trades: List[MarketTrade] = []
+        for index, row in enumerate(rows):
+            if str(row.get("type") or "").strip().lower() != "trade":
+                continue
+            row_market = str(row.get("marketId") or row.get("market_id") or market_id).strip()
+            if row_market and row_market != market_id:
+                continue
+            data = row.get("data") if isinstance(row.get("data"), Mapping) else row
+            outcome = str(
+                self._value(data, "outcome", "outcomeName", "outcome_name", "side") or ""
+            ).strip()
+            if outcome and not self._outcome_matches(outcome, outcome_index):
+                continue
+            price = self._probability(self._value(data, "price", "probability"))
+            size = self._positive_number(self._value(data, "contracts", "size", "quantity"))
+            timestamp = self._optional_timestamp(row.get("timestamp") or data.get("timestamp"))
+            if price is None or size is None or timestamp is None:
+                continue
+            if before_ts is not None and timestamp > before_ts:
+                continue
+            if after_ts is not None and timestamp < after_ts:
+                continue
+            trade_id = str(
+                row.get("id")
+                or row.get("tradeId")
+                or row.get("trade_id")
+                or row.get("txHash")
+                or row.get("hash")
+                or f"context:{market_id}:{int(timestamp * 1000)}:{index}"
+            ).strip()
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    trade_id=trade_id,
+                    side=outcome.upper() if outcome else "TRADE",
+                    price=price,
+                    size=size,
+                    timestamp=timestamp,
+                    raw=dict(row),
+                )
+            )
+            if len(trades) >= desired:
+                break
+        return trades
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Return Context's documented point price history as flat candles.
+
+        The Context API returns one binary-market price series.  Outcome 0 is
+        the published series and outcome 1 is its documented complement.  No
+        volume or synthetic OHLC movement is fabricated: each point is kept as
+        a flat OHLC snapshot with the upstream row in ``raw``.
+        """
+
+        self.ensure_capability("candle_history")
+        market_id, outcome_index = self._split_contract_id(contract_id)
+        if outcome_index not in (0, 1):
+            raise MarketConfigurationError("Context price history supports only YES (0) and NO (1) outcomes.")
+        clean_resolution = str(resolution or "").strip()
+        resolution_map = {"1h": "1h", "6h": "6h", "1d": "1d", "1w": "1w", "1m": "1M", "1M": "1M", "all": "all"}
+        if clean_resolution not in resolution_map:
+            raise MarketConfigurationError("Context price history resolution must be one of 1h, 6h, 1d, 1w, 1M, or all.")
+        start_ts = self._history_timestamp(from_timestamp, "from_timestamp") if from_timestamp is not None else None
+        end_ts = self._history_timestamp(to_timestamp, "to_timestamp") if to_timestamp is not None else None
+        if start_ts is not None and end_ts is not None and end_ts <= start_ts:
+            raise MarketConfigurationError("Context price history requires to_timestamp greater than from_timestamp.")
+
+        payload = self._get(f"/markets/{market_id}/prices", params={"timeframe": resolution_map[clean_resolution]})
+        rows = self._rows(payload, "prices", "history", "data")
+        if not rows and isinstance(payload, Mapping):
+            raw_prices = payload.get("prices")
+            if isinstance(raw_prices, list):
+                rows = [row for row in raw_prices if isinstance(row, Mapping)]
+        canonical = self._contract_id(market_id, outcome_index)
+        candles: List[MarketCandle] = []
+        for row in rows:
+            timestamp = self._optional_timestamp(self._value(row, "time", "timestamp", "ts"))
+            price = self._probability(self._value(row, "price", "probability"))
+            if timestamp is None or price is None:
+                continue
+            if outcome_index == 1:
+                price = 1.0 - price
+            if start_ts is not None and timestamp < start_ts:
+                continue
+            if end_ts is not None and timestamp > end_ts:
+                continue
+            candles.append(
+                MarketCandle(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    timestamp=timestamp,
+                    open=price,
+                    high=price,
+                    low=price,
+                    close=price,
+                    volume=None,
+                    raw=dict(row),
+                )
+            )
+        return candles
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -275,6 +424,69 @@ class ContextV2Adapter(MarketAdapter):
             payload["trader"] = trader
             payload["signature"] = signature
         return payload
+
+    @staticmethod
+    def _bounded_limit(value: Any, *, maximum: int, label: str) -> int:
+        try:
+            desired = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"{label} must be an integer between 1 and {maximum}.") from exc
+        if desired < 1 or desired > maximum:
+            raise MarketConfigurationError(f"{label} must be between 1 and {maximum}.")
+        return desired
+
+    @staticmethod
+    def _history_timestamp(value: Any, label: str) -> float:
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Context {label} must be a finite Unix timestamp.") from exc
+        if not math.isfinite(timestamp) or timestamp < 0:
+            raise MarketConfigurationError(f"Context {label} must be a finite, non-negative Unix timestamp.")
+        return timestamp
+
+    @classmethod
+    def _optional_timestamp(cls, value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        if isinstance(value, (int, float)):
+            try:
+                timestamp = float(value)
+            except (TypeError, ValueError):
+                return None
+            if timestamp > 100_000_000_000:
+                timestamp /= 1000.0
+            return timestamp if math.isfinite(timestamp) and timestamp >= 0 else None
+        text = str(value).strip()
+        try:
+            timestamp = datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return timestamp if math.isfinite(timestamp) and timestamp >= 0 else None
+
+    @staticmethod
+    def _iso_timestamp(timestamp: float) -> str:
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def _positive_number(value: Any) -> Optional[float]:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) and number > 0 else None
+
+    @staticmethod
+    def _outcome_matches(value: str, outcome_index: int) -> bool:
+        clean = str(value or "").strip().lower()
+        if clean in {"yes", "y", "0"}:
+            return outcome_index == 0
+        if clean in {"no", "n", "1"}:
+            return outcome_index == 1
+        try:
+            return int(clean) == outcome_index
+        except (TypeError, ValueError):
+            return True
 
     def _event_from_market(self, market: Mapping[str, Any]) -> MarketEvent:
         market_id = self._id(market)

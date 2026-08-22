@@ -859,6 +859,8 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         markets = load_fixture("context_v2", "markets")
         market = load_fixture("context_v2", "market")
         orderbook = load_fixture("context_v2", "orderbook")
+        activity = load_fixture("context_v2", "activity")
+        prices = load_fixture("context_v2", "prices")
         market_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
         def fake_get_json(url: str, *, params=None, headers=None):
@@ -869,6 +871,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 return market
             if url.endswith(f"/markets/{market_id}/orderbook"):
                 return orderbook
+            if url.endswith(f"/markets/{market_id}/activity"):
+                self.assertEqual(params["types"], "trade")
+                return activity
+            if url.endswith(f"/markets/{market_id}/prices"):
+                self.assertIn(params["timeframe"], {"1h", "1d", "1M"})
+                return prices
             raise AssertionError(f"unexpected Context URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
@@ -878,6 +886,9 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             contracts = adapter.list_contracts(market_id)
             book = adapter.get_orderbook(order.contract_id)
             price = adapter.get_price(order.contract_id)
+            trades = adapter.list_trades(order.contract_id)
+            yes_candles = adapter.list_candles(order.contract_id, resolution="1d")
+            no_candles = adapter.list_candles(f"{market_id}:1", resolution="1M")
             paper = adapter.place_paper_order(order)
 
         self.assertEqual(events[0].event_id, market_id)
@@ -885,6 +896,11 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual([level.price for level in book.bids], [0.42, 0.4])
         self.assertEqual([level.price for level in book.asks], [0.46, 0.48])
         self.assertAlmostEqual(price.midpoint or 0.0, 0.44)
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0].side, "YES")
+        self.assertAlmostEqual(trades[0].price, 0.44)
+        self.assertEqual([c.close for c in yes_candles], [0.42, 0.44, 0.47])
+        self.assertEqual([round(c.close, 2) for c in no_candles], [0.58, 0.56, 0.53])
         self.assertTrue(paper.accepted)
         self.assertEqual(paper.raw["request"]["marketId"], market_id)
 
