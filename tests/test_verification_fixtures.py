@@ -196,6 +196,7 @@ class VerificationFixtureTests(unittest.TestCase):
         opinion_price_history = json.loads(
             (FIXTURE_ROOT / "opinion_labs" / "price_history.json").read_text(encoding="utf-8")
         )
+        myriad_trades = json.loads((FIXTURE_ROOT / "myriad_markets" / "trades.json").read_text(encoding="utf-8"))
         predict_markets = json.loads((FIXTURE_ROOT / "predict_fun" / "markets.json").read_text(encoding="utf-8"))
         xo_markets = json.loads((FIXTURE_ROOT / "xo_market" / "markets.json").read_text(encoding="utf-8"))
         betfair_catalogue = json.loads(
@@ -226,6 +227,8 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("runners", betfair_catalogue["result"][0])
         self.assertIsInstance(myriad_orderbook.get("bids"), list)
         self.assertIsInstance(myriad_orderbook.get("asks"), list)
+        self.assertIsInstance(myriad_trades, list)
+        self.assertEqual(myriad_trades[0].get("side"), "buy")
         self.assertIn("order_id", gemini_order)
         self.assertEqual(predict_order.get("success"), True)
         self.assertEqual(betfair_order.get("status"), "SUCCESS")

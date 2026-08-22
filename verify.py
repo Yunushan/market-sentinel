@@ -564,6 +564,7 @@ def run_fixture_check() -> None:
         fixture_root / "myriad_markets" / "question.json",
         fixture_root / "myriad_markets" / "market.json",
         fixture_root / "myriad_markets" / "orderbook.json",
+        fixture_root / "myriad_markets" / "trades.json",
         fixture_root / "myriad_markets" / "order_response.json",
         fixture_root / "opinion_labs" / "markets.json",
         fixture_root / "opinion_labs" / "market.json",

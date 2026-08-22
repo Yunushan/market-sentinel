@@ -257,7 +257,7 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 
 ### 11) Additional official adapter support
 - Reads Gemini Prediction Markets events/contracts and orderbooks through official endpoints
-- Reads Myriad, Opinion, Predict.fun, XO, Betfair, and Limitless market data through their documented APIs; Limitless historical YES prices are normalized as flat candles with complementary NO prices, and finalized public market-event fills are normalized as trades
+- Reads Myriad, Opinion, Predict.fun, XO, Betfair, and Limitless market data through their documented APIs; Myriad order-book matches are normalized as public trades, while Limitless historical YES prices are normalized as flat candles with complementary NO prices and finalized public market-event fills are normalized as trades
 - Opinion also has an optional official CLOB SDK path for guarded BNB-chain limit/market orders; all live trading stays off by default and requires explicit opt-in plus documented credentials or pre-signed order payloads
 
 ## Install & Run
@@ -415,7 +415,7 @@ Useful local API endpoints:
 - `GET /api/health` returns API version, route metadata, React dev/build/prod commands, build availability, and confirms the Tkinter fallback remains `run_gui.bat` or `python app.py`.
 - `PATCH /api/config` updates shared local config fields such as selected market, theme, and Tkinter UI design.
 - `GET /api/markets` returns market capabilities, health, status text, credential source diagnostics without secret values, and live-safety settings.
-- `GET /api/markets/{market_id}/trades?contract_id=...` and `GET /api/markets/{market_id}/candles?contract_id=...&resolution=1h` expose normalized history for adapters that document those feeds (currently Kalshi, Hyperliquid candles, Manifold trades, Opinion price history, Polymarket price history, IBKR event-contract candles, and Space; Opinion and Polymarket's one-price-per-timestamp feeds are represented as flat OHLC points; Polymarket trade history still requires explicit operator-supplied CLOB L2 headers); unsupported adapters fail closed with a structured error.
+- `GET /api/markets/{market_id}/trades?contract_id=...` and `GET /api/markets/{market_id}/candles?contract_id=...&resolution=1h` expose normalized history for adapters that document those feeds (currently Kalshi, Hyperliquid candles, Manifold trades, Myriad trades, Opinion price history, Polymarket price history, IBKR event-contract candles, and Space; Opinion and Polymarket's one-price-per-timestamp feeds are represented as flat OHLC points; Polymarket trade history still requires explicit operator-supplied CLOB L2 headers); unsupported adapters fail closed with a structured error.
 - `PATCH /api/markets/{market_id}` toggles a market and persists live-safety settings such as enablement, acknowledgement, kill switch, max size, and max notional.
 - `GET /api/alerts` returns alert rows enriched with adapter-backed status and current in-memory price state.
 - `POST /api/alerts` creates a market-scoped price alert after validating the selected adapter supports alerts.

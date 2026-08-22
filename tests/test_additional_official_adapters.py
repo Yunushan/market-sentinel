@@ -1311,6 +1311,31 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(calls[0][2]["network_id"], 56)
         self.assertEqual(calls[0][3]["x-api-key"], "myriad-key")
 
+    def test_myriad_public_orderbook_trades_are_normalized_and_bounded(self) -> None:
+        adapter = MyriadAdapter({"myriad_network_id": 56})
+        trades = load_fixture("myriad_markets", "trades")
+
+        def fake_get_json(url: str, *, params=None, headers=None):
+            self.assertTrue(url.endswith("/markets/501/trades"))
+            self.assertEqual(params["page"], 1)
+            self.assertEqual(params["limit"], 3)
+            self.assertEqual(params["outcome"], 1)
+            self.assertEqual(params["network_id"], 56)
+            return trades
+
+        adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+        result = adapter.list_trades("501:1", limit=3, after=1719835050, before=1719835250)
+
+        self.assertEqual([trade.trade_id for trade in result], ["0xmyriadtradebuy", "0xmyriadtradesell"])
+        self.assertEqual([trade.side for trade in result], ["BUY", "SELL"])
+        self.assertAlmostEqual(result[0].price, 0.55)
+        self.assertAlmostEqual(result[0].size, 2.0)
+        self.assertEqual(result[0].timestamp, 1719835200.0)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades("501:1", limit=201)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades("501:1", before=100, after=100)
+
     def test_myriad_public_wallet_events_support_safe_simulation_copy(self) -> None:
         wallet = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
         adapter = MyriadAdapter({"myriad_network_id": 56})

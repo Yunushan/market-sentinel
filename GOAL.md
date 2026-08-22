@@ -272,6 +272,8 @@ These articles completed the catalog, adapter architecture, verification, docs, 
 - Article 133 Limitless Historical Price Normalization: scope complete for this pass; the official Limitless historical-price endpoint is normalized through `list_candles` for documented lookback presets, with optional local timestamp bounds, flat OHLC snapshots, and complementary NO prices. The API's newest-first order and the absence of volume are preserved explicitly; live credentials, account readiness, and funded execution remain external gates.
 - Article 134 Limitless Finalized Trade History: scope complete for this pass; the official public `/markets/{slug}/events` endpoint is normalized through `list_trades` with documented page/limit validation, YES/NO token filtering, numeric side mapping, ISO timestamp conversion, and six-decimal matched-size scaling. The endpoint is finalized public CLOB activity and has no timestamp query filters, so shared bounds are applied locally to the newest page; private account history and copy trading remain separate unsupported or credentialed paths.
 
+- Article 135 Myriad Order-Book Trade History: scope complete for this pass; the official `GET /markets/:id/trades` endpoint is normalized through `list_trades` with documented outcome/pagination filters, buy/sell/split/merge side preservation, smallest-unit amount scaling, local timestamp bounds, and fixture-backed response coverage. Myriad AMM actions, wallet activity, order submission, settlement, and copy execution remain separately modeled and guarded.
+
 ## Active continuation goals
 
 The earlier repository-controlled baseline is covered by the strict local
