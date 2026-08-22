@@ -266,6 +266,60 @@ class LimitlessAdapterTests(unittest.TestCase):
         self.assertIn("T", headers["lmts-timestamp"])
         self.assertGreater(timeout, 0)
 
+    def test_authenticated_portfolio_reads_use_hmac_and_delegation_header(self) -> None:
+        adapter = self.make_adapter({"limitless_on_behalf_of": "profile-123"})
+        positions = load_fixture("positions")
+        history = load_fixture("portfolio_history")
+        orders = load_fixture("user_orders")
+        calls = []
+
+        class AccountResponse:
+            status_code = 200
+            text = "{}"
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            def json(self):
+                return self.payload
+
+        def fake_request(method: str, url: str, *, headers=None, timeout=None):
+            calls.append((method, url, headers, timeout))
+            if url.endswith("/portfolio/positions"):
+                return AccountResponse(positions)
+            if url.endswith("/portfolio/history"):
+                return AccountResponse(history)
+            if url.endswith("/markets/doge-above-021652-sep-1-1200-utc/user-orders"):
+                return AccountResponse(orders)
+            raise AssertionError(f"unexpected Limitless account URL: {url}")
+
+        adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
+        secret = base64.b64encode(b"unit-test-secret").decode("ascii")
+
+        with patch.dict("os.environ", {"LIMITLESS_TOKEN_ID": "token-id", "LIMITLESS_TOKEN_SECRET": secret}):
+            self.assertEqual(adapter.get_positions(), positions)
+            self.assertEqual(adapter.list_account_history(), history)
+            self.assertEqual(
+                adapter.list_user_orders(
+                    "doge-above-021652-sep-1-1200-utc",
+                    on_behalf_of="profile-456",
+                ),
+                orders,
+            )
+
+        self.assertEqual([call[0] for call in calls], ["GET", "GET", "GET"])
+        self.assertTrue(all(call[2]["lmts-api-key"] == "token-id" for call in calls))
+        self.assertTrue(all(call[2]["lmts-signature"] for call in calls))
+        self.assertEqual(calls[0][2]["x-on-behalf-of"], "profile-123")
+        self.assertEqual(calls[1][2]["x-on-behalf-of"], "profile-123")
+        self.assertEqual(calls[2][2]["x-on-behalf-of"], "profile-456")
+        self.assertTrue(all(call[3] > 0 for call in calls))
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_user_orders("../portfolio/positions")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_user_orders("doge/other")
+
     def test_copy_trading_is_clear_unsupported_feature(self) -> None:
         adapter = self.make_adapter()
 

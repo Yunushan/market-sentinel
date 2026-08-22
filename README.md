@@ -257,7 +257,7 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 
 ### 11) Additional official adapter support
 - Reads Gemini Prediction Markets events/contracts, documented contract orderbooks, implied prices, irregular price-history points, and authenticated account recovery (active/history orders, current/settled positions, and event volume metrics) through official endpoints; history is exposed as flat candles without fabricated OHLCV resampling
-- Reads Myriad, Opinion, Predict.fun, XO, Betfair, and Limitless market data through their documented APIs; Betfair matched account orders are normalized as probability-priced trades, Myriad order-book matches are normalized as public trades, while Limitless historical YES prices are normalized as flat candles with complementary NO prices and finalized public market-event fills are normalized as trades
+- Reads Myriad, Opinion, Predict.fun, XO, Betfair, and Limitless market data through their documented APIs; Betfair matched account orders are normalized as probability-priced trades, Myriad order-book matches are normalized as public trades, while Limitless historical YES prices are normalized as flat candles with complementary NO prices and finalized public market-event fills are normalized as trades. Limitless also exposes HMAC-authenticated portfolio positions, account history, and market-specific user orders as raw lossless payloads when approved token credentials and an optional delegated profile are configured.
 - Opinion also has an optional official CLOB SDK path for guarded BNB-chain limit/market orders; all live trading stays off by default and requires explicit opt-in plus documented credentials or pre-signed order payloads
 
 ## Install & Run
@@ -538,7 +538,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | Zeitgeist SDK / Markets (`zeitgeist_sdk_markets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | No API key for reads; externally signed wallet payload required for live orders | Jurisdiction varies |
 | Azuro (`azuro`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Live signed orders only | Jurisdiction varies |
 | SX Bet / SX Network (`sx_bet`) | Implemented | Yes | Yes | Yes (public trades) | Guarded, off by default | No | Required | Live/WebSocket only | Jurisdiction varies |
-| Limitless Exchange (`limitless_exchange`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Live trading only | Jurisdiction varies |
+| Limitless Exchange (`limitless_exchange`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Account/API token required | Jurisdiction varies |
 | Predict.fun (`predict_fun`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | API credentials required | Jurisdiction varies |
 | Smarkets (`smarkets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
 | Betfair Exchange (`betfair_exchange`) | Implemented | Yes | Yes (matched account orders) | Yes | Guarded, off by default | No | Required | Exchange account/API keys | Region/KYC limited |

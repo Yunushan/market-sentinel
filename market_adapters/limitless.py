@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import math
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urlparse
@@ -34,6 +35,7 @@ LIMITLESS_REFERENCES = (
     "https://docs.limitless.exchange/developers/sdk/python/markets",
     "https://docs.limitless.exchange/developers/authentication",
     "https://docs.limitless.exchange/developers/programmatic-api",
+    "https://docs.limitless.exchange/developers/migrate-from-polymarket",
     "https://docs.limitless.exchange/developers/quickstart/websocket",
 )
 
@@ -69,6 +71,11 @@ class LimitlessAdapter(MarketAdapter):
                 "api_base_url": self.api_base_url,
                 "websocket_url": self.websocket_url,
                 "websocket_namespace": LIMITLESS_WS_NAMESPACE,
+                "authenticated_account_endpoints": [
+                    "/portfolio/positions",
+                    "/portfolio/history",
+                    "/markets/:slug/user-orders",
+                ],
                 "references": list(LIMITLESS_REFERENCES),
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "credential_sources": credential_sources,
@@ -308,6 +315,42 @@ class LimitlessAdapter(MarketAdapter):
             )
         return trades
 
+    def get_positions(self, *, on_behalf_of: Optional[str] = None) -> Any:
+        """Read the authenticated Limitless portfolio positions payload.
+
+        Limitless documents this HMAC-authenticated endpoint for the caller's
+        own account.  When ``on_behalf_of`` (or the configured
+        ``limitless_on_behalf_of`` profile) is supplied, the request carries the
+        documented ``x-on-behalf-of`` header and the API returns the linked
+        sub-account's view.  The response is intentionally returned unchanged:
+        the official schema contains settlement fields that may evolve, and
+        dropping them would make account recovery lossy.
+        """
+
+        return self._get_account_json("/portfolio/positions", on_behalf_of=on_behalf_of)
+
+    def list_account_history(self, *, on_behalf_of: Optional[str] = None) -> Any:
+        """Read the authenticated Limitless portfolio history payload.
+
+        The endpoint is the documented account-level trade-history surface.
+        It is separate from :meth:`list_trades`, which remains the public
+        finalized market-events feed and therefore does not require credentials.
+        """
+
+        return self._get_account_json("/portfolio/history", on_behalf_of=on_behalf_of)
+
+    def list_user_orders(self, market_slug: str, *, on_behalf_of: Optional[str] = None) -> Any:
+        """Read authenticated orders for one documented Limitless market.
+
+        ``market_slug`` is validated before it is interpolated into the URL so
+        callers cannot turn an account-read request into a path traversal or
+        arbitrary endpoint request.  The raw response is preserved because the
+        official order schema includes venue-specific status and fill fields.
+        """
+
+        slug = self._validated_market_slug(market_slug)
+        return self._get_account_json(f"/markets/{slug}/user-orders", on_behalf_of=on_behalf_of)
+
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
         self._validate_order(order)
@@ -541,6 +584,51 @@ class LimitlessAdapter(MarketAdapter):
             return response.json()
         except ValueError as exc:
             raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
+
+    def _get_account_json(self, path: str, *, on_behalf_of: Optional[str] = None) -> Any:
+        """Issue a documented HMAC-authenticated GET for account data."""
+
+        delegated_profile = self._delegated_profile(on_behalf_of)
+        request_path = "/" + str(path or "").strip("/")
+        headers = self._hmac_headers("GET", request_path)
+        if delegated_profile:
+            headers["x-on-behalf-of"] = delegated_profile
+        headers.update({"Accept": "application/json", "User-Agent": self.runtime.user_agent})
+        self.runtime.rate_limiter.wait()
+        try:
+            response = self.runtime.session.request(
+                "GET",
+                self._url(request_path),
+                headers=headers,
+                timeout=self.runtime.timeout_seconds,
+            )
+        except Exception as exc:
+            raise MarketHTTPError(f"{self.market_id} HTTP request failed: {exc}") from exc
+
+        status = int(getattr(response, "status_code", 0) or 0)
+        if status >= 400:
+            text = str(getattr(response, "text", "") or "")
+            raise MarketHTTPError(f"{self.market_id} HTTP {status}: {text[:200]}")
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
+
+    def _delegated_profile(self, value: Optional[str]) -> Optional[str]:
+        raw = value if value is not None else self.config.get("limitless_on_behalf_of")
+        if raw in (None, ""):
+            return None
+        profile = str(raw).strip()
+        if not profile or len(profile) > 128 or not re.fullmatch(r"[A-Za-z0-9._:-]+", profile):
+            raise MarketConfigurationError("Limitless on_behalf_of profile must be a safe profile identifier.")
+        return profile
+
+    @staticmethod
+    def _validated_market_slug(value: str) -> str:
+        slug = str(value or "").strip()
+        if not slug or len(slug) > 200 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._~-]*", slug):
+            raise MarketConfigurationError("Limitless market slug must be a safe URL path segment.")
+        return slug
 
     def _request_path(self, path_or_url: str) -> str:
         parsed = urlparse(path_or_url if "://" in path_or_url else self._url(path_or_url))
