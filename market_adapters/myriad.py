@@ -8,6 +8,7 @@ from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, MarketHTTPError
 from .identity import require_activity_identity
 from .types import (
+    MarketCandle,
     MarketContract,
     MarketEvent,
     MarketTrade,
@@ -174,6 +175,77 @@ class MyriadAdapter(MarketAdapter):
             )
         return trades
 
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Return normalized candles from Myriad's official price charts.
+
+        ``GET /markets/:id`` embeds the documented ``price_charts`` buckets
+        (24h, 7d, 30d, and all) on each outcome.  The generic adapter
+        resolution names are mapped to the nearest official bucket; no local
+        resampling is performed.  Myriad's chart payload can be either
+        OHLCV arrays or keyed objects, so both documented/SDK-compatible
+        shapes are parsed while preserving the original row in ``raw``.
+        """
+
+        self.ensure_capability("candle_history")
+        timeframe = self._chart_timeframe(resolution)
+        start = self._history_timestamp_bound(from_timestamp, "from") if from_timestamp is not None else None
+        end = self._history_timestamp_bound(to_timestamp, "to") if to_timestamp is not None else None
+        if start is not None and end is not None and start > end:
+            raise MarketConfigurationError("Myriad price-chart range requires from_timestamp <= to_timestamp.")
+
+        market_id, outcome_id = self._split_contract_id(contract_id)
+        market = self._get_market(market_id)
+        outcome = self._find_outcome(market, outcome_id)
+        if outcome is None:
+            raise MarketConfigurationError(f"Myriad outcome {outcome_id!r} was not found in market {market_id!r}.")
+        charts = outcome.get("price_charts")
+        if charts is None:
+            charts = outcome.get("priceCharts")
+        rows = self._chart_rows(charts, timeframe)
+        if rows is None:
+            raise MarketConfigurationError(
+                f"Myriad outcome {outcome_id!r} did not include the official {timeframe} price chart."
+            )
+
+        canonical = self._contract_id(market_id, outcome_id)
+        candles: List[MarketCandle] = []
+        for row in rows:
+            parsed = self._chart_candle(row)
+            if parsed is None:
+                continue
+            timestamp, values, volume = parsed
+            if start is not None and timestamp < start:
+                continue
+            if end is not None and timestamp > end:
+                continue
+            candles.append(
+                MarketCandle(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    timestamp=float(timestamp),
+                    open=values[0],
+                    high=values[1],
+                    low=values[2],
+                    close=values[3],
+                    volume=volume,
+                    raw={
+                        "source": "myriad_price_charts",
+                        "timeframe": timeframe,
+                        "resolution_requested": str(resolution or "1h"),
+                        "point": dict(row) if isinstance(row, Mapping) else list(row),
+                    },
+                )
+            )
+        candles.sort(key=lambda candle: candle.timestamp)
+        return candles
+
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
         self._validate_order(order)
@@ -335,7 +407,11 @@ class MyriadAdapter(MarketAdapter):
         clean = str(market_id or "").strip()
         if not clean:
             raise MarketConfigurationError("Myriad market id cannot be empty.")
-        payload = self._get(f"/markets/{clean}")
+        params: Dict[str, Any] = {}
+        network_id = self.config.get("myriad_network_id")
+        if network_id not in (None, ""):
+            params["network_id"] = network_id
+        payload = self._get(f"/markets/{clean}", params=params or None)
         data = payload.get("data") if isinstance(payload, Mapping) else None
         if isinstance(data, Mapping):
             return data
@@ -389,6 +465,98 @@ class MyriadAdapter(MarketAdapter):
         if desired < 1 or desired > 200:
             raise MarketConfigurationError("Myriad trade limit must be between 1 and 200.")
         return desired
+
+    @staticmethod
+    def _chart_timeframe(value: Any) -> str:
+        requested = str(value or "1h").strip().lower()
+        # Myriad publishes only these four buckets.  The aliases keep the
+        # shared API's common resolutions usable without pretending to
+        # resample the upstream series.
+        aliases = {
+            "5m": "24h",
+            "15m": "24h",
+            "30m": "24h",
+            "1h": "24h",
+            "24h": "24h",
+            "1d": "7d",
+            "day": "7d",
+            "7d": "7d",
+            "4h": "30d",
+            "1w": "30d",
+            "30d": "30d",
+            "max": "all",
+            "all": "all",
+        }
+        try:
+            return aliases[requested]
+        except KeyError as exc:
+            raise MarketConfigurationError(
+                "Myriad price history accepts official buckets 24h, 7d, 30d, or all "
+                "(common aliases 5m/15m/30m/1h/1d/4h/1w/max are mapped without resampling)."
+            ) from exc
+
+    @staticmethod
+    def _chart_rows(charts: Any, timeframe: str) -> Optional[List[Any]]:
+        if isinstance(charts, list):
+            return charts
+        if not isinstance(charts, Mapping):
+            return None
+        for key in (timeframe, timeframe.replace("h", "H"), timeframe.replace("d", "D")):
+            value = charts.get(key)
+            if isinstance(value, list):
+                return value
+        for key in ("data", "history", "candles", "points"):
+            nested = charts.get(key)
+            if isinstance(nested, Mapping):
+                rows = MyriadAdapter._chart_rows(nested, timeframe)
+                if rows is not None:
+                    return rows
+            elif isinstance(nested, list):
+                return nested
+        return None
+
+    @classmethod
+    def _chart_candle(cls, row: Any) -> Optional[Tuple[int, Tuple[float, float, float, float], Optional[float]]]:
+        timestamp: Any = None
+        open_value = high_value = low_value = close_value = price_value = None
+        volume_value: Any = None
+        if isinstance(row, Mapping):
+            timestamp = row.get("timestamp", row.get("time", row.get("ts", row.get("t"))))
+            open_value = row.get("open", row.get("o"))
+            high_value = row.get("high", row.get("h"))
+            low_value = row.get("low", row.get("l"))
+            close_value = row.get("close", row.get("c"))
+            price_value = row.get("price", row.get("p"))
+            volume_value = row.get("volume", row.get("v"))
+            nested_ohlc = row.get("ohlc")
+            if isinstance(nested_ohlc, Mapping):
+                open_value = open_value if open_value is not None else nested_ohlc.get("open", nested_ohlc.get("o"))
+                high_value = high_value if high_value is not None else nested_ohlc.get("high", nested_ohlc.get("h"))
+                low_value = low_value if low_value is not None else nested_ohlc.get("low", nested_ohlc.get("l"))
+                close_value = close_value if close_value is not None else nested_ohlc.get("close", nested_ohlc.get("c"))
+        elif isinstance(row, (list, tuple)):
+            if len(row) >= 5:
+                timestamp, open_value, high_value, low_value, close_value = row[:5]
+                volume_value = row[5] if len(row) >= 6 else None
+            elif len(row) >= 2:
+                timestamp, price_value = row[:2]
+            else:
+                return None
+        else:
+            return None
+
+        parsed_timestamp = cls._timestamp_seconds(timestamp)
+        if parsed_timestamp <= 0:
+            return None
+        if price_value is not None and all(value is None for value in (open_value, high_value, low_value, close_value)):
+            open_value = high_value = low_value = close_value = price_value
+        values = tuple(cls._safe_probability(value) for value in (open_value, high_value, low_value, close_value))
+        if any(value is None for value in values):
+            return None
+        volume = cls._finite_number(volume_value)
+        if volume is not None and volume < 0:
+            volume = None
+        return parsed_timestamp, (values[0], values[1], values[2], values[3]), volume  # type: ignore[index]
 
     @staticmethod
     def _history_timestamp_bound(value: Any, label: str) -> int:

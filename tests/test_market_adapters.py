@@ -162,7 +162,7 @@ HISTORY_CAPABILITIES = {
     "ibkr_forecasttrader": {"trade_history", "candle_history"},
     "forecastex": {"trade_history", "candle_history"},
     "cme_prediction_markets": {"trade_history", "candle_history"},
-    "myriad_markets": {"trade_history"},
+    "myriad_markets": {"trade_history", "candle_history"},
     "opinion_labs": {"trade_history", "candle_history"},
     "betfair_exchange": {"trade_history"},
     "matchbook": {"trade_history"},

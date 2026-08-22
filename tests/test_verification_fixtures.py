@@ -205,6 +205,7 @@ class VerificationFixtureTests(unittest.TestCase):
     def test_additional_official_adapter_fixtures_cover_core_payload_shapes(self) -> None:
         gemini_events = json.loads((FIXTURE_ROOT / "gemini" / "events.json").read_text(encoding="utf-8"))
         myriad_questions = json.loads((FIXTURE_ROOT / "myriad_markets" / "questions.json").read_text(encoding="utf-8"))
+        myriad_market = json.loads((FIXTURE_ROOT / "myriad_markets" / "market.json").read_text(encoding="utf-8"))
         opinion_markets = json.loads((FIXTURE_ROOT / "opinion_labs" / "markets.json").read_text(encoding="utf-8"))
         opinion_trades = json.loads((FIXTURE_ROOT / "opinion_labs" / "trades.json").read_text(encoding="utf-8"))
         opinion_price_history = json.loads(
@@ -227,6 +228,8 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("contracts", gemini_events["data"][0])
         self.assertIsInstance(myriad_questions.get("data"), list)
         self.assertIn("markets", myriad_questions["data"][0])
+        self.assertIsInstance(myriad_market.get("outcomes"), list)
+        self.assertIsInstance(myriad_market["outcomes"][0].get("price_charts"), dict)
         self.assertIsInstance(opinion_markets.get("result", {}).get("list"), list)
         self.assertIn("yesTokenId", opinion_markets["result"]["list"][0])
         self.assertIsInstance(opinion_trades.get("result", {}).get("list"), list)

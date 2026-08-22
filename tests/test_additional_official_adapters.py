@@ -1495,6 +1495,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         contracts = adapter.list_contracts("10")
         price = adapter.get_price("501:1")
         book = adapter.get_orderbook("501:1")
+        candles = adapter.list_candles(
+            "501:1",
+            resolution="7d",
+            from_timestamp=1719740000,
+            to_timestamp=1719840000,
+        )
         paper = adapter.place_paper_order(PaperOrderRequest("myriad_markets", "501:1", "BUY", 20))
 
         self.assertEqual(events[0].event_id, "10")
@@ -1502,6 +1508,13 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(price.last, 0.61)
         self.assertEqual([level.price for level in book.bids], [0.62, 0.6])
         self.assertEqual([level.size for level in book.asks], [2.0, 1.0])
+        self.assertEqual([candle.timestamp for candle in candles], [1719748800.0, 1719835200.0])
+        self.assertEqual([candle.close for candle in candles], [0.54, 0.61])
+        self.assertEqual([candle.volume for candle in candles], [44.0, None])
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles("501:1", resolution="5sec")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles("501:1", from_timestamp=1719840000, to_timestamp=1719740000)
         self.assertEqual(paper.raw["request"]["action"], "buy")
         self.assertEqual(paper.raw["request"]["value"], 20.0)
         with self.assertRaises(MarketConfigurationError):
