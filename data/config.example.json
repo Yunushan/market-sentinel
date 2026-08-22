@@ -244,9 +244,12 @@
       "enabled": false,
       "settings": {
         "adapter_status": "implemented",
-        "credential_env_vars": [],
+        "credential_env_vars": [
+          "HYPERLIQUID_TRADE_WALLET",
+          "HYPERLIQUID_ACTIVITY_WALLET"
+        ],
         "live_trading_enabled": false,
-        "notes": "Official HIP-4 outcome metadata, encoded outcome assets, orderbooks, alerts, paper orders, public userFills wallet activity, and simulation-first copy previews are implemented. Wallet signing, settlement, and funded execution remain external gates."
+        "notes": "Official HIP-4 outcome metadata, encoded outcome assets, orderbooks, wallet-scoped userFills/userFillsByTime trade history, alerts, paper orders, and simulation-first copy previews are implemented. Set HYPERLIQUID_TRADE_WALLET (or the legacy HYPERLIQUID_ACTIVITY_WALLET) for normalized history. Wallet signing, settlement, and funded execution remain external gates."
       }
     },
     "hypermind": {
