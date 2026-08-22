@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
@@ -9,6 +10,7 @@ from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatur
 from .types import (
     MarketContract,
     MarketEvent,
+    MarketTrade,
     OrderBookLevel,
     OrderBookSnapshot,
     PaperOrderRequest,
@@ -131,6 +133,93 @@ class BetfairExchangeAdapter(MarketAdapter):
             source="betfair_exchange_best_offers",
             raw=orderbook.raw,
         )
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Return matched account executions from Betfair's order feed.
+
+        Betfair's documented ``listCurrentOrders`` operation can order by
+        match time and, with ``orderProjection=ALL``, returns fully and
+        partially matched orders.  The adapter exposes those matched order
+        summaries as normalized trades; the raw Betfair order remains
+        attached for callers that need per-price match detail.
+        """
+
+        self.ensure_capability("trade_history")
+        market_id, selection_id = self._split_contract_id(contract_id)
+        desired = self._trade_limit(limit)
+        before_ts = self._history_timestamp(before, "before") if before is not None else None
+        after_ts = self._history_timestamp(after, "after") if after is not None else None
+        if before_ts is not None and after_ts is not None and before_ts < after_ts:
+            raise MarketConfigurationError("Betfair trade history requires before to be at or after after.")
+
+        params: Dict[str, Any] = {
+            "marketIds": [market_id],
+            "orderProjection": "ALL",
+            "orderBy": "BY_MATCH_TIME",
+            "sortDir": "EARLIEST_TO_LATEST",
+            "fromRecord": 0,
+            "recordCount": desired,
+            "includeItemDescription": False,
+        }
+        if after_ts is not None or before_ts is not None:
+            date_range: Dict[str, str] = {}
+            if after_ts is not None:
+                date_range["from"] = self._timestamp_iso(after_ts)
+            if before_ts is not None:
+                date_range["to"] = self._timestamp_iso(before_ts)
+            params["dateRange"] = date_range
+
+        payload = self._rpc("SportsAPING/v1.0/listCurrentOrders", params)
+        rows = payload.get("currentOrders") if isinstance(payload, Mapping) else []
+        if not isinstance(rows, list):
+            return []
+
+        trades: List[MarketTrade] = []
+        for raw in rows:
+            if not isinstance(raw, Mapping):
+                continue
+            row_market_id = str(raw.get("marketId") or "").strip()
+            row_selection_id = str(raw.get("selectionId") or "").strip()
+            if row_market_id and row_market_id != market_id:
+                continue
+            if row_selection_id and row_selection_id != selection_id:
+                continue
+            trade_id = str(raw.get("betId") or "").strip()
+            side = self._trade_side(raw.get("side"))
+            matched_size = self._positive_number(raw.get("sizeMatched"))
+            decimal_price = self._positive_number(raw.get("averagePriceMatched"))
+            price = self._probability_from_decimal_odds(decimal_price)
+            timestamp = self._timestamp_seconds(
+                raw.get("matchedDate") or raw.get("lastMatchedDate") or raw.get("placedDate")
+            )
+            if not trade_id or side is None or matched_size is None or price is None or timestamp is None:
+                continue
+            if after_ts is not None and timestamp < after_ts:
+                continue
+            if before_ts is not None and timestamp > before_ts:
+                continue
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=self._contract_id(market_id, selection_id),
+                    trade_id=trade_id,
+                    side=side,
+                    price=price,
+                    size=matched_size,
+                    timestamp=timestamp,
+                    raw=dict(raw),
+                )
+            )
+            if len(trades) >= desired:
+                break
+        return trades
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -291,6 +380,59 @@ class BetfairExchangeAdapter(MarketAdapter):
         if order.limit_price is not None and self._safe_probability(order.limit_price) is None:
             raise MarketConfigurationError("Betfair paper order limit probability must be between 0 and 1.")
 
+    @staticmethod
+    def _trade_limit(value: Any) -> int:
+        if isinstance(value, bool):
+            raise MarketConfigurationError("Betfair trade limit must be an integer between 1 and 1000.")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Betfair trade limit must be an integer between 1 and 1000.") from exc
+        if parsed < 1 or parsed > 1000:
+            raise MarketConfigurationError("Betfair trade limit must be an integer between 1 and 1000.")
+        return parsed
+
+    @staticmethod
+    def _history_timestamp(value: Any, label: str) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Betfair {label} must be a numeric epoch timestamp.") from exc
+        if not math.isfinite(parsed) or parsed < 0:
+            raise MarketConfigurationError(f"Betfair {label} must be a non-negative finite epoch timestamp.")
+        return parsed / 1000.0 if parsed > 10_000_000_000 else parsed
+
+    @staticmethod
+    def _timestamp_iso(value: float) -> str:
+        return datetime.fromtimestamp(value, tz=timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    @classmethod
+    def _timestamp_seconds(cls, value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            parsed = None
+        if parsed is not None:
+            if not math.isfinite(parsed):
+                return None
+            return parsed / 1000.0 if parsed > 10_000_000_000 else parsed
+        try:
+            text = str(value).strip().replace("Z", "+00:00")
+            parsed_dt = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if parsed_dt.tzinfo is None:
+            parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
+        return parsed_dt.timestamp()
+
+    @staticmethod
+    def _trade_side(value: Any) -> Optional[str]:
+        return {"BACK": "BUY", "BUY": "BUY", "LAY": "SELL", "SELL": "SELL"}.get(
+            str(value or "").strip().upper()
+        )
+
     def _place_instruction(self, order: PaperOrderRequest, *, selection_id: str) -> Dict[str, Any]:
         probability = self._safe_probability(order.limit_price)
         if probability is None or probability <= 0:
@@ -369,6 +511,14 @@ class BetfairExchangeAdapter(MarketAdapter):
         if not math.isfinite(odds) or odds <= 1.0:
             return None
         return 1.0 / odds
+
+    @staticmethod
+    def _positive_number(value: Any) -> Optional[float]:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) and parsed > 0 else None
 
     @staticmethod
     def _safe_probability(value: Any) -> Optional[float]:

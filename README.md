@@ -257,7 +257,7 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 
 ### 11) Additional official adapter support
 - Reads Gemini Prediction Markets events/contracts, documented contract orderbooks, implied prices, irregular price-history points, and authenticated account recovery (active/history orders, current/settled positions, and event volume metrics) through official endpoints; history is exposed as flat candles without fabricated OHLCV resampling
-- Reads Myriad, Opinion, Predict.fun, XO, Betfair, and Limitless market data through their documented APIs; Myriad order-book matches are normalized as public trades, while Limitless historical YES prices are normalized as flat candles with complementary NO prices and finalized public market-event fills are normalized as trades
+- Reads Myriad, Opinion, Predict.fun, XO, Betfair, and Limitless market data through their documented APIs; Betfair matched account orders are normalized as probability-priced trades, Myriad order-book matches are normalized as public trades, while Limitless historical YES prices are normalized as flat candles with complementary NO prices and finalized public market-event fills are normalized as trades
 - Opinion also has an optional official CLOB SDK path for guarded BNB-chain limit/market orders; all live trading stays off by default and requires explicit opt-in plus documented credentials or pre-signed order payloads
 
 ## Install & Run
@@ -541,7 +541,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | Limitless Exchange (`limitless_exchange`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Live trading only | Jurisdiction varies |
 | Predict.fun (`predict_fun`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | API credentials required | Jurisdiction varies |
 | Smarkets (`smarkets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
-| Betfair Exchange (`betfair_exchange`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
+| Betfair Exchange (`betfair_exchange`) | Implemented | Yes | Yes (matched account orders) | Yes | Guarded, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
 | Probo (`probo`) | Verified blocked | No | No | No | No | No | Required | Account required | Region limited |
 | Coinbase Prediction Markets (`coinbase_prediction_markets`) | Implemented | Yes | Yes | Yes | No | No | Required | No | Region/KYC limited |
 | Probable (`probable`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | API credentials required | Jurisdiction varies |

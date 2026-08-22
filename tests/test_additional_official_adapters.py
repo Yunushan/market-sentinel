@@ -1822,6 +1822,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         adapter = BetfairExchangeAdapter()
         catalogue = load_fixture("betfair_exchange", "market_catalogue")["result"]
         market_book = load_fixture("betfair_exchange", "market_book")["result"]
+        current_orders = load_fixture("betfair_exchange", "current_orders")["result"]
         place_response = load_fixture("betfair_exchange", "place_order_response")
 
         def fake_request(method: str, url: str, *, json=None, headers=None, timeout=None):
@@ -1831,6 +1832,10 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 return FakeResponse({"jsonrpc": "2.0", "result": catalogue, "id": 1})
             if json["method"].endswith("listMarketBook"):
                 return FakeResponse({"jsonrpc": "2.0", "result": market_book, "id": 1})
+            if json["method"].endswith("listCurrentOrders"):
+                self.assertEqual(json["params"]["marketIds"], ["1.234"])
+                self.assertEqual(json["params"]["orderBy"], "BY_MATCH_TIME")
+                return FakeResponse({"jsonrpc": "2.0", "result": current_orders, "id": 1})
             if json["method"].endswith("placeOrders"):
                 return FakeResponse({"jsonrpc": "2.0", "result": place_response, "id": 1})
             raise AssertionError(f"unexpected Betfair method: {json['method']}")
@@ -1845,6 +1850,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             contracts = adapter.list_contracts("1.234")
             book = adapter.get_orderbook("1.234:101")
             price = adapter.get_price("1.234:101")
+            trades = adapter.list_trades("1.234:101", limit=2, after=1780344000, before=1780344200)
             paper = adapter.place_paper_order(PaperOrderRequest("betfair_exchange", "1.234:101", "BACK", 10, 0.5))
             with self.assertRaises(MarketConfigurationError):
                 adapter.place_live_order(PaperOrderRequest("betfair_exchange", "1.234:101", "BACK", 10, 0.5))
@@ -1854,7 +1860,21 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual([round(level.price, 4) for level in book.bids], [0.5, 0.4545])
         self.assertEqual([round(level.price, 4) for level in book.asks], [0.5556, 0.5882])
         self.assertAlmostEqual(price.midpoint or 0.0, (0.5 + (1 / 1.8)) / 2)
+        self.assertEqual([trade.trade_id for trade in trades], ["bet_matched_101"])
+        self.assertEqual([trade.side for trade in trades], ["BUY"])
+        self.assertEqual([trade.price for trade in trades], [0.5])
+        self.assertEqual([trade.size for trade in trades], [4.0])
+        self.assertEqual([trade.timestamp for trade in trades], [1780344003.0])
         self.assertTrue(paper.accepted)
+
+        with patch.dict(
+            "os.environ",
+            {"BETFAIR_APP_KEY": "betfair-app", "BETFAIR_SESSION_TOKEN": "betfair-session"},
+        ):
+            with self.assertRaises(MarketConfigurationError):
+                adapter.list_trades("1.234:101", limit=1001)
+            with self.assertRaises(MarketConfigurationError):
+                adapter.list_trades("1.234:101", after=1780344200, before=1780344000)
 
         live_adapter = BetfairExchangeAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})
         calls = []

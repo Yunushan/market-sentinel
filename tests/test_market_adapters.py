@@ -164,6 +164,7 @@ HISTORY_CAPABILITIES = {
     "cme_prediction_markets": {"trade_history", "candle_history"},
     "myriad_markets": {"trade_history"},
     "opinion_labs": {"trade_history", "candle_history"},
+    "betfair_exchange": {"trade_history"},
     "gemini_titan": {"candle_history"},
     "iowa_electronic_markets": {"candle_history"},
     "space": {"trade_history", "candle_history"},
