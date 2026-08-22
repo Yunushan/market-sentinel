@@ -1231,6 +1231,8 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
 
         def fake_request(method: str, url: str, *, data=None, headers=None, timeout=None):
             calls.append((method, url, data, headers, timeout))
+            if url.endswith("/v1/prediction-markets/terms/status"):
+                return FakeResponse({"hasAcceptedLatest": True, "acceptedVersion": 3, "latestVersion": 3})
             return FakeResponse(load_fixture("gemini", "order_response"))
 
         live_adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
@@ -1242,16 +1244,49 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                     "BUY",
                     3,
                     0.44,
-                    {"nonce": 123, "client_order_id": "client-1"},
+                    {"nonce": 123, "client_order_id": "client-1", "outcome": "yes"},
                 )
             )
 
-        self.assertEqual(result["response"]["order_id"], "106817811")
-        self.assertEqual(calls[0][0], "POST")
-        self.assertTrue(calls[0][1].endswith("/v1/order/new"))
-        self.assertEqual(calls[0][2], "")
-        self.assertEqual(calls[0][3]["X-GEMINI-APIKEY"], "gemini-key")
-        self.assertTrue(calls[0][3]["X-GEMINI-SIGNATURE"])
+        self.assertEqual(result["response"]["orderId"], 106817811)
+        self.assertEqual(calls[0][0], "GET")
+        self.assertTrue(calls[0][1].endswith("/v1/prediction-markets/terms/status"))
+        self.assertEqual(calls[1][0], "POST")
+        self.assertTrue(calls[1][1].endswith("/v1/prediction-markets/order"))
+        request_payload = json.loads(calls[1][2])
+        self.assertEqual(request_payload["request"], "/v1/prediction-markets/order")
+        self.assertEqual(request_payload["symbol"], "GEMI-BTC100K26-YES")
+        self.assertEqual(request_payload["quantity"], "3")
+        self.assertEqual(request_payload["outcome"], "yes")
+        self.assertEqual(calls[1][3]["X-GEMINI-APIKEY"], "gemini-key")
+        self.assertEqual(calls[1][3]["Content-Type"], "application/json")
+        self.assertTrue(calls[1][3]["X-GEMINI-SIGNATURE"])
+
+    def test_gemini_live_order_fails_closed_when_terms_are_not_accepted(self) -> None:
+        adapter = GeminiPredictionAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})
+        calls = []
+
+        def fake_request(method: str, url: str, *, data=None, headers=None, timeout=None):
+            calls.append((method, url, data, headers, timeout))
+            return FakeResponse({"hasAcceptedLatest": False, "acceptedVersion": 2, "latestVersion": 3})
+
+        adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "gemini-key", "GEMINI_API_SECRET": "gemini-secret"}):
+            with self.assertRaisesRegex(MarketConfigurationError, "terms are not accepted"):
+                adapter.place_live_order(
+                    PaperOrderRequest(
+                        "gemini_titan",
+                        "BTC100K2026:GEMI-BTC100K26-YES",
+                        "BUY",
+                        3,
+                        0.44,
+                        {"outcome": "yes"},
+                    )
+                )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "GET")
+        self.assertTrue(calls[0][1].endswith("/v1/prediction-markets/terms/status"))
 
     def test_myriad_adapter_maps_questions_outcomes_prices_orderbooks_and_dry_run_quotes(self) -> None:
         adapter = MyriadAdapter()

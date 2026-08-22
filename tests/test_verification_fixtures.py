@@ -229,7 +229,7 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIsInstance(myriad_orderbook.get("asks"), list)
         self.assertIsInstance(myriad_trades, list)
         self.assertEqual(myriad_trades[0].get("side"), "buy")
-        self.assertIn("order_id", gemini_order)
+        self.assertIn("orderId", gemini_order)
         self.assertEqual(predict_order.get("success"), True)
         self.assertEqual(betfair_order.get("status"), "SUCCESS")
 

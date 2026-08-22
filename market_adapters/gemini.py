@@ -26,8 +26,9 @@ DEFAULT_GEMINI_BASE_URL = "https://api.gemini.com"
 GEMINI_REFERENCES = (
     "https://docs.gemini.com/prediction-markets/markets",
     "https://docs.gemini.com/rest-api/#current-order-book",
-    "https://docs.gemini.com/rest/orders",
-    "https://docs.gemini.com/websocket/market-data",
+    "https://developer.gemini.com/rest-api/prediction-markets/order-management/place-order",
+    "https://developer.gemini.com/rest-api/prediction-markets/terms/get-terms-status",
+    "https://developer.gemini.com/prediction-markets/websocket/streams",
 )
 
 
@@ -128,8 +129,12 @@ class GeminiPredictionAdapter(MarketAdapter):
         if order.limit_price is None:
             raise MarketConfigurationError("Gemini live orders require a limit price.")
         event_ticker, instrument_symbol = self._split_contract_id(order.contract_id)
-        payload = self._live_order_payload(order, instrument_symbol=instrument_symbol)
-        response = self._authenticated_post("/v1/order/new", payload)
+        self._ensure_prediction_terms_accepted()
+        payload = self._live_order_payload(
+            order,
+            instrument_symbol=instrument_symbol,
+        )
+        response = self._authenticated_post("/v1/prediction-markets/order", payload)
         return {
             "market_id": self.market_id,
             "event_ticker": event_ticker,
@@ -164,13 +169,31 @@ class GeminiPredictionAdapter(MarketAdapter):
         return self.runtime.get_json(self._url(path), params=params)
 
     def _authenticated_post(self, path: str, payload: Mapping[str, Any]) -> Any:
-        headers = self._auth_headers(payload)
+        request_payload = dict(payload)
+        request_payload.setdefault("request", path)
+        request_payload.setdefault("nonce", self._next_nonce())
+        return self._authenticated_request("POST", path, request_payload, send_body=True)
+
+    def _authenticated_get(self, path: str) -> Any:
+        request_payload = {"request": path, "nonce": self._next_nonce()}
+        return self._authenticated_request("GET", path, request_payload, send_body=False)
+
+    def _authenticated_request(
+        self,
+        method: str,
+        path: str,
+        payload: Mapping[str, Any],
+        *,
+        send_body: bool,
+    ) -> Any:
+        body = json.dumps(dict(payload), separators=(",", ":")) if send_body else ""
+        headers = self._auth_headers(payload, content_type="application/json" if send_body else "text/plain")
         self.runtime.rate_limiter.wait()
         try:
             response = self.runtime.session.request(
-                "POST",
+                method,
                 self._url(path),
-                data="",
+                data=body,
                 headers=headers,
                 timeout=self.runtime.timeout_seconds,
             )
@@ -184,10 +207,18 @@ class GeminiPredictionAdapter(MarketAdapter):
         except ValueError as exc:
             raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
 
+    def _ensure_prediction_terms_accepted(self) -> None:
+        status = self._authenticated_get("/v1/prediction-markets/terms/status")
+        if not isinstance(status, Mapping) or status.get("hasAcceptedLatest") is not True:
+            raise MarketConfigurationError(
+                "Gemini Prediction Markets terms are not accepted for this account. "
+                "Accept the latest terms through Gemini before enabling live orders."
+            )
+
     def _url(self, path: str) -> str:
         return f"{self.api_base_url}/{'/'.join(part for part in str(path or '').split('/') if part)}"
 
-    def _auth_headers(self, payload: Mapping[str, Any]) -> Dict[str, str]:
+    def _auth_headers(self, payload: Mapping[str, Any], *, content_type: str = "text/plain") -> Dict[str, str]:
         api_key = self.resolve_credential(
             "gemini_api_key",
             ("GEMINI_API_KEY",),
@@ -203,8 +234,7 @@ class GeminiPredictionAdapter(MarketAdapter):
         encoded = base64.b64encode(json.dumps(dict(payload), separators=(",", ":")).encode("utf-8"))
         signature = hmac.new(api_secret.value.encode("utf-8"), encoded, hashlib.sha384).hexdigest()
         return {
-            "Content-Type": "text/plain",
-            "Content-Length": "0",
+            "Content-Type": content_type,
             "Cache-Control": "no-cache",
             "X-GEMINI-APIKEY": api_key.value,
             "X-GEMINI-PAYLOAD": encoded.decode("ascii"),
@@ -261,28 +291,69 @@ class GeminiPredictionAdapter(MarketAdapter):
         if order.limit_price is not None and self._safe_probability(order.limit_price) is None:
             raise MarketConfigurationError("Gemini paper order limit price must be between 0 and 1.")
 
-    def _live_order_payload(self, order: PaperOrderRequest, *, instrument_symbol: str) -> Dict[str, Any]:
+    def _live_order_payload(
+        self,
+        order: PaperOrderRequest,
+        *,
+        instrument_symbol: str,
+    ) -> Dict[str, Any]:
+        outcome = self._order_outcome(order, instrument_symbol=instrument_symbol)
+        order_type = str(order.metadata.get("order_type") or "limit").strip().lower()
+        if order_type not in {"limit", "stop-limit"}:
+            raise MarketConfigurationError("Gemini prediction order_type must be limit or stop-limit.")
+        time_in_force = str(order.metadata.get("time_in_force") or "good-til-cancel").strip().lower()
+        if time_in_force not in {"good-til-cancel", "immediate-or-cancel", "fill-or-kill"}:
+            raise MarketConfigurationError(
+                "Gemini prediction time_in_force must be good-til-cancel, immediate-or-cancel, or fill-or-kill."
+            )
         payload: Dict[str, Any] = {
-            "request": "/v1/order/new",
-            "nonce": order.metadata.get("nonce", int(time.time() * 1000)),
             "symbol": instrument_symbol,
-            "amount": str(order.size),
-            "price": str(order.limit_price),
+            "orderType": order_type,
             "side": "buy" if str(order.side or "").upper() == "BUY" else "sell",
-            "type": str(order.metadata.get("order_type") or "exchange limit"),
+            "quantity": str(order.size),
+            "price": str(order.limit_price),
+            "outcome": outcome,
+            "timeInForce": time_in_force,
         }
-        options = order.metadata.get("options")
-        if isinstance(options, list):
-            payload["options"] = [str(option) for option in options]
-        elif isinstance(options, str) and options.strip():
-            payload["options"] = [options.strip()]
-        client_order_id = order.metadata.get("client_order_id")
+        stop_price = order.metadata.get("stop_price")
+        if order_type == "stop-limit":
+            parsed_stop = self._safe_probability(stop_price)
+            if parsed_stop is None:
+                raise MarketConfigurationError("Gemini stop-limit orders require stop_price between 0 and 1.")
+            payload["stopPrice"] = str(parsed_stop)
+        elif stop_price is not None:
+            raise MarketConfigurationError("Gemini stop_price is only valid for stop-limit orders.")
+        if "maker_or_cancel" in order.metadata:
+            payload["makerOrCancel"] = bool(order.metadata["maker_or_cancel"])
+        client_order_id = order.metadata.get("client_order_id") or order.metadata.get("clientOrderId")
         if client_order_id:
-            payload["client_order_id"] = str(client_order_id)
-        account = order.metadata.get("account", self.config.get("gemini_account"))
-        if account:
-            payload["account"] = str(account)
+            payload["clientOrderId"] = str(client_order_id)
         return payload
+
+    def _order_outcome(self, order: PaperOrderRequest, *, instrument_symbol: str) -> str:
+        candidate = order.metadata.get("outcome")
+        if candidate is None:
+            suffix = instrument_symbol.rsplit("-", 1)[-1].strip().lower()
+            if suffix in {"yes", "no"}:
+                candidate = suffix
+        outcome = str(candidate or "").strip().lower()
+        if outcome not in {"yes", "no"}:
+            raise MarketConfigurationError(
+                "Gemini live orders require metadata['outcome'] set to 'yes' or 'no'; "
+                "the event ticker alone does not identify the outcome."
+            )
+        return outcome
+
+    def _next_nonce(self, preferred: Any = None) -> int:
+        try:
+            requested = int(preferred) if preferred is not None else 0
+        except (TypeError, ValueError):
+            requested = 0
+        now = int(time.time() * 1000)
+        previous = int(getattr(self, "_last_nonce", 0) or 0)
+        nonce = max(now, requested, previous + 1)
+        self._last_nonce = nonce
+        return nonce
 
     @staticmethod
     def _event_ticker(event: Mapping[str, Any]) -> str:
