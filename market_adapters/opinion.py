@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import math
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError, UnsupportedFeatureError
+from .errors import MarketConfigurationError, MarketHTTPError
 from .types import (
     MarketContract,
     MarketEvent,
@@ -18,17 +19,21 @@ from .types import (
 
 
 DEFAULT_OPINION_BASE_URL = "https://openapi.opinion.trade/openapi"
+DEFAULT_OPINION_CLOB_HOST = "https://proxy.opinion.trade:8443"
+DEFAULT_OPINION_CHAIN_ID = 56
 OPINION_REFERENCES = (
     "https://docs.opinion.trade/developer-guide/opinion-open-api/overview",
     "https://docs.opinion.trade/developer-guide/opinion-open-api/market",
     "https://docs.opinion.trade/developer-guide/opinion-open-api/token",
     "https://docs.opinion.trade/developer-guide/opinion-open-api/trade",
     "https://docs.opinion.trade/developer-guide/opinion-open-api/position",
+    "https://docs.opinion.trade/developer-guide/opinion-clob-python-sdk/overview",
+    "https://pypi.org/project/opinion-clob-sdk/",
 )
 
 
 class OpinionAdapter(MarketAdapter):
-    """Opinion Labs read-only adapter using the documented Opinion OpenAPI."""
+    """Opinion Labs adapter using the documented OpenAPI and optional CLOB SDK."""
 
     metadata = get_market_metadata("opinion_labs")
 
@@ -40,7 +45,11 @@ class OpinionAdapter(MarketAdapter):
                 "api_base_url": self.api_base_url,
                 "references": list(OPINION_REFERENCES),
                 "credential_sources": [{"name": api_key.name, "source": api_key.source}] if api_key else [],
-                "live_trading_supported": False,
+                "clob_host": self.clob_host,
+                "chain_id": self.chain_id,
+                "clob_sdk_available": self._clob_sdk_available(),
+                "live_trading_supported": True,
+                "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "copy_trading_supported": bool(self.capabilities.copy_trading),
                 "activity_feed_supported": True,
             }
@@ -51,6 +60,22 @@ class OpinionAdapter(MarketAdapter):
     def api_base_url(self) -> str:
         configured = self.config.get("opinion_api_base_url") or self.config.get("api_base_url")
         return str(configured or DEFAULT_OPINION_BASE_URL).rstrip("/")
+
+    @property
+    def clob_host(self) -> str:
+        configured = self.config.get("opinion_clob_host") or self.config.get("clob_host")
+        return str(configured or DEFAULT_OPINION_CLOB_HOST).rstrip("/")
+
+    @property
+    def chain_id(self) -> int:
+        value = self.config.get("opinion_chain_id", DEFAULT_OPINION_CHAIN_ID)
+        try:
+            chain_id = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Opinion chain id must be an integer.") from exc
+        if chain_id != DEFAULT_OPINION_CHAIN_ID:
+            raise MarketConfigurationError("Opinion CLOB currently supports only BNB Chain (chain id 56).")
+        return chain_id
 
     def list_events(self, query: str = "", limit: int = 50) -> List[MarketEvent]:
         self.ensure_capability("event_listing")
@@ -125,11 +150,197 @@ class OpinionAdapter(MarketAdapter):
         )
 
     def place_live_order(self, order: PaperOrderRequest) -> Dict[str, Any]:
-        raise UnsupportedFeatureError(
-            self.market_id,
-            "live_trading",
-            "Opinion live trading requires the separate Opinion CLOB SDK and wallet/order signing.",
+        self.ensure_capability("live_trading")
+        self._validate_order(order)
+        audit = self.preflight_live_order(order, feature_name="Opinion CLOB live trading")
+        market_id, outcome, token_id = self._split_contract_id(order.contract_id)
+        if not market_id.isdigit() or int(market_id) <= 0:
+            raise MarketConfigurationError("Opinion live orders require a positive numeric market id.")
+
+        metadata = order.metadata if isinstance(order.metadata, Mapping) else {}
+        order_kind = str(metadata.get("order_type") or metadata.get("orderType") or "limit").strip().lower()
+        if order_kind not in {"limit", "limit_order", "market", "market_order"}:
+            raise MarketConfigurationError("Opinion order_type must be limit or market.")
+        is_market = order_kind in {"market", "market_order"}
+        if is_market:
+            sdk_price = "0"
+        else:
+            if order.limit_price is None:
+                raise MarketConfigurationError("Opinion limit orders require a limit price.")
+            price = self._safe_probability(order.limit_price)
+            if price is None or price < 0.01 or price > 0.99:
+                raise MarketConfigurationError("Opinion limit price must be between 0.01 and 0.99.")
+            sdk_price = self._decimal_string(price)
+
+        amount_quote = self._metadata_amount(
+            metadata,
+            "maker_amount_in_quote_token",
+            "makerAmountInQuoteToken",
         )
+        amount_base = self._metadata_amount(
+            metadata,
+            "maker_amount_in_base_token",
+            "makerAmountInBaseToken",
+        )
+        if amount_quote is not None and amount_base is not None:
+            raise MarketConfigurationError(
+                "Opinion live orders must provide exactly one of maker_amount_in_quote_token or maker_amount_in_base_token."
+            )
+        if amount_quote is None and amount_base is None:
+            # Preserve the common application order model: BUY size is quote
+            # currency to spend; SELL size is outcome tokens to sell.
+            if str(order.side or "").upper() == "BUY":
+                amount_quote = self._decimal_string(order.size)
+            else:
+                amount_base = self._decimal_string(order.size)
+
+        sdk_order = self._build_sdk_order(
+            market_id=int(market_id),
+            token_id=token_id,
+            side=str(order.side or "").upper(),
+            is_market=is_market,
+            price=sdk_price,
+            amount_quote=amount_quote,
+            amount_base=amount_base,
+        )
+        client = self._create_clob_client()
+        try:
+            response = client.place_order(
+                sdk_order,
+                check_approval=self.config_bool("opinion_live_check_approval", False),
+            )
+        except Exception as exc:
+            raise MarketHTTPError(f"Opinion CLOB order submission failed: {exc}") from exc
+        return {
+            "market_id": self.market_id,
+            "opinion_market_id": int(market_id),
+            "contract_id": self._contract_id(market_id, outcome, token_id),
+            "side": str(order.side or "").upper(),
+            "order_type": "market" if is_market else "limit",
+            "live": True,
+            "preflight": audit,
+            "approval_check_requested": self.config_bool("opinion_live_check_approval", False),
+            "request": {
+                "marketId": int(market_id),
+                "tokenId": token_id,
+                "side": str(order.side or "").upper(),
+                "price": sdk_price,
+                "makerAmountInQuoteToken": amount_quote,
+                "makerAmountInBaseToken": amount_base,
+            },
+            "response": self._json_safe(response),
+        }
+
+    def _create_clob_client(self):
+        try:
+            from opinion_clob_sdk import Client
+        except ImportError as exc:
+            raise MarketConfigurationError(
+                "Opinion live trading requires the official opinion-clob-sdk package; "
+                "install requirements-live.lock before enabling it."
+            ) from exc
+
+        api_key = self.resolve_credential("opinion_api_key", ("OPINION_API_KEY",), required=True, label="OPINION_API_KEY")
+        private_key = self.resolve_credential(
+            "opinion_private_key",
+            ("OPINION_PRIVATE_KEY",),
+            required=True,
+            label="OPINION_PRIVATE_KEY",
+        )
+        multi_sig = self.resolve_credential(
+            "opinion_multi_sig_address",
+            ("OPINION_MULTI_SIG_ADDRESS",),
+            required=True,
+            label="OPINION_MULTI_SIG_ADDRESS",
+        )
+        rpc_url = self.resolve_credential(
+            "opinion_rpc_url",
+            ("OPINION_RPC_URL",),
+            required=True,
+            label="OPINION_RPC_URL",
+        )
+        return Client(
+            host=self.clob_host,
+            apikey=api_key.value,
+            chain_id=self.chain_id,
+            rpc_url=rpc_url.value,
+            private_key=private_key.value,
+            multi_sig_addr=multi_sig.value,
+        )
+
+    @staticmethod
+    def _clob_sdk_available() -> bool:
+        try:
+            from opinion_clob_sdk import Client as _Client  # noqa: F401
+        except ImportError:
+            return False
+        return True
+
+    @staticmethod
+    def _build_sdk_order(
+        *,
+        market_id: int,
+        token_id: str,
+        side: str,
+        is_market: bool,
+        price: str,
+        amount_quote: Optional[str],
+        amount_base: Optional[str],
+    ) -> Any:
+        try:
+            from opinion_clob_sdk.chain.py_order_utils.model.order import PlaceOrderDataInput
+            from opinion_clob_sdk.chain.py_order_utils.model.order_type import LIMIT_ORDER, MARKET_ORDER
+            from opinion_clob_sdk.chain.py_order_utils.model.sides import BUY, SELL
+        except ImportError as exc:
+            raise MarketConfigurationError(
+                "Opinion live trading requires the official opinion-clob-sdk order models."
+            ) from exc
+        return PlaceOrderDataInput(
+            marketId=market_id,
+            tokenId=token_id,
+            side=BUY if side == "BUY" else SELL,
+            orderType=MARKET_ORDER if is_market else LIMIT_ORDER,
+            price=price,
+            makerAmountInQuoteToken=amount_quote,
+            makerAmountInBaseToken=amount_base,
+        )
+
+    @staticmethod
+    def _metadata_amount(metadata: Mapping[str, Any], *keys: str) -> Optional[str]:
+        value = next((metadata.get(key) for key in keys if metadata.get(key) not in (None, "")), None)
+        if value is None:
+            return None
+        return OpinionAdapter._decimal_string(value, positive=True)
+
+    @staticmethod
+    def _decimal_string(value: Any, *, positive: bool = False) -> str:
+        try:
+            number = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Opinion order amounts and prices must be finite decimals.") from exc
+        if not number.is_finite() or (positive and number <= 0):
+            raise MarketConfigurationError("Opinion order amounts must be finite and positive.")
+        text = format(number, "f")
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text or "0"
+
+    @staticmethod
+    def _json_safe(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {str(key): OpinionAdapter._json_safe(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [OpinionAdapter._json_safe(item) for item in value]
+        for method_name in ("to_dict", "dict"):
+            method = getattr(value, method_name, None)
+            if callable(method):
+                try:
+                    return OpinionAdapter._json_safe(method())
+                except Exception:
+                    pass
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return str(value)
 
     def list_activity(self, wallet_address: str, *, limit: int = 25) -> List[Dict[str, Any]]:
         """Return normalized filled trades for an official Opinion wallet feed.
@@ -439,3 +650,4 @@ class OpinionAdapter(MarketAdapter):
         except (TypeError, ValueError):
             return False
         return math.isfinite(number) and number > 0
+

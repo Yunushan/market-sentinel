@@ -42,6 +42,7 @@ build = [
 ]
 live = [
     "py-clob-client>=0.34.0",
+    "opinion-clob-sdk>=0.7.0",
 ]
 test = [
     "pytest>=8.0",
@@ -70,3 +71,4 @@ line-length = 120
 
 [tool.ruff.lint]
 select = ["F", "B", "S608"]
+

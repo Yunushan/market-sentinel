@@ -198,7 +198,7 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 - Default mode is **SIMULATION** (logs what it *would* do)
 - Copy sizing is a bounded **0..100%** setting; `0%` watches without copying and `100%` mirrors full detected size before max-USDC caps
 - Multiple followed wallets are supported; the conflict guard skips duplicate or opposite-side same-token copies inside the guard window
-- Enable **LIVE** mode only after the selected adapter live preflight settings are explicitly acknowledged; Opinion remains simulation-only until its separate CLOB SDK signing path is integrated
+- Enable **LIVE** mode only after the selected adapter live preflight settings are explicitly acknowledged; Opinion uses an optional official CLOB SDK signing path and remains off by default
 - The React Wallets & Copy tab edits simulation-first copy settings and previews guarded live-copy preflight without placing orders
 
 ### 5) Adapter-backed paper trading
@@ -256,7 +256,7 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 ### 11) Additional official adapter support
 - Reads Gemini Prediction Markets events/contracts and orderbooks through official endpoints
 - Reads Myriad, Opinion, Predict.fun, XO, and Betfair market data through their documented APIs
-- Keeps live trading off by default; Gemini, Myriad, Predict.fun, XO, and Betfair live order posting require explicit opt-in and documented credentials or pre-signed order payloads
+- Opinion also has an optional official CLOB SDK path for guarded BNB-chain limit/market orders; all live trading stays off by default and requires explicit opt-in plus documented credentials or pre-signed order payloads
 
 ## Install & Run
 
@@ -520,7 +520,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | Iowa Electronic Markets (`iowa_electronic_markets`) | Verified blocked | No | No | No | No | No | Required | IEM account required | Eligibility limited |
 | INFER / INFER-pub (`infer`) | Verified blocked | No | No | No | No | No | Required | Account/export access required | Not trading/KYC limited |
 | Fact Machine (`fact_machine`) | Verified blocked | No | No | No | No | No | Required | Wallet/personhood required | Identity/jurisdiction limited |
-| Opinion Labs (`opinion_labs`) | Implemented | Yes | Yes | Yes | No | Yes, simulation only | Required | API credentials required | Jurisdiction varies |
+| Opinion Labs (`opinion_labs`) | Implemented | Yes | Yes | Yes | Guarded, off by default | Yes, simulation only | Required | API credentials required | Jurisdiction varies |
 | Gemini Titan / Gemini Predictions (`gemini_titan`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Live trading only | Region/KYC limited |
 | Augur (`augur`) | Implemented | No | Yes | No | No | No | Required | Subgraph endpoint required | Jurisdiction varies |
 | BetMGM (`betmgm`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
@@ -705,3 +705,4 @@ In-app checks:
 
 ## License
 MarketSentinel is licensed under the BSD Zero Clause License (`0BSD`). See [LICENSE](LICENSE).
+

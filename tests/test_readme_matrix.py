@@ -25,6 +25,7 @@ CONCRETE_REQUIREMENT_VALUES = (
     "Yes",
     "No",
     "Live trading only",
+    "Guarded, off by default",
     "Live/WebSocket only",
     "Live signed orders only",
     "Subgraph endpoint required",
@@ -182,3 +183,4 @@ class ReadmeCapabilityMatrixTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

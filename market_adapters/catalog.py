@@ -258,10 +258,10 @@ OPINION_CAPABILITIES = MarketCapabilities(
     orderbook_reading=True,
     alerts=True,
     paper_trading=True,
-    live_trading=False,
-    # The documented OpenAPI exposes filled user trades by wallet.  Those
-    # trades can produce simulation-first copy intents; live execution stays
-    # disabled because it belongs to the separate Opinion CLOB SDK.
+    live_trading=True,
+    # Live execution is guarded by the optional official Opinion CLOB SDK,
+    # explicit live-order gates, and BNB-chain credentials. Copy intents remain
+    # simulation-first and never submit orders automatically.
     copy_trading=True,
     api_required=True,
     credentials_required=True,
@@ -634,8 +634,8 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://opinion.trade",
         description=(
             "Official Opinion OpenAPI adapter for authenticated market data, orderbooks, prices, "
-            "filled wallet-trade activity, and simulation-first copy intents; live trading remains "
-            "disabled because order signing belongs to the separate CLOB SDK."
+            "filled wallet-trade activity, and simulation-first copy intents; guarded live limit/market "
+            "orders use the optional official CLOB SDK and remain disabled by default."
         ),
         capabilities=OPINION_CAPABILITIES,
     ),
@@ -756,3 +756,4 @@ _MARKET_BY_ID: Dict[str, MarketMetadata] = {m.market_id: m for m in MARKET_CATAL
 def get_market_metadata(market_id: str) -> MarketMetadata:
     normalized = str(market_id or "").strip().lower()
     return _MARKET_BY_ID[normalized]
+

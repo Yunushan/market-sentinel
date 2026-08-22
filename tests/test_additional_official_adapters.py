@@ -1315,6 +1315,77 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         with self.assertRaises(MarketConfigurationError):
             adapter.list_activity("not-a-wallet")
 
+    def test_opinion_guarded_clob_orders_build_signed_limit_and_market_requests(self) -> None:
+        adapter = OpinionAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "live_trading_max_size": 25,
+                "opinion_live_check_approval": False,
+            }
+        )
+        submitted = []
+
+        class FakeClient:
+            def place_order(self, payload, *, check_approval=False):
+                submitted.append((payload, check_approval))
+                return {"order_id": "opinion-order-1", "status": "submitted"}
+
+        def fake_builder(**kwargs):
+            return kwargs
+
+        with patch.object(adapter, "_create_clob_client", return_value=FakeClient()), patch.object(
+            OpinionAdapter, "_build_sdk_order", side_effect=fake_builder
+        ):
+            limit = adapter.place_live_order(
+                PaperOrderRequest("opinion_labs", "77:YES:0xyes", "BUY", 4, 0.64)
+            )
+            market = adapter.place_live_order(
+                PaperOrderRequest(
+                    "opinion_labs",
+                    "77:NO:0xno",
+                    "SELL",
+                    3,
+                    None,
+                    {"order_type": "market", "maker_amount_in_base_token": "3"},
+                )
+            )
+
+        self.assertTrue(limit["live"])
+        self.assertEqual(limit["request"]["marketId"], 77)
+        self.assertEqual(limit["request"]["tokenId"], "0xyes")
+        self.assertEqual(limit["request"]["price"], "0.64")
+        self.assertEqual(limit["request"]["makerAmountInQuoteToken"], "4")
+        self.assertIsNone(limit["request"]["makerAmountInBaseToken"])
+        self.assertEqual(limit["response"]["order_id"], "opinion-order-1")
+        self.assertEqual(market["order_type"], "market")
+        self.assertEqual(market["request"]["price"], "0")
+        self.assertEqual(market["request"]["makerAmountInBaseToken"], "3")
+        self.assertEqual(len(submitted), 2)
+        self.assertFalse(submitted[0][1])
+
+        with patch.object(adapter, "_create_clob_client", return_value=FakeClient()), patch.object(
+            OpinionAdapter, "_build_sdk_order", side_effect=fake_builder
+        ):
+            with self.assertRaises(MarketConfigurationError):
+                adapter.place_live_order(
+                    PaperOrderRequest("opinion_labs", "77:YES:0xyes", "BUY", 1, 0.005)
+                )
+            with self.assertRaises(MarketConfigurationError):
+                adapter.place_live_order(
+                    PaperOrderRequest(
+                        "opinion_labs",
+                        "77:YES:0xyes",
+                        "BUY",
+                        1,
+                        0.5,
+                        {
+                            "maker_amount_in_quote_token": "1",
+                            "maker_amount_in_base_token": "1",
+                        },
+                    )
+                )
+
     def test_predict_fun_adapter_maps_markets_orderbooks_and_no_prices(self) -> None:
         adapter = PredictFunAdapter()
         markets = load_fixture("predict_fun", "markets")
@@ -1497,3 +1568,4 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
