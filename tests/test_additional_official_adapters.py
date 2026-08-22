@@ -1537,7 +1537,6 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         orderbook = load_fixture("opinion_labs", "orderbook")
         price_history = load_fixture("opinion_labs", "price_history")
         trades = load_fixture("opinion_labs", "trades")
-        price_history = load_fixture("opinion_labs", "price_history")
 
         def fake_get_json(url: str, *, params=None, headers=None):
             self.assertEqual(headers["apikey"], "opinion-key")
@@ -1556,6 +1555,8 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 self.assertEqual(params["end_at"], 1733356800)
                 return price_history
             if url.endswith("/trade/user/0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"):
+                if params and "marketId" in params:
+                    self.assertEqual(params["marketId"], 77)
                 return trades
             raise AssertionError(f"unexpected Opinion URL: {url}")
 
@@ -1564,7 +1565,13 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         with self.assertRaises(MarketConfigurationError):
             adapter.list_events()
 
-        with patch.dict("os.environ", {"OPINION_API_KEY": "opinion-key"}):
+        with patch.dict(
+            "os.environ",
+            {
+                "OPINION_API_KEY": "opinion-key",
+                "OPINION_WALLET_ADDRESS": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            },
+        ):
             events = adapter.list_events("ETH")
             contracts = adapter.list_contracts("77")
             price = adapter.get_price("77:YES:0xyes")
@@ -1574,6 +1581,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 resolution="1d",
                 from_timestamp=1733184000,
                 to_timestamp=1733356800,
+            )
+            trade_history = adapter.list_trades(
+                "77:YES:0xyes",
+                limit=2,
+                after=1733312000,
+                before=1733313000,
             )
             paper = adapter.place_paper_order(PaperOrderRequest("opinion_labs", "77:YES:0xyes", "SELL", 4, 0.64))
             activity = adapter.list_activity("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
@@ -1586,6 +1599,11 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual([candle.timestamp for candle in candles], [1733184000.0, 1733270400.0, 1733356800.0])
         self.assertEqual([candle.close for candle in candles], [0.58, 0.62, 0.65])
         self.assertTrue(all(candle.volume is None for candle in candles))
+        self.assertEqual([trade.trade_id for trade in trade_history], ["0xopiniontrade2"])
+        self.assertEqual([trade.side for trade in trade_history], ["BUY"])
+        self.assertEqual([trade.price for trade in trade_history], [0.65])
+        self.assertEqual([trade.size for trade in trade_history], [4.0])
+        self.assertEqual([trade.timestamp for trade in trade_history], [1733312400.0])
         self.assertTrue(paper.accepted)
         self.assertEqual(len(activity), 2)
         self.assertEqual(activity[0]["asset"], "77:YES:0xyes")
@@ -1605,6 +1623,10 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                     from_timestamp=1733356800,
                     to_timestamp=1733184000,
                 )
+            with self.assertRaises(MarketConfigurationError):
+                adapter.list_trades("77:YES:0xyes", limit=21)
+            with self.assertRaises(MarketConfigurationError):
+                adapter.list_trades("77:YES:0xyes", after=1733313000, before=1733312000)
 
     def test_opinion_guarded_clob_orders_build_signed_limit_and_market_requests(self) -> None:
         adapter = OpinionAdapter(

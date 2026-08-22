@@ -11,6 +11,7 @@ from .types import (
     MarketCandle,
     MarketContract,
     MarketEvent,
+    MarketTrade,
     OrderBookLevel,
     OrderBookSnapshot,
     PaperOrderRequest,
@@ -196,6 +197,83 @@ class OpinionAdapter(MarketAdapter):
                 )
             )
         return candles
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 20,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Return filled trades for a configured wallet from Opinion OpenAPI.
+
+        Opinion documents this feed as authenticated, wallet-scoped history
+        containing only successful trades.  The API supports a market filter
+        but not an outcome-token filter, so the adapter narrows the response to
+        the requested contract locally and applies optional time bounds.
+        """
+
+        self.ensure_capability("trade_history")
+        market_id, outcome, token_id = self._split_contract_id(contract_id)
+        wallet_credential = self.resolve_credential(
+            "opinion_trade_wallet",
+            ("OPINION_WALLET_ADDRESS", "OPINION_ACTIVITY_WALLET"),
+            required=True,
+            label="OPINION_WALLET_ADDRESS",
+        )
+        wallet = self._normalize_wallet(wallet_credential.value)
+        desired = self._trade_limit(limit)
+        before_ts = self._timestamp_seconds_strict(before, "before") if before is not None else None
+        after_ts = self._timestamp_seconds_strict(after, "after") if after is not None else None
+        if before_ts is not None and after_ts is not None and before_ts < after_ts:
+            raise MarketConfigurationError("Opinion trade history requires before to be at or after after.")
+
+        params: Dict[str, Any] = {"page": 1, "limit": desired, "marketId": int(market_id)}
+        chain_id = str(self.config.get("opinion_trade_chain_id") or "").strip()
+        if chain_id:
+            params["chainId"] = chain_id
+        payload = self._get(f"/trade/user/{wallet}", params=params)
+        trades: List[MarketTrade] = []
+        for raw in self._result_list(payload):
+            raw_token_id = str(
+                raw.get("tokenId")
+                or raw.get("token_id")
+                or raw.get("outcomeTokenId")
+                or raw.get("outcome_token_id")
+                or ""
+            ).strip()
+            if raw_token_id != token_id:
+                continue
+            trade_id = str(raw.get("txHash") or raw.get("transactionHash") or "").strip()
+            side = self._side_from_trade(raw)
+            price = self._safe_probability(raw.get("price"))
+            size = self._required_positive_number(
+                raw.get("shares") or raw.get("orderShares") or raw.get("size"),
+                "Opinion trade shares",
+            )
+            timestamp = self._timestamp_seconds(raw.get("createdAt") or raw.get("timestamp"))
+            if not trade_id or price is None or timestamp <= 0:
+                continue
+            if after_ts is not None and timestamp < after_ts:
+                continue
+            if before_ts is not None and timestamp > before_ts:
+                continue
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=self._contract_id(market_id, outcome, token_id),
+                    trade_id=trade_id,
+                    side=side,
+                    price=price,
+                    size=size,
+                    timestamp=float(timestamp),
+                    raw=dict(raw),
+                )
+            )
+            if len(trades) >= desired:
+                break
+        return trades
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -648,6 +726,18 @@ class OpinionAdapter(MarketAdapter):
         except (TypeError, ValueError):
             return 0
         return timestamp // 1000 if timestamp > 10_000_000_000 else timestamp
+
+    @staticmethod
+    def _trade_limit(value: Any) -> int:
+        if isinstance(value, bool):
+            raise MarketConfigurationError("Opinion trade limit must be an integer between 1 and 20.")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Opinion trade limit must be an integer between 1 and 20.") from exc
+        if parsed < 1 or parsed > 20:
+            raise MarketConfigurationError("Opinion trade limit must be an integer between 1 and 20.")
+        return parsed
 
     @staticmethod
     def _timestamp_seconds_strict(value: Any, label: str) -> int:
