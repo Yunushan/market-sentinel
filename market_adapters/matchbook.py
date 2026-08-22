@@ -8,6 +8,7 @@ and exposes the application's canonical probability/order-book model.
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
@@ -16,6 +17,7 @@ from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatur
 from .types import (
     MarketContract,
     MarketEvent,
+    MarketTrade,
     OrderBookLevel,
     OrderBookSnapshot,
     PaperOrderRequest,
@@ -34,6 +36,7 @@ MATCHBOOK_REFERENCES = (
     "https://developers.matchbook.com/reference/get-market",
     "https://developers.matchbook.com/reference/login",
     "https://developers.matchbook.com/reference/submit-offers-v2",
+    "https://developers.matchbook.com/reference/get-aggregated-matched-bets",
 )
 
 
@@ -157,6 +160,87 @@ class MatchbookAdapter(MarketAdapter):
             raw=orderbook.raw,
         )
 
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Return account matched bets from Matchbook's documented feed.
+
+        ``matched-bets/aggregated`` is the official authenticated read route
+        for matched bets.  Matchbook aggregates fills at the requested odds
+        mode, so each returned row is exposed as one normalized trade and the
+        original response remains available in ``raw``.
+        """
+
+        self.ensure_capability("trade_history")
+        event_id, market_id, runner_id = self._split_contract_id(contract_id)
+        desired = self._trade_limit(limit)
+        before_ts = self._history_timestamp(before, "before") if before is not None else None
+        after_ts = self._history_timestamp(after, "after") if after is not None else None
+        if before_ts is not None and after_ts is not None and before_ts < after_ts:
+            raise MarketConfigurationError("Matchbook trade history requires before to be at or after after.")
+
+        params: Dict[str, Any] = {
+            "event-ids": event_id,
+            "market-ids": market_id,
+            "runner-ids": runner_id,
+            "offset": 0,
+            "per-page": desired,
+            "aggregation-type": "average",
+        }
+        payload = self._request_json("GET", "/v2/matched-bets/aggregated", params=params, auth=True)
+        rows = self._list_from_payload(payload, "matched-bets", "matchedBets", "bets", "data")
+        trades: List[MarketTrade] = []
+        for raw in rows:
+            row_event = str(self._value(raw, "event-id", "eventId", "event_id") or "").strip()
+            row_market = str(self._value(raw, "market-id", "marketId", "market_id") or "").strip()
+            row_runner = str(self._value(raw, "runner-id", "runnerId", "runner_id") or "").strip()
+            if row_event and row_event != event_id:
+                continue
+            if row_market and row_market != market_id:
+                continue
+            if row_runner and row_runner != runner_id:
+                continue
+            trade_id = str(
+                self._value(raw, "id", "bet-id", "betId", "matched-bet-id", "matchedBetId") or ""
+            ).strip()
+            side = self._trade_side(self._value(raw, "side", "bet-side", "betSide"))
+            odds = self._positive_float(self._value(raw, "odds", "price", "decimal-odds", "decimalOdds"))
+            size = self._positive_float(
+                self._value(raw, "matched-stake", "matchedStake", "matched-amount", "matchedAmount", "stake", "size", "amount")
+            )
+            timestamp = self._timestamp_seconds(
+                self._value(raw, "matched-at", "matchedAt", "matched-date", "matchedDate", "timestamp", "created-at", "createdAt")
+            )
+            price = 1.0 / odds if odds is not None and odds > 1.0 else None
+            if not trade_id or side is None or odds is None or size is None or price is None:
+                continue
+            if (after_ts is not None or before_ts is not None) and timestamp is None:
+                continue
+            if after_ts is not None and timestamp < after_ts:
+                continue
+            if before_ts is not None and timestamp > before_ts:
+                continue
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=self._contract_id(event_id, market_id, runner_id),
+                    trade_id=trade_id,
+                    side=side,
+                    price=price,
+                    size=size,
+                    timestamp=timestamp,
+                    raw=dict(raw),
+                )
+            )
+            if len(trades) >= desired:
+                break
+        return trades
+
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
         self._validate_order(order)
@@ -242,6 +326,7 @@ class MatchbookAdapter(MarketAdapter):
         method: str,
         path: str,
         *,
+        params: Optional[Mapping[str, Any]] = None,
         body: Optional[Mapping[str, Any]] = None,
         auth: bool = False,
         login: bool = False,
@@ -256,6 +341,7 @@ class MatchbookAdapter(MarketAdapter):
             response = self.runtime.session.request(
                 method.upper(),
                 self._url(base, path),
+                params=dict(params) if params is not None else None,
                 json=dict(body) if body is not None else None,
                 headers=headers,
                 timeout=self.runtime.timeout_seconds,
@@ -307,6 +393,55 @@ class MatchbookAdapter(MarketAdapter):
             raise MarketConfigurationError("Matchbook login response did not include a session token.")
         self._session_token = str(session)
         return self._session_token
+
+    @staticmethod
+    def _trade_limit(value: Any) -> int:
+        if isinstance(value, bool):
+            raise MarketConfigurationError("Matchbook trade limit must be an integer between 1 and 1000.")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Matchbook trade limit must be an integer between 1 and 1000.") from exc
+        if parsed < 1 or parsed > 1000:
+            raise MarketConfigurationError("Matchbook trade limit must be an integer between 1 and 1000.")
+        return parsed
+
+    @staticmethod
+    def _history_timestamp(value: Any, label: str) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Matchbook {label} must be a numeric epoch timestamp.") from exc
+        if not math.isfinite(parsed) or parsed < 0:
+            raise MarketConfigurationError(f"Matchbook {label} must be a non-negative finite epoch timestamp.")
+        return parsed / 1000.0 if parsed > 10_000_000_000 else parsed
+
+    @classmethod
+    def _timestamp_seconds(cls, value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            parsed = None
+        if parsed is not None:
+            if not math.isfinite(parsed):
+                return None
+            return parsed / 1000.0 if parsed > 10_000_000_000 else parsed
+        try:
+            text = str(value).strip().replace("Z", "+00:00")
+            parsed_dt = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if parsed_dt.tzinfo is None:
+            parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
+        return parsed_dt.timestamp()
+
+    @staticmethod
+    def _trade_side(value: Any) -> Optional[str]:
+        return {"BACK": "BUY", "WIN": "BUY", "BUY": "BUY", "LAY": "SELL", "LOSE": "SELL", "SELL": "SELL"}.get(
+            str(value or "").strip().upper()
+        )
 
     def _validate_order(self, order: PaperOrderRequest) -> None:
         self.ensure_order_market(order)

@@ -1000,6 +1000,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         events = load_fixture("matchbook", "events")
         markets = load_fixture("matchbook", "markets")
         market = load_fixture("matchbook", "market")
+        matched_bets = load_fixture("matchbook", "matched_bets")
 
         def fake_get_json(url: str, *, params=None, headers=None):
             if url.endswith("/events"):
@@ -1032,12 +1033,18 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         live_adapter = MatchbookAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})
         calls = []
 
-        def fake_request(method: str, url: str, *, json=None, headers=None, timeout=None):
-            calls.append((method, url, json, headers, timeout))
+        def fake_request(method: str, url: str, *, params=None, json=None, headers=None, timeout=None):
+            calls.append((method, url, params, json, headers, timeout))
             if url.endswith("/security/session"):
                 return FakeResponse(load_fixture("matchbook", "login_response"))
             if url.endswith("/v2/offers"):
                 return FakeResponse(load_fixture("matchbook", "order_response"))
+            if url.endswith("/v2/matched-bets/aggregated"):
+                self.assertEqual(params["event-ids"], "101")
+                self.assertEqual(params["market-ids"], "202")
+                self.assertEqual(params["runner-ids"], "303")
+                self.assertEqual(params["aggregation-type"], "average")
+                return FakeResponse(matched_bets)
             raise AssertionError(f"unexpected Matchbook request URL: {url}")
 
         live_adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
@@ -1050,11 +1057,28 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(result["response"]["offers"][0]["id"], 404)
         self.assertEqual(calls[0][0], "POST")
         self.assertTrue(calls[0][1].endswith("/security/session"))
-        self.assertEqual(calls[0][2]["username"], "user")
+        self.assertEqual(calls[0][3]["username"], "user")
         self.assertTrue(calls[1][1].endswith("/v2/offers"))
-        self.assertEqual(calls[1][2]["offers"][0]["runner-id"], 303)
-        self.assertEqual(calls[1][2]["offers"][0]["odds"], 2.0)
-        self.assertEqual(calls[1][3]["session-token"], "session-123")
+        self.assertEqual(calls[1][3]["offers"][0]["runner-id"], 303)
+        self.assertEqual(calls[1][3]["offers"][0]["odds"], 2.0)
+        self.assertEqual(calls[1][4]["session-token"], "session-123")
+
+        trades = live_adapter.list_trades(
+            "101:202:303",
+            limit=2,
+            after=1780344000,
+            before=1780344050,
+        )
+        self.assertEqual([trade.trade_id for trade in trades], ["mb-303-1"])
+        self.assertEqual(trades[0].side, "BUY")
+        self.assertAlmostEqual(trades[0].price, 0.4)
+        self.assertEqual(trades[0].size, 4.0)
+        self.assertEqual(trades[0].timestamp, 1780344003.0)
+
+        with self.assertRaises(MarketConfigurationError):
+            live_adapter.list_trades("101:202:303", limit=1001)
+        with self.assertRaises(MarketConfigurationError):
+            live_adapter.list_trades("101:202:303", before=10, after=20)
 
         with self.assertRaises(UnsupportedFeatureError):
             live_adapter.copy_trade_from_activity({"side": "BUY"})

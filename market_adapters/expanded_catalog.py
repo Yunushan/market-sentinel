@@ -180,6 +180,7 @@ MATCHBOOK_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -601,7 +602,7 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://developers.matchbook.com/",
         description=(
             "Official Matchbook exchange API adapter for event/market discovery, decimal-odds prices, "
-            "orderbooks, paper orders, and guarded session-authenticated offers."
+            "orderbooks, matched-bet history, paper orders, and guarded session-authenticated offers."
         ),
         capabilities=MATCHBOOK_CAPABILITIES,
     ),
@@ -668,4 +669,3 @@ EXPANDED_VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
         "https://docs.metaarena.world/",
     ),
 }
-
