@@ -78,8 +78,9 @@ pages, but neither publishes a stable third-party market-data/order API or an
 automation permission contract. Nadex was separately promoted to a read-only
 CDNA alias after its official Crypto.com Predictions API surface was validated;
 this does not cover Nadex account automation, DCM/FIX depth, or knock-out products.
-Iowa Electronic Markets still exposes account/practice pages and quote/history
-forms without a documented integration API. Hypermind describes API feeds as
+Iowa Electronic Markets now has an archive-only adapter for its official
+historical price files; current quote pages, orderbooks, live trading, and copy
+activity remain unsupported because no stable automation API is documented. Hypermind describes API feeds as
 managed-service deliverables that require program access, not a public contract.
 Good Judgment Open remains an account-based forecasting site without a public
 export/API contract.
