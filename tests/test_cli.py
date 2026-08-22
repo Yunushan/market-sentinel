@@ -94,6 +94,42 @@ class MarketSentinelCliTests(unittest.TestCase):
         ), patch("market_sentinel_cli.adapter_for_market"):
             self.assertEqual(market_sentinel_cli.main(["markets", "trades", "contract", "--before", "nan"]), 1)
 
+    def test_market_account_command_exposes_allow_listed_recovery(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="gemini_titan")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("positions",),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+                "positions": [{"symbol": "GEMI-BTC100K26-YES"}],
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "positions",
+                        "--event-ticker",
+                        "BTC100K2026",
+                        "--limit",
+                        "10",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["operation"], "positions")
+        self.assertEqual(payload["parameters"]["event_ticker"], "BTC100K2026")
+        self.assertEqual(payload["data"]["positions"][0]["symbol"], "GEMI-BTC100K26-YES")
+
     def test_polymarket_leaderboard_cli_builds_unlimited_scan_params(self) -> None:
         parser = market_sentinel_cli.build_parser()
         args = parser.parse_args(

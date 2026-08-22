@@ -276,6 +276,7 @@ API_ROUTES = {
         "/api/markets/{market_id}/orderbook",
         "/api/markets/{market_id}/trades",
         "/api/markets/{market_id}/candles",
+        "/api/markets/{market_id}/account/{operation}",
         "/api/alerts",
         "/api/wallets",
         "/api/copy",
@@ -3525,6 +3526,90 @@ def market_candles_payload(
     }
 
 
+def market_account_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    operation: str,
+    query_params: Mapping[str, List[str]],
+) -> Dict[str, Any]:
+    """Read one explicitly documented authenticated account operation.
+
+    Account recovery is not treated as public market-data history.  The
+    adapter must publish an operation allow-list; arbitrary authenticated
+    paths are never accepted by this route.
+    """
+
+    normalized_market_id = str(market_id or "").strip().lower()
+    normalized_operation = str(operation or "").strip().lower()
+    require_market_enabled(cfg, normalized_market_id, "account recovery")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    supported = tuple(str(value).strip().lower() for value in getattr(adapter, "account_recovery_operations", ()))
+    if normalized_operation not in supported:
+        raise UnsupportedFeatureError(
+            normalized_market_id,
+            "account_recovery",
+            f"{normalized_market_id} does not support account operation {normalized_operation or '<empty>'}. "
+            f"Supported operations: {', '.join(supported) or 'none'}.",
+        )
+
+    kwargs: Dict[str, Any] = {}
+    if normalized_operation in {"active_orders", "order_history"}:
+        kwargs.update(
+            {
+                "contract_id": _query_value(query_params, "contract_id") or None,
+                "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 1000),
+                "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+            }
+        )
+    if normalized_operation == "order_history":
+        kwargs.update(
+            {
+                "status": _query_value(query_params, "status", "filled").lower(),
+                "from_timestamp": _query_float(query_params, "from"),
+                "to_timestamp": _query_float(query_params, "to"),
+            }
+        )
+    elif normalized_operation == "positions":
+        raw_limit = _query_value(query_params, "limit")
+        kwargs.update(
+            {
+                "event_ticker": _query_value(query_params, "event_ticker"),
+                "limit": _clamp_int(raw_limit, 100, 1, 1000) if raw_limit else None,
+                "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+                "sort": _query_value(query_params, "sort") or None,
+            }
+        )
+    elif normalized_operation == "settled_positions":
+        kwargs.update(
+            {
+                "event_ticker": _query_value(query_params, "event_ticker"),
+                "limit": _clamp_int(_query_value(query_params, "limit", "1000"), 1000, 1, 1000),
+                "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+                "sort": _query_value(query_params, "sort", "-date"),
+                "search": _query_value(query_params, "search"),
+                "category": _query_value(query_params, "category"),
+                "with_cash_outs": _query_bool(query_params, "with_cash_outs", False),
+            }
+        )
+    elif normalized_operation == "volume_metrics":
+        kwargs.update(
+            {
+                "event_ticker": _query_value(query_params, "event_ticker"),
+                "start_timestamp": _query_float(query_params, "from"),
+                "end_timestamp": _query_float(query_params, "to"),
+            }
+        )
+
+    data = adapter.account_recovery(normalized_operation, **kwargs)
+    return {
+        "market_id": normalized_market_id,
+        "operation": normalized_operation,
+        "parameters": kwargs,
+        "data": data,
+    }
+
+
 def paper_quote_payload(cfg: AppConfig, registry: AdapterRegistry, payload: Mapping[str, Any]) -> Dict[str, Any]:
     market_id = str(payload.get("market_id") or "").strip().lower()
     contract_id = str(payload.get("contract_id") or "").strip()
@@ -4057,6 +4142,20 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                         market_candles_payload(cfg, self.app_server.adapter_registry, market_id, query_params),
                     )
                     return
+            if len(market_route) == 5 and market_route[:2] == ["api", "markets"] and market_route[3] == "account":
+                market_id = unquote(market_route[2])
+                operation = unquote(market_route[4])
+                self._send_json(
+                    HTTPStatus.OK,
+                    market_account_payload(
+                        cfg,
+                        self.app_server.adapter_registry,
+                        market_id,
+                        operation,
+                        query_params,
+                    ),
+                )
+                return
             if path == "/api/alerts":
                 self._send_json(HTTPStatus.OK, alerts_payload(cfg, self.app_server.adapter_registry, self.app_server.alert_price_state))
                 return

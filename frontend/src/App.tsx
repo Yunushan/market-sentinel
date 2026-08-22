@@ -38,6 +38,7 @@ import {
   deleteWallet,
   fillPaperQuoteLimit,
   fetchLiveSafety,
+  fetchMarketAccount,
   fetchMarketCandles,
   fetchMarketContracts,
   fetchMarketEvents,
@@ -107,6 +108,8 @@ import type {
   LiveSafetyPayload,
   Market,
   MarketCandlesPayload,
+  MarketAccountOperation,
+  MarketAccountPayload,
   MarketContractsPayload,
   MarketEventsPayload,
   MarketOrderbookPayload,
@@ -159,6 +162,7 @@ interface MarketReadForm {
   resolution: string;
   from: string;
   to: string;
+  account_operation: MarketAccountOperation;
 }
 
 interface MarketReadState {
@@ -168,6 +172,7 @@ interface MarketReadState {
   orderbook: MarketOrderbookPayload | null;
   trades: MarketTradesPayload | null;
   candles: MarketCandlesPayload | null;
+  account: MarketAccountPayload | null;
 }
 
 function isTab(value: string | null): value is Tab {
@@ -347,11 +352,19 @@ function emptyAlertForm(marketId = "polymarket"): AlertForm {
 }
 
 function emptyMarketReadForm(): MarketReadForm {
-  return { query: "", event_id: "", contract_id: "", resolution: "1h", from: "", to: "" };
+  return {
+    query: "",
+    event_id: "",
+    contract_id: "",
+    resolution: "1h",
+    from: "",
+    to: "",
+    account_operation: "active_orders"
+  };
 }
 
 function emptyMarketReadState(): MarketReadState {
-  return { events: null, contracts: null, price: null, orderbook: null, trades: null, candles: null };
+  return { events: null, contracts: null, price: null, orderbook: null, trades: null, candles: null, account: null };
 }
 
 function alertToForm(alert: PriceAlert): AlertForm {
@@ -670,14 +683,14 @@ export default function App() {
     }
   }
 
-  async function handleMarketRead(action: "events" | "contracts" | "price" | "orderbook" | "trades" | "candles") {
+  async function handleMarketRead(action: "events" | "contracts" | "price" | "orderbook" | "trades" | "candles" | "account") {
     const marketId = selectedMarket?.market_id;
     if (!marketId) {
       setError("Select an enabled market before reading market data.");
       return;
     }
     const form = marketReadForm;
-    if (action !== "events" && action !== "contracts" && !form.contract_id.trim()) {
+    if (action !== "events" && action !== "contracts" && action !== "account" && !form.contract_id.trim()) {
       setError("Enter a contract id before reading quote or history data.");
       return;
     }
@@ -720,15 +733,27 @@ export default function App() {
         setMarketRead((current) => ({ ...current, trades: payload }));
         setMarketReadMessage(`${payload.trades.length} trade(s) loaded.`);
       } else {
-        const payload = await fetchMarketCandles(
-          marketId,
-          form.contract_id.trim(),
-          form.resolution.trim(),
-          form.from.trim(),
-          form.to.trim()
-        );
-        setMarketRead((current) => ({ ...current, candles: payload }));
-        setMarketReadMessage(`${payload.candles.length} candle(s) loaded.`);
+        if (action === "candles") {
+          const payload = await fetchMarketCandles(
+            marketId,
+            form.contract_id.trim(),
+            form.resolution.trim(),
+            form.from.trim(),
+            form.to.trim()
+          );
+          setMarketRead((current) => ({ ...current, candles: payload }));
+          setMarketReadMessage(`${payload.candles.length} candle(s) loaded.`);
+        } else {
+          const payload = await fetchMarketAccount(marketId, form.account_operation, {
+            contract_id: form.contract_id.trim() || undefined,
+            event_ticker: form.event_id.trim() || undefined,
+            from: form.from.trim() || undefined,
+            to: form.to.trim() || undefined,
+            limit: 50
+          });
+          setMarketRead((current) => ({ ...current, account: payload }));
+          setMarketReadMessage(`${payload.operation.replaceAll("_", " ")} loaded.`);
+        }
       }
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
@@ -1725,7 +1750,7 @@ function MarketsView({
   marketReadForm: MarketReadForm;
   marketReadMessage: string;
   markets: MarketsPayload | null;
-  onMarketRead: (action: "events" | "contracts" | "price" | "orderbook" | "trades" | "candles") => void;
+  onMarketRead: (action: "events" | "contracts" | "price" | "orderbook" | "trades" | "candles" | "account") => void;
   onMarketReadFormChange: (patch: Partial<MarketReadForm>) => void;
   onQueryChange: (value: string) => void;
   onSelectedMarketChange: (marketId: string) => void;
@@ -1818,7 +1843,7 @@ function MarketsView({
           <div className="market-detail-main">
             <div>
               <h3>Market data</h3>
-              <p>Use the enabled adapter's official discovery, quote, orderbook, trade, and candle feeds.</p>
+              <p>Use the enabled adapter's official discovery, quote, orderbook, trade, candle, and credentialed account feeds.</p>
             </div>
             <StatusPill tone={marketReadBusy ? "neutral" : marketReadMessage ? "good" : "neutral"}>
               {marketReadBusy ? `loading ${marketReadBusy}` : marketReadMessage || "ready"}
@@ -1873,6 +1898,19 @@ function MarketsView({
                 placeholder="Optional"
               />
             </label>
+            {selectedMarket.health.account_recovery_operations?.length ? (
+              <label>
+                <span>Account read</span>
+                <select
+                  value={marketReadForm.account_operation}
+                  onChange={(event) => onMarketReadFormChange({ account_operation: event.target.value as MarketAccountOperation })}
+                >
+                  {selectedMarket.health.account_recovery_operations.map((operation) => (
+                    <option key={operation} value={operation}>{operation.replaceAll("_", " ")}</option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
           </div>
           <div className="button-row compact">
             {(["events", "contracts", "price", "orderbook", "trades", "candles"] as const).map((action) => (
@@ -1886,6 +1924,16 @@ function MarketsView({
                 {action === "events" ? "Discover events" : action === "contracts" ? "Load contracts" : `Read ${action}`}
               </button>
             ))}
+            {selectedMarket.health.account_recovery_operations?.length ? (
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={marketReadBusy !== null}
+                onClick={() => onMarketRead("account")}
+              >
+                Read account
+              </button>
+            ) : null}
           </div>
           {marketRead.events ? (
             <div className="table-wrap">
@@ -1964,6 +2012,12 @@ function MarketsView({
                   <tr key={candle.timestamp}><td>{formatUnknownTime(candle.timestamp)}</td><td>{formatNumber(candle.open)}</td><td>{formatNumber(candle.high)}</td><td>{formatNumber(candle.low)}</td><td>{formatNumber(candle.close)}</td><td>{formatNumber(candle.volume)}</td></tr>
                 ))}</tbody>
               </table>
+            </div>
+          ) : null}
+          {marketRead.account ? (
+            <div className="table-wrap">
+              <h4>Account: {marketRead.account.operation.replaceAll("_", " ")}</h4>
+              <pre className="account-json">{JSON.stringify(marketRead.account.data, null, 2)}</pre>
             </div>
           ) : null}
         </div>

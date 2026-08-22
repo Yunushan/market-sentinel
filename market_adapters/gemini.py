@@ -39,6 +39,13 @@ class GeminiPredictionAdapter(MarketAdapter):
     """Gemini Prediction Markets read-only adapter using official public endpoints."""
 
     metadata = get_market_metadata("gemini_titan")
+    account_recovery_operations = (
+        "active_orders",
+        "order_history",
+        "positions",
+        "settled_positions",
+        "volume_metrics",
+    )
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -50,6 +57,7 @@ class GeminiPredictionAdapter(MarketAdapter):
                 "credential_sources": [{"name": api_key.name, "source": api_key.source}] if api_key else [],
                 "live_trading_supported": True,
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
+                "account_recovery_operations": list(self.account_recovery_operations),
             }
         )
         return health
@@ -465,6 +473,58 @@ class GeminiPredictionAdapter(MarketAdapter):
         if "startTime" in payload and "endTime" in payload and payload["startTime"] > payload["endTime"]:
             raise MarketConfigurationError("Gemini volume end_timestamp must not precede start_timestamp.")
         return self._authenticated_post("/v1/prediction-markets/metrics/volume", payload)
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Any:
+        """Dispatch an explicitly allow-listed Gemini account read.
+
+        Keeping this small dispatcher beside the validated endpoint methods
+        gives the CLI and web API one safe surface without exposing arbitrary
+        authenticated paths or allowing callers to bypass parameter checks.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized == "active_orders":
+            return self.list_active_orders(
+                kwargs.get("contract_id"),
+                limit=kwargs.get("limit", 50),
+                offset=kwargs.get("offset", 0),
+            )
+        if normalized == "order_history":
+            return self.list_order_history(
+                status=kwargs.get("status", "filled"),
+                contract_id=kwargs.get("contract_id"),
+                limit=kwargs.get("limit", 50),
+                offset=kwargs.get("offset", 0),
+                from_timestamp=kwargs.get("from_timestamp"),
+                to_timestamp=kwargs.get("to_timestamp"),
+            )
+        if normalized == "positions":
+            return self.get_positions(
+                kwargs.get("event_ticker", ""),
+                limit=kwargs.get("limit"),
+                offset=kwargs.get("offset", 0),
+                sort=kwargs.get("sort"),
+            )
+        if normalized == "settled_positions":
+            return self.get_settled_positions(
+                kwargs.get("event_ticker", ""),
+                limit=kwargs.get("limit", 1000),
+                offset=kwargs.get("offset", 0),
+                sort=kwargs.get("sort", "-date"),
+                search=kwargs.get("search", ""),
+                category=kwargs.get("category", ""),
+                with_cash_outs=kwargs.get("with_cash_outs", False),
+            )
+        if normalized == "volume_metrics":
+            return self.get_volume_metrics(
+                kwargs.get("event_ticker", ""),
+                start_timestamp=kwargs.get("start_timestamp"),
+                end_timestamp=kwargs.get("end_timestamp"),
+            )
+        supported = ", ".join(self.account_recovery_operations)
+        raise MarketConfigurationError(
+            f"Gemini account recovery operation must be one of: {supported}."
+        )
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
         raise UnsupportedFeatureError(

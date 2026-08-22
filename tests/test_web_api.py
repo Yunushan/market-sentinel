@@ -30,6 +30,7 @@ from market_adapters.types import (
     PriceSnapshot,
     MarketTrade,
 )
+from market_adapters.errors import UnsupportedFeatureError
 from polymarket.analytics_cache import POLYMARKET_MDD_AUDIT_KIND, store_analytics_artifact
 from polymarket.gamma import ProfileResult
 from polymarket.http_client import PolymarketRateLimitError
@@ -58,6 +59,7 @@ from web_api import (
     live_safety_payload,
     markets_payload,
     market_candles_payload,
+    market_account_payload,
     market_contracts_payload,
     market_events_payload,
     market_orderbook_payload,
@@ -578,6 +580,39 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(trades["trades"][0]["size"], 3.0)
         self.assertEqual(candles["candles"][0]["close"], 0.4)
         self.assertEqual(candles["resolution"], "1h")
+
+    def test_market_account_payload_requires_explicit_operation_allow_list(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="gemini_titan",
+            display_name="Gemini Titan",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("positions",)  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "positions": [{"symbol": "GEMI-BTC100K26-YES"}],
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["gemini_titan"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "gemini_titan",
+            "positions",
+            {"event_ticker": ["BTC100K2026"], "limit": ["10"]},
+        )
+        self.assertEqual(payload["operation"], "positions")
+        self.assertEqual(payload["parameters"]["event_ticker"], "BTC100K2026")
+        self.assertEqual(payload["data"]["positions"][0]["symbol"], "GEMI-BTC100K26-YES")
+        with self.assertRaises(UnsupportedFeatureError):
+            market_account_payload(cfg, Registry(), "gemini_titan", "arbitrary", {})
 
     def test_markets_payload_includes_diagnostics_without_secret_values(self) -> None:
         cfg = AppConfig()

@@ -28,6 +28,10 @@ class MarketAdapter:
 
     metadata = MarketMetadata(market_id="base", display_name="Base")
     live_order_sides = ("BUY", "SELL")
+    # Account recovery is deliberately separate from public trade history.
+    # Adapters opt in only when the upstream account endpoints are documented
+    # and the implementation has explicit credential/safety tests.
+    account_recovery_operations: tuple[str, ...] = ()
 
     def __init__(
         self,
@@ -244,6 +248,18 @@ class MarketAdapter:
 
         self.ensure_capability("candle_history")
         raise UnsupportedFeatureError(self.market_id, "candle_history")
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Any:
+        """Read a documented authenticated account surface, when supported.
+
+        This is intentionally not part of the public market-data capability
+        flags: account payloads are private, credentialed, and vary by venue.
+        Concrete adapters must publish an explicit operation allow-list and
+        validate each operation's parameters before making a request.
+        """
+
+        del operation, kwargs
+        raise UnsupportedFeatureError(self.market_id, "account_recovery")
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")

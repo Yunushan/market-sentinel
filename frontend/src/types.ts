@@ -45,6 +45,7 @@ export interface Market {
     runtime?: Record<string, unknown>;
     verified_blocker?: boolean;
     credential_requirement?: string;
+    account_recovery_operations?: string[];
   };
   status_text: string;
   credential_env_vars: string[];
@@ -164,6 +165,20 @@ export interface MarketCandlesPayload {
   from: number | null;
   to: number | null;
   candles: MarketCandle[];
+}
+
+export type MarketAccountOperation =
+  | "active_orders"
+  | "order_history"
+  | "positions"
+  | "settled_positions"
+  | "volume_metrics";
+
+export interface MarketAccountPayload {
+  market_id: string;
+  operation: MarketAccountOperation;
+  parameters: Record<string, unknown>;
+  data: unknown;
 }
 
 export type AlertDirection = "above" | "below";

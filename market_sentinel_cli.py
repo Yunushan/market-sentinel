@@ -1325,6 +1325,82 @@ def run_market_candles(args: argparse.Namespace) -> int:
     )
 
 
+GEMINI_ACCOUNT_OPERATIONS = (
+    "active_orders",
+    "order_history",
+    "positions",
+    "settled_positions",
+    "volume_metrics",
+)
+
+
+def run_market_account(args: argparse.Namespace) -> int:
+    """Read one adapter's explicitly documented authenticated account feed."""
+
+    _cfg, market_id, adapter = _market_read_context(args, "account recovery")
+    operation = str(args.operation or "").strip().lower()
+    kwargs: Dict[str, Any] = {}
+    if operation in {"active_orders", "order_history"}:
+        kwargs.update(
+            {
+                "contract_id": str(args.contract or "").strip() or None,
+                "limit": _cli_clamp_int(args.limit, 50, 1, 1000),
+                "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
+            }
+        )
+    if operation == "order_history":
+        kwargs.update(
+            {
+                "status": str(args.status or "filled").strip().lower(),
+                "from_timestamp": _cli_history_float(args.from_timestamp, "from"),
+                "to_timestamp": _cli_history_float(args.to_timestamp, "to"),
+            }
+        )
+    elif operation == "positions":
+        kwargs.update(
+            {
+                "event_ticker": str(args.event_ticker or "").strip(),
+                "limit": (
+                    _cli_clamp_int(args.limit, 100, 1, 1000)
+                    if args.limit not in (None, "")
+                    else None
+                ),
+                "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
+                "sort": str(args.sort or "").strip() or None,
+            }
+        )
+    elif operation == "settled_positions":
+        kwargs.update(
+            {
+                "event_ticker": str(args.event_ticker or "").strip(),
+                "limit": _cli_clamp_int(args.limit, 1000, 1, 1000),
+                "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
+                "sort": str(args.sort or "-date").strip(),
+                "search": str(args.search or "").strip(),
+                "category": str(args.category or "").strip(),
+                "with_cash_outs": bool(args.with_cash_outs),
+            }
+        )
+    elif operation == "volume_metrics":
+        kwargs.update(
+            {
+                "event_ticker": str(args.event_ticker or "").strip(),
+                "start_timestamp": _cli_history_float(args.from_timestamp, "from"),
+                "end_timestamp": _cli_history_float(args.to_timestamp, "to"),
+            }
+        )
+    data = adapter.account_recovery(operation, **kwargs)
+    return _write_command_payload(
+        args,
+        {
+            "market_id": market_id,
+            "operation": operation,
+            "parameters": kwargs,
+            "data": data,
+        },
+    )
+
+
 def run_live_safety_show(args: argparse.Namespace) -> int:
     return _write_command_payload(args, live_safety_payload(_load_cfg(args), _registry(), args.market))
 
@@ -2272,6 +2348,27 @@ def build_parser() -> argparse.ArgumentParser:
     market_candles.add_argument("--to", dest="to_timestamp", default=None, help="Optional Unix timestamp bound.")
     _add_json_output_args(market_candles)
     market_candles.set_defaults(func=run_market_candles)
+
+    market_account = markets_sub.add_parser(
+        "account",
+        parents=[common],
+        help="Read an explicitly documented authenticated account feed (Gemini currently).",
+    )
+    market_account.add_argument("operation", choices=GEMINI_ACCOUNT_OPERATIONS)
+    market_account.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
+    market_account.add_argument("--contract", default=None, help="Optional canonical contract id for order feeds.")
+    market_account.add_argument("--event-ticker", default=None, help="Optional event ticker for position/volume feeds.")
+    market_account.add_argument("--status", choices=["filled", "cancelled"], default="filled")
+    market_account.add_argument("--limit", default=None, help="Optional page size (operation-specific).")
+    market_account.add_argument("--offset", default="0", help="Optional page offset.")
+    market_account.add_argument("--sort", default=None, help="Documented position sort value.")
+    market_account.add_argument("--search", default="", help="Settled-position search text.")
+    market_account.add_argument("--category", default="", help="Settled-position category.")
+    market_account.add_argument("--with-cash-outs", action="store_true")
+    market_account.add_argument("--from", dest="from_timestamp", default=None, help="Optional Unix timestamp bound.")
+    market_account.add_argument("--to", dest="to_timestamp", default=None, help="Optional Unix timestamp bound.")
+    _add_json_output_args(market_account)
+    market_account.set_defaults(func=run_market_account)
 
     live = subparsers.add_parser("live-safety", parents=[common], help="Inspect live safety gates or run a no-order preflight.")
     live_sub = live.add_subparsers(dest="live_command", required=True)

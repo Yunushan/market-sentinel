@@ -12,6 +12,8 @@ import type {
   LivePreflightPayload,
   LiveSafetyPayload,
   MarketsPayload,
+  MarketAccountOperation,
+  MarketAccountPayload,
   MarketCandlesPayload,
   MarketContractsPayload,
   MarketEventsPayload,
@@ -145,7 +147,7 @@ export function fetchMarkets(): Promise<MarketsPayload> {
   return request<MarketsPayload>("/api/markets");
 }
 
-function marketReadQuery(values: Record<string, string | number | undefined>): string {
+function marketReadQuery(values: Record<string, string | number | boolean | undefined>): string {
   const params = new URLSearchParams();
   Object.entries(values).forEach(([key, value]) => {
     if (value !== undefined && String(value).trim() !== "") {
@@ -201,6 +203,16 @@ export function fetchMarketCandles(
 ): Promise<MarketCandlesPayload> {
   return request<MarketCandlesPayload>(
     `/api/markets/${encodeURIComponent(marketId)}/candles${marketReadQuery({ contract_id: contractId, resolution, from, to })}`
+  );
+}
+
+export function fetchMarketAccount(
+  marketId: string,
+  operation: MarketAccountOperation,
+  values: Record<string, string | number | boolean | undefined> = {}
+): Promise<MarketAccountPayload> {
+  return request<MarketAccountPayload>(
+    `/api/markets/${encodeURIComponent(marketId)}/account/${encodeURIComponent(operation)}${marketReadQuery(values)}`
   );
 }
 
