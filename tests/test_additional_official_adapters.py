@@ -1858,6 +1858,58 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             with self.assertRaises(MarketConfigurationError):
                 adapter.list_trades("77:YES:0xyes", after=1733313000, before=1733312000)
 
+    def test_opinion_account_recovery_reads_are_authenticated_and_bounded(self) -> None:
+        wallet = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        adapter = OpinionAdapter(
+            {
+                "opinion_api_key": "opinion-key",
+                "opinion_account_wallet": wallet,
+            }
+        )
+        orders = load_fixture("opinion_labs", "orders")
+        order_detail = load_fixture("opinion_labs", "order_detail")
+        positions = load_fixture("opinion_labs", "positions")
+        calls = []
+
+        def fake_get_json(url: str, *, params=None, headers=None):
+            calls.append((url, dict(params or {}), dict(headers or {})))
+            self.assertEqual(headers, {"apikey": "opinion-key"})
+            if url.endswith("/order"):
+                self.assertEqual(params, {"page": 2, "limit": 20, "marketId": 77, "chainId": "56", "status": "1,2"})
+                return orders
+            if url.endswith("/order/order-1"):
+                self.assertIsNone(params)
+                return order_detail
+            if url.endswith(f"/positions/user/{wallet}"):
+                self.assertEqual(params, {"page": 1, "limit": 10, "marketId": 77, "chainId": "56"})
+                return positions
+            raise AssertionError(f"unexpected Opinion account URL: {url}")
+
+        adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+        history = adapter.account_recovery(
+            "order_history",
+            page=2,
+            limit=20,
+            market_id="77",
+            chain_id="56",
+            status="1,2",
+        )
+        detail = adapter.account_recovery("order_detail", order_id="order-1")
+        account_positions = adapter.account_recovery(
+            "positions", page=1, limit=10, market_id="77", chain_id="56"
+        )
+        self.assertEqual(history["result"]["list"][0]["orderId"], "order-1")
+        self.assertEqual(detail["result"]["orderData"]["orderId"], "order-1")
+        self.assertEqual(account_positions["result"]["list"][0]["tokenId"], "0xyes")
+        self.assertEqual(len(calls), 3)
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("order_history", status="1,6")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("order_detail", order_id="../outside")
+        with self.assertRaises(MarketConfigurationError):
+            OpinionAdapter({"opinion_api_key": "opinion-key"}).account_recovery("positions")
+
     def test_opinion_guarded_clob_orders_build_signed_limit_and_market_requests(self) -> None:
         adapter = OpinionAdapter(
             {

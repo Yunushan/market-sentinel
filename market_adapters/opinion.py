@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -39,6 +40,10 @@ class OpinionAdapter(MarketAdapter):
     """Opinion Labs adapter using the documented OpenAPI and optional CLOB SDK."""
 
     metadata = get_market_metadata("opinion_labs")
+    # Authenticated OpenAPI reads are exposed only through this explicit
+    # operation allow-list.  Arbitrary order or portfolio paths are never
+    # accepted by the shared CLI/API account route.
+    account_recovery_operations = ("order_history", "order_detail", "positions")
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -55,6 +60,12 @@ class OpinionAdapter(MarketAdapter):
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "copy_trading_supported": bool(self.capabilities.copy_trading),
                 "activity_feed_supported": True,
+                "account_recovery_operations": list(self.account_recovery_operations),
+                "authenticated_account_endpoints": [
+                    "/order",
+                    "/order/:orderId",
+                    "/positions/user/:walletAddress",
+                ],
             }
         )
         return health
@@ -274,6 +285,96 @@ class OpinionAdapter(MarketAdapter):
             if len(trades) >= desired:
                 break
         return trades
+
+    def list_order_history(
+        self,
+        *,
+        page: int = 1,
+        limit: int = 10,
+        market_id: str = "",
+        chain_id: str = "",
+        status: str = "",
+    ) -> Any:
+        """Read the authenticated user's documented order list."""
+
+        params: Dict[str, Any] = {
+            "page": self._account_page(page),
+            "limit": self._account_limit(limit),
+        }
+        normalized_market = self._account_market_id(market_id)
+        normalized_chain = self._account_chain_id(chain_id)
+        normalized_status = self._account_order_status(status)
+        if normalized_market is not None:
+            params["marketId"] = normalized_market
+        if normalized_chain:
+            params["chainId"] = normalized_chain
+        if normalized_status:
+            params["status"] = normalized_status
+        payload = self._get("/order", params=params)
+        if not isinstance(payload, Mapping):
+            raise MarketConfigurationError("Opinion order history returned an invalid payload.")
+        return dict(payload)
+
+    def get_order_detail(self, order_id: str) -> Any:
+        """Read one authenticated order detail using a path-safe identifier."""
+
+        normalized = str(order_id or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", normalized):
+            raise MarketConfigurationError("Opinion order_id must be a short path-safe identifier.")
+        payload = self._get(f"/order/{normalized}")
+        if not isinstance(payload, Mapping):
+            raise MarketConfigurationError("Opinion order detail returned an invalid payload.")
+        return dict(payload)
+
+    def get_positions(
+        self,
+        *,
+        page: int = 1,
+        limit: int = 10,
+        market_id: str = "",
+        chain_id: str = "",
+    ) -> Any:
+        """Read the documented wallet-scoped portfolio positions."""
+
+        wallet = self._account_wallet()
+        params: Dict[str, Any] = {
+            "page": self._account_page(page),
+            "limit": self._account_limit(limit),
+        }
+        normalized_market = self._account_market_id(market_id)
+        normalized_chain = self._account_chain_id(chain_id)
+        if normalized_market is not None:
+            params["marketId"] = normalized_market
+        if normalized_chain:
+            params["chainId"] = normalized_chain
+        payload = self._get(f"/positions/user/{wallet}", params=params)
+        if not isinstance(payload, Mapping):
+            raise MarketConfigurationError("Opinion positions returned an invalid payload.")
+        return dict(payload)
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Any:
+        """Dispatch one validated, documented Opinion account read."""
+
+        normalized = str(operation or "").strip().lower()
+        if normalized == "order_history":
+            return self.list_order_history(
+                page=kwargs.get("page", 1),
+                limit=kwargs.get("limit", 10),
+                market_id=kwargs.get("market_id", ""),
+                chain_id=kwargs.get("chain_id", ""),
+                status=kwargs.get("status", ""),
+            )
+        if normalized == "order_detail":
+            return self.get_order_detail(kwargs.get("order_id", ""))
+        if normalized == "positions":
+            return self.get_positions(
+                page=kwargs.get("page", 1),
+                limit=kwargs.get("limit", 10),
+                market_id=kwargs.get("market_id", ""),
+                chain_id=kwargs.get("chain_id", ""),
+            )
+        supported = ", ".join(self.account_recovery_operations)
+        raise MarketConfigurationError(f"Opinion account recovery operation must be one of: {supported}.")
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -561,6 +662,72 @@ class OpinionAdapter(MarketAdapter):
             "pseudonym": str(trade.get("marketTitle") or ""),
             "raw": dict(trade),
         }
+
+    def _account_wallet(self) -> str:
+        credential = self.resolve_credential(
+            "opinion_account_wallet",
+            ("OPINION_ACCOUNT_WALLET", "OPINION_WALLET_ADDRESS", "OPINION_ACTIVITY_WALLET"),
+            required=False,
+            label="OPINION_ACCOUNT_WALLET",
+        )
+        if credential is None:
+            credential = self.resolve_credential(
+                "opinion_trade_wallet",
+                ("OPINION_TRADE_WALLET",),
+                required=True,
+                label="OPINION_ACCOUNT_WALLET",
+            )
+        return self._normalize_wallet(credential.value)
+
+    @staticmethod
+    def _account_page(value: Any) -> int:
+        try:
+            page = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Opinion account page must be an integer between 1 and 10000.") from exc
+        if page < 1 or page > 10000:
+            raise MarketConfigurationError("Opinion account page must be between 1 and 10000.")
+        return page
+
+    @staticmethod
+    def _account_limit(value: Any) -> int:
+        try:
+            limit = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Opinion account limit must be an integer between 1 and 20.") from exc
+        if limit < 1 or limit > 20:
+            raise MarketConfigurationError("Opinion account limit must be between 1 and 20.")
+        return limit
+
+    @staticmethod
+    def _account_market_id(value: Any) -> Optional[int]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if not text.isdigit() or int(text) <= 0:
+            raise MarketConfigurationError("Opinion account market_id must be a positive integer.")
+        return int(text)
+
+    @staticmethod
+    def _account_chain_id(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if not re.fullmatch(r"[0-9]{1,10}", text) or int(text) <= 0:
+            raise MarketConfigurationError("Opinion account chain_id must be a positive numeric chain id.")
+        return text
+
+    @staticmethod
+    def _account_order_status(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        parts = [part.strip() for part in text.split(",") if part.strip()]
+        if not parts or any(part not in {"1", "2", "3", "4", "5"} for part in parts):
+            raise MarketConfigurationError("Opinion order status must be a comma-separated list of values 1-5.")
+        if len(set(parts)) != len(parts):
+            raise MarketConfigurationError("Opinion order status cannot contain duplicates.")
+        return ",".join(parts)
 
     def _get_market(self, market_id: str) -> Mapping[str, Any]:
         clean = str(market_id or "").strip()

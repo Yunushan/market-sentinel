@@ -165,6 +165,60 @@ class MarketSentinelCliTests(unittest.TestCase):
         self.assertEqual(payload["operation"], "order_history")
         self.assertEqual(payload["parameters"]["limit"], 12)
 
+    def test_opinion_account_command_forwards_page_filters_and_order_id(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="opinion_labs")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("order_history", "order_detail", "positions"),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+                "result": {"list": [{"orderId": "order-1"}]},
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "order_history",
+                        "--page",
+                        "2",
+                        "--limit",
+                        "20",
+                        "--account-market-id",
+                        "77",
+                        "--chain-id",
+                        "56",
+                        "--status",
+                        "1,2",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["parameters"], {"page": 2, "limit": 20, "market_id": "77", "chain_id": "56", "status": "1,2"})
+
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    ["markets", "account", "order_detail", "--order-id", "order-1", "--compact"]
+                ),
+                0,
+            )
+        self.assertEqual(json.loads(stdout.getvalue())["parameters"], {"order_id": "order-1"})
+
     def test_kalshi_account_command_forwards_signed_read_parameters(self) -> None:
         cfg = SimpleNamespace(selected_market_id="kalshi")
         adapter = SimpleNamespace(

@@ -693,6 +693,50 @@ class WebApiTests(unittest.TestCase):
             {"limit": 12, "status": "filled", "from_timestamp": None, "to_timestamp": None},
         )
 
+    def test_opinion_account_payload_forwards_page_filters_and_path_safe_order_id(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="opinion_labs",
+            display_name="Opinion Labs",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("order_history", "order_detail", "positions")  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "result": {"list": [{"orderId": "order-1"}]},
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["opinion_labs"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "opinion_labs",
+            "order_history",
+            {
+                "page": ["2"],
+                "limit": ["20"],
+                "market_id": ["77"],
+                "chain_id": ["56"],
+                "status": ["1,2"],
+            },
+        )
+        self.assertEqual(
+            payload["parameters"],
+            {"page": 2, "limit": 20, "market_id": "77", "chain_id": "56", "status": "1,2"},
+        )
+        detail = market_account_payload(
+            cfg, Registry(), "opinion_labs", "order_detail", {"order_id": ["order-1"]}
+        )
+        self.assertEqual(detail["parameters"], {"order_id": "order-1"})
+        clamped = market_account_payload(cfg, Registry(), "opinion_labs", "order_history", {"limit": ["99"]})
+        self.assertEqual(clamped["parameters"]["limit"], 20)
+
     def test_limitless_account_payload_forwards_delegated_read_parameters(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(

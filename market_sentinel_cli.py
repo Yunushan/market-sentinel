@@ -1342,6 +1342,7 @@ KALSHI_ACCOUNT_OPERATIONS = (
     "queue_positions",
 )
 LIMITLESS_ACCOUNT_OPERATIONS = ("positions", "account_history", "user_orders")
+OPINION_ACCOUNT_OPERATIONS = ("order_history", "order_detail", "positions")
 HYPERLIQUID_ACCOUNT_OPERATIONS = (
     "active_orders",
     "order_history",
@@ -1355,6 +1356,7 @@ MARKET_ACCOUNT_OPERATIONS = tuple(
         GEMINI_ACCOUNT_OPERATIONS
         + KALSHI_ACCOUNT_OPERATIONS
         + LIMITLESS_ACCOUNT_OPERATIONS
+        + OPINION_ACCOUNT_OPERATIONS
         + HYPERLIQUID_ACCOUNT_OPERATIONS
     )
 )
@@ -1414,6 +1416,18 @@ def run_market_account(args: argparse.Namespace) -> int:
                 "event_ticker": str(args.event_ticker or "").strip(),
                 "subaccount": subaccount,
             }
+    elif market_id == "opinion_labs":
+        if operation == "order_detail":
+            kwargs = {"order_id": str(args.order_id or "").strip()}
+        else:
+            kwargs = {
+                "page": _cli_clamp_int(getattr(args, "page", "1"), 1, 1, 10000),
+                "limit": _cli_clamp_int(args.limit, 10, 1, 20),
+                "market_id": str(getattr(args, "account_market_id", "") or "").strip(),
+                "chain_id": str(getattr(args, "chain_id", "") or "").strip(),
+            }
+            if operation == "order_history":
+                kwargs["status"] = str(args.status or "").strip()
     elif market_id == "hyperliquid":
         if operation in {"active_orders", "positions"}:
             kwargs["dex"] = str(getattr(args, "dex", "") or "").strip()
@@ -2432,7 +2446,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_account = markets_sub.add_parser(
         "account",
         parents=[common],
-        help="Read an explicitly documented authenticated account feed (Gemini, Kalshi, Limitless, or Hyperliquid).",
+        help="Read an explicitly documented authenticated account feed (Gemini, Kalshi, Limitless, Opinion, or Hyperliquid).",
     )
     market_account.add_argument("operation", choices=MARKET_ACCOUNT_OPERATIONS)
     market_account.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
@@ -2441,6 +2455,9 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--market-slug", default=None, help="Limitless market slug for user_orders.")
     market_account.add_argument("--on-behalf-of", default=None, help="Optional Limitless delegated profile.")
     market_account.add_argument("--order-id", default=None, help="Optional Kalshi order id for fill reads.")
+    market_account.add_argument("--page", default="1", help="Opinion account page (1-10000).")
+    market_account.add_argument("--account-market-id", default="", help="Opinion numeric market filter.")
+    market_account.add_argument("--chain-id", default="", help="Opinion numeric chain filter.")
     market_account.add_argument("--event-ticker", default=None, help="Optional event ticker for position/volume feeds.")
     market_account.add_argument("--status", default="", help="Documented account order status (venue-specific).")
     market_account.add_argument("--limit", default=None, help="Optional page size (operation-specific).")

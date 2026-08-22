@@ -417,6 +417,7 @@
         "opinion_chain_id": 56,
         "credential_env_vars": [
           "OPINION_API_KEY",
+          "OPINION_ACCOUNT_WALLET",
           "OPINION_PRIVATE_KEY",
           "OPINION_MULTI_SIG_ADDRESS",
           "OPINION_RPC_URL"
@@ -427,7 +428,7 @@
         "live_trading_max_notional": 25.0,
         "opinion_live_check_approval": false,
         "min_request_interval_seconds": 0.25,
-        "notes": "Authenticated market discovery, token listing, token prices, orderbooks, alerts, filled wallet-trade activity, and simulation-first copy intents use the official Opinion OpenAPI. Guarded limit/market live orders use the optional official opinion-clob-sdk on BNB Chain (chain id 56); install requirements-live.lock and provide OPINION_API_KEY, OPINION_PRIVATE_KEY, OPINION_MULTI_SIG_ADDRESS, and OPINION_RPC_URL only when explicitly enabling live trading."
+        "notes": "Authenticated market discovery, token listing, token prices, orderbooks, alerts, filled wallet-trade activity, order history/detail, and wallet positions use the official Opinion OpenAPI. Account reads require OPINION_ACCOUNT_WALLET (or the documented trade/activity wallet fallback) and OPINION_API_KEY. Guarded limit/market live orders use the optional official opinion-clob-sdk on BNB Chain (chain id 56); install requirements-live.lock and provide OPINION_API_KEY, OPINION_PRIVATE_KEY, OPINION_MULTI_SIG_ADDRESS, and OPINION_RPC_URL only when explicitly enabling live trading."
       }
     },
     "nadex": {

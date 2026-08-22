@@ -163,6 +163,9 @@ interface MarketReadForm {
   account_order_id: string;
   account_cursor: string;
   account_dex: string;
+  account_market_id: string;
+  account_chain_id: string;
+  account_status: string;
   account_subaccount: string;
   account_count_filter: string;
   account_market_slug: string;
@@ -369,6 +372,9 @@ function emptyMarketReadForm(): MarketReadForm {
     account_order_id: "",
     account_cursor: "",
     account_dex: "",
+    account_market_id: "",
+    account_chain_id: "",
+    account_status: "",
     account_subaccount: "",
     account_count_filter: "",
     account_market_slug: "",
@@ -690,7 +696,12 @@ export default function App() {
       setPaperForm((current) => ({ ...current, market_id: marketId }));
       setAlertForm((current) => ({ ...current, market_id: marketId }));
       setMarketRead(emptyMarketReadState());
-      setMarketReadForm(emptyMarketReadForm());
+      const nextMarket = markets?.markets.find((market) => market.market_id === marketId);
+      const accountOperations = nextMarket?.health.account_recovery_operations ?? [];
+      setMarketReadForm({
+        ...emptyMarketReadForm(),
+        account_operation: accountOperations[0] as MarketAccountOperation ?? "active_orders",
+      });
       setMarketReadMessage("");
       setLivePreflight(null);
       setLiveMessage("");
@@ -768,6 +779,9 @@ export default function App() {
             order_id: form.account_order_id.trim() || undefined,
             cursor: form.account_cursor.trim() || undefined,
             dex: form.account_dex.trim() || undefined,
+            market_id: form.account_market_id.trim() || undefined,
+            chain_id: form.account_chain_id.trim() || undefined,
+            status: form.account_status.trim() || undefined,
             subaccount: form.account_subaccount.trim() || undefined,
             count_filter: form.account_count_filter.trim() || undefined,
             market_slug: form.account_market_slug.trim() || undefined,
@@ -776,7 +790,8 @@ export default function App() {
             event_ticker: form.event_id.trim() || undefined,
             from: form.from.trim() || undefined,
             to: form.to.trim() || undefined,
-            limit: marketId === "hyperliquid" ? 2000 : 50
+            limit: marketId === "hyperliquid" ? 2000 : marketId === "opinion_labs" ? 20 : 50,
+            page: marketId === "opinion_labs" ? 1 : undefined
           });
           setMarketRead((current) => ({ ...current, account: payload }));
           setMarketReadMessage(`${payload.operation.replaceAll("_", " ")} loaded.`);
@@ -1931,6 +1946,30 @@ function MarketsView({
                 value={marketReadForm.account_dex}
                 onChange={(event) => onMarketReadFormChange({ account_dex: event.target.value })}
                 placeholder="Optional Hyperliquid DEX"
+              />
+            </label>
+            <label>
+              <span>Opinion market id</span>
+              <input
+                value={marketReadForm.account_market_id}
+                onChange={(event) => onMarketReadFormChange({ account_market_id: event.target.value })}
+                placeholder="Optional numeric id"
+              />
+            </label>
+            <label>
+              <span>Opinion chain id</span>
+              <input
+                value={marketReadForm.account_chain_id}
+                onChange={(event) => onMarketReadFormChange({ account_chain_id: event.target.value })}
+                placeholder="Optional numeric id"
+              />
+            </label>
+            <label>
+              <span>Opinion order status</span>
+              <input
+                value={marketReadForm.account_status}
+                onChange={(event) => onMarketReadFormChange({ account_status: event.target.value })}
+                placeholder="1,2,3,4,5"
               />
             </label>
             <label>
