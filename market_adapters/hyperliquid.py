@@ -63,6 +63,17 @@ class HyperliquidAdapter(MarketAdapter):
 
     metadata = get_market_metadata("hyperliquid")
     live_order_sides = ("BUY", "SELL")
+    # Private account reads are restricted to the documented Info endpoint
+    # request types below.  The shared CLI/API/React surfaces consume this
+    # allow-list so arbitrary authenticated payloads cannot be requested.
+    account_recovery_operations = (
+        "active_orders",
+        "order_history",
+        "positions",
+        "spot_balances",
+        "portfolio",
+        "subaccounts",
+    )
 
     def __init__(self, config: Optional[Mapping[str, Any]] = None, *, runtime=None) -> None:
         super().__init__(config, runtime=runtime)
@@ -102,6 +113,15 @@ class HyperliquidAdapter(MarketAdapter):
                 "external_signature_required": True,
                 "activity_feed_supported": True,
                 "copy_trading_supported": bool(self.capabilities.copy_trading),
+                "account_recovery_operations": list(self.account_recovery_operations),
+                "authenticated_account_endpoints": [
+                    "openOrders",
+                    "historicalOrders",
+                    "clearinghouseState",
+                    "spotClearinghouseState",
+                    "portfolio",
+                    "subAccounts",
+                ],
             }
         )
         return health
@@ -379,6 +399,95 @@ class HyperliquidAdapter(MarketAdapter):
                 break
         return trades
 
+    def list_active_orders(self, *, dex: str = "") -> Any:
+        """Read the configured wallet's documented open-order feed.
+
+        Hyperliquid's ``openOrders`` request is account-scoped and returns
+        both perpetual and spot orders.  The response is deliberately kept
+        lossless; callers that need HIP-4-only rows can filter by the
+        synthetic ``#<encoding>`` coin using the same contract mapping as
+        normalized trade history.
+        """
+
+        wallet = self._account_wallet()
+        request: Dict[str, Any] = {"type": "openOrders", "user": wallet}
+        normalized_dex = self._account_dex(dex)
+        if normalized_dex:
+            request["dex"] = normalized_dex
+        payload = self._info(request)
+        if not isinstance(payload, list):
+            raise MarketConfigurationError("Hyperliquid openOrders returned an invalid payload.")
+        return payload
+
+    def list_order_history(self, *, limit: int = 2000) -> Any:
+        """Read the documented historical-order feed for the configured wallet."""
+
+        wallet = self._account_wallet()
+        desired = self._account_limit(limit)
+        payload = self._info({"type": "historicalOrders", "user": wallet})
+        if not isinstance(payload, list):
+            raise MarketConfigurationError("Hyperliquid historicalOrders returned an invalid payload.")
+        return payload[:desired]
+
+    def get_positions(self, *, dex: str = "") -> Any:
+        """Read the documented perpetual clearinghouse state."""
+
+        wallet = self._account_wallet()
+        request: Dict[str, Any] = {"type": "clearinghouseState", "user": wallet}
+        normalized_dex = self._account_dex(dex)
+        if normalized_dex:
+            request["dex"] = normalized_dex
+        payload = self._info(request)
+        if not isinstance(payload, Mapping):
+            raise MarketConfigurationError("Hyperliquid clearinghouseState returned an invalid payload.")
+        return dict(payload)
+
+    def get_spot_balances(self) -> Any:
+        """Read the documented spot clearinghouse balances for the wallet."""
+
+        wallet = self._account_wallet()
+        payload = self._info({"type": "spotClearinghouseState", "user": wallet})
+        if not isinstance(payload, Mapping):
+            raise MarketConfigurationError("Hyperliquid spotClearinghouseState returned an invalid payload.")
+        return dict(payload)
+
+    def get_portfolio(self) -> Any:
+        """Read the documented account portfolio performance payload."""
+
+        wallet = self._account_wallet()
+        payload = self._info({"type": "portfolio", "user": wallet})
+        if not isinstance(payload, list):
+            raise MarketConfigurationError("Hyperliquid portfolio returned an invalid payload.")
+        return payload
+
+    def list_subaccounts(self) -> Any:
+        """Read the documented sub-account list for the configured master wallet."""
+
+        wallet = self._account_wallet()
+        payload = self._info({"type": "subAccounts", "user": wallet})
+        if not isinstance(payload, list):
+            raise MarketConfigurationError("Hyperliquid subAccounts returned an invalid payload.")
+        return payload
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Any:
+        """Dispatch one validated, documented Hyperliquid account read."""
+
+        normalized = str(operation or "").strip().lower()
+        if normalized == "active_orders":
+            return self.list_active_orders(dex=kwargs.get("dex", ""))
+        if normalized == "order_history":
+            return self.list_order_history(limit=kwargs.get("limit", 2000))
+        if normalized == "positions":
+            return self.get_positions(dex=kwargs.get("dex", ""))
+        if normalized == "spot_balances":
+            return self.get_spot_balances()
+        if normalized == "portfolio":
+            return self.get_portfolio()
+        if normalized == "subaccounts":
+            return self.list_subaccounts()
+        supported = ", ".join(self.account_recovery_operations)
+        raise MarketConfigurationError(f"Hyperliquid account recovery operation must be one of: {supported}.")
+
     def list_activity(self, wallet_address: str, *, limit: int = 25) -> List[Dict[str, Any]]:
         """Return normalized public HIP-4 fills for a wallet.
 
@@ -589,6 +698,34 @@ class HyperliquidAdapter(MarketAdapter):
             "outcome": outcome,
             "raw": dict(fill),
         }
+
+    def _account_wallet(self) -> str:
+        credential = self.resolve_credential(
+            "hyperliquid_account_wallet",
+            ("HYPERLIQUID_ACCOUNT_WALLET", "HYPERLIQUID_TRADE_WALLET", "HYPERLIQUID_ACTIVITY_WALLET"),
+            required=True,
+            label="HYPERLIQUID_ACCOUNT_WALLET",
+        )
+        return require_activity_identity(self.market_id, credential.value)
+
+    @staticmethod
+    def _account_dex(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if len(text) > 64 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}", text):
+            raise MarketConfigurationError("Hyperliquid account dex must be a short alphanumeric name.")
+        return text
+
+    @staticmethod
+    def _account_limit(value: Any) -> int:
+        try:
+            limit = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Hyperliquid account limit must be an integer between 1 and 2000.") from exc
+        if limit < 1 or limit > 2000:
+            raise MarketConfigurationError("Hyperliquid account limit must be between 1 and 2000.")
+        return limit
 
     def _validate_signed_payload(
         self, payload: Mapping[str, Any], outcome_id: str, side: int, order: PaperOrderRequest

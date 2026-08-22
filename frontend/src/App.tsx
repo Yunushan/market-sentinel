@@ -162,6 +162,7 @@ interface MarketReadForm {
   account_ticker: string;
   account_order_id: string;
   account_cursor: string;
+  account_dex: string;
   account_subaccount: string;
   account_count_filter: string;
   account_market_slug: string;
@@ -367,6 +368,7 @@ function emptyMarketReadForm(): MarketReadForm {
     account_ticker: "",
     account_order_id: "",
     account_cursor: "",
+    account_dex: "",
     account_subaccount: "",
     account_count_filter: "",
     account_market_slug: "",
@@ -765,6 +767,7 @@ export default function App() {
             ticker: form.account_ticker.trim() || undefined,
             order_id: form.account_order_id.trim() || undefined,
             cursor: form.account_cursor.trim() || undefined,
+            dex: form.account_dex.trim() || undefined,
             subaccount: form.account_subaccount.trim() || undefined,
             count_filter: form.account_count_filter.trim() || undefined,
             market_slug: form.account_market_slug.trim() || undefined,
@@ -773,7 +776,7 @@ export default function App() {
             event_ticker: form.event_id.trim() || undefined,
             from: form.from.trim() || undefined,
             to: form.to.trim() || undefined,
-            limit: 50
+            limit: marketId === "hyperliquid" ? 2000 : 50
           });
           setMarketRead((current) => ({ ...current, account: payload }));
           setMarketReadMessage(`${payload.operation.replaceAll("_", " ")} loaded.`);
@@ -1920,6 +1923,14 @@ function MarketsView({
                 value={marketReadForm.account_cursor}
                 onChange={(event) => onMarketReadFormChange({ account_cursor: event.target.value })}
                 placeholder="Next page cursor"
+              />
+            </label>
+            <label>
+              <span>Perp DEX</span>
+              <input
+                value={marketReadForm.account_dex}
+                onChange={(event) => onMarketReadFormChange({ account_dex: event.target.value })}
+                placeholder="Optional Hyperliquid DEX"
               />
             </label>
             <label>

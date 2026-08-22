@@ -291,6 +291,67 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         with self.assertRaises(MarketConfigurationError):
             adapter.list_trades("outcome:1:0", after="not-a-time")
 
+    def test_hyperliquid_account_recovery_reads_use_allowlisted_info_requests(self) -> None:
+        wallet = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+        fixtures = {
+            name: load_fixture("hyperliquid", name)
+            for name in (
+                "open_orders",
+                "historical_orders",
+                "clearinghouse_state",
+                "spot_clearinghouse_state",
+                "portfolio",
+                "subaccounts",
+            )
+        }
+        adapter = HyperliquidAdapter({"hyperliquid_account_wallet": wallet})
+        requests = []
+
+        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+            self.assertEqual(method, "POST")
+            self.assertIsNone(params)
+            self.assertEqual(headers["Content-Type"], "application/json")
+            self.assertTrue(url.endswith("/info"))
+            requests.append(dict(json_body))
+            return {
+                "openOrders": fixtures["open_orders"],
+                "historicalOrders": fixtures["historical_orders"],
+                "clearinghouseState": fixtures["clearinghouse_state"],
+                "spotClearinghouseState": fixtures["spot_clearinghouse_state"],
+                "portfolio": fixtures["portfolio"],
+                "subAccounts": fixtures["subaccounts"],
+            }[str(json_body["type"])]
+
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        self.assertEqual(adapter.account_recovery_operations[-1], "subaccounts")
+        self.assertEqual(adapter.list_active_orders(dex="xyz")[0]["coin"], "#10")
+        self.assertEqual(adapter.list_order_history(limit=1)[0]["status"], "filled")
+        self.assertEqual(adapter.get_positions(dex="xyz")["withdrawable"], "100.0")
+        self.assertEqual(adapter.get_spot_balances()["balances"][0]["coin"], "USDC")
+        self.assertEqual(adapter.get_portfolio()[0][0], "day")
+        self.assertEqual(adapter.list_subaccounts()[0]["name"], "Trading")
+        self.assertEqual(
+            requests,
+            [
+                {"type": "openOrders", "user": wallet, "dex": "xyz"},
+                {"type": "historicalOrders", "user": wallet},
+                {"type": "clearinghouseState", "user": wallet, "dex": "xyz"},
+                {"type": "spotClearinghouseState", "user": wallet},
+                {"type": "portfolio", "user": wallet},
+                {"type": "subAccounts", "user": wallet},
+            ],
+        )
+
+        self.assertEqual(adapter.account_recovery("positions", dex="xyz")["withdrawable"], "100.0")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("unsupported")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_active_orders(dex="../private")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_order_history(limit=2001)
+        with self.assertRaises(MarketConfigurationError):
+            HyperliquidAdapter().get_positions()
+
     def test_seer_adapter_maps_official_search_prices_and_paper_orders(self) -> None:
         adapter = SeerAdapter()
         markets = load_fixture("seer", "markets_search")

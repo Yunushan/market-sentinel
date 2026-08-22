@@ -457,6 +457,21 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("v", candles[0])
         self.assertEqual(exchange.get("status"), "ok")
 
+    def test_hyperliquid_account_fixtures_cover_documented_info_shapes(self) -> None:
+        open_orders = json.loads((FIXTURE_ROOT / "hyperliquid" / "open_orders.json").read_text(encoding="utf-8"))
+        historical_orders = json.loads((FIXTURE_ROOT / "hyperliquid" / "historical_orders.json").read_text(encoding="utf-8"))
+        clearinghouse = json.loads((FIXTURE_ROOT / "hyperliquid" / "clearinghouse_state.json").read_text(encoding="utf-8"))
+        spot = json.loads((FIXTURE_ROOT / "hyperliquid" / "spot_clearinghouse_state.json").read_text(encoding="utf-8"))
+        portfolio = json.loads((FIXTURE_ROOT / "hyperliquid" / "portfolio.json").read_text(encoding="utf-8"))
+        subaccounts = json.loads((FIXTURE_ROOT / "hyperliquid" / "subaccounts.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(open_orders[0].get("coin"), "#10")
+        self.assertEqual(historical_orders[0].get("status"), "filled")
+        self.assertIn("marginSummary", clearinghouse)
+        self.assertIsInstance(spot.get("balances"), list)
+        self.assertEqual(portfolio[0][0], "day")
+        self.assertEqual(subaccounts[0].get("master"), "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd")
+
     def test_trueo_fixtures_cover_onchain_manager_pool_and_signed_transaction_shapes(self) -> None:
         rpc = json.loads((FIXTURE_ROOT / "trueo" / "rpc.json").read_text(encoding="utf-8"))
 

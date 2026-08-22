@@ -3601,6 +3601,11 @@ def market_account_payload(
             }
         elif normalized_operation == "balance":
             kwargs = {"subaccount": subaccount}
+    elif normalized_market_id == "hyperliquid":
+        if normalized_operation in {"active_orders", "positions"}:
+            kwargs["dex"] = _query_value(query_params, "dex") or ""
+        elif normalized_operation == "order_history":
+            kwargs["limit"] = _clamp_int(_query_value(query_params, "limit", "2000"), 2000, 1, 2000)
     elif normalized_operation in {"active_orders", "order_history"}:
         kwargs.update(
             {

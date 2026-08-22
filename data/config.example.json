@@ -245,11 +245,12 @@
       "settings": {
         "adapter_status": "implemented",
         "credential_env_vars": [
+          "HYPERLIQUID_ACCOUNT_WALLET",
           "HYPERLIQUID_TRADE_WALLET",
           "HYPERLIQUID_ACTIVITY_WALLET"
         ],
         "live_trading_enabled": false,
-        "notes": "Official HIP-4 outcome metadata, encoded outcome assets, orderbooks, wallet-scoped userFills/userFillsByTime trade history, alerts, paper orders, and simulation-first copy previews are implemented. Set HYPERLIQUID_TRADE_WALLET (or the legacy HYPERLIQUID_ACTIVITY_WALLET) for normalized history. Wallet signing, settlement, and funded execution remain external gates."
+        "notes": "Official HIP-4 outcome metadata, encoded outcome assets, orderbooks, wallet-scoped userFills/userFillsByTime trade history, open/historical orders, perpetual and spot account state, portfolio, subaccounts, alerts, paper orders, and simulation-first copy previews are implemented. Set HYPERLIQUID_ACCOUNT_WALLET for account reads and HYPERLIQUID_TRADE_WALLET (or the legacy HYPERLIQUID_ACTIVITY_WALLET) for normalized history; the account reader falls back to the trade wallet when needed. Wallet signing, settlement, and funded execution remain external gates."
       }
     },
     "hypermind": {

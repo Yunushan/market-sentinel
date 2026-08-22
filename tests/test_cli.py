@@ -130,6 +130,41 @@ class MarketSentinelCliTests(unittest.TestCase):
         self.assertEqual(payload["parameters"]["event_ticker"], "BTC100K2026")
         self.assertEqual(payload["data"]["positions"][0]["symbol"], "GEMI-BTC100K26-YES")
 
+    def test_hyperliquid_account_command_forwards_dex_and_history_limit(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="hyperliquid")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("order_history",),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+                "orders": [{"coin": "#10"}],
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "order_history",
+                        "--market",
+                        "hyperliquid",
+                        "--limit",
+                        "12",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["operation"], "order_history")
+        self.assertEqual(payload["parameters"]["limit"], 12)
+
     def test_kalshi_account_command_forwards_signed_read_parameters(self) -> None:
         cfg = SimpleNamespace(selected_market_id="kalshi")
         adapter = SimpleNamespace(

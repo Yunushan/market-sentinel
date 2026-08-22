@@ -1342,8 +1342,21 @@ KALSHI_ACCOUNT_OPERATIONS = (
     "queue_positions",
 )
 LIMITLESS_ACCOUNT_OPERATIONS = ("positions", "account_history", "user_orders")
+HYPERLIQUID_ACCOUNT_OPERATIONS = (
+    "active_orders",
+    "order_history",
+    "positions",
+    "spot_balances",
+    "portfolio",
+    "subaccounts",
+)
 MARKET_ACCOUNT_OPERATIONS = tuple(
-    dict.fromkeys(GEMINI_ACCOUNT_OPERATIONS + KALSHI_ACCOUNT_OPERATIONS + LIMITLESS_ACCOUNT_OPERATIONS)
+    dict.fromkeys(
+        GEMINI_ACCOUNT_OPERATIONS
+        + KALSHI_ACCOUNT_OPERATIONS
+        + LIMITLESS_ACCOUNT_OPERATIONS
+        + HYPERLIQUID_ACCOUNT_OPERATIONS
+    )
 )
 
 
@@ -1401,6 +1414,11 @@ def run_market_account(args: argparse.Namespace) -> int:
                 "event_ticker": str(args.event_ticker or "").strip(),
                 "subaccount": subaccount,
             }
+    elif market_id == "hyperliquid":
+        if operation in {"active_orders", "positions"}:
+            kwargs["dex"] = str(getattr(args, "dex", "") or "").strip()
+        elif operation == "order_history":
+            kwargs["limit"] = _cli_clamp_int(args.limit, 2000, 1, 2000)
     else:
         if operation in {"active_orders", "order_history"}:
             kwargs.update(
@@ -2414,7 +2432,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_account = markets_sub.add_parser(
         "account",
         parents=[common],
-        help="Read an explicitly documented authenticated account feed (Gemini, Kalshi, or Limitless).",
+        help="Read an explicitly documented authenticated account feed (Gemini, Kalshi, Limitless, or Hyperliquid).",
     )
     market_account.add_argument("operation", choices=MARKET_ACCOUNT_OPERATIONS)
     market_account.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
@@ -2435,6 +2453,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--search", default="", help="Settled-position search text.")
     market_account.add_argument("--category", default="", help="Settled-position category.")
     market_account.add_argument("--with-cash-outs", action="store_true")
+    market_account.add_argument("--dex", default="", help="Optional Hyperliquid perpetual DEX name.")
     market_account.add_argument("--from", dest="from_timestamp", default=None, help="Optional Unix timestamp bound.")
     market_account.add_argument("--to", dest="to_timestamp", default=None, help="Optional Unix timestamp bound.")
     _add_json_output_args(market_account)

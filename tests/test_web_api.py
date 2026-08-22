@@ -657,6 +657,42 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["parameters"]["subaccount"], 2)
         self.assertEqual(payload["data"]["fills"][0]["fill_id"], "fill-1")
 
+    def test_hyperliquid_account_payload_forwards_safe_dex_and_limit(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="hyperliquid",
+            display_name="Hyperliquid",
+            capabilities=MarketCapabilities(credentials_required=False),
+        )
+        adapter.account_recovery_operations = ("active_orders", "order_history")  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "orders": [{"coin": "#10"}],
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["hyperliquid"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "hyperliquid",
+            "active_orders",
+            {"dex": ["xyz"]},
+        )
+        self.assertEqual(payload["operation"], "active_orders")
+        self.assertEqual(payload["parameters"], {"dex": "xyz"})
+        self.assertEqual(payload["data"]["orders"][0]["coin"], "#10")
+        history = market_account_payload(cfg, Registry(), "hyperliquid", "order_history", {"limit": ["12"]})
+        self.assertEqual(
+            history["parameters"],
+            {"limit": 12, "status": "filled", "from_timestamp": None, "to_timestamp": None},
+        )
+
     def test_limitless_account_payload_forwards_delegated_read_parameters(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(
