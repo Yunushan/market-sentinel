@@ -248,6 +248,12 @@ class VerificationFixtureTests(unittest.TestCase):
         betfair_cleared = json.loads(
             (FIXTURE_ROOT / "betfair_exchange" / "cleared_orders.json").read_text(encoding="utf-8")
         )
+        betfair_statement = json.loads(
+            (FIXTURE_ROOT / "betfair_exchange" / "account_statement.json").read_text(encoding="utf-8")
+        )
+        betfair_rates = json.loads(
+            (FIXTURE_ROOT / "betfair_exchange" / "currency_rates.json").read_text(encoding="utf-8")
+        )
 
         self.assertIsInstance(gemini_events.get("data"), list)
         self.assertIn("contracts", gemini_events["data"][0])
@@ -281,6 +287,10 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertEqual(betfair_order.get("status"), "SUCCESS")
         self.assertIsInstance(betfair_cleared.get("result", {}).get("clearedOrders"), list)
         self.assertIn("betId", betfair_cleared["result"]["clearedOrders"][0])
+        self.assertIsInstance(betfair_statement.get("result", {}).get("accountStatement"), list)
+        self.assertIn("refId", betfair_statement["result"]["accountStatement"][0])
+        self.assertIsInstance(betfair_rates.get("result"), list)
+        self.assertEqual(betfair_rates["result"][0].get("currencyCode"), "EUR")
 
     def test_iowa_electronic_markets_fixture_uses_documented_price_file_shape(self) -> None:
         market = json.loads((FIXTURE_ROOT / "iowa_electronic_markets" / "market.json").read_text(encoding="utf-8"))

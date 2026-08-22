@@ -1343,7 +1343,14 @@ KALSHI_ACCOUNT_OPERATIONS = (
 )
 LIMITLESS_ACCOUNT_OPERATIONS = ("positions", "account_history", "user_orders")
 OPINION_ACCOUNT_OPERATIONS = ("order_history", "order_detail", "positions")
-BETFAIR_ACCOUNT_OPERATIONS = ("active_orders", "cleared_orders", "funds", "account")
+BETFAIR_ACCOUNT_OPERATIONS = (
+    "active_orders",
+    "cleared_orders",
+    "funds",
+    "account",
+    "statement",
+    "currency_rates",
+)
 MATCHBOOK_ACCOUNT_OPERATIONS = (
     "settled_bets",
     "current_bets",
@@ -1443,6 +1450,18 @@ def run_market_account(args: argparse.Namespace) -> int:
             kwargs = {"wallet": str(getattr(args, "wallet", "") or "").strip()}
         elif operation == "account":
             kwargs = {}
+        elif operation == "statement":
+            kwargs = {
+                "locale": str(getattr(args, "locale", "en") or "en").strip(),
+                "limit": _cli_clamp_int(args.limit, 100, 1, 1000),
+                "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
+                "include_item": not bool(getattr(args, "exclude_item", False)),
+                "wallet": str(getattr(args, "wallet", "") or "").strip(),
+                "from_timestamp": _cli_history_float(args.from_timestamp, "from"),
+                "to_timestamp": _cli_history_float(args.to_timestamp, "to"),
+            }
+        elif operation == "currency_rates":
+            kwargs = {"from_currency": str(getattr(args, "from_currency", "") or "").strip()}
         elif operation in {"active_orders", "cleared_orders"}:
             market_id_filter = str(getattr(args, "account_market_id", "") or "").strip()
             runner_id = str(getattr(args, "runner_id", "") or "").strip()
@@ -2554,7 +2573,10 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--bet-id", default="", help="Betfair bet id filter.")
     market_account.add_argument("--group-by", default="BET", help="Betfair cleared-order roll-up.")
     market_account.add_argument("--include-item-description", action="store_true")
-    market_account.add_argument("--wallet", default="", help="Betfair account wallet (for funds reads).")
+    market_account.add_argument("--wallet", default="", help="Betfair account wallet (for funds/statement reads).")
+    market_account.add_argument("--locale", default="en", help="Betfair account-statement locale.")
+    market_account.add_argument("--exclude-item", action="store_true", help="Exclude item details from Betfair statements.")
+    market_account.add_argument("--from-currency", default="", help="Betfair source currency for currency_rates.")
     market_account.add_argument("--order-by", default="BY_MATCH_TIME", help="Betfair current-order sort field.")
     market_account.add_argument("--sort-dir", default="EARLIEST_TO_LATEST", help="Betfair current-order sort direction.")
     market_account.add_argument("--event-ticker", default=None, help="Optional event ticker for position/volume feeds.")

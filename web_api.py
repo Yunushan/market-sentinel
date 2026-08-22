@@ -3653,6 +3653,18 @@ def market_account_payload(
         if normalized_operation in {"funds", "account"}:
             if normalized_operation == "funds":
                 kwargs = {"wallet": _query_value(query_params, "wallet")}
+        elif normalized_operation == "statement":
+            kwargs = {
+                "locale": _query_value(query_params, "locale", "en"),
+                "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 1000),
+                "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+                "include_item": not _query_bool(query_params, "exclude_item", False),
+                "wallet": _query_value(query_params, "wallet"),
+                "from_timestamp": _query_float(query_params, "from"),
+                "to_timestamp": _query_float(query_params, "to"),
+            }
+        elif normalized_operation == "currency_rates":
+            kwargs = {"from_currency": _query_value(query_params, "from_currency")}
         elif normalized_operation in {"active_orders", "cleared_orders"}:
             market_id_filter = _query_value(query_params, "market_id")
             runner_id = _query_value(query_params, "runner_id")

@@ -329,6 +329,83 @@ class MarketSentinelCliTests(unittest.TestCase):
             )
         self.assertEqual(json.loads(stdout.getvalue())["parameters"], {"wallet": "UK"})
 
+    def test_betfair_account_command_forwards_statement_and_currency_options(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="betfair_exchange")
+        adapter = SimpleNamespace(
+            account_recovery_operations=(
+                "active_orders",
+                "cleared_orders",
+                "funds",
+                "account",
+                "statement",
+                "currency_rates",
+            ),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "statement",
+                        "--market",
+                        "betfair_exchange",
+                        "--locale",
+                        "en",
+                        "--wallet",
+                        "UK",
+                        "--limit",
+                        "12",
+                        "--offset",
+                        "4",
+                        "--from",
+                        "1780272000",
+                        "--to",
+                        "1780358400",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        statement = json.loads(stdout.getvalue())["parameters"]
+        self.assertEqual(statement["locale"], "en")
+        self.assertEqual(statement["limit"], 12)
+        self.assertEqual(statement["offset"], 4)
+        self.assertTrue(statement["include_item"])
+        self.assertEqual(statement["wallet"], "UK")
+
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "currency_rates",
+                        "--market",
+                        "betfair_exchange",
+                        "--from-currency",
+                        "GBP",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(json.loads(stdout.getvalue())["parameters"], {"from_currency": "GBP"})
+
     def test_matchbook_account_command_forwards_report_and_offer_filters(self) -> None:
         cfg = SimpleNamespace(selected_market_id="matchbook")
         adapter = SimpleNamespace(

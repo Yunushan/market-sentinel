@@ -744,7 +744,14 @@ class WebApiTests(unittest.TestCase):
             display_name="Betfair Exchange",
             capabilities=MarketCapabilities(credentials_required=True),
         )
-        adapter.account_recovery_operations = ("active_orders", "cleared_orders", "funds", "account")  # type: ignore[attr-defined]
+        adapter.account_recovery_operations = (  # type: ignore[attr-defined]
+            "active_orders",
+            "cleared_orders",
+            "funds",
+            "account",
+            "statement",
+            "currency_rates",
+        )
         adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
             "operation": operation,
             "parameters": kwargs,
@@ -821,6 +828,40 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(funds["parameters"], {"wallet": "UK"})
         account = market_account_payload(cfg, Registry(), "betfair_exchange", "account", {})
         self.assertEqual(account["parameters"], {})
+        statement = market_account_payload(
+            cfg,
+            Registry(),
+            "betfair_exchange",
+            "statement",
+            {
+                "locale": ["en"],
+                "wallet": ["UK"],
+                "limit": ["12"],
+                "offset": ["4"],
+                "from": ["1780272000"],
+                "to": ["1780358400"],
+            },
+        )
+        self.assertEqual(
+            statement["parameters"],
+            {
+                "locale": "en",
+                "limit": 12,
+                "offset": 4,
+                "include_item": True,
+                "wallet": "UK",
+                "from_timestamp": 1780272000.0,
+                "to_timestamp": 1780358400.0,
+            },
+        )
+        rates = market_account_payload(
+            cfg,
+            Registry(),
+            "betfair_exchange",
+            "currency_rates",
+            {"from_currency": ["GBP"]},
+        )
+        self.assertEqual(rates["parameters"], {"from_currency": "GBP"})
 
     def test_matchbook_account_payload_forwards_report_and_offer_filters(self) -> None:
         adapter = MarketAdapter({})

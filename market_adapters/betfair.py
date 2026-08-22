@@ -37,7 +37,14 @@ class BetfairExchangeAdapter(MarketAdapter):
 
     live_order_sides = ("BUY", "SELL", "BACK", "LAY")
     metadata = get_market_metadata("betfair_exchange")
-    account_recovery_operations = ("active_orders", "cleared_orders", "funds", "account")
+    account_recovery_operations = (
+        "active_orders",
+        "cleared_orders",
+        "funds",
+        "account",
+        "statement",
+        "currency_rates",
+    )
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -65,6 +72,8 @@ class BetfairExchangeAdapter(MarketAdapter):
                     "listClearedOrders",
                     "getAccountFunds",
                     "getAccountDetails",
+                    "getAccountStatement",
+                    "listCurrencyRates",
                 ],
             }
         )
@@ -403,12 +412,7 @@ class BetfairExchangeAdapter(MarketAdapter):
     def get_account_funds(self, *, wallet: str = "") -> Any:
         """Read available-to-bet funds through Betfair's documented account API."""
 
-        normalized_wallet = str(wallet or "").strip().upper()
-        if normalized_wallet and (
-            len(normalized_wallet) > 32
-            or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ_" for char in normalized_wallet)
-        ):
-            raise MarketConfigurationError("Betfair wallet must contain only letters and underscores.")
+        normalized_wallet = self._account_wallet(wallet)
         params = {"wallet": normalized_wallet} if normalized_wallet else {}
         return self._account_rpc("AccountAPING/v1.0/getAccountFunds", params)
 
@@ -416,6 +420,62 @@ class BetfairExchangeAdapter(MarketAdapter):
         """Read account profile/discount/points details through Betfair's account API."""
 
         return self._account_rpc("AccountAPING/v1.0/getAccountDetails", {})
+
+    def get_account_statement(
+        self,
+        *,
+        locale: str = "en",
+        limit: int = 100,
+        offset: int = 0,
+        include_item: bool = True,
+        wallet: str = "",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> Any:
+        """Read the documented account money-movement statement.
+
+        The response is deliberately returned losslessly: callers can inspect
+        the venue's balance, item, and transfer fields without this adapter
+        inventing a normalized accounting model. Date bounds are converted to
+        Betfair's ISO ``itemDateRange`` shape and all paging/enum-like values
+        are validated locally before the authenticated request.
+        """
+
+        normalized_locale = self._account_locale(locale)
+        count = self._account_limit(limit)
+        start = self._account_offset(offset)
+        after_ts = self._history_timestamp(from_timestamp, "from") if from_timestamp is not None else None
+        before_ts = self._history_timestamp(to_timestamp, "to") if to_timestamp is not None else None
+        if after_ts is not None and before_ts is not None and before_ts < after_ts:
+            raise MarketConfigurationError("Betfair account statement requires to at or after from.")
+        normalized_wallet = self._account_wallet(wallet)
+        params: Dict[str, Any] = {
+            "locale": normalized_locale,
+            "fromRecord": start,
+            "recordCount": count,
+            "includeItem": bool(include_item),
+        }
+        if normalized_wallet:
+            params["wallet"] = normalized_wallet
+        if after_ts is not None or before_ts is not None:
+            date_range: Dict[str, str] = {}
+            if after_ts is not None:
+                date_range["from"] = self._timestamp_iso(after_ts)
+            if before_ts is not None:
+                date_range["to"] = self._timestamp_iso(before_ts)
+            params["itemDateRange"] = date_range
+        return self._account_rpc("AccountAPING/v1.0/getAccountStatement", params)
+
+    def list_currency_rates(self, *, from_currency: str) -> Any:
+        """Read Betfair's documented currency conversion rates."""
+
+        normalized_currency = str(from_currency or "").strip().upper()
+        if len(normalized_currency) != 3 or not normalized_currency.isalpha():
+            raise MarketConfigurationError("Betfair from_currency must be a three-letter ISO currency code.")
+        return self._account_rpc(
+            "AccountAPING/v1.0/listCurrencyRates",
+            {"fromCurrency": normalized_currency},
+        )
 
     def account_recovery(self, operation: str, **kwargs: Any) -> Any:
         normalized = str(operation or "").strip().lower()
@@ -451,6 +511,18 @@ class BetfairExchangeAdapter(MarketAdapter):
             return self.get_account_funds(wallet=kwargs.get("wallet", ""))
         if normalized == "account":
             return self.get_account_details()
+        if normalized == "statement":
+            return self.get_account_statement(
+                locale=kwargs.get("locale", "en"),
+                limit=kwargs.get("limit", 100),
+                offset=kwargs.get("offset", 0),
+                include_item=bool(kwargs.get("include_item", True)),
+                wallet=kwargs.get("wallet", ""),
+                from_timestamp=kwargs.get("from_timestamp"),
+                to_timestamp=kwargs.get("to_timestamp"),
+            )
+        if normalized == "currency_rates":
+            return self.list_currency_rates(from_currency=kwargs.get("from_currency", ""))
         supported = ", ".join(self.account_recovery_operations)
         raise MarketConfigurationError(f"Betfair account recovery supports only: {supported}.")
 
@@ -627,6 +699,23 @@ class BetfairExchangeAdapter(MarketAdapter):
         if len(text) > 128 or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-" for char in text):
             raise MarketConfigurationError(f"Betfair {label} must be a short identifier.")
         return text
+
+    @staticmethod
+    def _account_locale(value: Any) -> str:
+        locale = str(value or "en").strip().lower()
+        if not locale or len(locale) > 16 or any(char not in "abcdefghijklmnopqrstuvwxyz-_" for char in locale):
+            raise MarketConfigurationError("Betfair locale must contain only letters, hyphens, or underscores.")
+        return locale
+
+    @staticmethod
+    def _account_wallet(value: Any) -> str:
+        wallet = str(value or "").strip().upper()
+        if wallet and (
+            len(wallet) > 32
+            or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ_" for char in wallet)
+        ):
+            raise MarketConfigurationError("Betfair wallet must contain only letters and underscores.")
+        return wallet
 
     @staticmethod
     def _account_limit(value: Any) -> int:
