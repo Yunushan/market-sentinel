@@ -16,6 +16,7 @@ from .types import (
     MarketCandle,
     MarketContract,
     MarketEvent,
+    MarketTrade,
     OrderBookLevel,
     OrderBookSnapshot,
     PaperOrderRequest,
@@ -224,6 +225,89 @@ class LimitlessAdapter(MarketAdapter):
                 )
             )
         return candles
+
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Return finalized public Limitless CLOB events for one outcome.
+
+        The documented market-events endpoint is paginated but does not expose
+        timestamp filters.  The adapter requests the first (newest) page and
+        applies the shared before/after bounds locally.  Limitless reports raw
+        six-decimal token amounts, so matchedSize is scaled to the normalized
+        share size; numeric side values map to BUY/SELL.
+        """
+
+        self.ensure_capability("price_reading")
+        slug, outcome = self._split_contract_id(contract_id)
+        try:
+            desired = int(limit)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Limitless trade history limit must be an integer between 1 and 100.") from exc
+        if desired < 1 or desired > 100:
+            raise MarketConfigurationError("Limitless trade history limit must be between 1 and 100.")
+
+        start = self._history_timestamp_seconds(after, "after") if after is not None else None
+        end = self._history_timestamp_seconds(before, "before") if before is not None else None
+        if start is not None and end is not None and end < start:
+            raise MarketConfigurationError("Limitless trade history requires before greater than or equal to after.")
+
+        # Market events expose tokenId rather than an outcome label.  Resolve
+        # the documented market record once so YES/NO rows cannot be mixed.
+        token_id = self._token_id_for_outcome(slug, outcome)
+        payload = self.runtime.get_json(
+            self._url(f"/markets/{slug}/events"),
+            params={"page": 1, "limit": desired},
+        )
+        rows = payload.get("events") if isinstance(payload, Mapping) else []
+        if not isinstance(rows, list):
+            return []
+
+        trades: List[MarketTrade] = []
+        canonical = self._contract_id(slug, outcome)
+        for raw in rows:
+            if not isinstance(raw, Mapping):
+                continue
+            row_token_id = str(raw.get("tokenId") or raw.get("token_id") or "").strip()
+            if row_token_id and row_token_id != token_id:
+                continue
+            side_value = raw.get("side")
+            if isinstance(side_value, str):
+                side = side_value.strip().upper()
+            else:
+                try:
+                    side = {0: "BUY", 1: "SELL"}[int(side_value)]
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if side not in {"BUY", "SELL"}:
+                continue
+            price = self._safe_probability(raw.get("price"))
+            size = self._limitless_trade_size(raw.get("matchedSize") or raw.get("matched_size"))
+            trade_id = str(raw.get("txHash") or raw.get("tx_hash") or raw.get("id") or "").strip()
+            if price is None or size is None or not trade_id:
+                continue
+            timestamp = self._event_timestamp_seconds(raw.get("createdAt") or raw.get("created_at"))
+            if timestamp is not None and ((start is not None and timestamp < start) or (end is not None and timestamp > end)):
+                continue
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    trade_id=trade_id,
+                    side=side,
+                    price=price,
+                    size=size,
+                    timestamp=timestamp,
+                    raw=dict(raw),
+                )
+            )
+        return trades
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -668,6 +752,41 @@ class LimitlessAdapter(MarketAdapter):
         if timestamp >= 100_000_000_000:
             timestamp /= 1000.0
         return timestamp
+
+
+    @staticmethod
+    def _event_timestamp_seconds(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            try:
+                timestamp = float(value)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(timestamp) or timestamp < 0:
+                return None
+            return timestamp / 1000.0 if timestamp >= 100_000_000_000 else timestamp
+        raw = str(value).strip()
+        if not raw:
+            return None
+        try:
+            timestamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                return LimitlessAdapter._history_timestamp_seconds(raw, "createdAt")
+            except MarketConfigurationError:
+                return None
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return timestamp.timestamp()
+
+    @staticmethod
+    def _limitless_trade_size(value: Any) -> Optional[float]:
+        try:
+            size = float(value) / 1_000_000.0
+        except (TypeError, ValueError):
+            return None
+        return size if math.isfinite(size) and size > 0 else None
 
     @staticmethod
     def _limit_probability(value: Any) -> float:

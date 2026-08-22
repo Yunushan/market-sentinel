@@ -32,6 +32,7 @@ class LimitlessAdapterTests(unittest.TestCase):
         market = load_fixture("market")
         orderbook = load_fixture("orderbook")
         historical_price = load_fixture("historical_price")
+        events = load_fixture("events")
 
         def fake_get_json(url: str, *, params=None, headers=None):
             if url.endswith("/markets/active"):
@@ -42,6 +43,8 @@ class LimitlessAdapterTests(unittest.TestCase):
                 return orderbook
             if url.endswith("/markets/doge-above-021652-sep-1-1200-utc/historical-price"):
                 return historical_price
+            if url.endswith("/markets/doge-above-021652-sep-1-1200-utc/events"):
+                return events
             raise AssertionError(f"unexpected Limitless URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
@@ -125,6 +128,36 @@ class LimitlessAdapterTests(unittest.TestCase):
                 "doge-above-021652-sep-1-1200-utc:YES",
                 from_timestamp=1736944300,
                 to_timestamp=1736943000,
+            )
+
+
+    def test_market_events_maps_finalized_trades_to_yes_or_no_and_scales_size(self) -> None:
+        adapter = self.make_adapter()
+
+        yes = adapter.list_trades(
+            "doge-above-021652-sep-1-1200-utc:YES",
+            limit=10,
+            after=1736942000,
+            before=1736945100,
+        )
+        no = adapter.list_trades("doge-above-021652-sep-1-1200-utc:NO", limit=10)
+
+        self.assertEqual([trade.trade_id for trade in yes], ["0xtrade-yes-1", "0xtrade-yes-2"])
+        self.assertEqual([trade.side for trade in yes], ["BUY", "BUY"])
+        self.assertEqual([trade.size for trade in yes], [1.5, 1.0])
+        self.assertEqual([round(trade.price, 2) for trade in yes], [0.75, 0.6])
+        self.assertEqual([trade.contract_id for trade in yes], ["doge-above-021652-sep-1-1200-utc:YES"] * 2)
+        self.assertEqual(no[0].side, "SELL")
+        self.assertEqual(no[0].size, 0.5)
+        self.assertEqual(no[0].timestamp, 1736943300.0)
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades("doge-above-021652-sep-1-1200-utc:YES", limit=0)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades(
+                "doge-above-021652-sep-1-1200-utc:YES",
+                after=1736945100,
+                before=1736943000,
             )
 
     def test_paper_order_builds_delegated_order_shape_without_live_post(self) -> None:

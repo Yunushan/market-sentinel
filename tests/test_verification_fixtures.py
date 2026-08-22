@@ -109,6 +109,7 @@ class VerificationFixtureTests(unittest.TestCase):
         historical_price = json.loads(
             (FIXTURE_ROOT / "limitless_exchange" / "historical_price.json").read_text(encoding="utf-8")
         )
+        events = json.loads((FIXTURE_ROOT / "limitless_exchange" / "events.json").read_text(encoding="utf-8"))
 
         self.assertIsInstance(active.get("data"), list)
         self.assertGreaterEqual(len(active["data"]), 1)
@@ -119,6 +120,9 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIsInstance(orderbook.get("asks"), list)
         self.assertIsInstance(historical_price.get("prices"), list)
         self.assertIn("timestamp", historical_price["prices"][0])
+        self.assertIsInstance(events.get("events"), list)
+        self.assertIn("tokenId", events["events"][0])
+        self.assertIn("matchedSize", events["events"][0])
 
     def test_sx_bet_fixtures_cover_core_payload_shapes(self) -> None:
         active = json.loads((FIXTURE_ROOT / "sx_bet" / "active_markets.json").read_text(encoding="utf-8"))
