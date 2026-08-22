@@ -36,11 +36,13 @@ from market_adapters.errors import UnsupportedFeatureError
 from market_adapters.identity import activity_identity_hint, normalize_activity_identity
 from market_adapters.types import (
     MarketCapabilities,
+    MarketCandle,
     MarketMetadata,
     OrderBookSnapshot,
     PaperOrderRequest,
     PaperOrderResult,
     PriceSnapshot,
+    MarketTrade,
 )
 from polymarket import data_api, gamma
 from polymarket.analytics_cache import (
@@ -266,6 +268,8 @@ API_ROUTES = {
         "/api/state",
         "/api/config",
         "/api/markets",
+        "/api/markets/{market_id}/trades",
+        "/api/markets/{market_id}/candles",
         "/api/alerts",
         "/api/wallets",
         "/api/copy",
@@ -3331,6 +3335,86 @@ def serialize_orderbook(orderbook: Optional[OrderBookSnapshot]) -> Optional[Dict
     }
 
 
+def serialize_market_trade(trade: MarketTrade) -> Dict[str, Any]:
+    return {
+        "market_id": trade.market_id,
+        "contract_id": trade.contract_id,
+        "trade_id": trade.trade_id,
+        "side": trade.side,
+        "price": trade.price,
+        "size": trade.size,
+        "timestamp": trade.timestamp,
+    }
+
+
+def serialize_market_candle(candle: MarketCandle) -> Dict[str, Any]:
+    return {
+        "market_id": candle.market_id,
+        "contract_id": candle.contract_id,
+        "timestamp": candle.timestamp,
+        "open": candle.open,
+        "high": candle.high,
+        "low": candle.low,
+        "close": candle.close,
+        "volume": candle.volume,
+    }
+
+
+def market_trades_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    query_params: Mapping[str, List[str]],
+) -> Dict[str, Any]:
+    normalized_market_id = str(market_id or "").strip().lower()
+    contract_id = _query_value(query_params, "contract_id")
+    if not contract_id:
+        raise ValueError("contract_id is required.")
+    require_market_enabled(cfg, normalized_market_id, "trade history")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    limit = _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 500)
+    before = _query_float(query_params, "before")
+    after = _query_float(query_params, "after")
+    trades = adapter.list_trades(contract_id, limit=limit, before=before, after=after)
+    return {
+        "market_id": normalized_market_id,
+        "contract_id": contract_id,
+        "limit": limit,
+        "before": before,
+        "after": after,
+        "trades": [serialize_market_trade(trade) for trade in trades],
+    }
+
+
+def market_candles_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    query_params: Mapping[str, List[str]],
+) -> Dict[str, Any]:
+    normalized_market_id = str(market_id or "").strip().lower()
+    contract_id = _query_value(query_params, "contract_id")
+    if not contract_id:
+        raise ValueError("contract_id is required.")
+    require_market_enabled(cfg, normalized_market_id, "candle history")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    resolution = _query_value(query_params, "resolution", "1h")
+    candles = adapter.list_candles(
+        contract_id,
+        resolution=resolution,
+        from_timestamp=_query_float(query_params, "from"),
+        to_timestamp=_query_float(query_params, "to"),
+    )
+    return {
+        "market_id": normalized_market_id,
+        "contract_id": contract_id,
+        "resolution": resolution,
+        "from": _query_float(query_params, "from"),
+        "to": _query_float(query_params, "to"),
+        "candles": [serialize_market_candle(candle) for candle in candles],
+    }
+
+
 def paper_quote_payload(cfg: AppConfig, registry: AdapterRegistry, payload: Mapping[str, Any]) -> Dict[str, Any]:
     market_id = str(payload.get("market_id") or "").strip().lower()
     contract_id = str(payload.get("contract_id") or "").strip()
@@ -3824,6 +3908,21 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             if path == "/api/markets":
                 self._send_json(HTTPStatus.OK, markets_payload(cfg, self.app_server.adapter_registry))
                 return
+            market_route = path.strip("/").split("/")
+            if len(market_route) == 4 and market_route[:2] == ["api", "markets"]:
+                market_id = unquote(market_route[2])
+                if market_route[3] == "trades":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_trades_payload(cfg, self.app_server.adapter_registry, market_id, query_params),
+                    )
+                    return
+                if market_route[3] == "candles":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_candles_payload(cfg, self.app_server.adapter_registry, market_id, query_params),
+                    )
+                    return
             if path == "/api/alerts":
                 self._send_json(HTTPStatus.OK, alerts_payload(cfg, self.app_server.adapter_registry, self.app_server.alert_price_state))
                 return
@@ -4668,3 +4767,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

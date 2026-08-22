@@ -30,6 +30,12 @@ class SpaceAdapterTests(unittest.TestCase):
             if url.endswith("/markets/btc-150k-2025/orderbook"):
                 self.assertEqual(params.get("outcome"), "YES")
                 return load_fixture("orderbook")
+            if url.endswith("/markets/btc-150k-2025/trades"):
+                self.assertEqual(params.get("outcome"), "YES")
+                return load_fixture("trades")
+            if url.endswith("/markets/btc-150k-2025/candles"):
+                self.assertEqual(params.get("outcome"), "YES")
+                return load_fixture("candles")
             if url.endswith("/markets/btc-150k-2025"):
                 return load_fixture("market")
             raise AssertionError(f"unexpected Space URL: {url}")
@@ -79,6 +85,27 @@ class SpaceAdapterTests(unittest.TestCase):
         self.assertEqual(paper.average_price, 0.35)
         self.assertGreaterEqual(len(calls), 3)
 
+    def test_public_trade_and_candle_history_is_normalized(self) -> None:
+        adapter, calls = self.make_adapter()
+
+        trades = adapter.list_trades("btc-150k-2025:YES", limit=2, after=1704150000)
+        candles = adapter.list_candles(
+            "btc-150k-2025:YES",
+            resolution="15m",
+            from_timestamp=1704150000,
+            to_timestamp=1704153600,
+        )
+
+        self.assertEqual([trade.trade_id for trade in trades], ["trade_abc123", "trade_def456"])
+        self.assertEqual([trade.side for trade in trades], ["BUY", "SELL"])
+        self.assertAlmostEqual(trades[0].price, 0.35)
+        self.assertEqual(trades[0].size, 1000.0)
+        self.assertEqual(candles[0].timestamp, 1704153600.0)
+        self.assertAlmostEqual(candles[0].close, 0.351)
+        self.assertEqual(candles[0].volume, 125000.0)
+        self.assertTrue(any(url.endswith("/trades") for url, _, _ in calls))
+        self.assertTrue(any(url.endswith("/candles") for url, _, _ in calls))
+
     def test_multi_outcome_payload_and_query_filter_are_supported(self) -> None:
         adapter, _ = self.make_adapter()
         market = load_fixture("market")
@@ -101,6 +128,10 @@ class SpaceAdapterTests(unittest.TestCase):
             adapter.get_orderbook("btc-150k-2025:bad:outcome")
         with self.assertRaises(MarketConfigurationError):
             adapter.place_paper_order(PaperOrderRequest("space", "btc-150k-2025:YES", "HOLD", 1, 0.5))
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades("btc-150k-2025:YES", limit=501)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles("btc-150k-2025:YES", resolution="30m")
 
         order = PaperOrderRequest("space", "btc-150k-2025:YES", "BUY", 1, 0.5)
         with self.assertRaises(UnsupportedFeatureError):
@@ -111,3 +142,4 @@ class SpaceAdapterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

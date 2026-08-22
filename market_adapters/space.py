@@ -10,7 +10,9 @@ from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
 from .types import (
     MarketContract,
+    MarketCandle,
     MarketEvent,
+    MarketTrade,
     OrderBookLevel,
     OrderBookSnapshot,
     PaperOrderRequest,
@@ -181,6 +183,97 @@ class SpaceAdapter(MarketAdapter):
             raw={"market_id": market_id, "outcome": outcome, "orderbook": dict(book)},
         )
 
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Read the documented public trade feed for one market outcome."""
+
+        market_id, outcome = self._split_contract_id(contract_id)
+        query: Dict[str, Any] = {
+            "outcome": outcome,
+            "limit": self._bounded_limit(limit, maximum=500, label="Space trade limit"),
+        }
+        if before is not None:
+            query["before"] = self._timestamp_cursor(before, "before")
+        if after is not None:
+            query["after"] = self._timestamp_cursor(after, "after")
+        payload = self._get(f"/markets/{market_id}/trades", params=query)
+        rows = self._rows_for_key(payload, "trades")
+        trades: List[MarketTrade] = []
+        canonical = self._contract_id(market_id, outcome)
+        for row in rows:
+            trade_id = str(row.get("id") or row.get("tradeId") or "").strip()
+            price = self._bounded_probability(row.get("price"), allow_zero=True)
+            size = self._finite_nonnegative(row.get("quantity") if row.get("quantity") is not None else row.get("size"))
+            if not trade_id or price is None or size is None or size <= 0:
+                continue
+            side = str(row.get("side") or "").strip().upper()
+            if side not in {"BUY", "SELL"}:
+                continue
+            timestamp = self._optional_timestamp(row.get("timestamp"))
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    trade_id=trade_id,
+                    side=side,
+                    price=price,
+                    size=size,
+                    timestamp=timestamp,
+                    raw=dict(row),
+                )
+            )
+        return trades
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Read the documented public OHLCV candle feed for one outcome."""
+
+        market_id, outcome = self._split_contract_id(contract_id)
+        clean_resolution = str(resolution or "").strip().lower()
+        if clean_resolution not in {"1m", "5m", "15m", "1h", "4h", "1d"}:
+            raise MarketConfigurationError("Space candle resolution must be one of 1m, 5m, 15m, 1h, 4h, or 1d.")
+        query: Dict[str, Any] = {"outcome": outcome, "resolution": clean_resolution}
+        if from_timestamp is not None:
+            query["from"] = self._timestamp_cursor(from_timestamp, "from")
+        if to_timestamp is not None:
+            query["to"] = self._timestamp_cursor(to_timestamp, "to")
+        payload = self._get(f"/markets/{market_id}/candles", params=query)
+        rows = self._rows_for_key(payload, "candles")
+        candles: List[MarketCandle] = []
+        canonical = self._contract_id(market_id, outcome)
+        for row in rows:
+            timestamp = self._optional_timestamp(row.get("time") if row.get("time") is not None else row.get("timestamp"))
+            values = [self._bounded_probability(row.get(key), allow_zero=True) for key in ("open", "high", "low", "close")]
+            volume = self._finite_nonnegative(row.get("volume"))
+            if timestamp is None or any(value is None for value in values):
+                continue
+            candles.append(
+                MarketCandle(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    timestamp=timestamp,
+                    open=float(values[0]),
+                    high=float(values[1]),
+                    low=float(values[2]),
+                    close=float(values[3]),
+                    volume=volume,
+                    raw=dict(row),
+                )
+            )
+        return candles
+
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
         market_id, outcome = self._validate_order(order)
@@ -308,6 +401,57 @@ class SpaceAdapter(MarketAdapter):
         return []
 
     @staticmethod
+    def _rows_for_key(payload: Any, key: str) -> List[Mapping[str, Any]]:
+        if isinstance(payload, Mapping):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [row for row in value if isinstance(row, Mapping)]
+            value = payload.get("data")
+            if isinstance(value, Mapping):
+                return SpaceAdapter._rows_for_key(value, key)
+        return []
+
+    @staticmethod
+    def _bounded_limit(value: Any, *, maximum: int, label: str) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"{label} must be an integer between 1 and {maximum}.") from exc
+        if number < 1 or number > maximum:
+            raise MarketConfigurationError(f"{label} must be an integer between 1 and {maximum}.")
+        return number
+
+    @staticmethod
+    def _timestamp_cursor(value: Any, label: str) -> int:
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Space {label} timestamp must be finite and non-negative.") from exc
+        if not math.isfinite(number) or number < 0:
+            raise MarketConfigurationError(f"Space {label} timestamp must be finite and non-negative.")
+        return int(number)
+
+    @staticmethod
+    def _optional_timestamp(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) and number >= 0 else None
+
+    @staticmethod
+    def _finite_nonnegative(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) and number >= 0 else None
+
+    @staticmethod
     def _mapping_payload(payload: Any) -> Dict[str, Any]:
         if isinstance(payload, Mapping):
             value = payload.get("data")
@@ -397,3 +541,4 @@ class SpaceAdapter(MarketAdapter):
 
 
 __all__ = ["DEFAULT_SPACE_API_BASE_URL", "SPACE_REFERENCES", "SpaceAdapter"]
+

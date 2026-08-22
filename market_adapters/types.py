@@ -96,6 +96,35 @@ class OrderBookSnapshot:
 
 
 @dataclass(frozen=True)
+class MarketTrade:
+    """A normalized public trade from a market's documented trade feed."""
+
+    market_id: str
+    contract_id: str
+    trade_id: str
+    side: str
+    price: float
+    size: float
+    timestamp: Optional[float] = None
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class MarketCandle:
+    """A normalized OHLCV candle from a market's documented history feed."""
+
+    market_id: str
+    contract_id: str
+    timestamp: float
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: Optional[float] = None
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class PaperOrderRequest:
     market_id: str
     contract_id: str
@@ -114,3 +143,4 @@ class PaperOrderResult:
     filled_size: float = 0.0
     average_price: Optional[float] = None
     raw: Dict[str, Any] = field(default_factory=dict)
+

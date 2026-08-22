@@ -388,8 +388,9 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://docs.into.space/en/api/rest",
         description=(
             "Official Space REST adapter for public market discovery, binary/multi-outcome contracts, "
-            "prices, orderbooks, alerts, and local paper orders; wallet-signed live execution and copy "
-            "trading remain unsupported while the public API release is pending."
+            "prices, orderbooks, public trade history, OHLCV candles, alerts, and local paper orders; "
+            "wallet-signed live execution and copy trading remain unsupported while the public API release "
+            "is pending."
         ),
         capabilities=SPACE_CAPABILITIES,
     ),
@@ -625,4 +626,5 @@ EXPANDED_VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
         "https://docs.metaarena.world/",
     ),
 }
+
 

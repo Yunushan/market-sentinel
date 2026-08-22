@@ -56,6 +56,7 @@ from .xo import XOMarketAdapter
 from .xmarket import XMarketAdapter
 from .types import (
     MarketCapabilities,
+    MarketCandle,
     MarketContract,
     MarketEvent,
     MarketMetadata,
@@ -64,6 +65,7 @@ from .types import (
     PaperOrderRequest,
     PaperOrderResult,
     PriceSnapshot,
+    MarketTrade,
 )
 
 __all__ = [
@@ -94,11 +96,13 @@ __all__ = [
     "MarketAdapter",
     "MarketAdapterError",
     "MarketCapabilities",
+    "MarketCandle",
     "MarketConfigurationError",
     "MarketContract",
     "MarketEvent",
     "MarketHTTPError",
     "MarketMetadata",
+    "MarketTrade",
     "KalshiAdapter",
     "LamasFinanceAdapter",
     "LimitlessAdapter",
@@ -147,3 +151,4 @@ __all__ = [
     "load_json_fixture",
     "load_market_fixture",
 ]
+
