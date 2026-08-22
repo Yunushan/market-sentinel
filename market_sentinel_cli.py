@@ -5,10 +5,12 @@ import csv
 import importlib
 import importlib.metadata as importlib_metadata
 import json
+import math
 import os
 import sys
 import tempfile
 import time
+from dataclasses import asdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, TextIO
@@ -31,6 +33,7 @@ from web_api import (
     LEADERBOARD_SORTS,
     _fetch_polymarket_leaderboard_scan_rows,
     add_wallet_watch,
+    adapter_for_market,
     alert_from_payload,
     alerts_payload,
     app_state_payload,
@@ -82,10 +85,15 @@ from web_api import (
     refresh_all_alert_prices,
     refresh_paper_marks,
     refresh_selected_paper_mark,
+    require_market_enabled,
     run_server,
     attach_polymarket_mdd_audit_cache,
     normalize_polymarket_leaderboard_row,
     submit_paper_order,
+    serialize_market_candle,
+    serialize_market_trade,
+    serialize_orderbook,
+    serialize_price_snapshot,
     update_wallet_watch,
     wallets_payload,
 )
@@ -1186,6 +1194,136 @@ def run_market_set(args: argparse.Namespace) -> int:
     return _write_command_payload(args, markets_payload(cfg, _registry()))
 
 
+def _market_read_context(args: argparse.Namespace, feature: str):
+    """Load an enabled market adapter for a headless read operation.
+
+    Read commands deliberately share the same enablement and adapter
+    configuration path as the web API.  This keeps the CLI from accidentally
+    bypassing local market-disable or safety settings while still allowing
+    every documented adapter read to be used without a GUI.
+    """
+
+    cfg = _load_cfg(args)
+    market_id = str(getattr(args, "market", None) or cfg.selected_market_id or "").strip().lower()
+    if not market_id:
+        raise ValueError("market is required (pass --market or select one in config).")
+    require_market_enabled(cfg, market_id, feature)
+    registry = _registry()
+    return cfg, market_id, adapter_for_market(cfg, market_id, registry)
+
+
+def _cli_history_float(value: Any, label: str) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a finite number.") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"{label} must be a finite number.")
+    return number
+
+
+def run_market_events(args: argparse.Namespace) -> int:
+    _cfg, market_id, adapter = _market_read_context(args, "event listing")
+    query = str(args.query or "")
+    limit = _cli_clamp_int(args.limit, 50, 1, 1000)
+    events = adapter.list_events(query, limit=limit)
+    return _write_command_payload(
+        args,
+        {
+            "market_id": market_id,
+            "query": query,
+            "limit": limit,
+            "events": [asdict(event) for event in events],
+        },
+    )
+
+
+def run_market_contracts(args: argparse.Namespace) -> int:
+    _cfg, market_id, adapter = _market_read_context(args, "contract listing")
+    contracts = adapter.list_contracts(str(args.event_id))
+    return _write_command_payload(
+        args,
+        {
+            "market_id": market_id,
+            "event_id": str(args.event_id),
+            "contracts": [asdict(contract) for contract in contracts],
+        },
+    )
+
+
+def run_market_price(args: argparse.Namespace) -> int:
+    _cfg, market_id, adapter = _market_read_context(args, "price reading")
+    snapshot = adapter.get_price(str(args.contract))
+    return _write_command_payload(
+        args,
+        {
+            "market_id": market_id,
+            "contract_id": str(args.contract),
+            "price": serialize_price_snapshot(snapshot),
+        },
+    )
+
+
+def run_market_orderbook(args: argparse.Namespace) -> int:
+    _cfg, market_id, adapter = _market_read_context(args, "orderbook reading")
+    orderbook = adapter.get_orderbook(str(args.contract))
+    return _write_command_payload(
+        args,
+        {
+            "market_id": market_id,
+            "contract_id": str(args.contract),
+            "orderbook": serialize_orderbook(orderbook),
+        },
+    )
+
+
+def run_market_trades(args: argparse.Namespace) -> int:
+    _cfg, market_id, adapter = _market_read_context(args, "trade history")
+    limit = _cli_clamp_int(args.limit, 50, 1, 1000)
+    before = _cli_history_float(args.before, "before")
+    after = _cli_history_float(args.after, "after")
+    trades = adapter.list_trades(str(args.contract), limit=limit, before=before, after=after)
+    return _write_command_payload(
+        args,
+        {
+            "market_id": market_id,
+            "contract_id": str(args.contract),
+            "limit": limit,
+            "before": before,
+            "after": after,
+            "trades": [serialize_market_trade(trade) for trade in trades],
+        },
+    )
+
+
+def run_market_candles(args: argparse.Namespace) -> int:
+    _cfg, market_id, adapter = _market_read_context(args, "candle history")
+    resolution = str(args.resolution or "1h").strip()
+    if not resolution:
+        raise ValueError("resolution cannot be empty.")
+    from_timestamp = _cli_history_float(args.from_timestamp, "from")
+    to_timestamp = _cli_history_float(args.to_timestamp, "to")
+    candles = adapter.list_candles(
+        str(args.contract),
+        resolution=resolution,
+        from_timestamp=from_timestamp,
+        to_timestamp=to_timestamp,
+    )
+    return _write_command_payload(
+        args,
+        {
+            "market_id": market_id,
+            "contract_id": str(args.contract),
+            "resolution": resolution,
+            "from": from_timestamp,
+            "to": to_timestamp,
+            "candles": [serialize_market_candle(candle) for candle in candles],
+        },
+    )
+
+
 def run_live_safety_show(args: argparse.Namespace) -> int:
     return _write_command_payload(args, live_safety_payload(_load_cfg(args), _registry(), args.market))
 
@@ -2066,6 +2204,73 @@ def build_parser() -> argparse.ArgumentParser:
     market_set.add_argument("--json", default=None, help="Inline JSON object or @file to merge before explicit flags.")
     _add_json_output_args(market_set)
     market_set.set_defaults(func=run_market_set)
+
+    market_events = markets_sub.add_parser(
+        "events",
+        parents=[common],
+        help="List events/markets from an enabled adapter using its official discovery feed.",
+    )
+    market_events.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
+    market_events.add_argument("--query", default="", help="Optional adapter-supported search text.")
+    market_events.add_argument("--limit", default="50", help="Maximum events to return (1-1000).")
+    _add_json_output_args(market_events)
+    market_events.set_defaults(func=run_market_events)
+
+    market_contracts = markets_sub.add_parser(
+        "contracts",
+        parents=[common],
+        help="List contracts/outcomes for an event from an enabled adapter.",
+    )
+    market_contracts.add_argument("event_id")
+    market_contracts.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
+    _add_json_output_args(market_contracts)
+    market_contracts.set_defaults(func=run_market_contracts)
+
+    market_price = markets_sub.add_parser(
+        "price",
+        parents=[common],
+        help="Read one normalized contract price from an enabled adapter.",
+    )
+    market_price.add_argument("contract")
+    market_price.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
+    _add_json_output_args(market_price)
+    market_price.set_defaults(func=run_market_price)
+
+    market_orderbook = markets_sub.add_parser(
+        "orderbook",
+        parents=[common],
+        help="Read one normalized contract orderbook from an enabled adapter.",
+    )
+    market_orderbook.add_argument("contract")
+    market_orderbook.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
+    _add_json_output_args(market_orderbook)
+    market_orderbook.set_defaults(func=run_market_orderbook)
+
+    market_trades = markets_sub.add_parser(
+        "trades",
+        parents=[common],
+        help="Read normalized trade history from an enabled adapter when officially documented.",
+    )
+    market_trades.add_argument("contract")
+    market_trades.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
+    market_trades.add_argument("--limit", default="50", help="Maximum trades to return (1-1000).")
+    market_trades.add_argument("--before", default=None, help="Optional Unix timestamp bound.")
+    market_trades.add_argument("--after", default=None, help="Optional Unix timestamp bound.")
+    _add_json_output_args(market_trades)
+    market_trades.set_defaults(func=run_market_trades)
+
+    market_candles = markets_sub.add_parser(
+        "candles",
+        parents=[common],
+        help="Read normalized candle history from an enabled adapter when officially documented.",
+    )
+    market_candles.add_argument("contract")
+    market_candles.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
+    market_candles.add_argument("--resolution", default="1h")
+    market_candles.add_argument("--from", dest="from_timestamp", default=None, help="Optional Unix timestamp bound.")
+    market_candles.add_argument("--to", dest="to_timestamp", default=None, help="Optional Unix timestamp bound.")
+    _add_json_output_args(market_candles)
+    market_candles.set_defaults(func=run_market_candles)
 
     live = subparsers.add_parser("live-safety", parents=[common], help="Inspect live safety gates or run a no-order preflight.")
     live_sub = live.add_subparsers(dest="live_command", required=True)

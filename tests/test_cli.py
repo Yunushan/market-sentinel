@@ -11,6 +11,15 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from core.storage import load_config
+from market_adapters import (
+    MarketCandle,
+    MarketContract,
+    MarketEvent,
+    MarketTrade,
+    OrderBookLevel,
+    OrderBookSnapshot,
+    PriceSnapshot,
+)
 
 import market_sentinel_cli
 from polymarket.http_client import PolymarketHTTPError
@@ -24,6 +33,67 @@ def run_cli_silent(args: list[str]) -> int:
 
 
 class MarketSentinelCliTests(unittest.TestCase):
+    def test_market_read_commands_expose_normalized_adapter_operations(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="space")
+        adapter = SimpleNamespace(
+            list_events=lambda query, limit: [
+                MarketEvent("space", "event-1", query or "event", status="open")
+            ],
+            list_contracts=lambda event_id: [
+                MarketContract("space", "event-1:YES", event_id, "Yes", outcome="Yes")
+            ],
+            get_price=lambda contract: PriceSnapshot("space", contract, last=0.61, midpoint=0.61, source="fixture"),
+            get_orderbook=lambda contract: OrderBookSnapshot(
+                "space",
+                contract,
+                bids=[OrderBookLevel(0.6, 4.0)],
+                asks=[OrderBookLevel(0.62, 3.0)],
+            ),
+            list_trades=lambda contract, **kwargs: [MarketTrade("space", contract, "trade-1", "BUY", 0.6, 2.0, 1700000000.0)],
+            list_candles=lambda contract, **kwargs: [
+                MarketCandle("space", contract, 1700000000.0, 0.59, 0.62, 0.58, 0.61, 10.0)
+            ],
+        )
+
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(["markets", "events", "--query", "launch", "--compact"]),
+                0,
+            )
+            self.assertEqual(
+                json.loads(stdout.getvalue())["events"][0]["title"],
+                "launch",
+            )
+
+        commands = [
+            (["markets", "contracts", "event-1", "--compact"], "contracts"),
+            (["markets", "price", "event-1:YES", "--compact"], "price"),
+            (["markets", "orderbook", "event-1:YES", "--compact"], "orderbook"),
+            (["markets", "trades", "event-1:YES", "--before", "1700000010", "--compact"], "trades"),
+            (["markets", "candles", "event-1:YES", "--resolution", "1h", "--from", "1700000000", "--compact"], "candles"),
+        ]
+        for command, key in commands:
+            with self.subTest(command=command):
+                stdout = io.StringIO()
+                with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+                    "market_sentinel_cli._registry", return_value=SimpleNamespace()
+                ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+                    "market_sentinel_cli.require_market_enabled"
+                ), patch("sys.stdout", stdout):
+                    self.assertEqual(market_sentinel_cli.main(command), 0)
+                    self.assertIn(key, json.loads(stdout.getvalue()))
+
+    def test_market_read_commands_reject_non_finite_time_bounds(self) -> None:
+        with patch("market_sentinel_cli._load_cfg", return_value=SimpleNamespace(selected_market_id="space")), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("market_sentinel_cli.adapter_for_market"):
+            self.assertEqual(market_sentinel_cli.main(["markets", "trades", "contract", "--before", "nan"]), 1)
+
     def test_polymarket_leaderboard_cli_builds_unlimited_scan_params(self) -> None:
         parser = market_sentinel_cli.build_parser()
         args = parser.parse_args(
