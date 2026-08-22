@@ -237,6 +237,135 @@ class GeminiPredictionAdapter(MarketAdapter):
             "response": response,
         }
 
+    def list_active_orders(
+        self,
+        contract_id: Optional[str] = None,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Any:
+        """Recover currently open prediction-market orders for the account."""
+
+        payload: Dict[str, Any] = {
+            "limit": self._bounded_int(limit, "limit", minimum=1, maximum=100),
+            "offset": self._bounded_int(offset, "offset", minimum=0, maximum=10000),
+        }
+        if contract_id:
+            _, symbol = self._split_contract_id(contract_id)
+            payload["symbol"] = symbol
+        return self._authenticated_post("/v1/prediction-markets/orders/active", payload)
+
+    def list_order_history(
+        self,
+        *,
+        status: str = "filled",
+        contract_id: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> Any:
+        """Recover filled/cancelled account orders through the documented REST API."""
+
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status not in {"filled", "cancelled"}:
+            raise MarketConfigurationError("Gemini order history status must be filled or cancelled.")
+        payload: Dict[str, Any] = {
+            "status": normalized_status,
+            "limit": self._bounded_int(limit, "limit", minimum=1, maximum=1000),
+            "offset": self._bounded_int(offset, "offset", minimum=0, maximum=10000),
+        }
+        if contract_id:
+            _, symbol = self._split_contract_id(contract_id)
+            payload["symbol"] = symbol
+        if from_timestamp is not None:
+            payload["from"] = self._history_millis(from_timestamp, "from_timestamp")
+        if to_timestamp is not None:
+            payload["to"] = self._history_millis(to_timestamp, "to_timestamp")
+        if "from" in payload and "to" in payload and payload["from"] > payload["to"]:
+            raise MarketConfigurationError("Gemini order history to_timestamp must not precede from_timestamp.")
+        return self._authenticated_post("/v1/prediction-markets/orders/history", payload)
+
+    def get_positions(
+        self,
+        event_ticker: str = "",
+        *,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        sort: Optional[str] = None,
+    ) -> Any:
+        """Recover current filled positions for the authenticated account."""
+
+        payload: Dict[str, Any] = {}
+        if event_ticker:
+            payload["eventTicker"] = self._nonempty_text(event_ticker, "event_ticker")
+        if limit is not None:
+            payload["limit"] = self._bounded_int(limit, "limit", minimum=1, maximum=1000)
+            payload["offset"] = self._bounded_int(offset, "offset", minimum=0, maximum=100000)
+        elif offset:
+            raise MarketConfigurationError("Gemini positions offset requires limit to be set.")
+        if sort is not None:
+            normalized_sort = str(sort).strip()
+            if normalized_sort.lower() not in {
+                "positionvalue",
+                "+positionvalue",
+                "-positionvalue",
+                "unrealizedpnl",
+                "+unrealizedpnl",
+                "-unrealizedpnl",
+                "expirydate",
+                "+expirydate",
+                "-expirydate",
+            }:
+                raise MarketConfigurationError("Gemini positions sort is not a documented value.")
+            payload["sort"] = normalized_sort
+        return self._authenticated_post("/v1/prediction-markets/positions", payload)
+
+    def get_settled_positions(
+        self,
+        event_ticker: str = "",
+        *,
+        limit: int = 1000,
+        offset: int = 0,
+        sort: str = "-date",
+        search: str = "",
+        category: str = "",
+        with_cash_outs: bool = False,
+    ) -> Any:
+        """Recover historically settled prediction-market positions."""
+
+        payload: Dict[str, Any] = {
+            "limit": self._bounded_int(limit, "limit", minimum=1, maximum=1000),
+            "offset": self._bounded_int(offset, "offset", minimum=0, maximum=100000),
+            "sort": self._settled_sort(sort),
+            "withCashOuts": bool(with_cash_outs),
+        }
+        if event_ticker:
+            payload["eventTicker"] = self._nonempty_text(event_ticker, "event_ticker")
+        if search:
+            payload["search"] = str(search).strip()[:64]
+        if category:
+            payload["category"] = self._nonempty_text(category, "category")
+        return self._authenticated_post("/v1/prediction-markets/positions/settled", payload)
+
+    def get_volume_metrics(
+        self,
+        event_ticker: str,
+        *,
+        start_timestamp: Optional[float] = None,
+        end_timestamp: Optional[float] = None,
+    ) -> Any:
+        """Return documented per-contract share-volume metrics for an event."""
+
+        payload: Dict[str, Any] = {"eventTicker": self._nonempty_text(event_ticker, "event_ticker")}
+        if start_timestamp is not None:
+            payload["startTime"] = self._history_millis(start_timestamp, "start_timestamp")
+        if end_timestamp is not None:
+            payload["endTime"] = self._history_millis(end_timestamp, "end_timestamp")
+        if "startTime" in payload and "endTime" in payload and payload["startTime"] > payload["endTime"]:
+            raise MarketConfigurationError("Gemini volume end_timestamp must not precede start_timestamp.")
+        return self._authenticated_post("/v1/prediction-markets/metrics/volume", payload)
+
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
         raise UnsupportedFeatureError(
             self.market_id,
@@ -470,6 +599,42 @@ class GeminiPredictionAdapter(MarketAdapter):
         nonce = max(now, requested, previous + 1)
         self._last_nonce = nonce
         return nonce
+
+    @staticmethod
+    def _bounded_int(value: Any, label: str, *, minimum: int, maximum: int) -> int:
+        if isinstance(value, bool):
+            raise MarketConfigurationError(f"Gemini {label} must be an integer.")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Gemini {label} must be an integer.") from exc
+        if parsed < minimum or parsed > maximum:
+            raise MarketConfigurationError(f"Gemini {label} must be between {minimum} and {maximum}.")
+        return parsed
+
+    @staticmethod
+    def _nonempty_text(value: Any, label: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            raise MarketConfigurationError(f"Gemini {label} cannot be empty.")
+        if any(char in text for char in ("/", "\\", "\r", "\n")):
+            raise MarketConfigurationError(f"Gemini {label} contains unsupported characters.")
+        return text
+
+    @classmethod
+    def _history_millis(cls, value: Any, label: str) -> int:
+        timestamp = cls._history_timestamp(value, label)
+        if timestamp is None or timestamp < 0:
+            raise MarketConfigurationError(f"Gemini {label} must be a non-negative timestamp.")
+        return int(round(timestamp * 1000))
+
+    @staticmethod
+    def _settled_sort(value: Any) -> str:
+        sort = str(value or "").strip().lower()
+        allowed = {"date", "-date", "payout", "+payout", "-payout"}
+        if sort not in allowed:
+            raise MarketConfigurationError("Gemini settled position sort must be date, -date, payout, +payout, or -payout.")
+        return sort
 
     @staticmethod
     def _event_ticker(event: Mapping[str, Any]) -> str:

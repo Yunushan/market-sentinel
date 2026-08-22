@@ -1295,6 +1295,97 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(calls[0][0], "GET")
         self.assertTrue(calls[0][1].endswith("/v1/prediction-markets/terms/status"))
 
+    def test_gemini_prediction_authenticated_recovery_uses_documented_post_contracts(self) -> None:
+        adapter = GeminiPredictionAdapter()
+        calls = []
+        fixture_by_path = {
+            "/v1/prediction-markets/orders/active": "active_orders",
+            "/v1/prediction-markets/orders/history": "order_history",
+            "/v1/prediction-markets/positions": "positions",
+            "/v1/prediction-markets/positions/settled": "settled_positions",
+            "/v1/prediction-markets/metrics/volume": "volume_metrics",
+        }
+
+        def fake_request(method: str, url: str, *, data=None, headers=None, timeout=None):
+            path = "/" + url.split("/", 3)[-1]
+            calls.append((method, path, json.loads(data), headers, timeout))
+            return FakeResponse(load_fixture("gemini", fixture_by_path[path]))
+
+        adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "gemini-key", "GEMINI_API_SECRET": "gemini-secret"}):
+            active = adapter.list_active_orders(
+                "BTC100K2026:GEMI-BTC100K26-YES",
+                limit=50,
+                offset=2,
+            )
+            history = adapter.list_order_history(
+                status="filled",
+                contract_id="BTC100K2026:GEMI-BTC100K26-YES",
+                limit=50,
+                offset=0,
+                from_timestamp=1787385600,
+                to_timestamp=1787389200,
+            )
+            positions = adapter.get_positions(
+                "BTC100K2026",
+                limit=100,
+                offset=2,
+                sort="-unrealizedPnl",
+            )
+            settled = adapter.get_settled_positions(
+                "BTC100K2025",
+                limit=100,
+                offset=1,
+                sort="-date",
+                search="Bitcoin",
+                category="crypto",
+                with_cash_outs=True,
+            )
+            volume = adapter.get_volume_metrics(
+                "BTC100K2026",
+                start_timestamp=1787385600,
+                end_timestamp=1787389200,
+            )
+
+        self.assertEqual(active["orders"][0]["orderId"], "order-1001")
+        self.assertEqual(history["orders"][0]["status"], "filled")
+        self.assertEqual(positions["positions"][0]["symbol"], "GEMI-BTC100K26-YES")
+        self.assertEqual(settled["positions"][0]["settlementStatus"], "settled")
+        self.assertEqual(volume["eventTicker"], "BTC100K2026")
+        self.assertEqual([call[0] for call in calls], ["POST"] * 5)
+        self.assertEqual(
+            [call[1] for call in calls],
+            [
+                "/v1/prediction-markets/orders/active",
+                "/v1/prediction-markets/orders/history",
+                "/v1/prediction-markets/positions",
+                "/v1/prediction-markets/positions/settled",
+                "/v1/prediction-markets/metrics/volume",
+            ],
+        )
+        self.assertEqual(calls[0][2]["symbol"], "GEMI-BTC100K26-YES")
+        self.assertEqual(calls[0][2]["offset"], 2)
+        self.assertEqual(calls[1][2]["status"], "filled")
+        self.assertEqual(calls[1][2]["from"], 1787385600000)
+        self.assertEqual(calls[1][2]["to"], 1787389200000)
+        self.assertEqual(calls[2][2]["sort"], "-unrealizedPnl")
+        self.assertTrue(calls[3][2]["withCashOuts"])
+        self.assertEqual(calls[4][2]["startTime"], 1787385600000)
+        self.assertEqual(calls[4][2]["endTime"], 1787389200000)
+        self.assertTrue(all(call[3]["X-GEMINI-APIKEY"] == "gemini-key" for call in calls))
+        self.assertTrue(all("gemini-secret" not in json.dumps(call[2]) for call in calls))
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_order_history(status="open")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.get_positions(offset=1)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.get_settled_positions(sort="-payouts")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.get_volume_metrics("../BTC100K2026")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_order_history(from_timestamp=1787389200, to_timestamp=1787385600)
+
     def test_myriad_adapter_maps_questions_outcomes_prices_orderbooks_and_dry_run_quotes(self) -> None:
         adapter = MyriadAdapter()
         questions = load_fixture("myriad_markets", "questions")

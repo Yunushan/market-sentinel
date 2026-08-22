@@ -256,7 +256,7 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 - Supports dry-run paper orders where reliable price data exists; Zeitgeist also exposes a guarded externally signed HybridRouter transaction boundary, off by default and without in-app signing or settlement
 
 ### 11) Additional official adapter support
-- Reads Gemini Prediction Markets events/contracts, documented contract orderbooks, implied prices, and irregular price-history points through official endpoints; history is exposed as flat candles without fabricated OHLCV resampling
+- Reads Gemini Prediction Markets events/contracts, documented contract orderbooks, implied prices, irregular price-history points, and authenticated account recovery (active/history orders, current/settled positions, and event volume metrics) through official endpoints; history is exposed as flat candles without fabricated OHLCV resampling
 - Reads Myriad, Opinion, Predict.fun, XO, Betfair, and Limitless market data through their documented APIs; Myriad order-book matches are normalized as public trades, while Limitless historical YES prices are normalized as flat candles with complementary NO prices and finalized public market-event fills are normalized as trades
 - Opinion also has an optional official CLOB SDK path for guarded BNB-chain limit/market orders; all live trading stays off by default and requires explicit opt-in plus documented credentials or pre-signed order payloads
 
