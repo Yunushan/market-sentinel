@@ -37,6 +37,8 @@ from market_adapters.identity import activity_identity_hint, normalize_activity_
 from market_adapters.types import (
     MarketCapabilities,
     MarketCandle,
+    MarketContract,
+    MarketEvent,
     MarketMetadata,
     OrderBookSnapshot,
     PaperOrderRequest,
@@ -268,6 +270,10 @@ API_ROUTES = {
         "/api/state",
         "/api/config",
         "/api/markets",
+        "/api/markets/{market_id}/events",
+        "/api/markets/{market_id}/contracts",
+        "/api/markets/{market_id}/price",
+        "/api/markets/{market_id}/orderbook",
         "/api/markets/{market_id}/trades",
         "/api/markets/{market_id}/candles",
         "/api/alerts",
@@ -3305,6 +3311,32 @@ def format_paper_order_impact(impact: Mapping[str, Any]) -> str:
     return "; ".join(parts)
 
 
+def serialize_market_event(event: MarketEvent) -> Dict[str, Any]:
+    """Return the stable, non-raw event schema shared by API and clients."""
+
+    return {
+        "market_id": event.market_id,
+        "event_id": event.event_id,
+        "title": event.title,
+        "url": event.url,
+        "status": event.status,
+    }
+
+
+def serialize_market_contract(contract: MarketContract) -> Dict[str, Any]:
+    """Return the stable, non-raw contract schema shared by API and clients."""
+
+    return {
+        "market_id": contract.market_id,
+        "contract_id": contract.contract_id,
+        "event_id": contract.event_id,
+        "title": contract.title,
+        "outcome": contract.outcome,
+        "url": contract.url,
+        "status": contract.status,
+    }
+
+
 def serialize_price_snapshot(snapshot: Optional[PriceSnapshot]) -> Optional[Dict[str, Any]]:
     if snapshot is None:
         return None
@@ -3357,6 +3389,84 @@ def serialize_market_candle(candle: MarketCandle) -> Dict[str, Any]:
         "low": candle.low,
         "close": candle.close,
         "volume": candle.volume,
+    }
+
+
+def market_events_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    query_params: Mapping[str, List[str]],
+) -> Dict[str, Any]:
+    normalized_market_id = str(market_id or "").strip().lower()
+    require_market_enabled(cfg, normalized_market_id, "event listing")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    query = _query_value(query_params, "query", "")
+    limit = _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 1000)
+    events = adapter.list_events(query, limit=limit)
+    return {
+        "market_id": normalized_market_id,
+        "query": query,
+        "limit": limit,
+        "events": [serialize_market_event(event) for event in events],
+    }
+
+
+def market_contracts_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    query_params: Mapping[str, List[str]],
+) -> Dict[str, Any]:
+    normalized_market_id = str(market_id or "").strip().lower()
+    event_id = _query_value(query_params, "event_id")
+    if not event_id:
+        raise ValueError("event_id is required.")
+    require_market_enabled(cfg, normalized_market_id, "contract listing")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    contracts = adapter.list_contracts(event_id)
+    return {
+        "market_id": normalized_market_id,
+        "event_id": event_id,
+        "contracts": [serialize_market_contract(contract) for contract in contracts],
+    }
+
+
+def market_price_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    query_params: Mapping[str, List[str]],
+) -> Dict[str, Any]:
+    normalized_market_id = str(market_id or "").strip().lower()
+    contract_id = _query_value(query_params, "contract_id")
+    if not contract_id:
+        raise ValueError("contract_id is required.")
+    require_market_enabled(cfg, normalized_market_id, "price reading")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    return {
+        "market_id": normalized_market_id,
+        "contract_id": contract_id,
+        "price": serialize_price_snapshot(adapter.get_price(contract_id)),
+    }
+
+
+def market_orderbook_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    query_params: Mapping[str, List[str]],
+) -> Dict[str, Any]:
+    normalized_market_id = str(market_id or "").strip().lower()
+    contract_id = _query_value(query_params, "contract_id")
+    if not contract_id:
+        raise ValueError("contract_id is required.")
+    require_market_enabled(cfg, normalized_market_id, "orderbook reading")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    return {
+        "market_id": normalized_market_id,
+        "contract_id": contract_id,
+        "orderbook": serialize_orderbook(adapter.get_orderbook(contract_id)),
     }
 
 
@@ -3911,6 +4021,30 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             market_route = path.strip("/").split("/")
             if len(market_route) == 4 and market_route[:2] == ["api", "markets"]:
                 market_id = unquote(market_route[2])
+                if market_route[3] == "events":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_events_payload(cfg, self.app_server.adapter_registry, market_id, query_params),
+                    )
+                    return
+                if market_route[3] == "contracts":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_contracts_payload(cfg, self.app_server.adapter_registry, market_id, query_params),
+                    )
+                    return
+                if market_route[3] == "price":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_price_payload(cfg, self.app_server.adapter_registry, market_id, query_params),
+                    )
+                    return
+                if market_route[3] == "orderbook":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_orderbook_payload(cfg, self.app_server.adapter_registry, market_id, query_params),
+                    )
+                    return
                 if market_route[3] == "trades":
                     self._send_json(
                         HTTPStatus.OK,

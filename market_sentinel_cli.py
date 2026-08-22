@@ -10,7 +10,6 @@ import os
 import sys
 import tempfile
 import time
-from dataclasses import asdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, TextIO
@@ -87,6 +86,8 @@ from web_api import (
     refresh_selected_paper_mark,
     require_market_enabled,
     run_server,
+    serialize_market_contract,
+    serialize_market_event,
     attach_polymarket_mdd_audit_cache,
     normalize_polymarket_leaderboard_row,
     submit_paper_order,
@@ -1235,7 +1236,7 @@ def run_market_events(args: argparse.Namespace) -> int:
             "market_id": market_id,
             "query": query,
             "limit": limit,
-            "events": [asdict(event) for event in events],
+            "events": [serialize_market_event(event) for event in events],
         },
     )
 
@@ -1248,7 +1249,7 @@ def run_market_contracts(args: argparse.Namespace) -> int:
         {
             "market_id": market_id,
             "event_id": str(args.event_id),
-            "contracts": [asdict(contract) for contract in contracts],
+            "contracts": [serialize_market_contract(contract) for contract in contracts],
         },
     )
 

@@ -65,6 +65,107 @@ export interface MarketsPayload {
   };
 }
 
+export interface MarketEvent {
+  market_id: string;
+  event_id: string;
+  title: string;
+  url: string;
+  status: string;
+}
+
+export interface MarketContract {
+  market_id: string;
+  contract_id: string;
+  event_id: string;
+  title: string;
+  outcome: string;
+  url: string;
+  status: string;
+}
+
+export interface MarketPriceSnapshot {
+  market_id: string;
+  contract_id: string;
+  last: number | null;
+  bid: number | null;
+  ask: number | null;
+  midpoint: number | null;
+  source: string;
+}
+
+export interface MarketOrderbook {
+  market_id: string;
+  contract_id: string;
+  bids: Array<{ price: number; size: number }>;
+  asks: Array<{ price: number; size: number }>;
+  best_bid: number | null;
+  best_ask: number | null;
+}
+
+export interface MarketTrade {
+  market_id: string;
+  contract_id: string;
+  trade_id: string;
+  side: string;
+  price: number;
+  size: number;
+  timestamp: number | null;
+}
+
+export interface MarketCandle {
+  market_id: string;
+  contract_id: string;
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number | null;
+}
+
+export interface MarketEventsPayload {
+  market_id: string;
+  query: string;
+  limit: number;
+  events: MarketEvent[];
+}
+
+export interface MarketContractsPayload {
+  market_id: string;
+  event_id: string;
+  contracts: MarketContract[];
+}
+
+export interface MarketPricePayload {
+  market_id: string;
+  contract_id: string;
+  price: MarketPriceSnapshot | null;
+}
+
+export interface MarketOrderbookPayload {
+  market_id: string;
+  contract_id: string;
+  orderbook: MarketOrderbook | null;
+}
+
+export interface MarketTradesPayload {
+  market_id: string;
+  contract_id: string;
+  limit: number;
+  before: number | null;
+  after: number | null;
+  trades: MarketTrade[];
+}
+
+export interface MarketCandlesPayload {
+  market_id: string;
+  contract_id: string;
+  resolution: string;
+  from: number | null;
+  to: number | null;
+  candles: MarketCandle[];
+}
+
 export type AlertDirection = "above" | "below";
 export type AlertSource = "last_trade" | "midpoint" | "best_bid" | "best_ask";
 

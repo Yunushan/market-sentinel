@@ -20,6 +20,8 @@ from market_adapters.base import MarketAdapter
 from market_adapters.types import (
     MarketCapabilities,
     MarketCandle,
+    MarketContract,
+    MarketEvent,
     MarketMetadata,
     OrderBookLevel,
     OrderBookSnapshot,
@@ -56,6 +58,10 @@ from web_api import (
     live_safety_payload,
     markets_payload,
     market_candles_payload,
+    market_contracts_payload,
+    market_events_payload,
+    market_orderbook_payload,
+    market_price_payload,
     market_trades_payload,
     paper_payload,
     paper_order_impact,
@@ -515,7 +521,29 @@ class WebApiTests(unittest.TestCase):
         adapter.metadata = MarketMetadata(
             market_id="space",
             display_name="Space",
-            capabilities=MarketCapabilities(price_reading=True),
+            capabilities=MarketCapabilities(
+                event_listing=True,
+                price_reading=True,
+                orderbook_reading=True,
+                trade_history=True,
+                candle_history=True,
+            ),
+        )
+        adapter.list_events = lambda query, limit: [  # type: ignore[method-assign]
+            MarketEvent("space", "event-1", query or "event", status="open", raw={"secret": "redact"})
+        ]
+        adapter.list_contracts = lambda event_id: [  # type: ignore[method-assign]
+            MarketContract("space", "m:YES", event_id, "Yes", outcome="Yes", raw={"secret": "redact"})
+        ]
+        adapter.get_price = lambda contract_id: PriceSnapshot(  # type: ignore[method-assign]
+            "space", contract_id, last=0.4, bid=0.39, ask=0.41, source="fixture", raw={"secret": "redact"}
+        )
+        adapter.get_orderbook = lambda contract_id: OrderBookSnapshot(  # type: ignore[method-assign]
+            "space",
+            contract_id,
+            bids=[OrderBookLevel(0.39, 4.0)],
+            asks=[OrderBookLevel(0.41, 3.0)],
+            raw={"secret": "redact"},
         )
         adapter.list_trades = lambda contract_id, **_kwargs: [  # type: ignore[method-assign]
             MarketTrade("space", contract_id, "trade-1", "BUY", 0.4, 3.0, 1700000000.0)
@@ -531,9 +559,21 @@ class WebApiTests(unittest.TestCase):
         cfg = AppConfig()
         cfg.markets["space"].enabled = True
         registry = Registry()
+        events = market_events_payload(cfg, registry, "space", {"query": ["launch"], "limit": ["1"]})
+        contracts = market_contracts_payload(cfg, registry, "space", {"event_id": ["event-1"]})
+        price = market_price_payload(cfg, registry, "space", {"contract_id": ["m:YES"]})
+        orderbook = market_orderbook_payload(cfg, registry, "space", {"contract_id": ["m:YES"]})
         trades = market_trades_payload(cfg, registry, "space", {"contract_id": ["m:YES"], "limit": ["1"]})
         candles = market_candles_payload(cfg, registry, "space", {"contract_id": ["m:YES"], "resolution": ["1h"]})
 
+        self.assertEqual(events["events"][0]["title"], "launch")
+        self.assertNotIn("raw", events["events"][0])
+        self.assertEqual(contracts["contracts"][0]["outcome"], "Yes")
+        self.assertNotIn("raw", contracts["contracts"][0])
+        self.assertEqual(price["price"]["midpoint"], 0.4)
+        self.assertNotIn("raw", price["price"])
+        self.assertEqual(orderbook["orderbook"]["best_ask"], 0.41)
+        self.assertNotIn("raw", orderbook["orderbook"])
         self.assertEqual(trades["trades"][0]["trade_id"], "trade-1")
         self.assertEqual(trades["trades"][0]["size"], 3.0)
         self.assertEqual(candles["candles"][0]["close"], 0.4)
