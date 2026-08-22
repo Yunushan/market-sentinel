@@ -33,6 +33,13 @@ GEMINI_REFERENCES = (
     "https://developer.gemini.com/prediction-markets-spec/terms",
     "https://developer.gemini.com/prediction-markets/websocket/streams",
 )
+GEMINI_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "batch_cancel_orders")
+GEMINI_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+GEMINI_ORDER_MANAGEMENT_MAX_BATCH = 20
+GEMINI_ORDER_MANAGEMENT_REFERENCES = (
+    "https://developer.gemini.com/rest-api/prediction-markets/order-management/cancel-order",
+    "https://developer.gemini.com/rest-api/prediction-markets/order-management/cancel-batch-orders",
+)
 
 
 class GeminiPredictionAdapter(MarketAdapter):
@@ -46,6 +53,7 @@ class GeminiPredictionAdapter(MarketAdapter):
         "settled_positions",
         "volume_metrics",
     )
+    order_management_operations = GEMINI_ORDER_MANAGEMENT_OPERATIONS
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -58,6 +66,19 @@ class GeminiPredictionAdapter(MarketAdapter):
                 "live_trading_supported": True,
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "account_recovery_operations": list(self.account_recovery_operations),
+                "order_management_operations": list(self.order_management_operations),
+                "order_management_enabled": self.config_bool("gemini_order_management_enabled", False),
+                "authenticated_account_endpoints": [
+                    "POST /v1/prediction-markets/orders/active",
+                    "POST /v1/prediction-markets/orders/history",
+                    "POST /v1/prediction-markets/positions",
+                    "POST /v1/prediction-markets/positions/settled",
+                    "POST /v1/prediction-markets/metrics/volume",
+                ],
+                "order_management_endpoints": [
+                    "POST /v1/prediction-markets/order/cancel",
+                    "POST /v1/prediction-markets/order/batch/cancel",
+                ],
             }
         )
         return health
@@ -342,6 +363,64 @@ class GeminiPredictionAdapter(MarketAdapter):
             "live": True,
             "preflight": preflight,
             "request": payload,
+            "response": response,
+        }
+
+    def manage_orders(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Run one guarded Gemini Prediction Markets cancellation mutation.
+
+        Gemini documents cancellation as a separate authenticated REST surface.
+        Only the fixed single-order and batch endpoints are exposed here; the
+        adapter never accepts a caller-provided path or method. Cancellation is
+        opt-in and requires the shared live-safety gates plus exact confirmation.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.order_management_operations:
+            supported = ", ".join(self.order_management_operations)
+            raise MarketConfigurationError(
+                f"Gemini order-management operation must be one of: {supported}."
+            )
+        self.ensure_capability("live_trading")
+        if not self.config_bool("gemini_order_management_enabled", False):
+            raise MarketConfigurationError(
+                "Gemini order management is disabled by adapter config. "
+                "Set gemini_order_management_enabled=true only after reviewing cancellation risk."
+            )
+        self.ensure_live_trading_enabled("Gemini order management")
+        if str(kwargs.get("confirm_order_management") or "").strip() != GEMINI_ORDER_MANAGEMENT_CONFIRMATION:
+            raise MarketConfigurationError(
+                "Gemini order management requires exact confirmation text "
+                f"{GEMINI_ORDER_MANAGEMENT_CONFIRMATION}."
+            )
+        if bool(kwargs.get("async_request")):
+            raise MarketConfigurationError("Gemini order-management requests are synchronous.")
+
+        if normalized == "cancel_order":
+            order_id = self._order_management_id(kwargs.get("order_id"))
+            request = {"orderId": order_id}
+            response = self._authenticated_post("/v1/prediction-markets/order/cancel", request)
+        else:
+            order_ids = self._order_management_ids(kwargs.get("orders", kwargs.get("instructions")))
+            request = {"orderIds": order_ids}
+            response = self._authenticated_post("/v1/prediction-markets/order/batch/cancel", request)
+
+        return {
+            "market_id": self.market_id,
+            "operation": normalized,
+            "live": True,
+            "preflight": {
+                "market_id": self.market_id,
+                "display_name": self.display_name,
+                "feature": "order management",
+                "operation": normalized,
+                "live_trading_enabled": True,
+                "order_management_enabled": True,
+                "confirmed": True,
+                "requires_credentials": True,
+                "references": list(GEMINI_ORDER_MANAGEMENT_REFERENCES),
+            },
+            "request": request,
             "response": response,
         }
 
@@ -748,6 +827,30 @@ class GeminiPredictionAdapter(MarketAdapter):
                 "the event ticker alone does not identify the outcome."
             )
         return outcome
+
+    @staticmethod
+    def _order_management_id(value: Any) -> int:
+        text = str(value or "").strip()
+        if not text or not text.isdigit():
+            raise MarketConfigurationError("Gemini order_id must be a positive integer.")
+        parsed = int(text)
+        if parsed < 1 or parsed > 9_223_372_036_854_775_807:
+            raise MarketConfigurationError("Gemini order_id must fit in a positive int64.")
+        return parsed
+
+    @classmethod
+    def _order_management_ids(cls, values: Any) -> List[int]:
+        if not isinstance(values, (list, tuple)):
+            raise MarketConfigurationError("Gemini batch cancellation requires an array of order ids.")
+        if not values or len(values) > GEMINI_ORDER_MANAGEMENT_MAX_BATCH:
+            raise MarketConfigurationError(
+                "Gemini batch cancellation requires between 1 and "
+                f"{GEMINI_ORDER_MANAGEMENT_MAX_BATCH} order ids."
+            )
+        parsed = [cls._order_management_id(value) for value in values]
+        if len(set(parsed)) != len(parsed):
+            raise MarketConfigurationError("Gemini batch cancellation order ids must be unique.")
+        return parsed
 
     def _next_nonce(self, preferred: Any = None) -> int:
         try:

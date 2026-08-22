@@ -1623,11 +1623,13 @@ POLYMARKET_ORDER_MANAGEMENT_OPERATIONS = (
     "cancel_all_orders",
     "cancel_market_orders",
 )
+GEMINI_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "batch_cancel_orders")
 MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
     dict.fromkeys(
         BETFAIR_ORDER_MANAGEMENT_OPERATIONS
         + KALSHI_ORDER_MANAGEMENT_OPERATIONS
         + POLYMARKET_ORDER_MANAGEMENT_OPERATIONS
+        + GEMINI_ORDER_MANAGEMENT_OPERATIONS
     )
 )
 
@@ -2699,7 +2701,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_orders = markets_sub.add_parser(
         "manage-orders",
         parents=[common],
-        help="Run a guarded documented live order-management mutation (Betfair, Kalshi, or Polymarket).",
+        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Kalshi, or Polymarket).",
     )
     market_orders.add_argument("operation", choices=MARKET_ORDER_MANAGEMENT_OPERATIONS)
     market_orders.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
@@ -2719,7 +2721,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Exact text CANCEL ALL BETS is required for a Betfair all-account cancellation.",
     )
-    market_orders.add_argument("--order-id", default=None, help="Kalshi order identifier for single-order mutations.")
+    market_orders.add_argument("--order-id", default=None, help="Venue order identifier for single-order mutations.")
     market_orders.add_argument("--trade-id", default=None, help="Polymarket trade id for account fills reads.")
     market_orders.add_argument("--ticker", default=None, help="Kalshi market ticker for amend_order.")
     market_orders.add_argument("--side", choices=["bid", "ask"], default=None, help="Kalshi V2 amend side.")

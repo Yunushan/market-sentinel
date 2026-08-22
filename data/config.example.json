@@ -216,8 +216,9 @@
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
+        "gemini_order_management_enabled": false,
         "min_request_interval_seconds": 0.25,
-        "notes": "Public prediction-market event discovery, contract listing, orderbooks, implied prices, local paper orders, and guarded authenticated limit-order posting are implemented through official Gemini endpoints. Live trading stays disabled by default; copy trading remains unsupported."
+        "notes": "Public prediction-market event discovery, contract listing, orderbooks, implied prices, local paper orders, guarded authenticated limit-order posting, and guarded single/batch order cancellation are implemented through official Gemini endpoints. Order management requires gemini_order_management_enabled plus the shared live-safety gates and exact operator confirmation; live trading stays disabled by default and copy trading remains unsupported."
       }
     },
     "good_judgment_open": {

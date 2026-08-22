@@ -249,6 +249,10 @@ class VerificationFixtureTests(unittest.TestCase):
         myriad_orderbook = json.loads((FIXTURE_ROOT / "myriad_markets" / "orderbook.json").read_text(encoding="utf-8"))
         myriad_trades = json.loads((FIXTURE_ROOT / "myriad_markets" / "trades.json").read_text(encoding="utf-8"))
         gemini_order = json.loads((FIXTURE_ROOT / "gemini" / "order_response.json").read_text(encoding="utf-8"))
+        gemini_cancel = json.loads((FIXTURE_ROOT / "gemini" / "cancel_order_response.json").read_text(encoding="utf-8"))
+        gemini_batch_cancel = json.loads(
+            (FIXTURE_ROOT / "gemini" / "batch_cancel_orders_response.json").read_text(encoding="utf-8")
+        )
         predict_order = json.loads((FIXTURE_ROOT / "predict_fun" / "order_response.json").read_text(encoding="utf-8"))
         betfair_order = json.loads(
             (FIXTURE_ROOT / "betfair_exchange" / "place_order_response.json").read_text(encoding="utf-8")
@@ -300,6 +304,8 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIsInstance(myriad_trades, list)
         self.assertEqual(myriad_trades[0].get("side"), "buy")
         self.assertIn("orderId", gemini_order)
+        self.assertEqual(gemini_cancel.get("result"), "ok")
+        self.assertIsInstance(gemini_batch_cancel.get("results"), list)
         self.assertEqual(predict_order.get("success"), True)
         self.assertEqual(betfair_order.get("status"), "SUCCESS")
         for response in (betfair_cancel, betfair_update, betfair_replace):

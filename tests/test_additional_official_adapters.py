@@ -1666,6 +1666,64 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         with self.assertRaises(MarketConfigurationError):
             adapter.list_order_history(from_timestamp=1787389200, to_timestamp=1787385600)
 
+    def test_gemini_prediction_order_management_uses_fixed_cancel_contracts_and_guards(self) -> None:
+        adapter = GeminiPredictionAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "gemini_order_management_enabled": True,
+            }
+        )
+        calls = []
+        fixture_by_path = {
+            "/v1/prediction-markets/order/cancel": "cancel_order_response",
+            "/v1/prediction-markets/order/batch/cancel": "batch_cancel_orders_response",
+        }
+
+        def fake_request(method: str, url: str, *, data=None, headers=None, timeout=None):
+            path = "/" + url.split("/", 3)[-1]
+            calls.append((method, path, json.loads(data), headers, timeout))
+            return FakeResponse(load_fixture("gemini", fixture_by_path[path]))
+
+        adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
+        confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "gemini-key", "GEMINI_API_SECRET": "gemini-secret"}):
+            single = adapter.manage_orders("cancel_order", order_id="106817811", confirm_order_management=confirmation)
+            batch = adapter.manage_orders(
+                "batch_cancel_orders",
+                orders=["106817811", 106817812],
+                confirm_order_management=confirmation,
+            )
+
+        self.assertEqual(single["response"]["result"], "ok")
+        self.assertEqual(batch["response"]["results"][1]["error"], "OrderNotFound")
+        self.assertEqual([call[0] for call in calls], ["POST", "POST"])
+        self.assertEqual(
+            [call[1] for call in calls],
+            [
+                "/v1/prediction-markets/order/cancel",
+                "/v1/prediction-markets/order/batch/cancel",
+            ],
+        )
+        self.assertEqual(calls[0][2]["orderId"], 106817811)
+        self.assertEqual(calls[1][2]["orderIds"], [106817811, 106817812])
+        self.assertTrue(all(call[3]["X-GEMINI-APIKEY"] == "gemini-key" for call in calls))
+        self.assertTrue(all("gemini-secret" not in json.dumps(call[2]) for call in calls))
+
+        health = adapter.health_check()
+        self.assertEqual(health["order_management_operations"], ["cancel_order", "batch_cancel_orders"])
+        self.assertTrue(health["order_management_enabled"])
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders("cancel_order", order_id="../private", confirm_order_management=confirmation)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders(
+                "batch_cancel_orders",
+                orders=[1, 1],
+                confirm_order_management=confirmation,
+            )
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders("cancel_order", order_id=1, confirm_order_management="wrong")
+
     def test_myriad_adapter_maps_questions_outcomes_prices_orderbooks_and_dry_run_quotes(self) -> None:
         adapter = MyriadAdapter()
         questions = load_fixture("myriad_markets", "questions")

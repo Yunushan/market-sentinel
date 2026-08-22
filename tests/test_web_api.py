@@ -749,6 +749,48 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["contract_id"], "1234567890")
         self.assertNotIn("unexpected", calls[0][1])
 
+    def test_gemini_order_management_payload_forwards_only_documented_cancel_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="gemini_titan",
+            display_name="Gemini Predictions",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_order", "batch_cancel_orders")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["gemini_titan"].enabled = True
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "gemini_titan",
+            "batch_cancel_orders",
+            {
+                "orders": [106817811, "106817812"],
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["operation"], "batch_cancel_orders")
+        self.assertEqual(payload["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["orders"], [106817811, "106817812"])
+        self.assertEqual(
+            calls[0][1]["confirm_order_management"],
+            "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        )
+        self.assertNotIn("unexpected", calls[0][1])
+
     def test_hyperliquid_account_payload_forwards_safe_dex_and_limit(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(
