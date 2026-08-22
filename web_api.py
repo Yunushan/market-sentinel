@@ -3602,6 +3602,28 @@ def market_account_payload(
             }
         elif normalized_operation == "balance":
             kwargs = {"subaccount": subaccount}
+    elif normalized_market_id == "polymarket":
+        raw_contract = _query_value(query_params, "contract_id")
+        kwargs = {
+            "market_id": _query_value(query_params, "market_id"),
+            "contract_id": raw_contract,
+            "next_cursor": _query_value(query_params, "cursor"),
+        }
+        if normalized_operation == "order_detail":
+            kwargs = {"order_id": _query_value(query_params, "order_id")}
+        elif normalized_operation == "fills":
+            kwargs.update(
+                {
+                    "trade_id": _query_value(query_params, "trade_id"),
+                    "before": _query_float(query_params, "before")
+                    if _query_value(query_params, "before") is not None
+                    else _query_float(query_params, "to"),
+                    "after": _query_float(query_params, "after")
+                    if _query_value(query_params, "after") is not None
+                    else _query_float(query_params, "from"),
+                    "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 500),
+                }
+            )
     elif normalized_market_id == "hyperliquid":
         if normalized_operation in {"active_orders", "positions"}:
             kwargs["dex"] = _query_value(query_params, "dex") or ""
@@ -3790,6 +3812,13 @@ def market_order_management_payload(
         "async_request": bool_from_setting(payload.get("async_request", payload.get("async")), False),
         "confirm_global_cancel": str(payload.get("confirm_global_cancel") or "").strip(),
     }
+    if normalized_market_id == "polymarket":
+        kwargs.update(
+            {
+                "contract_id": str(payload.get("contract_id") or "").strip(),
+                "asset_id": str(payload.get("asset_id") or "").strip(),
+            }
+        )
     for key in (
         "order_id",
         "ticker",
