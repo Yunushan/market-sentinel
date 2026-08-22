@@ -179,6 +179,9 @@ class VerificationFixtureTests(unittest.TestCase):
         myriad_questions = json.loads((FIXTURE_ROOT / "myriad_markets" / "questions.json").read_text(encoding="utf-8"))
         opinion_markets = json.loads((FIXTURE_ROOT / "opinion_labs" / "markets.json").read_text(encoding="utf-8"))
         opinion_trades = json.loads((FIXTURE_ROOT / "opinion_labs" / "trades.json").read_text(encoding="utf-8"))
+        opinion_price_history = json.loads(
+            (FIXTURE_ROOT / "opinion_labs" / "price_history.json").read_text(encoding="utf-8")
+        )
         predict_markets = json.loads((FIXTURE_ROOT / "predict_fun" / "markets.json").read_text(encoding="utf-8"))
         xo_markets = json.loads((FIXTURE_ROOT / "xo_market" / "markets.json").read_text(encoding="utf-8"))
         betfair_catalogue = json.loads(
@@ -199,6 +202,8 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("yesTokenId", opinion_markets["result"]["list"][0])
         self.assertIsInstance(opinion_trades.get("result", {}).get("list"), list)
         self.assertIn("tokenId", opinion_trades["result"]["list"][0])
+        self.assertIsInstance(opinion_price_history.get("result", {}).get("history"), list)
+        self.assertIn("p", opinion_price_history["result"]["history"][0])
         self.assertIsInstance(predict_markets.get("data"), list)
         self.assertIn("outcomes", predict_markets["data"][0])
         self.assertIsInstance(xo_markets.get("markets"), list)

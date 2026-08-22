@@ -8,6 +8,7 @@ from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, MarketHTTPError
 from .types import (
+    MarketCandle,
     MarketContract,
     MarketEvent,
     OrderBookLevel,
@@ -19,6 +20,7 @@ from .types import (
 
 
 DEFAULT_OPINION_BASE_URL = "https://openapi.opinion.trade/openapi"
+OPINION_PRICE_HISTORY_INTERVALS = ("1m", "1h", "1d", "1w", "max")
 DEFAULT_OPINION_CLOB_HOST = "https://proxy.opinion.trade:8443"
 DEFAULT_OPINION_CHAIN_ID = 56
 OPINION_REFERENCES = (
@@ -132,6 +134,68 @@ class OpinionAdapter(MarketAdapter):
             asks=asks,
             raw=result,
         )
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1d",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Return Opinion's documented token price history as flat candles.
+
+        Opinion exposes one price per timestamp rather than OHLCV bars.  The
+        shared candle model therefore repeats that price across OHLC and keeps
+        volume unset; the raw response remains attached for consumers that
+        need the original price-history points.
+        """
+
+        self.ensure_capability("price_reading")
+        market_id, outcome, token_id = self._split_contract_id(contract_id)
+        interval = str(resolution or "").strip()
+        if interval not in OPINION_PRICE_HISTORY_INTERVALS:
+            allowed = ", ".join(OPINION_PRICE_HISTORY_INTERVALS)
+            raise MarketConfigurationError(f"Opinion price-history interval must be one of: {allowed}.")
+
+        params: Dict[str, Any] = {"token_id": token_id, "interval": interval}
+        if from_timestamp is not None:
+            params["start_at"] = self._timestamp_seconds_strict(from_timestamp, "from_timestamp")
+        if to_timestamp is not None:
+            params["end_at"] = self._timestamp_seconds_strict(to_timestamp, "to_timestamp")
+        if "start_at" in params and "end_at" in params and params["end_at"] <= params["start_at"]:
+            raise MarketConfigurationError(
+                "Opinion price history requires to_timestamp greater than from_timestamp."
+            )
+
+        payload = self._get("/token/price-history", params=params)
+        result = self._result_mapping(payload)
+        history = result.get("history")
+        if not isinstance(history, list):
+            return []
+
+        canonical = self._contract_id(market_id, outcome, token_id)
+        candles: List[MarketCandle] = []
+        for row in history:
+            if not isinstance(row, Mapping):
+                continue
+            timestamp = self._timestamp_seconds(row.get("t"))
+            price = self._safe_probability(row.get("p"))
+            if timestamp <= 0 or price is None:
+                continue
+            candles.append(
+                MarketCandle(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    timestamp=float(timestamp),
+                    open=price,
+                    high=price,
+                    low=price,
+                    close=price,
+                    raw=dict(row),
+                )
+            )
+        return candles
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -584,6 +648,16 @@ class OpinionAdapter(MarketAdapter):
         except (TypeError, ValueError):
             return 0
         return timestamp // 1000 if timestamp > 10_000_000_000 else timestamp
+
+    @staticmethod
+    def _timestamp_seconds_strict(value: Any, label: str) -> int:
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Opinion {label} must be a finite Unix timestamp.") from exc
+        if not math.isfinite(number) or number < 0:
+            raise MarketConfigurationError(f"Opinion {label} must be a non-negative Unix timestamp.")
+        return int(number if number < 10_000_000_000 else number / 1000)
 
     @staticmethod
     def _required_positive_number(value: Any, label: str) -> float:

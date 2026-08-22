@@ -181,6 +181,15 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
 
         with self.assertRaises(MarketConfigurationError):
             adapter.list_activity("not-a-wallet")
+        with patch.dict("os.environ", {"OPINION_API_KEY": "opinion-key"}):
+            with self.assertRaises(MarketConfigurationError):
+                adapter.list_candles("77:YES:0xyes", resolution="30m")
+            with self.assertRaises(MarketConfigurationError):
+                adapter.list_candles(
+                    "77:YES:0xyes",
+                    from_timestamp=1733356800,
+                    to_timestamp=1733184000,
+                )
 
     def test_seer_adapter_maps_official_search_prices_and_paper_orders(self) -> None:
         adapter = SeerAdapter()
@@ -1323,6 +1332,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         price_payload = load_fixture("opinion_labs", "price")
         orderbook = load_fixture("opinion_labs", "orderbook")
         trades = load_fixture("opinion_labs", "trades")
+        price_history = load_fixture("opinion_labs", "price_history")
 
         def fake_get_json(url: str, *, params=None, headers=None):
             self.assertEqual(headers["apikey"], "opinion-key")
@@ -1334,6 +1344,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 return price_payload
             if url.endswith("/token/orderbook"):
                 return orderbook
+            if url.endswith("/token/price-history"):
+                self.assertEqual(params["token_id"], "0xyes")
+                self.assertEqual(params["interval"], "1d")
+                self.assertEqual(params["start_at"], 1733184000)
+                self.assertEqual(params["end_at"], 1733356800)
+                return price_history
             if url.endswith("/trade/user/0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"):
                 return trades
             raise AssertionError(f"unexpected Opinion URL: {url}")
@@ -1348,6 +1364,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             contracts = adapter.list_contracts("77")
             price = adapter.get_price("77:YES:0xyes")
             book = adapter.get_orderbook("77:YES:0xyes")
+            candles = adapter.list_candles(
+                "77:YES:0xyes",
+                resolution="1d",
+                from_timestamp=1733184000,
+                to_timestamp=1733356800,
+            )
             paper = adapter.place_paper_order(PaperOrderRequest("opinion_labs", "77:YES:0xyes", "SELL", 4, 0.64))
             activity = adapter.list_activity("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
             copied = adapter.copy_trade_from_activity(activity[0])
@@ -1356,6 +1378,9 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual([contract.contract_id for contract in contracts], ["77:YES:0xyes", "77:NO:0xno"])
         self.assertEqual(price.last, 0.65)
         self.assertEqual([level.price for level in book.bids], [0.64, 0.62])
+        self.assertEqual([candle.timestamp for candle in candles], [1733184000.0, 1733270400.0, 1733356800.0])
+        self.assertEqual([candle.close for candle in candles], [0.58, 0.62, 0.65])
+        self.assertTrue(all(candle.volume is None for candle in candles))
         self.assertTrue(paper.accepted)
         self.assertEqual(len(activity), 2)
         self.assertEqual(activity[0]["asset"], "77:YES:0xyes")
