@@ -18,6 +18,7 @@ from .types import (
     OrderBookSnapshot,
     PaperOrderRequest,
     PaperOrderResult,
+    MarketTrade,
     PriceSnapshot,
 )
 
@@ -290,6 +291,93 @@ class HyperliquidAdapter(MarketAdapter):
                 )
             )
         return candles
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Return normalized HIP-4 fills for a configured wallet.
+
+        Hyperliquid's documented ``userFills`` and ``userFillsByTime`` info
+        requests are account-scoped.  The feed includes perpetual and spot
+        activity as well, so only the requested synthetic HIP-4 coin is
+        admitted into the shared trade-history model.  Wallet identity is
+        explicit configuration rather than an HTTP-controlled path value.
+        """
+
+        self.ensure_capability("trade_history")
+        outcome_id, side_index = self._split_contract_id(contract_id)
+        canonical_contract = self._contract_id(outcome_id, side_index)
+        wallet_credential = self.resolve_credential(
+            "hyperliquid_trade_wallet",
+            ("HYPERLIQUID_TRADE_WALLET", "HYPERLIQUID_ACTIVITY_WALLET"),
+            required=True,
+            label="HYPERLIQUID_TRADE_WALLET",
+        )
+        wallet = require_activity_identity(self.market_id, wallet_credential.value)
+        desired = self._trade_limit(limit)
+        before_ts = self._history_timestamp(before, "before") if before is not None else None
+        after_ts = self._history_timestamp(after, "after") if after is not None else None
+        if before_ts is not None and after_ts is not None and before_ts < after_ts:
+            raise MarketConfigurationError("Hyperliquid trade history requires before to be at or after after.")
+
+        if before_ts is None and after_ts is None:
+            request: Dict[str, Any] = {
+                "type": "userFills",
+                "user": wallet,
+                "aggregateByTime": True,
+            }
+        else:
+            request = {
+                "type": "userFillsByTime",
+                "user": wallet,
+                "startTime": int(after_ts * 1000) if after_ts is not None else 0,
+                "aggregateByTime": True,
+            }
+            if before_ts is not None:
+                request["endTime"] = int(before_ts * 1000)
+
+        payload = self._info(request)
+        if not isinstance(payload, list):
+            raise MarketConfigurationError("Hyperliquid user fills returned an invalid payload.")
+
+        trades: List[MarketTrade] = []
+        for fill in payload:
+            if not isinstance(fill, Mapping):
+                continue
+            try:
+                activity = self._activity_from_fill(wallet, fill)
+            except MarketConfigurationError:
+                continue
+            if activity.get("contract_id") != canonical_contract:
+                continue
+            timestamp = float(activity.get("timestamp") or 0)
+            price = activity.get("price")
+            if timestamp <= 0 or price is None:
+                continue
+            if after_ts is not None and timestamp < after_ts:
+                continue
+            if before_ts is not None and timestamp > before_ts:
+                continue
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=canonical_contract,
+                    trade_id=str(activity["activity_id"]),
+                    side=str(activity["side"]),
+                    price=float(price),
+                    size=float(activity["size"]),
+                    timestamp=timestamp,
+                    raw=dict(fill),
+                )
+            )
+            if len(trades) >= desired:
+                break
+        return trades
 
     def list_activity(self, wallet_address: str, *, limit: int = 25) -> List[Dict[str, Any]]:
         """Return normalized public HIP-4 fills for a wallet.
@@ -650,6 +738,26 @@ class HyperliquidAdapter(MarketAdapter):
         except (TypeError, ValueError):
             return 0
         return timestamp // 1000 if timestamp > 10_000_000_000 else timestamp
+
+    @staticmethod
+    def _history_timestamp(value: Any, label: str) -> float:
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Hyperliquid trade history {label} must be a finite Unix timestamp.") from exc
+        if not math.isfinite(timestamp) or timestamp < 0:
+            raise MarketConfigurationError(f"Hyperliquid trade history {label} must be a non-negative Unix timestamp.")
+        return timestamp / 1000.0 if timestamp > 10_000_000_000 else timestamp
+
+    @staticmethod
+    def _trade_limit(value: Any) -> int:
+        try:
+            limit = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Hyperliquid trade history limit must be an integer between 1 and 1000.") from exc
+        if limit < 1 or limit > 1000:
+            raise MarketConfigurationError("Hyperliquid trade history limit must be between 1 and 1000.")
+        return limit
 
     @staticmethod
     def _timestamp_millis(value: Any, label: str) -> int:

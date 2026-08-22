@@ -158,7 +158,7 @@ HISTORY_CAPABILITIES = {
     "manifold": {"trade_history"},
     "metaculus": {"candle_history"},
     "limitless_exchange": {"trade_history", "candle_history"},
-    "hyperliquid": {"candle_history"},
+    "hyperliquid": {"trade_history", "candle_history"},
     "ibkr_forecasttrader": {"trade_history", "candle_history"},
     "forecastex": {"trade_history", "candle_history"},
     "cme_prediction_markets": {"trade_history", "candle_history"},

@@ -236,6 +236,61 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                     to_timestamp=1733184000,
                 )
 
+    def test_hyperliquid_hip4_fills_are_normalized_as_configured_trade_history(self) -> None:
+        wallet = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+        fills = load_fixture("hyperliquid", "user_fills")
+        adapter = HyperliquidAdapter({"hyperliquid_trade_wallet": wallet})
+        requests = []
+
+        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+            self.assertEqual(method, "POST")
+            self.assertIsNone(params)
+            self.assertEqual(headers["Content-Type"], "application/json")
+            self.assertTrue(url.endswith("/info"))
+            requests.append(json_body)
+            return fills
+
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        trades = adapter.list_trades("outcome:1:0", limit=5)
+        self.assertTrue(adapter.capabilities.trade_history)
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0].trade_id, "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        self.assertEqual(trades[0].side, "BUY")
+        self.assertAlmostEqual(trades[0].price, 0.63)
+        self.assertAlmostEqual(trades[0].size, 5.0)
+        self.assertEqual(trades[0].timestamp, 1788264000)
+        self.assertEqual(
+            requests[0],
+            {"type": "userFills", "user": wallet, "aggregateByTime": True},
+        )
+
+        bounded = adapter.list_trades(
+            "outcome:1:0",
+            limit=5,
+            after=1788263999,
+            before=1788264000,
+        )
+        self.assertEqual(len(bounded), 1)
+        self.assertEqual(
+            requests[1],
+            {
+                "type": "userFillsByTime",
+                "user": wallet,
+                "startTime": 1788263999000,
+                "endTime": 1788264000000,
+                "aggregateByTime": True,
+            },
+        )
+
+        with self.assertRaises(MarketConfigurationError):
+            HyperliquidAdapter().list_trades("outcome:1:0")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades("outcome:1:0", limit=1001)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades("outcome:1:0", after=1788264001, before=1788264000)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades("outcome:1:0", after="not-a-time")
+
     def test_seer_adapter_maps_official_search_prices_and_paper_orders(self) -> None:
         adapter = SeerAdapter()
         markets = load_fixture("seer", "markets_search")
