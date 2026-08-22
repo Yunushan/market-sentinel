@@ -166,6 +166,12 @@ interface MarketReadForm {
   account_market_id: string;
   account_chain_id: string;
   account_status: string;
+  account_event_type_id: string;
+  account_event_id: string;
+  account_runner_id: string;
+  account_bet_id: string;
+  account_group_by: string;
+  account_include_item_description: boolean;
   account_subaccount: string;
   account_count_filter: string;
   account_market_slug: string;
@@ -375,6 +381,12 @@ function emptyMarketReadForm(): MarketReadForm {
     account_market_id: "",
     account_chain_id: "",
     account_status: "",
+    account_event_type_id: "",
+    account_event_id: "",
+    account_runner_id: "",
+    account_bet_id: "",
+    account_group_by: "BET",
+    account_include_item_description: false,
     account_subaccount: "",
     account_count_filter: "",
     account_market_slug: "",
@@ -782,6 +794,12 @@ export default function App() {
             market_id: form.account_market_id.trim() || undefined,
             chain_id: form.account_chain_id.trim() || undefined,
             status: form.account_status.trim() || undefined,
+            event_type_id: form.account_event_type_id.trim() || undefined,
+            event_id: form.account_event_id.trim() || undefined,
+            runner_id: form.account_runner_id.trim() || undefined,
+            bet_id: form.account_bet_id.trim() || undefined,
+            group_by: form.account_group_by.trim() || undefined,
+            include_item_description: form.account_include_item_description,
             subaccount: form.account_subaccount.trim() || undefined,
             count_filter: form.account_count_filter.trim() || undefined,
             market_slug: form.account_market_slug.trim() || undefined,
@@ -790,7 +808,7 @@ export default function App() {
             event_ticker: form.event_id.trim() || undefined,
             from: form.from.trim() || undefined,
             to: form.to.trim() || undefined,
-            limit: marketId === "hyperliquid" ? 2000 : marketId === "opinion_labs" ? 20 : 50,
+            limit: marketId === "hyperliquid" ? 2000 : marketId === "opinion_labs" ? 20 : marketId === "betfair_exchange" ? 100 : 50,
             page: marketId === "opinion_labs" ? 1 : undefined
           });
           setMarketRead((current) => ({ ...current, account: payload }));
@@ -1949,11 +1967,11 @@ function MarketsView({
               />
             </label>
             <label>
-              <span>Opinion market id</span>
+              <span>Account market id</span>
               <input
                 value={marketReadForm.account_market_id}
                 onChange={(event) => onMarketReadFormChange({ account_market_id: event.target.value })}
-                placeholder="Optional numeric id"
+                placeholder="Opinion numeric / Betfair market id"
               />
             </label>
             <label>
@@ -1965,12 +1983,60 @@ function MarketsView({
               />
             </label>
             <label>
-              <span>Opinion order status</span>
+              <span>Account status</span>
               <input
                 value={marketReadForm.account_status}
                 onChange={(event) => onMarketReadFormChange({ account_status: event.target.value })}
-                placeholder="1,2,3,4,5"
+                placeholder="Opinion 1,2,3,4,5 / Betfair SETTLED"
               />
+            </label>
+            <label>
+              <span>Betfair event type id</span>
+              <input
+                value={marketReadForm.account_event_type_id}
+                onChange={(event) => onMarketReadFormChange({ account_event_type_id: event.target.value })}
+                placeholder="Optional"
+              />
+            </label>
+            <label>
+              <span>Betfair event id</span>
+              <input
+                value={marketReadForm.account_event_id}
+                onChange={(event) => onMarketReadFormChange({ account_event_id: event.target.value })}
+                placeholder="Optional"
+              />
+            </label>
+            <label>
+              <span>Betfair runner id</span>
+              <input
+                value={marketReadForm.account_runner_id}
+                onChange={(event) => onMarketReadFormChange({ account_runner_id: event.target.value })}
+                placeholder="Optional"
+              />
+            </label>
+            <label>
+              <span>Betfair bet id</span>
+              <input
+                value={marketReadForm.account_bet_id}
+                onChange={(event) => onMarketReadFormChange({ account_bet_id: event.target.value })}
+                placeholder="Optional"
+              />
+            </label>
+            <label>
+              <span>Betfair group by</span>
+              <input
+                value={marketReadForm.account_group_by}
+                onChange={(event) => onMarketReadFormChange({ account_group_by: event.target.value })}
+                placeholder="BET, MARKET, RUNNER"
+              />
+            </label>
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={marketReadForm.account_include_item_description}
+                onChange={(event) => onMarketReadFormChange({ account_include_item_description: event.target.checked })}
+              />
+              <span>Include Betfair item descriptions</span>
             </label>
             <label>
               <span>Subaccount</span>

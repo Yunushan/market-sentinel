@@ -3618,6 +3618,30 @@ def market_account_payload(
             }
             if normalized_operation == "order_history":
                 kwargs["status"] = _query_value(query_params, "status")
+    elif normalized_market_id == "betfair_exchange":
+        if normalized_operation == "cleared_orders":
+            market_id_filter = _query_value(query_params, "market_id")
+            runner_id = _query_value(query_params, "runner_id")
+            raw_contract = _query_value(query_params, "contract_id")
+            if not market_id_filter and raw_contract:
+                parts = raw_contract.split(":", 1)
+                market_id_filter = parts[0].strip()
+                if len(parts) == 2 and not runner_id:
+                    runner_id = parts[1].strip()
+            kwargs = {
+                "bet_status": _query_value(query_params, "status", "SETTLED"),
+                "market_id": market_id_filter,
+                "event_type_id": _query_value(query_params, "event_type_id"),
+                "event_id": _query_value(query_params, "event_id"),
+                "runner_id": runner_id,
+                "bet_id": _query_value(query_params, "bet_id"),
+                "group_by": _query_value(query_params, "group_by", "BET"),
+                "include_item_description": _query_bool(query_params, "include_item_description", False),
+                "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 1000),
+                "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+                "from_timestamp": _query_float(query_params, "from"),
+                "to_timestamp": _query_float(query_params, "to"),
+            }
     elif normalized_operation in {"active_orders", "order_history"}:
         kwargs.update(
             {

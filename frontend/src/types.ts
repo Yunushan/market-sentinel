@@ -180,6 +180,7 @@ export type MarketAccountOperation =
   | "volume_metrics"
   | "account_history"
   | "user_orders"
+  | "cleared_orders"
   | "portfolio"
   | "subaccounts"
   | "spot_balances";

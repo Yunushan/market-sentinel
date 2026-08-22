@@ -219,6 +219,56 @@ class MarketSentinelCliTests(unittest.TestCase):
             )
         self.assertEqual(json.loads(stdout.getvalue())["parameters"], {"order_id": "order-1"})
 
+    def test_betfair_account_command_forwards_cleared_order_filters(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="betfair_exchange")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("cleared_orders",),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+                "clearedOrders": [{"betId": "bet-1"}],
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "cleared_orders",
+                        "--market",
+                        "betfair_exchange",
+                        "--contract",
+                        "1.234:101",
+                        "--status",
+                        "SETTLED",
+                        "--limit",
+                        "10",
+                        "--offset",
+                        "2",
+                        "--from",
+                        "1780308000",
+                        "--to",
+                        "1780394400",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        parameters = json.loads(stdout.getvalue())["parameters"]
+        self.assertEqual(parameters["market_id"], "1.234")
+        self.assertEqual(parameters["runner_id"], "101")
+        self.assertEqual(parameters["bet_status"], "SETTLED")
+        self.assertEqual(parameters["limit"], 10)
+        self.assertEqual(parameters["offset"], 2)
+        self.assertEqual(parameters["from_timestamp"], 1780308000.0)
+        self.assertEqual(parameters["to_timestamp"], 1780394400.0)
+
     def test_kalshi_account_command_forwards_signed_read_parameters(self) -> None:
         cfg = SimpleNamespace(selected_market_id="kalshi")
         adapter = SimpleNamespace(

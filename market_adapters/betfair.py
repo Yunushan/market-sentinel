@@ -25,6 +25,7 @@ BETFAIR_REFERENCES = (
     "https://support.developer.betfair.com/hc/en-us/categories/360000245252-Exchange-API",
     "https://support.developer.betfair.com/hc/en-us/articles/115003864651-How-do-I-get-started",
     "https://support.developer.betfair.com/hc/en-us/articles/360016170431-How-do-I-place-bets-on-handicap-markets",
+    "https://betfair-developer-docs.atlassian.net/wiki/spaces/1smk3cen4v3lu3yomq5qye0ni/pages/2687679/listClearedOrders+-+Roll-up+Fields+Available",
 )
 
 
@@ -33,6 +34,7 @@ class BetfairExchangeAdapter(MarketAdapter):
 
     live_order_sides = ("BUY", "SELL", "BACK", "LAY")
     metadata = get_market_metadata("betfair_exchange")
+    account_recovery_operations = ("cleared_orders",)
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -53,6 +55,8 @@ class BetfairExchangeAdapter(MarketAdapter):
                 "credential_sources": credential_sources,
                 "live_trading_supported": True,
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
+                "account_recovery_operations": list(self.account_recovery_operations),
+                "authenticated_account_endpoints": ["listClearedOrders"],
             }
         )
         return health
@@ -221,6 +225,92 @@ class BetfairExchangeAdapter(MarketAdapter):
                 break
         return trades
 
+    def list_cleared_orders(
+        self,
+        *,
+        bet_status: str = "SETTLED",
+        market_id: str = "",
+        event_type_id: str = "",
+        event_id: str = "",
+        runner_id: str = "",
+        bet_id: str = "",
+        group_by: str = "BET",
+        include_item_description: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> Any:
+        """Read settled/cleared Betfair orders through the official RPC feed.
+
+        ``listClearedOrders`` is the documented settlement surface for settled,
+        voided, lapsed, and cancelled bets.  The adapter returns the upstream
+        roll-up payload losslessly while validating all caller-controlled
+        filters and date bounds before they reach the authenticated endpoint.
+        """
+
+        status = str(bet_status or "SETTLED").strip().upper()
+        if status not in {"SETTLED", "VOIDED", "LAPSED", "CANCELLED"}:
+            raise MarketConfigurationError(
+                "Betfair cleared-order status must be SETTLED, VOIDED, LAPSED, or CANCELLED."
+            )
+        rollup = str(group_by or "BET").strip().upper()
+        if rollup not in {"EVENT_TYPE", "EVENT", "MARKET", "RUNNER", "BET"}:
+            raise MarketConfigurationError(
+                "Betfair cleared-order group_by must be EVENT_TYPE, EVENT, MARKET, RUNNER, or BET."
+            )
+        count = self._account_limit(limit)
+        start = self._account_offset(offset)
+        after_ts = self._history_timestamp(from_timestamp, "from") if from_timestamp is not None else None
+        before_ts = self._history_timestamp(to_timestamp, "to") if to_timestamp is not None else None
+        if after_ts is not None and before_ts is not None and before_ts < after_ts:
+            raise MarketConfigurationError("Betfair cleared-order history requires to at or after from.")
+
+        params: Dict[str, Any] = {
+            "betStatus": status,
+            "groupBy": rollup,
+            "includeItemDescription": bool(include_item_description),
+            "fromRecord": start,
+            "recordCount": count,
+        }
+        for parameter, value, label in (
+            ("eventTypeIds", event_type_id, "event_type_id"),
+            ("eventIds", event_id, "event_id"),
+            ("marketIds", market_id, "market_id"),
+            ("runnerIds", runner_id, "runner_id"),
+            ("betIds", bet_id, "bet_id"),
+        ):
+            normalized = self._account_id(value, label)
+            if normalized:
+                params[parameter] = [normalized]
+        if after_ts is not None or before_ts is not None:
+            date_range: Dict[str, str] = {}
+            if after_ts is not None:
+                date_range["from"] = self._timestamp_iso(after_ts)
+            if before_ts is not None:
+                date_range["to"] = self._timestamp_iso(before_ts)
+            params["settledDateRange"] = date_range
+        return self._rpc("SportsAPING/v1.0/listClearedOrders", params)
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Any:
+        normalized = str(operation or "").strip().lower()
+        if normalized == "cleared_orders":
+            return self.list_cleared_orders(
+                bet_status=kwargs.get("bet_status", "SETTLED"),
+                market_id=kwargs.get("market_id", ""),
+                event_type_id=kwargs.get("event_type_id", ""),
+                event_id=kwargs.get("event_id", ""),
+                runner_id=kwargs.get("runner_id", ""),
+                bet_id=kwargs.get("bet_id", ""),
+                group_by=kwargs.get("group_by", "BET"),
+                include_item_description=bool(kwargs.get("include_item_description", False)),
+                limit=kwargs.get("limit", 100),
+                offset=kwargs.get("offset", 0),
+                from_timestamp=kwargs.get("from_timestamp"),
+                to_timestamp=kwargs.get("to_timestamp"),
+            )
+        raise MarketConfigurationError("Betfair account recovery supports only cleared_orders.")
+
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
         self._validate_order(order)
@@ -379,6 +469,35 @@ class BetfairExchangeAdapter(MarketAdapter):
             raise MarketConfigurationError("Betfair paper order stake must be positive.")
         if order.limit_price is not None and self._safe_probability(order.limit_price) is None:
             raise MarketConfigurationError("Betfair paper order limit probability must be between 0 and 1.")
+
+    @staticmethod
+    def _account_id(value: Any, label: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if len(text) > 128 or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-" for char in text):
+            raise MarketConfigurationError(f"Betfair {label} must be a short identifier.")
+        return text
+
+    @staticmethod
+    def _account_limit(value: Any) -> int:
+        try:
+            limit = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Betfair cleared-order limit must be an integer between 1 and 1000.") from exc
+        if limit < 1 or limit > 1000:
+            raise MarketConfigurationError("Betfair cleared-order limit must be between 1 and 1000.")
+        return limit
+
+    @staticmethod
+    def _account_offset(value: Any) -> int:
+        try:
+            offset = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Betfair cleared-order offset must be an integer between 0 and 100000.") from exc
+        if offset < 0 or offset > 100000:
+            raise MarketConfigurationError("Betfair cleared-order offset must be between 0 and 100000.")
+        return offset
 
     @staticmethod
     def _trade_limit(value: Any) -> int:

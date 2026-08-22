@@ -737,6 +737,58 @@ class WebApiTests(unittest.TestCase):
         clamped = market_account_payload(cfg, Registry(), "opinion_labs", "order_history", {"limit": ["99"]})
         self.assertEqual(clamped["parameters"]["limit"], 20)
 
+    def test_betfair_account_payload_forwards_cleared_order_filters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="betfair_exchange",
+            display_name="Betfair Exchange",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("cleared_orders",)  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "clearedOrders": [{"betId": "bet-1"}],
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["betfair_exchange"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "betfair_exchange",
+            "cleared_orders",
+            {
+                "contract_id": ["1.234:101"],
+                "status": ["SETTLED"],
+                "limit": ["12"],
+                "offset": ["2"],
+                "group_by": ["RUNNER"],
+                "include_item_description": ["true"],
+            },
+        )
+        self.assertEqual(
+            payload["parameters"],
+            {
+                "bet_status": "SETTLED",
+                "market_id": "1.234",
+                "event_type_id": "",
+                "event_id": "",
+                "runner_id": "101",
+                "bet_id": "",
+                "group_by": "RUNNER",
+                "include_item_description": True,
+                "limit": 12,
+                "offset": 2,
+                "from_timestamp": None,
+                "to_timestamp": None,
+            },
+        )
+
     def test_limitless_account_payload_forwards_delegated_read_parameters(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(
