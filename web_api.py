@@ -5129,26 +5129,27 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             return {}
 
         catalog: Dict[str, Path] = {}
+        try:
+            index_target = (root / "index.html").resolve()
+            index_target.relative_to(root)
+            if index_target.is_file():
+                catalog["index.html"] = index_target
+        except (OSError, RuntimeError, ValueError):
+            pass
 
-        def add_file(relative_path: str, candidate: Path) -> None:
-            try:
-                # Candidates come only from the validated root and are
-                # confined with relative_to below.
-                target = candidate.resolve()
-                target.relative_to(root)
-            except (OSError, RuntimeError, ValueError):
-                return
-            if target.is_file():
-                catalog[relative_path] = target
-
-        add_file("index.html", root / "index.html")
         try:
             root_entries = tuple(root.iterdir())
         except OSError:
             return catalog
         for candidate in root_entries:
             if candidate.name != "index.html" and STATIC_FRONTEND_FILENAME_RE.fullmatch(candidate.name):
-                add_file(candidate.name, candidate)
+                try:
+                    target = candidate.resolve()
+                    target.relative_to(root)
+                    if target.is_file():
+                        catalog[candidate.name] = target
+                except (OSError, RuntimeError, ValueError):
+                    continue
 
         assets_dir = root / "assets"
         try:
@@ -5159,7 +5160,13 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             return catalog
         for candidate in asset_entries:
             if STATIC_FRONTEND_FILENAME_RE.fullmatch(candidate.name):
-                add_file(f"assets/{candidate.name}", candidate)
+                try:
+                    target = candidate.resolve()
+                    target.relative_to(root)
+                    if target.is_file():
+                        catalog[f"assets/{candidate.name}"] = target
+                except (OSError, RuntimeError, ValueError):
+                    continue
         return catalog
 
     def _send_json(self, status: int, payload: Dict[str, Any], *, retry_after_seconds: Optional[int] = None) -> None:
