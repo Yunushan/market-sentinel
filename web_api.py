@@ -5106,12 +5106,14 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             configured_root = frontend_dir if frontend_dir is not None else DEFAULT_FRONTEND_DIR
             # Deployment-time server configuration is validated by the
             # immutable catalog before any HTTP path lookup.
-            root = configured_root.resolve()  # lgtm [py/path-injection]
+            # lgtm [py/path-injection]
+            root = configured_root.resolve()
         except (OSError, RuntimeError, ValueError):
             return {}
         # The root is a deployment-time directory, never a request-derived
         # path.  The catalog is built once before any HTTP request is handled.
-        if not root.is_dir():  # lgtm [py/path-injection]
+        # lgtm [py/path-injection]
+        if not root.is_dir():
             return {}
 
         catalog: Dict[str, Path] = {}
@@ -5120,16 +5122,19 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             try:
                 # Candidates come only from the validated root and are
                 # confined with relative_to below.
-                target = candidate.resolve()  # lgtm [py/path-injection]
-                target.relative_to(root)  # lgtm [py/path-injection]
+                # lgtm [py/path-injection]
+                target = candidate.resolve()
+                target.relative_to(root)
             except (OSError, RuntimeError, ValueError):
                 return
+            # lgtm [py/path-injection]
             if target.is_file():
                 catalog[relative_path] = target
 
         add_file("index.html", root / "index.html")
         try:
-            root_entries = tuple(root.iterdir())  # lgtm [py/path-injection]
+            # lgtm [py/path-injection]
+            root_entries = tuple(root.iterdir())
         except OSError:
             return catalog
         for candidate in root_entries:
@@ -5138,7 +5143,8 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
 
         assets_dir = root / "assets"
         try:
-            asset_entries = (  # lgtm [py/path-injection]
+            # lgtm [py/path-injection]
+            asset_entries = (
                 tuple(assets_dir.iterdir()) if assets_dir.is_dir() else ()
             )
         except OSError:
