@@ -104,6 +104,9 @@ The CLI `serve --frontend-dir` option is supported for deployment-relative
 builds and is validated before the socket is opened. The resolved directory
 must remain beneath the release/resource root, so a typo or an unsafe path
 fails closed instead of changing the HTTP static-file root.
+The static catalog is built once from that canonical root; each candidate is
+resolved and checked relative to the root before it is read, so request URLs
+never construct filesystem paths.
 
 The web and health units use strict systemd sandboxes, private device and
 hostname/clock namespaces, restricted network address families, and a root-owned
