@@ -658,6 +658,97 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["parameters"]["subaccount"], 2)
         self.assertEqual(payload["data"]["fills"][0]["fill_id"], "fill-1")
 
+    def test_polymarket_account_payload_forwards_l2_filters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="polymarket",
+            display_name="Polymarket",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("active_orders", "order_detail", "fills")  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "data": [{"id": "order-1"}],
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["polymarket"].enabled = True
+        active = market_account_payload(
+            cfg,
+            Registry(),
+            "polymarket",
+            "active_orders",
+            {"market_id": ["0x" + "b" * 64], "contract_id": ["1234567890"], "cursor": ["MTAw"]},
+        )
+        self.assertEqual(
+            active["parameters"],
+            {"market_id": "0x" + "b" * 64, "contract_id": "1234567890", "next_cursor": "MTAw"},
+        )
+        fills = market_account_payload(
+            cfg,
+            Registry(),
+            "polymarket",
+            "fills",
+            {
+                "contract_id": ["1234567890"],
+                "trade_id": ["trade-1"],
+                "limit": ["20"],
+                "before": ["1760000300"],
+                "after": ["1760000000"],
+            },
+        )
+        self.assertEqual(fills["parameters"]["trade_id"], "trade-1")
+        self.assertEqual(fills["parameters"]["limit"], 20)
+        self.assertEqual(fills["parameters"]["before"], 1760000300.0)
+        detail = market_account_payload(cfg, Registry(), "polymarket", "order_detail", {"order_id": ["order-1"]})
+        self.assertEqual(detail["parameters"], {"order_id": "order-1"})
+
+    def test_polymarket_order_management_payload_forwards_cancel_fields_only(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="polymarket",
+            display_name="Polymarket",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_orders", "cancel_all_orders", "cancel_market_orders")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["polymarket"].enabled = True
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "polymarket",
+            "cancel_market_orders",
+            {
+                "market_id": "0x" + "b" * 64,
+                "asset_id": "1234567890",
+                "contract_id": "1234567890",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["market_id"], "0x" + "b" * 64)
+        self.assertEqual(calls[0][1]["asset_id"], "1234567890")
+        self.assertEqual(calls[0][1]["contract_id"], "1234567890")
+        self.assertNotIn("unexpected", calls[0][1])
+
     def test_hyperliquid_account_payload_forwards_safe_dex_and_limit(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(

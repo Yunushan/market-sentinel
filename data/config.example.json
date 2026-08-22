@@ -476,7 +476,8 @@
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
-        "notes": "Live trading is disabled by default. Keep credentials in .env or environment variables, not in config.json."
+        "polymarket_order_management_enabled": false,
+        "notes": "Authenticated CLOB order/fill recovery and guarded cancel-order, cancel-orders, cancel-all-orders, and cancel-market-orders mutations are implemented through fixed official endpoints. Order management requires polymarket_order_management_enabled plus the shared live-safety gates and exact operator confirmation; live trading remains disabled by default. Keep credentials in .env or environment variables, not in config.json."
       }
     },
     "predictit": {

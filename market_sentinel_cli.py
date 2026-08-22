@@ -1366,6 +1366,7 @@ HYPERLIQUID_ACCOUNT_OPERATIONS = (
     "portfolio",
     "subaccounts",
 )
+POLYMARKET_ACCOUNT_OPERATIONS = ("active_orders", "order_detail", "fills")
 MARKET_ACCOUNT_OPERATIONS = tuple(
     dict.fromkeys(
         GEMINI_ACCOUNT_OPERATIONS
@@ -1375,6 +1376,7 @@ MARKET_ACCOUNT_OPERATIONS = tuple(
         + BETFAIR_ACCOUNT_OPERATIONS
         + MATCHBOOK_ACCOUNT_OPERATIONS
         + HYPERLIQUID_ACCOUNT_OPERATIONS
+        + POLYMARKET_ACCOUNT_OPERATIONS
     )
 )
 
@@ -1445,6 +1447,23 @@ def run_market_account(args: argparse.Namespace) -> int:
             }
             if operation == "order_history":
                 kwargs["status"] = str(args.status or "").strip()
+    elif market_id == "polymarket":
+        kwargs = {
+            "market_id": str(getattr(args, "account_market_id", "") or "").strip(),
+            "contract_id": str(args.contract or "").strip(),
+            "next_cursor": str(args.cursor or "").strip(),
+        }
+        if operation == "order_detail":
+            kwargs = {"order_id": str(args.order_id or "").strip()}
+        elif operation == "fills":
+            kwargs.update(
+                {
+                    "trade_id": str(getattr(args, "trade_id", "") or "").strip(),
+                    "limit": _cli_clamp_int(args.limit, 100, 1, 500),
+                    "before": _cli_history_float(getattr(args, "before", None), "before"),
+                    "after": _cli_history_float(getattr(args, "after", None), "after"),
+                }
+            )
     elif market_id == "betfair_exchange":
         if operation == "funds":
             kwargs = {"wallet": str(getattr(args, "wallet", "") or "").strip()}
@@ -1598,8 +1617,18 @@ def run_market_account(args: argparse.Namespace) -> int:
 
 BETFAIR_ORDER_MANAGEMENT_OPERATIONS = ("cancel_orders", "update_orders", "replace_orders")
 KALSHI_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "batch_cancel_orders", "amend_order", "decrease_order")
+POLYMARKET_ORDER_MANAGEMENT_OPERATIONS = (
+    "cancel_order",
+    "cancel_orders",
+    "cancel_all_orders",
+    "cancel_market_orders",
+)
 MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
-    dict.fromkeys(BETFAIR_ORDER_MANAGEMENT_OPERATIONS + KALSHI_ORDER_MANAGEMENT_OPERATIONS)
+    dict.fromkeys(
+        BETFAIR_ORDER_MANAGEMENT_OPERATIONS
+        + KALSHI_ORDER_MANAGEMENT_OPERATIONS
+        + POLYMARKET_ORDER_MANAGEMENT_OPERATIONS
+    )
 )
 
 
@@ -1612,6 +1641,11 @@ def run_market_order_management(args: argparse.Namespace) -> int:
     exchange_market_id = str(getattr(args, "exchange_market_id", "") or "").strip()
     if exchange_market_id:
         payload["market_id"] = exchange_market_id
+    polymarket_market_id = str(getattr(args, "market_id", "") or "").strip()
+    if polymarket_market_id:
+        payload["market_id"] = polymarket_market_id
+    if market_id == "polymarket":
+        _put_optional(payload, "asset_id", getattr(args, "asset_id", None))
     instructions_value = getattr(args, "instructions", None)
     if instructions_value:
         raw = str(instructions_value)
@@ -1620,7 +1654,7 @@ def run_market_order_management(args: argparse.Namespace) -> int:
         parsed = json.loads(raw)
         if not isinstance(parsed, list):
             raise ValueError("--instructions must contain a JSON array.")
-        if operation == "batch_cancel_orders":
+        if operation == "batch_cancel_orders" or (market_id == "polymarket" and operation == "cancel_orders"):
             payload["orders"] = parsed
         else:
             payload["instructions"] = parsed
@@ -2609,7 +2643,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_account = markets_sub.add_parser(
         "account",
         parents=[common],
-        help="Read an explicitly documented authenticated account feed (Gemini, Kalshi, Limitless, Opinion, Betfair, Matchbook, or Hyperliquid).",
+        help="Read an explicitly documented authenticated account feed (including Polymarket CLOB orders and fills).",
     )
     market_account.add_argument("operation", choices=MARKET_ACCOUNT_OPERATIONS)
     market_account.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
@@ -2617,7 +2651,8 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--ticker", default=None, help="Kalshi market ticker for account reads.")
     market_account.add_argument("--market-slug", default=None, help="Limitless market slug for user_orders.")
     market_account.add_argument("--on-behalf-of", default=None, help="Optional Limitless delegated profile.")
-    market_account.add_argument("--order-id", default=None, help="Optional Kalshi order id for fill reads.")
+    market_account.add_argument("--order-id", default=None, help="Optional order id for order-detail/fill reads.")
+    market_account.add_argument("--trade-id", default=None, help="Optional Polymarket trade id for fill reads.")
     market_account.add_argument("--page", default="1", help="Opinion account page (1-10000).")
     market_account.add_argument("--account-market-id", default="", help="Opinion numeric market filter.")
     market_account.add_argument("--chain-id", default="", help="Opinion numeric chain filter.")
@@ -2656,21 +2691,25 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--dex", default="", help="Optional Hyperliquid perpetual DEX name.")
     market_account.add_argument("--from", dest="from_timestamp", default=None, help="Optional Unix timestamp bound.")
     market_account.add_argument("--to", dest="to_timestamp", default=None, help="Optional Unix timestamp bound.")
+    market_account.add_argument("--before", default=None, help="Optional Polymarket fill timestamp upper bound.")
+    market_account.add_argument("--after", default=None, help="Optional Polymarket fill timestamp lower bound.")
     _add_json_output_args(market_account)
     market_account.set_defaults(func=run_market_account)
 
     market_orders = markets_sub.add_parser(
         "manage-orders",
         parents=[common],
-        help="Run a guarded documented live order-management mutation (Betfair Exchange or Kalshi).",
+        help="Run a guarded documented live order-management mutation (Betfair, Kalshi, or Polymarket).",
     )
     market_orders.add_argument("operation", choices=MARKET_ORDER_MANAGEMENT_OPERATIONS)
     market_orders.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
     market_orders.add_argument("--exchange-market-id", default="", help="Betfair exchange market id for the mutation.")
+    market_orders.add_argument("--market-id", default="", help="Polymarket condition id for cancel_market_orders.")
+    market_orders.add_argument("--asset-id", default="", help="Polymarket token id for cancel_market_orders.")
     market_orders.add_argument(
         "--instructions",
         default=None,
-        help="JSON array of Betfair instructions, or @path to a JSON file.",
+        help="JSON array of venue instructions/order ids, or @path to a JSON file.",
     )
     market_orders.add_argument("--customer-ref", default=None, help="Optional Betfair de-duplication reference (max 32 chars).")
     market_orders.add_argument("--market-version", default=None, help="Optional replaceOrders market version integer or JSON object.")
@@ -2681,6 +2720,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exact text CANCEL ALL BETS is required for a Betfair all-account cancellation.",
     )
     market_orders.add_argument("--order-id", default=None, help="Kalshi order identifier for single-order mutations.")
+    market_orders.add_argument("--trade-id", default=None, help="Polymarket trade id for account fills reads.")
     market_orders.add_argument("--ticker", default=None, help="Kalshi market ticker for amend_order.")
     market_orders.add_argument("--side", choices=["bid", "ask"], default=None, help="Kalshi V2 amend side.")
     market_orders.add_argument("--price", default=None, help="Kalshi V2 amend price in probability dollars.")

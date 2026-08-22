@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from typing import Any, Dict, List, Mapping, Optional
 
 from .base import MarketAdapter
@@ -27,10 +28,28 @@ from polymarket.trader import PolymarketTrader, TraderConfig
 
 
 POLYMARKET_PRICE_HISTORY_INTERVALS = ("max", "all", "1m", "1w", "1d", "6h", "1h")
+POLYMARKET_ACCOUNT_OPERATIONS = ("active_orders", "order_detail", "fills")
+POLYMARKET_ORDER_MANAGEMENT_OPERATIONS = (
+    "cancel_order",
+    "cancel_orders",
+    "cancel_all_orders",
+    "cancel_market_orders",
+)
+POLYMARKET_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+POLYMARKET_ORDER_MANAGEMENT_REFERENCES = (
+    "https://docs.polymarket.com/api-reference/trade/get-user-orders",
+    "https://docs.polymarket.com/api-reference/trade/get-single-order-by-id",
+    "https://docs.polymarket.com/api-reference/trade/cancel-single-order",
+    "https://docs.polymarket.com/api-reference/trade/cancel-multiple-orders",
+    "https://docs.polymarket.com/api-reference/trade/cancel-all-orders",
+    "https://docs.polymarket.com/api-reference/trade/cancel-market-orders",
+)
 
 
 class PolymarketAdapter(MarketAdapter):
     metadata = get_market_metadata("polymarket")
+    account_recovery_operations = POLYMARKET_ACCOUNT_OPERATIONS
+    order_management_operations = POLYMARKET_ORDER_MANAGEMENT_OPERATIONS
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -51,6 +70,16 @@ class PolymarketAdapter(MarketAdapter):
                 "credential_requirement": "live_trading_only",
                 "geoblock_required_for_live": True,
                 "clob_auth_readiness": readiness,
+                "account_recovery_operations": list(self.account_recovery_operations),
+                "order_management_operations": list(self.order_management_operations),
+                "order_management_enabled": self.config_bool("polymarket_order_management_enabled", False),
+                "authenticated_account_endpoints": ["GET /data/orders", "GET /order/{orderID}", "GET /trades"],
+                "order_management_endpoints": [
+                    "DELETE /order",
+                    "DELETE /orders",
+                    "DELETE /cancel-all",
+                    "DELETE /cancel-market-orders",
+                ],
             }
         )
         return health
@@ -259,6 +288,169 @@ class PolymarketAdapter(MarketAdapter):
                 )
             )
         return trades
+
+    def get_account_orders(
+        self,
+        *,
+        market_id: str = "",
+        contract_id: str = "",
+        next_cursor: str = "",
+    ) -> Dict[str, Any]:
+        """Read the authenticated user's open CLOB orders.
+
+        Polymarket documents ``GET /data/orders`` as a paginated L2-authenticated
+        account endpoint.  Filters are passed only as query parameters; callers
+        cannot select an arbitrary path or endpoint.
+        """
+
+        normalized_market = self._account_filter(market_id, "market_id")
+        normalized_asset = self._account_filter(contract_id, "contract_id")
+        cursor = self._account_cursor(next_cursor)
+        try:
+            return clob_auth.get_orders(
+                self._l2_read_headers(),
+                market=normalized_market or None,
+                asset_id=normalized_asset or None,
+                next_cursor=cursor or None,
+            )
+        except (ValueError, KeyError) as exc:
+            raise MarketConfigurationError(f"Polymarket authenticated order recovery is not ready: {exc}") from exc
+
+    def get_account_order(self, order_id: str) -> Dict[str, Any]:
+        """Read one authenticated order by its documented order hash."""
+
+        normalized_order_id = self._order_management_id(order_id, label="order_id")
+        try:
+            return clob_auth.get_order(normalized_order_id, self._l2_read_headers())
+        except (ValueError, KeyError) as exc:
+            raise MarketConfigurationError(f"Polymarket authenticated order detail is not ready: {exc}") from exc
+
+    def get_account_fills(
+        self,
+        *,
+        trade_id: str = "",
+        market_id: str = "",
+        contract_id: str = "",
+        before: Any = None,
+        after: Any = None,
+        next_cursor: str = "",
+        limit: Any = 100,
+    ) -> Dict[str, Any]:
+        """Read the authenticated user's CLOB fills/trades feed."""
+
+        normalized_trade_id = self._account_filter(trade_id, "trade_id")
+        normalized_market = self._account_filter(market_id, "market_id")
+        normalized_asset = self._account_filter(contract_id, "contract_id")
+        normalized_limit = self._account_limit(limit)
+        params: Dict[str, Any] = {
+            "id": normalized_trade_id or None,
+            "market": normalized_market or None,
+            "asset_id": normalized_asset or None,
+            "before": self._account_timestamp(before, "before") if before not in (None, "") else None,
+            "after": self._account_timestamp(after, "after") if after not in (None, "") else None,
+            "next_cursor": self._account_cursor(next_cursor) or None,
+            "limit": normalized_limit,
+        }
+        if params["before"] is not None and params["after"] is not None and params["before"] < params["after"]:
+            raise MarketConfigurationError("Polymarket fills require before greater than or equal to after.")
+        try:
+            return clob_auth.get_trades(self._l2_read_headers(), **params)
+        except (ValueError, KeyError) as exc:
+            raise MarketConfigurationError(f"Polymarket authenticated fills are not ready: {exc}") from exc
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Any:
+        """Dispatch one validated, documented Polymarket account read."""
+
+        normalized = str(operation or "").strip().lower()
+        if normalized == "active_orders":
+            return self.get_account_orders(
+                market_id=kwargs.get("market_id", ""),
+                contract_id=kwargs.get("contract_id", ""),
+                next_cursor=kwargs.get("next_cursor", ""),
+            )
+        if normalized == "order_detail":
+            return self.get_account_order(kwargs.get("order_id", ""))
+        if normalized == "fills":
+            return self.get_account_fills(
+                trade_id=kwargs.get("trade_id", ""),
+                market_id=kwargs.get("market_id", ""),
+                contract_id=kwargs.get("contract_id", ""),
+                before=kwargs.get("before"),
+                after=kwargs.get("after"),
+                next_cursor=kwargs.get("next_cursor", ""),
+                limit=kwargs.get("limit", 100),
+            )
+        supported = ", ".join(self.account_recovery_operations)
+        raise MarketConfigurationError(f"Polymarket account recovery supports only: {supported}.")
+
+    def manage_orders(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Run one guarded Polymarket CLOB order-management mutation.
+
+        Every mutation uses a fixed documented endpoint, explicit L2 headers,
+        the shared live-safety gates, a separate adapter opt-in, and exact
+        operator confirmation.  No caller-provided URL, method, or headers are
+        accepted.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.order_management_operations:
+            supported = ", ".join(self.order_management_operations)
+            raise MarketConfigurationError(f"Polymarket order management supports only: {supported}.")
+        self.ensure_capability("live_trading")
+        if not self.config_bool("polymarket_order_management_enabled", False):
+            raise MarketConfigurationError(
+                "Polymarket order management is disabled by adapter config. "
+                "Set polymarket_order_management_enabled=true only after reviewing cancellation risk."
+            )
+        self.ensure_live_trading_enabled("Polymarket order management")
+        if str(kwargs.get("confirm_order_management") or "").strip() != POLYMARKET_ORDER_MANAGEMENT_CONFIRMATION:
+            raise MarketConfigurationError(
+                "Polymarket order management requires exact confirmation text "
+                f"{POLYMARKET_ORDER_MANAGEMENT_CONFIRMATION}."
+            )
+
+        headers = self._l2_read_headers()
+        request: Dict[str, Any] = {}
+        if normalized == "cancel_order":
+            order_id = self._order_management_id(kwargs.get("order_id"), label="order_id")
+            request = {"orderID": order_id}
+            response = clob_auth.cancel_order(order_id, headers)
+        elif normalized == "cancel_orders":
+            order_ids = self._order_management_ids(kwargs.get("orders", kwargs.get("instructions")))
+            request = {"orders": order_ids}
+            response = clob_auth.cancel_orders(order_ids, headers)
+        elif normalized == "cancel_all_orders":
+            response = clob_auth.cancel_all_orders(headers)
+        else:
+            market_id = self._account_filter(kwargs.get("market_id"), "market_id")
+            asset_id = self._account_filter(
+                kwargs.get("asset_id") or kwargs.get("contract_id"), "asset_id"
+            )
+            if not market_id or not asset_id:
+                raise MarketConfigurationError(
+                    "Polymarket cancel_market_orders requires both market_id and asset_id."
+                )
+            request = {"market": market_id, "asset_id": asset_id}
+            response = clob_auth.cancel_market_orders(market_id, asset_id, headers)
+
+        return {
+            "market_id": self.market_id,
+            "operation": normalized,
+            "live": True,
+            "preflight": {
+                "market_id": self.market_id,
+                "display_name": self.display_name,
+                "feature": "order management",
+                "operation": normalized,
+                "live_trading_enabled": True,
+                "order_management_enabled": True,
+                "confirmed": True,
+                "requires_credentials": True,
+                "references": list(POLYMARKET_ORDER_MANAGEMENT_REFERENCES),
+            },
+            "request": request,
+            "response": response,
+        }
 
     def list_candles(
         self,
@@ -485,6 +677,67 @@ class PolymarketAdapter(MarketAdapter):
                 "Polymarket authenticated trade history requires explicit L2 headers: " + ", ".join(missing)
             )
         return headers
+
+    @staticmethod
+    def _account_filter(value: Any, label: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if len(text) > 256 or any(not char.isprintable() for char in text):
+            raise MarketConfigurationError(f"Polymarket {label} must be printable and at most 256 characters.")
+        return text
+
+    @staticmethod
+    def _account_cursor(value: Any) -> str:
+        text = str(value or "").strip()
+        if len(text) > 512 or any(not char.isprintable() for char in text):
+            raise MarketConfigurationError("Polymarket account cursor must be printable and at most 512 characters.")
+        return text
+
+    @staticmethod
+    def _account_limit(value: Any) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Polymarket account limit must be an integer between 1 and 500.") from exc
+        if parsed < 1 or parsed > 500:
+            raise MarketConfigurationError("Polymarket account limit must be between 1 and 500.")
+        return parsed
+
+    @staticmethod
+    def _account_timestamp(value: Any, label: str) -> int:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Polymarket {label} timestamp must be numeric.") from exc
+        if not math.isfinite(parsed) or parsed < 0:
+            raise MarketConfigurationError(f"Polymarket {label} timestamp must be a finite non-negative number.")
+        return int(parsed)
+
+    @staticmethod
+    def _order_management_id(value: Any, *, label: str) -> str:
+        text = str(value or "").strip()
+        # Polymarket's API examples use shortened hashes while live order ids
+        # are commonly 32-byte values.  Keep the path-safe hexadecimal shape
+        # without rejecting documented/test identifiers solely on length.
+        if not re.fullmatch(r"0x[0-9a-fA-F]{40,128}", text) or len(text[2:]) % 2:
+            raise MarketConfigurationError(f"Polymarket {label} must be a 0x-prefixed hexadecimal order hash.")
+        return text
+
+    @classmethod
+    def _order_management_ids(cls, value: Any) -> List[str]:
+        if not isinstance(value, (list, tuple)):
+            raise MarketConfigurationError("Polymarket cancel_orders requires a JSON array of order hashes.")
+        if not value or len(value) > 3000:
+            raise MarketConfigurationError("Polymarket cancel_orders requires between 1 and 3000 order hashes.")
+        normalized: List[str] = []
+        seen = set()
+        for item in value:
+            order_id = cls._order_management_id(item, label="order_id")
+            if order_id not in seen:
+                normalized.append(order_id)
+                seen.add(order_id)
+        return normalized
 
     @staticmethod
     def _history_timestamp(value: Any, label: str) -> int:

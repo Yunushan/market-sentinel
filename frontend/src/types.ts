@@ -201,6 +201,8 @@ export interface MarketAccountPayload {
 
 export type MarketOrderManagementOperation =
   | "cancel_orders"
+  | "cancel_all_orders"
+  | "cancel_market_orders"
   | "update_orders"
   | "replace_orders"
   | "cancel_order"

@@ -759,6 +759,10 @@ export default function App() {
       patch.settings = {
         kalshi_order_management_enabled: form.get("kalshi_order_management_enabled") === "on"
       };
+    } else if (selectedMarket.market_id === "polymarket") {
+      patch.settings = {
+        polymarket_order_management_enabled: form.get("polymarket_order_management_enabled") === "on"
+      };
     }
     setBusyMarket(selectedMarket.market_id);
     setError(null);
@@ -920,23 +924,39 @@ export default function App() {
       setError(`${selectedMarket.display_name} does not advertise ${operation.replaceAll("_", " ")}.`);
       return;
     }
-    let instructions: unknown;
-    try {
-      instructions = JSON.parse(marketReadForm.order_management_instructions || "[]");
-    } catch (exc) {
-      setError(exc instanceof Error ? `Instructions JSON is invalid: ${exc.message}` : "Instructions JSON is invalid.");
-      return;
-    }
-    if (!Array.isArray(instructions)) {
-      setError("Instructions must be a JSON array.");
-      return;
-    }
     const isKalshi = marketId === "kalshi";
-    if (!isKalshi && (operation === "update_orders" || operation === "replace_orders") && !marketReadForm.order_management_market_id.trim()) {
+    const isPolymarket = marketId === "polymarket";
+    let instructions: unknown = [];
+    const needsInstructions = !isPolymarket || operation === "cancel_orders" || operation === "batch_cancel_orders";
+    if (needsInstructions) {
+      try {
+        instructions = JSON.parse(marketReadForm.order_management_instructions || "[]");
+      } catch (exc) {
+        setError(exc instanceof Error ? `Instructions JSON is invalid: ${exc.message}` : "Instructions JSON is invalid.");
+        return;
+      }
+      if (!Array.isArray(instructions)) {
+        setError("Instructions must be a JSON array.");
+        return;
+      }
+    }
+    if (isPolymarket && operation === "cancel_order" && !marketReadForm.order_management_order_id.trim()) {
+      setError("A Polymarket order id is required for cancel_order.");
+      return;
+    }
+    if (isPolymarket && operation === "cancel_orders" && (!Array.isArray(instructions) || (instructions as unknown[]).length === 0)) {
+      setError("Polymarket cancel_orders requires at least one order hash.");
+      return;
+    }
+    if (isPolymarket && operation === "cancel_market_orders" && (!marketReadForm.order_management_market_id.trim() || !marketReadForm.contract_id.trim())) {
+      setError("Polymarket cancel_market_orders requires a condition id and token id.");
+      return;
+    }
+    if (!isKalshi && !isPolymarket && (operation === "update_orders" || operation === "replace_orders") && !marketReadForm.order_management_market_id.trim()) {
       setError("A Betfair exchange market id is required for update and replace operations.");
       return;
     }
-    if (isKalshi && operation === "batch_cancel_orders" && !instructions.length) {
+    if (isKalshi && operation === "batch_cancel_orders" && !(instructions as unknown[]).length) {
       setError("Kalshi batch cancellation requires at least one order object.");
       return;
     }
@@ -948,21 +968,29 @@ export default function App() {
       setError("A Kalshi ticker is required for amend_order.");
       return;
     }
-    const warning = !isKalshi && operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()
+    const warning = !isKalshi && !isPolymarket && operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()
       ? "This submits a GLOBAL Betfair cancellation for the account."
-      : `This submits a live ${isKalshi ? "Kalshi" : "Betfair"} ${operation.replaceAll("_", " ")} request.`;
+      : `This submits a live ${isKalshi ? "Kalshi" : isPolymarket ? "Polymarket" : "Betfair"} ${operation.replaceAll("_", " ")} request.`;
     if (!window.confirm(`${warning} Continue only if the live-safety gates and request details are intentional.`)) {
       return;
     }
     const payload: Record<string, unknown> = isKalshi
       ? { instructions }
+      : isPolymarket
+        ? {
+            market_id: marketReadForm.order_management_market_id.trim() || undefined,
+            asset_id: marketReadForm.contract_id.trim() || undefined,
+            order_id: marketReadForm.order_management_order_id.trim() || undefined,
+            orders: operation === "cancel_orders" ? instructions : undefined,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined
+          }
       : {
           market_id: marketReadForm.order_management_market_id.trim() || undefined,
           instructions,
           customer_ref: marketReadForm.order_management_customer_ref.trim() || undefined,
           confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
         };
-    if (!isKalshi && marketReadForm.order_management_market_version.trim()) {
+    if (!isKalshi && !isPolymarket && marketReadForm.order_management_market_version.trim()) {
       const version = Number(marketReadForm.order_management_market_version.trim());
       if (!Number.isInteger(version) || version < 1) {
         setError("Market version must be a positive integer.");
@@ -970,7 +998,7 @@ export default function App() {
       }
       payload.market_version = version;
     }
-    if (!isKalshi && marketReadForm.order_management_async) {
+    if (!isKalshi && !isPolymarket && marketReadForm.order_management_async) {
       payload.async_request = true;
     }
     if (isKalshi) {
@@ -2098,6 +2126,15 @@ function MarketsView({
                 />
                 <span>Enable Kalshi order management</span>
               </label>
+            ) : selectedMarket.market_id === "polymarket" ? (
+              <label className="check-row">
+                <input
+                  name="polymarket_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Polymarket order management</span>
+              </label>
             ) : null}
             <label>
               <span>Max size</span>
@@ -2428,7 +2465,9 @@ function MarketsView({
                   <p>
                     {selectedMarket.market_id === "kalshi"
                       ? "Kalshi mutations are disabled by default and require the shared live-safety gates, Kalshi-specific opt-in, and exact operator confirmation."
-                      : "Betfair mutations are disabled by default and require the shared live-safety gates plus the Betfair-specific opt-in. The UI never sends a request without explicit confirmation."}
+                      : selectedMarket.market_id === "polymarket"
+                        ? "Polymarket CLOB cancellations are disabled by default and require the shared live-safety gates, explicit L2 headers, a separate opt-in, and exact operator confirmation."
+                        : "Betfair mutations are disabled by default and require the shared live-safety gates plus the Betfair-specific opt-in. The UI never sends a request without explicit confirmation."}
                   </p>
                 </div>
                 <StatusPill tone={selectedMarket.health.order_management_enabled ? "warn" : "neutral"}>
@@ -2547,6 +2586,51 @@ function MarketsView({
                         rows={3}
                         spellCheck={false}
                         placeholder='[{"order_id":"order-id","subaccount":0}]'
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "polymarket" ? (
+                  <>
+                    <label>
+                      <span>Order id</span>
+                      <input
+                        value={marketReadForm.order_management_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_order_id: event.target.value })}
+                        placeholder="0x… 32-byte order hash"
+                      />
+                    </label>
+                    <label>
+                      <span>Condition id</span>
+                      <input
+                        value={marketReadForm.order_management_market_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_market_id: event.target.value })}
+                        placeholder="Required for market cancel"
+                      />
+                    </label>
+                    <label>
+                      <span>Token id</span>
+                      <input
+                        value={marketReadForm.contract_id}
+                        onChange={(event) => onMarketReadFormChange({ contract_id: event.target.value })}
+                        placeholder="Required for market cancel"
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Order hashes JSON (cancel_orders)</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={3}
+                        spellCheck={false}
+                        placeholder='["0x…"]'
                       />
                     </label>
                     <label className="wide-field">
