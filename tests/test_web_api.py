@@ -1271,6 +1271,47 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["network_id"], 56)
         self.assertNotIn("unexpected", calls[0][1])
 
+    def test_opinion_order_management_payload_forwards_sdk_filters_only(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="opinion_labs",
+            display_name="Opinion Labs",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_order", "batch_cancel_orders", "cancel_all_orders")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["opinion_labs"].enabled = True
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "opinion_labs",
+            "cancel_all_orders",
+            {
+                "market_id": "77",
+                "side": "BUY",
+                "confirm_global_cancel": "CANCEL ALL OPINION ORDERS",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["market_id"], "77")
+        self.assertEqual(calls[0][1]["side"], "BUY")
+        self.assertEqual(calls[0][1]["confirm_global_cancel"], "CANCEL ALL OPINION ORDERS")
+        self.assertNotIn("unexpected", calls[0][1])
+
     def test_limitless_account_payload_forwards_delegated_read_parameters(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(

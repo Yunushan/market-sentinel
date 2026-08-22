@@ -2287,6 +2287,78 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                     )
                 )
 
+    def test_opinion_guarded_order_management_uses_documented_sdk_methods(self) -> None:
+        adapter = OpinionAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "opinion_order_management_enabled": True,
+            }
+        )
+        calls = []
+
+        class FakeClient:
+            def cancel_order(self, order_id):
+                calls.append(("cancel_order", order_id))
+                return {"orderId": order_id, "status": "cancelled"}
+
+            def cancel_orders_batch(self, order_ids):
+                calls.append(("cancel_orders_batch", list(order_ids)))
+                return [{"orderId": order_id, "status": "cancelled"} for order_id in order_ids]
+
+            def cancel_all_orders(self, *, market_id=None, side=None):
+                calls.append(("cancel_all_orders", market_id, side))
+                return {"cancelled": 2}
+
+        confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+        with patch.object(adapter, "_create_clob_client", return_value=FakeClient()):
+            single = adapter.manage_orders(
+                "cancel_order",
+                order_id="order-1",
+                confirm_order_management=confirmation,
+            )
+            batch = adapter.manage_orders(
+                "batch_cancel_orders",
+                orders=["order-1", "order-2"],
+                confirm_order_management=confirmation,
+            )
+            global_cancel = adapter.manage_orders(
+                "cancel_all_orders",
+                confirm_order_management=confirmation,
+                confirm_global_cancel="CANCEL ALL OPINION ORDERS",
+            )
+
+        self.assertEqual(single["request"], {"orderId": "order-1"})
+        self.assertEqual(batch["request"], {"orderIds": ["order-1", "order-2"]})
+        self.assertEqual(global_cancel["request"], {})
+        self.assertEqual(calls, [
+            ("cancel_order", "order-1"),
+            ("cancel_orders_batch", ["order-1", "order-2"]),
+            ("cancel_all_orders", None, None),
+        ])
+        self.assertEqual(
+            adapter.health_check()["order_management_operations"],
+            ["cancel_order", "batch_cancel_orders", "cancel_all_orders"],
+        )
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders(
+                "cancel_order",
+                order_id="../outside",
+                confirm_order_management=confirmation,
+            )
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders(
+                "batch_cancel_orders",
+                orders=["order-1", "order-1"],
+                confirm_order_management=confirmation,
+            )
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders(
+                "cancel_all_orders",
+                confirm_order_management=confirmation,
+                confirm_global_cancel="wrong",
+            )
+
     def test_predict_fun_adapter_maps_markets_orderbooks_and_no_prices(self) -> None:
         adapter = PredictFunAdapter()
         markets = load_fixture("predict_fun", "markets")

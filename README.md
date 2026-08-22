@@ -538,7 +538,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | Iowa Electronic Markets (`iowa_electronic_markets`) | Implemented | Yes | Yes | Yes | No | No | Required | Not required | Not trading/KYC limited |
 | INFER / INFER-pub (`infer`) | Verified blocked | No | No | No | No | No | Required | Account/export access required | Not trading/KYC limited |
 | Fact Machine (`fact_machine`) | Verified blocked | No | No | No | No | No | Required | Wallet/personhood required | Identity/jurisdiction limited |
-| Opinion Labs (`opinion_labs`) | Implemented | Yes | Yes (price history, authenticated filled trades/account reads) | Yes | Guarded, off by default | Yes, simulation only | Required | API credentials required | Jurisdiction varies |
+| Opinion Labs (`opinion_labs`) | Implemented | Yes | Yes (price history, authenticated filled trades/account reads) | Yes | Guarded, off by default (orders and cancel/batch/global cancellation) | Yes, simulation only | Required | API credentials required | Jurisdiction varies |
 | Gemini Titan / Gemini Predictions (`gemini_titan`) | Implemented | Yes | Yes (filled account trades/price-history points) | Yes | Guarded, off by default (orders and single/batch cancellation) | No | Required | Live trading only | Region/KYC limited |
 | Augur (`augur`) | Implemented | No | Yes | No | No | No | Required | Subgraph endpoint required | Jurisdiction varies |
 | BetMGM (`betmgm`) | Implemented | Yes | Yes | Yes | No | No | Required | Account/API token required | Region/KYC limited |

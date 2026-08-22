@@ -1343,6 +1343,11 @@ KALSHI_ACCOUNT_OPERATIONS = (
 )
 LIMITLESS_ACCOUNT_OPERATIONS = ("positions", "account_history", "user_orders")
 OPINION_ACCOUNT_OPERATIONS = ("order_history", "order_detail", "positions")
+OPINION_ORDER_MANAGEMENT_OPERATIONS = (
+    "cancel_order",
+    "batch_cancel_orders",
+    "cancel_all_orders",
+)
 BETFAIR_ACCOUNT_OPERATIONS = (
     "active_orders",
     "cleared_orders",
@@ -1645,6 +1650,7 @@ MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
         + GEMINI_ORDER_MANAGEMENT_OPERATIONS
         + MATCHBOOK_ORDER_MANAGEMENT_OPERATIONS
         + MYRIAD_ORDER_MANAGEMENT_OPERATIONS
+        + OPINION_ORDER_MANAGEMENT_OPERATIONS
     )
 )
 
@@ -2744,7 +2750,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_orders = markets_sub.add_parser(
         "manage-orders",
         parents=[common],
-        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Kalshi, Matchbook, Myriad, or Polymarket).",
+        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Kalshi, Matchbook, Myriad, Opinion, or Polymarket).",
     )
     market_orders.add_argument("operation", choices=MARKET_ORDER_MANAGEMENT_OPERATIONS)
     market_orders.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
@@ -2762,7 +2768,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_orders.add_argument(
         "--confirm-global-cancel",
         default=None,
-        help="Exact text CANCEL ALL BETS (Betfair) or CANCEL ALL MATCHBOOK OFFERS is required for global cancellation.",
+        help="Exact global-cancel text is required (venue-specific; e.g. CANCEL ALL BETS, CANCEL ALL MATCHBOOK OFFERS, or CANCEL ALL OPINION ORDERS).",
     )
     market_orders.add_argument("--order-id", default=None, help="Venue order identifier for single-order mutations.")
     market_orders.add_argument("--offer-id", default=None, help="Matchbook offer identifier for single-offer mutations.")
@@ -2788,7 +2794,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     market_orders.add_argument("--trade-id", default=None, help="Polymarket trade id for account fills reads.")
     market_orders.add_argument("--ticker", default=None, help="Kalshi market ticker for amend_order.")
-    market_orders.add_argument("--side", choices=["bid", "ask"], default=None, help="Kalshi V2 amend side.")
+    market_orders.add_argument("--side", choices=["bid", "ask", "BUY", "SELL"], default=None, help="Kalshi bid/ask or Opinion BUY/SELL filter.")
     market_orders.add_argument("--price", default=None, help="Kalshi V2 amend price in probability dollars.")
     market_orders.add_argument("--count", default=None, help="Kalshi V2 amend total contract count.")
     market_orders.add_argument("--client-order-id", default=None, help="Optional Kalshi original client order id.")

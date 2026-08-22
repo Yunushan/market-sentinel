@@ -25,6 +25,14 @@ DEFAULT_OPINION_BASE_URL = "https://openapi.opinion.trade/openapi"
 DEFAULT_OPINION_CLOB_HOST = "https://proxy.opinion.trade:8443"
 DEFAULT_OPINION_CHAIN_ID = 56
 OPINION_PRICE_HISTORY_INTERVALS = ("1m", "1h", "1d", "1w", "max")
+OPINION_ORDER_MANAGEMENT_OPERATIONS = (
+    "cancel_order",
+    "batch_cancel_orders",
+    "cancel_all_orders",
+)
+OPINION_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+OPINION_GLOBAL_CANCEL_CONFIRMATION = "CANCEL ALL OPINION ORDERS"
+OPINION_ORDER_MANAGEMENT_MAX_BATCH = 20
 OPINION_REFERENCES = (
     "https://docs.opinion.trade/developer-guide/opinion-open-api/overview",
     "https://docs.opinion.trade/developer-guide/opinion-open-api/market",
@@ -44,6 +52,7 @@ class OpinionAdapter(MarketAdapter):
     # operation allow-list.  Arbitrary order or portfolio paths are never
     # accepted by the shared CLI/API account route.
     account_recovery_operations = ("order_history", "order_detail", "positions")
+    order_management_operations = OPINION_ORDER_MANAGEMENT_OPERATIONS
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -61,10 +70,17 @@ class OpinionAdapter(MarketAdapter):
                 "copy_trading_supported": bool(self.capabilities.copy_trading),
                 "activity_feed_supported": True,
                 "account_recovery_operations": list(self.account_recovery_operations),
+                "order_management_operations": list(self.order_management_operations),
+                "order_management_enabled": self.config_bool("opinion_order_management_enabled", False),
                 "authenticated_account_endpoints": [
                     "/order",
                     "/order/:orderId",
                     "/positions/user/:walletAddress",
+                ],
+                "authenticated_order_management_endpoints": [
+                    "SDK cancel_order",
+                    "SDK cancel_orders_batch",
+                    "SDK cancel_all_orders",
                 ],
             }
         )
@@ -474,6 +490,97 @@ class OpinionAdapter(MarketAdapter):
             "response": self._json_safe(response),
         }
 
+    def manage_orders(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Run one guarded Opinion CLOB cancellation mutation.
+
+        Opinion's official Python SDK owns the authenticated cancellation
+        workflow. This boundary exposes only the SDK's documented methods,
+        validates identifiers and filters before creating the client, and
+        keeps all mutations behind a separate opt-in and exact confirmations.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.order_management_operations:
+            supported = ", ".join(self.order_management_operations)
+            raise MarketConfigurationError(
+                f"Opinion order-management operation must be one of: {supported}."
+            )
+        self.ensure_capability("live_trading")
+        if not self.config_bool("opinion_order_management_enabled", False):
+            raise MarketConfigurationError(
+                "Opinion order management is disabled by adapter config. "
+                "Set opinion_order_management_enabled=true only after reviewing cancellation risk."
+            )
+        self.ensure_live_trading_enabled("Opinion order management")
+        if str(kwargs.get("confirm_order_management") or "").strip() != OPINION_ORDER_MANAGEMENT_CONFIRMATION:
+            raise MarketConfigurationError(
+                "Opinion order management requires exact confirmation text "
+                f"{OPINION_ORDER_MANAGEMENT_CONFIRMATION}."
+            )
+        if bool(kwargs.get("async_request")):
+            raise MarketConfigurationError("Opinion order-management requests are synchronous.")
+
+        request: Dict[str, Any] = {}
+        try:
+            if normalized == "cancel_order":
+                order_id = self._order_management_id(kwargs.get("order_id"))
+                request = {"orderId": order_id}
+                response = self._create_clob_client().cancel_order(order_id)
+            elif normalized == "batch_cancel_orders":
+                order_ids = self._order_management_ids(
+                    kwargs.get("order_ids", kwargs.get("orders", kwargs.get("instructions")))
+                )
+                request = {"orderIds": order_ids}
+                response = self._create_clob_client().cancel_orders_batch(order_ids)
+            else:
+                if str(kwargs.get("confirm_global_cancel") or "").strip() != OPINION_GLOBAL_CANCEL_CONFIRMATION:
+                    raise MarketConfigurationError(
+                        "Opinion global cancellation requires exact confirmation text "
+                        f"{OPINION_GLOBAL_CANCEL_CONFIRMATION}."
+                    )
+                market_id = self._account_market_id(kwargs.get("market_id"))
+                side_text = str(kwargs.get("side") or "").strip().upper()
+                if side_text and side_text not in {"BUY", "SELL"}:
+                    raise MarketConfigurationError("Opinion cancel_all_orders side must be BUY or SELL.")
+                side_value = None
+                if side_text:
+                    try:
+                        from opinion_clob_sdk.chain.py_order_utils.model.sides import OrderSide
+                    except ImportError as exc:
+                        raise MarketConfigurationError(
+                            "Opinion live order management requires the official opinion-clob-sdk package."
+                        ) from exc
+                    side_value = OrderSide.BUY if side_text == "BUY" else OrderSide.SELL
+                request = {}
+                if market_id is not None:
+                    request["marketId"] = market_id
+                if side_text:
+                    request["side"] = side_text
+                response = self._create_clob_client().cancel_all_orders(market_id=market_id, side=side_value)
+        except MarketConfigurationError:
+            raise
+        except Exception as exc:
+            raise MarketHTTPError(f"Opinion CLOB order cancellation failed: {exc}") from exc
+
+        return {
+            "market_id": self.market_id,
+            "operation": normalized,
+            "live": True,
+            "preflight": {
+                "market_id": self.market_id,
+                "display_name": self.display_name,
+                "feature": "order management",
+                "operation": normalized,
+                "live_trading_enabled": True,
+                "order_management_enabled": True,
+                "confirmed": True,
+                "requires_credentials": True,
+                "references": list(OPINION_REFERENCES),
+            },
+            "request": request,
+            "response": self._json_safe(response),
+        }
+
     def _create_clob_client(self):
         try:
             from opinion_clob_sdk import Client
@@ -518,6 +625,26 @@ class OpinionAdapter(MarketAdapter):
         except ImportError:
             return False
         return True
+
+    @staticmethod
+    def _order_management_id(value: Any) -> str:
+        normalized = str(value or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", normalized):
+            raise MarketConfigurationError("Opinion order_id must be a short path-safe identifier.")
+        return normalized
+
+    @classmethod
+    def _order_management_ids(cls, value: Any) -> List[str]:
+        if not isinstance(value, (list, tuple)) or not value:
+            raise MarketConfigurationError("Opinion batch cancellation requires a non-empty order id list.")
+        if len(value) > OPINION_ORDER_MANAGEMENT_MAX_BATCH:
+            raise MarketConfigurationError(
+                f"Opinion batch cancellation accepts at most {OPINION_ORDER_MANAGEMENT_MAX_BATCH} order ids."
+            )
+        order_ids = [cls._order_management_id(item) for item in value]
+        if len(set(order_ids)) != len(order_ids):
+            raise MarketConfigurationError("Opinion batch cancellation order ids must be unique.")
+        return order_ids
 
     @staticmethod
     def _build_sdk_order(
