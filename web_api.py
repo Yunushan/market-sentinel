@@ -3554,7 +3554,47 @@ def market_account_payload(
         )
 
     kwargs: Dict[str, Any] = {}
-    if normalized_operation in {"active_orders", "order_history"}:
+    if normalized_market_id == "kalshi":
+        raw_contract = _query_value(query_params, "contract_id")
+        ticker = _query_value(query_params, "ticker") or raw_contract.split(":", 1)[0]
+        raw_subaccount = _query_value(query_params, "subaccount")
+        subaccount = _clamp_int(raw_subaccount, 0, 0, 63) if raw_subaccount else None
+        kwargs.update(
+            {
+                "ticker": ticker,
+                "event_ticker": _query_value(query_params, "event_ticker"),
+                "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 1000),
+                "cursor": _query_value(query_params, "cursor"),
+                "min_timestamp": _query_float(query_params, "from"),
+                "max_timestamp": _query_float(query_params, "to"),
+                "subaccount": subaccount,
+            }
+        )
+        if normalized_operation == "order_history":
+            kwargs.update(
+                {
+                    "status": _query_value(query_params, "status", "executed").lower(),
+                    "historical": _query_bool(query_params, "historical", False),
+                }
+            )
+        elif normalized_operation == "fills":
+            kwargs.update(
+                {
+                    "order_id": _query_value(query_params, "order_id"),
+                    "historical": _query_bool(query_params, "historical", False),
+                }
+            )
+        elif normalized_operation == "positions":
+            kwargs["count_filter"] = _query_value(query_params, "count_filter")
+        elif normalized_operation == "queue_positions":
+            kwargs = {
+                "ticker": ticker,
+                "event_ticker": _query_value(query_params, "event_ticker"),
+                "subaccount": subaccount,
+            }
+        elif normalized_operation == "balance":
+            kwargs = {"subaccount": subaccount}
+    elif normalized_operation in {"active_orders", "order_history"}:
         kwargs.update(
             {
                 "contract_id": _query_value(query_params, "contract_id") or None,
@@ -3562,7 +3602,7 @@ def market_account_payload(
                 "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
             }
         )
-    if normalized_operation == "order_history":
+    if normalized_market_id != "kalshi" and normalized_operation == "order_history":
         kwargs.update(
             {
                 "status": _query_value(query_params, "status", "filled").lower(),
@@ -3570,7 +3610,7 @@ def market_account_payload(
                 "to_timestamp": _query_float(query_params, "to"),
             }
         )
-    elif normalized_operation == "positions":
+    elif normalized_market_id != "kalshi" and normalized_operation == "positions":
         raw_limit = _query_value(query_params, "limit")
         kwargs.update(
             {
@@ -3580,7 +3620,7 @@ def market_account_payload(
                 "sort": _query_value(query_params, "sort") or None,
             }
         )
-    elif normalized_operation == "settled_positions":
+    elif normalized_market_id != "kalshi" and normalized_operation == "settled_positions":
         kwargs.update(
             {
                 "event_ticker": _query_value(query_params, "event_ticker"),
@@ -3592,7 +3632,7 @@ def market_account_payload(
                 "with_cash_outs": _query_bool(query_params, "with_cash_outs", False),
             }
         )
-    elif normalized_operation == "volume_metrics":
+    elif normalized_market_id != "kalshi" and normalized_operation == "volume_metrics":
         kwargs.update(
             {
                 "event_ticker": _query_value(query_params, "event_ticker"),
