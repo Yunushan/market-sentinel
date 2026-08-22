@@ -519,6 +519,7 @@ def run_fixture_check() -> None:
         fixture_root / "polymarket" / "orderbook.json",
         fixture_root / "polymarket" / "activity_buy.json",
         fixture_root / "polymarket" / "clob_trades.json",
+        fixture_root / "polymarket" / "price_history.json",
         fixture_root / "kalshi" / "markets.json",
         fixture_root / "kalshi" / "orderbook.json",
         fixture_root / "kalshi" / "trades.json",

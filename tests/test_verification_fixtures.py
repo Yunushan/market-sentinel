@@ -30,6 +30,7 @@ class VerificationFixtureTests(unittest.TestCase):
         orderbook = json.loads((FIXTURE_ROOT / "polymarket" / "orderbook.json").read_text(encoding="utf-8"))
         activity = json.loads((FIXTURE_ROOT / "polymarket" / "activity_buy.json").read_text(encoding="utf-8"))
         clob_trades = json.loads((FIXTURE_ROOT / "polymarket" / "clob_trades.json").read_text(encoding="utf-8"))
+        price_history = json.loads((FIXTURE_ROOT / "polymarket" / "price_history.json").read_text(encoding="utf-8"))
 
         self.assertIn("clobTokenIds", market)
         self.assertIn("outcomes", market)
@@ -40,6 +41,8 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("asset", activity)
         self.assertIsInstance(clob_trades.get("data"), list)
         self.assertIn("asset_id", clob_trades["data"][0])
+        self.assertIsInstance(price_history.get("history"), list)
+        self.assertIn("p", price_history["history"][0])
 
     def test_kalshi_fixtures_cover_core_payload_shapes(self) -> None:
         markets = json.loads((FIXTURE_ROOT / "kalshi" / "markets.json").read_text(encoding="utf-8"))

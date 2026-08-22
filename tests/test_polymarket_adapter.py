@@ -116,6 +116,44 @@ class PolymarketAdapterTests(unittest.TestCase):
 
         self.assertIn("explicit L2 headers", str(ctx.exception))
 
+    def test_public_clob_price_history_is_normalized_to_flat_candles(self) -> None:
+        adapter = PolymarketAdapter()
+        history = load_fixture("price_history.json")
+
+        with patch("market_adapters.polymarket.clob_rest.get_price_history", return_value=history) as get_history:
+            result = adapter.list_candles(
+                "token-yes",
+                resolution="1h",
+                from_timestamp=1760000000,
+                to_timestamp=1760000300,
+            )
+
+        get_history.assert_called_once_with(
+            "token-yes",
+            start_ts=1760000000,
+            end_ts=1760000300,
+            interval="1h",
+        )
+        self.assertEqual([candle.timestamp for candle in result], [1760000100.0, 1760000200.0])
+        self.assertEqual([candle.close for candle in result], [0.45, 0.47])
+        self.assertTrue(all(candle.volume is None for candle in result))
+        self.assertEqual(result[0].raw["t"], 1760000100)
+
+    def test_public_clob_price_history_validates_interval_and_range(self) -> None:
+        adapter = PolymarketAdapter()
+
+        with self.assertRaises(MarketConfigurationError) as interval_error:
+            adapter.list_candles("token-yes", resolution="5m")
+        self.assertIn("price-history interval", str(interval_error.exception))
+
+        with self.assertRaises(MarketConfigurationError) as range_error:
+            adapter.list_candles(
+                "token-yes",
+                from_timestamp=1760000300,
+                to_timestamp=1760000000,
+            )
+        self.assertIn("to_timestamp greater than from_timestamp", str(range_error.exception))
+
     def test_get_price_falls_back_to_book_midpoint_when_midpoint_payload_is_bad(self) -> None:
         adapter = PolymarketAdapter()
         book = {

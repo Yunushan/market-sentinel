@@ -8,6 +8,7 @@ from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError
 from .types import (
+    MarketCandle,
     MarketContract,
     MarketEvent,
     MarketTrade,
@@ -23,6 +24,9 @@ from polymarket.auth_readiness import build_clob_auth_readiness, parse_signature
 from polymarket.geoblock import check_geoblock
 from polymarket.http_client import PolymarketValidationError
 from polymarket.trader import PolymarketTrader, TraderConfig
+
+
+POLYMARKET_PRICE_HISTORY_INTERVALS = ("max", "all", "1m", "1w", "1d", "6h", "1h")
 
 
 class PolymarketAdapter(MarketAdapter):
@@ -255,6 +259,69 @@ class PolymarketAdapter(MarketAdapter):
                 )
             )
         return trades
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Return the documented public CLOB price history for one token.
+
+        Polymarket's prices-history response is a price point stream rather
+        than OHLCV bars.  The normalized candle model repeats each point across
+        OHLC and leaves volume unset; the original point is retained in raw.
+        """
+
+        self.ensure_capability("price_reading")
+        token_id = str(contract_id or "").strip()
+        if not token_id:
+            raise MarketConfigurationError("Polymarket price history requires a contract id.")
+        interval = str(resolution or "").strip().lower()
+        if interval not in POLYMARKET_PRICE_HISTORY_INTERVALS:
+            allowed = ", ".join(POLYMARKET_PRICE_HISTORY_INTERVALS)
+            raise MarketConfigurationError(f"Polymarket price-history interval must be one of: {allowed}.")
+
+        start_ts = self._history_timestamp(from_timestamp, "from_timestamp") if from_timestamp is not None else None
+        end_ts = self._history_timestamp(to_timestamp, "to_timestamp") if to_timestamp is not None else None
+        if start_ts is not None and end_ts is not None and end_ts <= start_ts:
+            raise MarketConfigurationError(
+                "Polymarket price history requires to_timestamp greater than from_timestamp."
+            )
+
+        payload = clob_rest.get_price_history(
+            token_id,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            interval=interval,
+        )
+        history = payload.get("history") if isinstance(payload, Mapping) else []
+        if not isinstance(history, list):
+            return []
+
+        candles: List[MarketCandle] = []
+        for row in history:
+            if not isinstance(row, Mapping):
+                continue
+            timestamp = self._history_timestamp_value(row.get("t"))
+            price = self._finite_probability(row.get("p"))
+            if timestamp is None or price is None:
+                continue
+            candles.append(
+                MarketCandle(
+                    market_id=self.market_id,
+                    contract_id=token_id,
+                    timestamp=timestamp,
+                    open=price,
+                    high=price,
+                    low=price,
+                    close=price,
+                    raw=dict(row),
+                )
+            )
+        return candles
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
