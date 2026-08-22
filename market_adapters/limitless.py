@@ -30,6 +30,10 @@ DEFAULT_LIMITLESS_BASE_URL = "https://api.limitless.exchange"
 DEFAULT_LIMITLESS_WS_URL = "wss://ws.limitless.exchange"
 LIMITLESS_WS_NAMESPACE = "/markets"
 LIMITLESS_HISTORY_INTERVALS = ("5m", "1h", "6h", "1d", "1w", "1m", "all")
+LIMITLESS_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "batch_cancel_orders", "cancel_all_orders")
+LIMITLESS_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+LIMITLESS_GLOBAL_CANCEL_CONFIRMATION = "CANCEL ALL LIMITLESS ORDERS"
+LIMITLESS_ORDER_MANAGEMENT_MAX_BATCH = 100
 LIMITLESS_REFERENCES = (
     "https://docs.limitless.exchange/api-reference/markets/browse-active",
     "https://docs.limitless.exchange/developers/sdk/python/markets",
@@ -37,6 +41,9 @@ LIMITLESS_REFERENCES = (
     "https://docs.limitless.exchange/developers/programmatic-api",
     "https://docs.limitless.exchange/developers/migrate-from-polymarket",
     "https://docs.limitless.exchange/developers/quickstart/websocket",
+    "https://docs.limitless.exchange/api-reference/trading/cancel-order",
+    "https://docs.limitless.exchange/api-reference/trading/cancel-batch",
+    "https://docs.limitless.exchange/api-reference/trading/cancel-all",
 )
 
 
@@ -48,6 +55,7 @@ class LimitlessAdapter(MarketAdapter):
     # validated operations.  The shared CLI/API surfaces consume this
     # allow-list so callers cannot request arbitrary authenticated paths.
     account_recovery_operations = ("positions", "account_history", "user_orders")
+    order_management_operations = LIMITLESS_ORDER_MANAGEMENT_OPERATIONS
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -81,6 +89,13 @@ class LimitlessAdapter(MarketAdapter):
                     "/markets/:slug/user-orders",
                 ],
                 "account_recovery_operations": list(self.account_recovery_operations),
+                "authenticated_order_management_endpoints": [
+                    "DELETE /orders/:orderId",
+                    "POST /orders/cancel-batch",
+                    "DELETE /orders/all/:slug",
+                ],
+                "order_management_operations": list(self.order_management_operations),
+                "order_management_enabled": self.config_bool("limitless_order_management_enabled", False),
                 "references": list(LIMITLESS_REFERENCES),
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "credential_sources": credential_sources,
@@ -410,6 +425,84 @@ class LimitlessAdapter(MarketAdapter):
             "response": response,
         }
 
+    def manage_orders(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Run one guarded, documented Limitless order cancellation mutation.
+
+        Limitless exposes cancellation through fixed HMAC-authenticated REST
+        paths.  This method deliberately accepts only the three documented
+        operations and validates every path-bearing identifier before loading
+        credentials or issuing a request.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.order_management_operations:
+            supported = ", ".join(self.order_management_operations)
+            raise MarketConfigurationError(
+                f"Limitless order-management operation must be one of: {supported}."
+            )
+        self.ensure_capability("live_trading")
+        if not self.config_bool("limitless_order_management_enabled", False):
+            raise MarketConfigurationError(
+                "Limitless order management is disabled by adapter config. "
+                "Set limitless_order_management_enabled=true only after reviewing cancellation risk."
+            )
+        self.ensure_live_trading_enabled("Limitless order management")
+        if str(kwargs.get("confirm_order_management") or "").strip() != LIMITLESS_ORDER_MANAGEMENT_CONFIRMATION:
+            raise MarketConfigurationError(
+                "Limitless order management requires exact confirmation text "
+                f"{LIMITLESS_ORDER_MANAGEMENT_CONFIRMATION}."
+            )
+        if bool(kwargs.get("async_request")):
+            raise MarketConfigurationError("Limitless order-management requests are synchronous.")
+
+        request: Dict[str, Any]
+        method: str
+        path: str
+        body = ""
+        if normalized == "cancel_order":
+            order_id = self._order_management_id(kwargs.get("order_id"))
+            request = {"orderId": order_id}
+            method = "DELETE"
+            path = f"/orders/{order_id}"
+        elif normalized == "batch_cancel_orders":
+            order_ids = self._order_management_ids(
+                kwargs.get("order_ids", kwargs.get("orders", kwargs.get("instructions")))
+            )
+            request = {"orderIds": order_ids}
+            method = "POST"
+            path = "/orders/cancel-batch"
+            body = self._canonical_json(request)
+        else:
+            if str(kwargs.get("confirm_global_cancel") or "").strip() != LIMITLESS_GLOBAL_CANCEL_CONFIRMATION:
+                raise MarketConfigurationError(
+                    "Limitless market cancellation requires exact confirmation text "
+                    f"{LIMITLESS_GLOBAL_CANCEL_CONFIRMATION}."
+                )
+            slug = self._validated_market_slug(str(kwargs.get("market_slug") or ""))
+            request = {"marketSlug": slug}
+            method = "DELETE"
+            path = f"/orders/all/{slug}"
+
+        response = self._signed_request(method, path, body=body, content_type=bool(body))
+        return {
+            "market_id": self.market_id,
+            "operation": normalized,
+            "live": True,
+            "preflight": {
+                "market_id": self.market_id,
+                "display_name": self.display_name,
+                "feature": "order management",
+                "operation": normalized,
+                "live_trading_enabled": True,
+                "order_management_enabled": True,
+                "confirmed": True,
+                "requires_credentials": True,
+                "references": list(LIMITLESS_REFERENCES),
+            },
+            "request": request,
+            "response": response,
+        }
+
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
         raise UnsupportedFeatureError(
             self.market_id,
@@ -585,16 +678,20 @@ class LimitlessAdapter(MarketAdapter):
             "lmts-signature": signature,
         }
 
-    def _post_signed_json(self, path: str, payload: Mapping[str, Any], *, body: Optional[str] = None) -> Any:
-        request_body = body if body is not None else self._canonical_json(payload)
-        headers = self._hmac_headers("POST", path, request_body)
-        headers.update({"Accept": "application/json", "Content-Type": "application/json", "User-Agent": self.runtime.user_agent})
+    def _signed_request(self, method: str, path: str, *, body: str = "", content_type: bool = False) -> Any:
+        request_method = str(method or "").strip().upper()
+        if request_method not in {"POST", "DELETE"}:
+            raise MarketConfigurationError("Limitless signed mutation method is not supported.")
+        headers = self._hmac_headers(request_method, path, body)
+        headers.update({"Accept": "application/json", "User-Agent": self.runtime.user_agent})
+        if content_type:
+            headers["Content-Type"] = "application/json"
         self.runtime.rate_limiter.wait()
         try:
             response = self.runtime.session.request(
-                "POST",
+                request_method,
                 self._url(path),
-                data=request_body,
+                data=body,
                 headers=headers,
                 timeout=self.runtime.timeout_seconds,
             )
@@ -609,6 +706,10 @@ class LimitlessAdapter(MarketAdapter):
             return response.json()
         except ValueError as exc:
             raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
+
+    def _post_signed_json(self, path: str, payload: Mapping[str, Any], *, body: Optional[str] = None) -> Any:
+        request_body = body if body is not None else self._canonical_json(payload)
+        return self._signed_request("POST", path, body=request_body, content_type=True)
 
     def _get_account_json(self, path: str, *, on_behalf_of: Optional[str] = None) -> Any:
         """Issue a documented HMAC-authenticated GET for account data."""
@@ -654,6 +755,27 @@ class LimitlessAdapter(MarketAdapter):
         if not slug or len(slug) > 200 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._~-]*", slug):
             raise MarketConfigurationError("Limitless market slug must be a safe URL path segment.")
         return slug
+
+    @staticmethod
+    def _order_management_id(value: Any) -> str:
+        normalized = str(value or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,199}", normalized):
+            raise MarketConfigurationError("Limitless order_id must be a short path-safe identifier.")
+        return normalized
+
+    @classmethod
+    def _order_management_ids(cls, value: Any) -> List[str]:
+        if not isinstance(value, (list, tuple)) or not value:
+            raise MarketConfigurationError("Limitless batch cancellation requires a non-empty order id list.")
+        if len(value) > LIMITLESS_ORDER_MANAGEMENT_MAX_BATCH:
+            raise MarketConfigurationError(
+                "Limitless batch cancellation accepts at most "
+                f"{LIMITLESS_ORDER_MANAGEMENT_MAX_BATCH} order ids."
+            )
+        order_ids = [cls._order_management_id(item) for item in value]
+        if len(set(order_ids)) != len(order_ids):
+            raise MarketConfigurationError("Limitless batch cancellation order ids must be unique.")
+        return order_ids
 
     def _request_path(self, path_or_url: str) -> str:
         parsed = urlparse(path_or_url if "://" in path_or_url else self._url(path_or_url))

@@ -369,8 +369,9 @@
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
+        "limitless_order_management_enabled": false,
         "min_request_interval_seconds": 0.25,
-        "notes": "Read-only market data, orderbooks, and local paper trading are implemented through official Limitless APIs. Live HMAC order posting is guarded by live_trading_enabled and requires environment credentials plus an on-behalf-of profile."
+        "notes": "Official market data, orderbooks, local paper trading, HMAC live order posting, and guarded single/batch/market-scoped cancellation are implemented through documented Limitless APIs. Live order management is disabled by default and requires limitless_order_management_enabled, live_trading_enabled, exact operator/global confirmations, and token credentials."
       }
     },
     "manifold": {

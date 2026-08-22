@@ -1642,6 +1642,7 @@ MYRIAD_ORDER_MANAGEMENT_OPERATIONS = (
     "cancel_all_orders",
     "batch_modify_orders",
 )
+LIMITLESS_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "batch_cancel_orders", "cancel_all_orders")
 MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
     dict.fromkeys(
         BETFAIR_ORDER_MANAGEMENT_OPERATIONS
@@ -1651,6 +1652,7 @@ MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
         + MATCHBOOK_ORDER_MANAGEMENT_OPERATIONS
         + MYRIAD_ORDER_MANAGEMENT_OPERATIONS
         + OPINION_ORDER_MANAGEMENT_OPERATIONS
+        + LIMITLESS_ORDER_MANAGEMENT_OPERATIONS
     )
 )
 
@@ -1669,6 +1671,9 @@ def run_market_order_management(args: argparse.Namespace) -> int:
         payload["market_id"] = polymarket_market_id
     if market_id == "polymarket":
         _put_optional(payload, "asset_id", getattr(args, "asset_id", None))
+    market_slug = str(getattr(args, "market_slug", "") or "").strip()
+    if market_slug:
+        payload["market_slug"] = market_slug
     instructions_value = getattr(args, "instructions", None)
     if instructions_value:
         raw = str(instructions_value)
@@ -2750,12 +2755,13 @@ def build_parser() -> argparse.ArgumentParser:
     market_orders = markets_sub.add_parser(
         "manage-orders",
         parents=[common],
-        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Kalshi, Matchbook, Myriad, Opinion, or Polymarket).",
+        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Kalshi, Limitless, Matchbook, Myriad, Opinion, or Polymarket).",
     )
     market_orders.add_argument("operation", choices=MARKET_ORDER_MANAGEMENT_OPERATIONS)
     market_orders.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
     market_orders.add_argument("--exchange-market-id", default="", help="Betfair exchange market id for the mutation.")
     market_orders.add_argument("--market-id", default="", help="Polymarket condition id for cancel_market_orders.")
+    market_orders.add_argument("--market-slug", default="", help="Limitless market slug for cancel_all_orders.")
     market_orders.add_argument("--asset-id", default="", help="Polymarket token id for cancel_market_orders.")
     market_orders.add_argument(
         "--instructions",
@@ -2768,7 +2774,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_orders.add_argument(
         "--confirm-global-cancel",
         default=None,
-        help="Exact global-cancel text is required (venue-specific; e.g. CANCEL ALL BETS, CANCEL ALL MATCHBOOK OFFERS, or CANCEL ALL OPINION ORDERS).",
+        help="Exact global-cancel text is required (venue-specific; e.g. CANCEL ALL BETS, CANCEL ALL LIMITLESS ORDERS, CANCEL ALL MATCHBOOK OFFERS, or CANCEL ALL OPINION ORDERS).",
     )
     market_orders.add_argument("--order-id", default=None, help="Venue order identifier for single-order mutations.")
     market_orders.add_argument("--offer-id", default=None, help="Matchbook offer identifier for single-offer mutations.")

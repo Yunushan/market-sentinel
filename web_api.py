@@ -3812,6 +3812,9 @@ def market_order_management_payload(
         "async_request": bool_from_setting(payload.get("async_request", payload.get("async")), False),
         "confirm_global_cancel": str(payload.get("confirm_global_cancel") or "").strip(),
     }
+    market_slug = str(payload.get("market_slug") or payload.get("marketSlug") or "").strip()
+    if market_slug:
+        kwargs["market_slug"] = market_slug
     if normalized_market_id == "polymarket":
         kwargs.update(
             {

@@ -70,6 +70,11 @@ class LimitlessAdapterTests(unittest.TestCase):
             health["account_recovery_operations"],
             ["positions", "account_history", "user_orders"],
         )
+        self.assertEqual(
+            health["order_management_operations"],
+            ["cancel_order", "batch_cancel_orders", "cancel_all_orders"],
+        )
+        self.assertFalse(health["order_management_enabled"])
 
     def test_list_events_uses_active_market_endpoint_and_filters_query(self) -> None:
         adapter = self.make_adapter()
@@ -269,6 +274,92 @@ class LimitlessAdapterTests(unittest.TestCase):
         self.assertTrue(headers["lmts-signature"])
         self.assertIn("T", headers["lmts-timestamp"])
         self.assertGreater(timeout, 0)
+
+    def test_order_management_posts_fixed_hmac_cancellation_paths(self) -> None:
+        adapter = self.make_adapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "limitless_order_management_enabled": True,
+                "min_request_interval_seconds": 0,
+            }
+        )
+        calls = []
+
+        def fake_request(method: str, url: str, *, data=None, headers=None, timeout=None):
+            calls.append((method, url, data, headers, timeout))
+            return FakeResponse()
+
+        adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
+        secret = base64.b64encode(b"unit-test-secret").decode("ascii")
+        operator_confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+
+        with patch.dict("os.environ", {"LIMITLESS_TOKEN_ID": "token-id", "LIMITLESS_TOKEN_SECRET": secret}):
+            single = adapter.manage_orders(
+                "cancel_order",
+                order_id="order-1",
+                confirm_order_management=operator_confirmation,
+            )
+            batch = adapter.manage_orders(
+                "batch_cancel_orders",
+                orders=["order-1", "order-2"],
+                confirm_order_management=operator_confirmation,
+            )
+            market = adapter.manage_orders(
+                "cancel_all_orders",
+                market_slug="doge-above-021652-sep-1-1200-utc",
+                confirm_order_management=operator_confirmation,
+                confirm_global_cancel="CANCEL ALL LIMITLESS ORDERS",
+            )
+
+        self.assertEqual(single["request"], {"orderId": "order-1"})
+        self.assertEqual(batch["request"], {"orderIds": ["order-1", "order-2"]})
+        self.assertEqual(market["request"], {"marketSlug": "doge-above-021652-sep-1-1200-utc"})
+        self.assertEqual([call[0] for call in calls], ["DELETE", "POST", "DELETE"])
+        self.assertTrue(calls[0][1].endswith("/orders/order-1"))
+        self.assertTrue(calls[1][1].endswith("/orders/cancel-batch"))
+        self.assertTrue(calls[2][1].endswith("/orders/all/doge-above-021652-sep-1-1200-utc"))
+        self.assertEqual(calls[0][2], "")
+        self.assertEqual(calls[2][2], "")
+        self.assertEqual(calls[1][2], '{"orderIds":["order-1","order-2"]}')
+        self.assertNotIn("Content-Type", calls[0][3])
+        self.assertEqual(calls[1][3]["Content-Type"], "application/json")
+        self.assertTrue(all(call[3]["lmts-signature"] for call in calls))
+        self.assertEqual(single["response"]["orderId"], "order-1")
+
+    def test_order_management_rejects_unsafe_or_unconfirmed_requests_before_http(self) -> None:
+        adapter = self.make_adapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "limitless_order_management_enabled": True,
+            }
+        )
+        calls = []
+
+        def fake_request(method: str, url: str, *, data=None, headers=None, timeout=None):
+            calls.append((method, url))
+            return FakeResponse()
+
+        adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
+        operator_confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders("cancel_order", order_id="../private", confirm_order_management=operator_confirmation)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders(
+                "batch_cancel_orders",
+                orders=["order-1", "order-1"],
+                confirm_order_management=operator_confirmation,
+            )
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders(
+                "cancel_all_orders",
+                market_slug="doge-above-021652-sep-1-1200-utc",
+                confirm_order_management=operator_confirmation,
+                confirm_global_cancel="CANCEL ALL ORDERS",
+            )
+        self.assertEqual(calls, [])
 
     def test_authenticated_portfolio_reads_use_hmac_and_delegation_header(self) -> None:
         adapter = self.make_adapter({"limitless_on_behalf_of": "profile-123"})
