@@ -261,6 +261,7 @@ GEMINI_PREDICTION_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,

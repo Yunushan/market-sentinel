@@ -1193,15 +1193,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         adapter = GeminiPredictionAdapter()
         events = load_fixture("gemini", "events")
         event = load_fixture("gemini", "event")
-        orderbook = load_fixture("gemini", "orderbook")
 
         def fake_get_json(url: str, *, params=None, headers=None):
             if url.endswith("/v1/prediction-markets/events"):
                 return events
             if url.endswith("/v1/prediction-markets/events/BTC100K2026"):
                 return event
-            if url.endswith("/v1/book/GEMI-BTC100K26-YES"):
-                return orderbook
             raise AssertionError(f"unexpected Gemini URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
@@ -1210,6 +1207,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         contracts = adapter.list_contracts("BTC100K2026")
         book = adapter.get_orderbook("BTC100K2026:GEMI-BTC100K26-YES")
         price = adapter.get_price("BTC100K2026:GEMI-BTC100K26-YES")
+        candles = adapter.list_candles(
+            "BTC100K2026:GEMI-BTC100K26-YES",
+            resolution="raw",
+            from_timestamp=1787382000,
+            to_timestamp=1787385600,
+        )
         paper = adapter.place_paper_order(
             PaperOrderRequest("gemini_titan", "BTC100K2026:GEMI-BTC100K26-YES", "BUY", 3, 0.44)
         )
@@ -1218,7 +1221,11 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual([contract.outcome for contract in contracts], ["Yes", "No"])
         self.assertEqual([level.price for level in book.bids], [0.42, 0.4])
         self.assertEqual([level.price for level in book.asks], [0.45, 0.47])
+        self.assertAlmostEqual(price.last or 0.0, 0.44)
         self.assertAlmostEqual(price.midpoint or 0.0, 0.435)
+        self.assertEqual([candle.timestamp for candle in candles], [1787382000.0, 1787385600.0])
+        self.assertEqual([candle.close for candle in candles], [0.4, 0.44])
+        self.assertEqual([candle.volume for candle in candles], [None, None])
         self.assertTrue(paper.accepted)
 
         with self.assertRaises(MarketConfigurationError):

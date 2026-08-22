@@ -6,6 +6,7 @@ import hmac
 import json
 import math
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
@@ -13,6 +14,7 @@ from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
 from .types import (
     MarketContract,
+    MarketCandle,
     MarketEvent,
     OrderBookLevel,
     OrderBookSnapshot,
@@ -24,10 +26,10 @@ from .types import (
 
 DEFAULT_GEMINI_BASE_URL = "https://api.gemini.com"
 GEMINI_REFERENCES = (
-    "https://docs.gemini.com/prediction-markets/markets",
-    "https://docs.gemini.com/rest-api/#current-order-book",
-    "https://developer.gemini.com/rest-api/prediction-markets/order-management/place-order",
-    "https://developer.gemini.com/rest-api/prediction-markets/terms/get-terms-status",
+    "https://developer.gemini.com/prediction-markets-spec",
+    "https://developer.gemini.com/prediction-markets-spec/markets",
+    "https://developer.gemini.com/prediction-markets-spec/trading",
+    "https://developer.gemini.com/prediction-markets-spec/terms",
     "https://developer.gemini.com/prediction-markets/websocket/streams",
 )
 
@@ -77,7 +79,14 @@ class GeminiPredictionAdapter(MarketAdapter):
     def get_orderbook(self, contract_id: str) -> OrderBookSnapshot:
         self.ensure_capability("orderbook_reading")
         event_ticker, instrument_symbol = self._split_contract_id(contract_id)
-        payload = self._get(f"/v1/book/{instrument_symbol}")
+        event = self._get_event(event_ticker)
+        payload = self._contract_orderbook(event, instrument_symbol)
+        if payload is None:
+            raise MarketConfigurationError(
+                f"Gemini event {event_ticker} did not include an orderbook for {instrument_symbol}. "
+                "The documented prediction-market REST contract exposes depth in the event response; "
+                "live streaming depth remains available through the official WebSocket stream."
+            )
         bids = self._book_levels(self._value_at(payload, "bids"), descending=True)
         asks = self._book_levels(self._value_at(payload, "asks"))
         return OrderBookSnapshot(
@@ -91,20 +100,102 @@ class GeminiPredictionAdapter(MarketAdapter):
     def get_price(self, contract_id: str) -> PriceSnapshot:
         self.ensure_capability("price_reading")
         event_ticker, instrument_symbol = self._split_contract_id(contract_id)
-        orderbook = self.get_orderbook(self._contract_id(event_ticker, instrument_symbol))
-        bid = orderbook.bids[0].price if orderbook.bids else None
-        ask = orderbook.asks[0].price if orderbook.asks else None
+        event = self._get_event(event_ticker)
+        contract = self._find_contract(event, instrument_symbol)
+        prices = contract.get("prices") if isinstance(contract.get("prices"), Mapping) else {}
+        bid = self._safe_probability(self._value_at(prices, "bestBid", "best_bid"))
+        ask = self._safe_probability(self._value_at(prices, "bestAsk", "best_ask"))
+        last = self._safe_probability(self._value_at(prices, "lastTradePrice", "last_trade_price"))
+        if bid is None or ask is None:
+            orderbook = self._contract_orderbook(event, instrument_symbol)
+            if orderbook is not None:
+                bids = self._book_levels(self._value_at(orderbook, "bids"), descending=True)
+                asks = self._book_levels(self._value_at(orderbook, "asks"))
+                bid = bid if bid is not None else (bids[0].price if bids else None)
+                ask = ask if ask is not None else (asks[0].price if asks else None)
         midpoint = (bid + ask) / 2.0 if bid is not None and ask is not None else None
+        if last is None:
+            last = midpoint
         return PriceSnapshot(
             market_id=self.market_id,
             contract_id=self._contract_id(event_ticker, instrument_symbol),
-            last=midpoint,
+            last=last,
             bid=bid,
             ask=ask,
             midpoint=midpoint,
-            source="gemini_orderbook",
-            raw=orderbook.raw,
+            source="gemini_prediction_contract",
+            raw={"event": dict(event), "contract": dict(contract)},
         )
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Return Gemini's documented contract price-history points.
+
+        Gemini exposes irregular ``priceHistory`` snapshots on the contract
+        detail response rather than exchange-style OHLCV bars.  Each point is
+        represented as a flat candle and volume is intentionally left unset;
+        no resampling is claimed.
+        """
+
+        self.ensure_capability("candle_history")
+        requested_resolution = str(resolution or "1h").strip().lower()
+        if requested_resolution not in {"raw", "price", "1h", "1d"}:
+            raise MarketConfigurationError(
+                "Gemini price history accepts resolution 'raw', 'price', '1h', or '1d'; "
+                "the irregular official snapshots are not resampled."
+            )
+        lower = self._history_timestamp(from_timestamp, "from_timestamp") if from_timestamp is not None else None
+        upper = self._history_timestamp(to_timestamp, "to_timestamp") if to_timestamp is not None else None
+        if lower is not None and upper is not None and upper < lower:
+            raise MarketConfigurationError("Gemini price history to_timestamp must not precede from_timestamp.")
+
+        event_ticker, instrument_symbol = self._split_contract_id(contract_id)
+        event = self._get_event(event_ticker)
+        contract = self._find_contract(event, instrument_symbol)
+        history = contract.get("priceHistory")
+        if history is None:
+            history = contract.get("price_history")
+        if history is None:
+            raise MarketConfigurationError(
+                f"Gemini event {event_ticker} did not include price history for {instrument_symbol}."
+            )
+        if not isinstance(history, list):
+            raise MarketConfigurationError("Gemini priceHistory must be a list of timestamp/price points.")
+
+        canonical = self._contract_id(event_ticker, instrument_symbol)
+        candles: List[MarketCandle] = []
+        for point in history:
+            if not isinstance(point, Mapping):
+                continue
+            timestamp = self._history_timestamp(point.get("timestamp"), "timestamp")
+            price = self._safe_probability(point.get("price"))
+            if timestamp is None or price is None:
+                continue
+            if lower is not None and timestamp < lower:
+                continue
+            if upper is not None and timestamp > upper:
+                continue
+            candles.append(
+                MarketCandle(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    timestamp=timestamp,
+                    open=price,
+                    high=price,
+                    low=price,
+                    close=price,
+                    volume=None,
+                    raw={"source": "gemini_prediction_markets", "resolution_requested": requested_resolution, **dict(point)},
+                )
+            )
+        candles.sort(key=lambda candle: candle.timestamp)
+        return candles
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -164,6 +255,31 @@ class GeminiPredictionAdapter(MarketAdapter):
                 return data
             return payload
         raise MarketConfigurationError(f"Gemini event {ticker!r} was not found.")
+
+    @classmethod
+    def _find_contract(cls, event: Mapping[str, Any], instrument_symbol: str) -> Mapping[str, Any]:
+        for contract in cls._list_from_payload(event, "contracts"):
+            if cls._instrument_symbol(contract) == instrument_symbol:
+                return contract
+        raise MarketConfigurationError(
+            f"Gemini event {cls._event_ticker(event)!r} did not include contract {instrument_symbol!r}."
+        )
+
+    @classmethod
+    def _contract_orderbook(cls, event: Mapping[str, Any], instrument_symbol: str) -> Optional[Mapping[str, Any]]:
+        contract = cls._find_contract(event, instrument_symbol)
+        for key in ("orderbook", "orderBook", "book"):
+            direct = contract.get(key)
+            if isinstance(direct, Mapping):
+                return direct
+        orderbooks = event.get("contractOrderbooks") or event.get("contract_orderbooks")
+        if isinstance(orderbooks, Mapping):
+            contract_id = str(contract.get("id") or "").strip()
+            contract_ticker = str(contract.get("ticker") or "").strip()
+            for key in (instrument_symbol, contract_id, contract_ticker):
+                if key and isinstance(orderbooks.get(key), Mapping):
+                    return orderbooks[key]
+        return None
 
     def _get(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> Any:
         return self.runtime.get_json(self._url(path), params=params)
@@ -428,6 +544,34 @@ class GeminiPredictionAdapter(MarketAdapter):
                 levels.append(OrderBookLevel(price=parsed_price, size=parsed_size))
         levels.sort(key=lambda level: level.price, reverse=descending)
         return levels
+
+    @staticmethod
+    def _history_timestamp(value: Any, label: str) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            number = float(value)
+            if not math.isfinite(number):
+                return None
+            return number / 1000.0 if number > 100_000_000_000 else number
+        raw = str(value).strip()
+        if not raw:
+            return None
+        try:
+            parsed = float(raw)
+            if math.isfinite(parsed):
+                return parsed / 1000.0 if parsed > 100_000_000_000 else parsed
+        except ValueError:
+            pass
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise MarketConfigurationError(
+                f"Gemini {label} must be a Unix timestamp or ISO-8601 value."
+            ) from exc
 
     @staticmethod
     def _value_at(data: Any, *keys: str) -> Any:

@@ -256,7 +256,7 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 - Supports dry-run paper orders where reliable price data exists; Zeitgeist also exposes a guarded externally signed HybridRouter transaction boundary, off by default and without in-app signing or settlement
 
 ### 11) Additional official adapter support
-- Reads Gemini Prediction Markets events/contracts and orderbooks through official endpoints
+- Reads Gemini Prediction Markets events/contracts, documented contract orderbooks, implied prices, and irregular price-history points through official endpoints; history is exposed as flat candles without fabricated OHLCV resampling
 - Reads Myriad, Opinion, Predict.fun, XO, Betfair, and Limitless market data through their documented APIs; Myriad order-book matches are normalized as public trades, while Limitless historical YES prices are normalized as flat candles with complementary NO prices and finalized public market-event fills are normalized as trades
 - Opinion also has an optional official CLOB SDK path for guarded BNB-chain limit/market orders; all live trading stays off by default and requires explicit opt-in plus documented credentials or pre-signed order payloads
 
@@ -525,7 +525,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | INFER / INFER-pub (`infer`) | Verified blocked | No | No | No | No | No | Required | Account/export access required | Not trading/KYC limited |
 | Fact Machine (`fact_machine`) | Verified blocked | No | No | No | No | No | Required | Wallet/personhood required | Identity/jurisdiction limited |
 | Opinion Labs (`opinion_labs`) | Implemented | Yes | Yes | Yes | Guarded, off by default | Yes, simulation only | Required | API credentials required | Jurisdiction varies |
-| Gemini Titan / Gemini Predictions (`gemini_titan`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Live trading only | Region/KYC limited |
+| Gemini Titan / Gemini Predictions (`gemini_titan`) | Implemented | Yes | Yes (price-history points) | Yes | Guarded, off by default | No | Required | Live trading only | Region/KYC limited |
 | Augur (`augur`) | Implemented | No | Yes | No | No | No | Required | Subgraph endpoint required | Jurisdiction varies |
 | BetMGM (`betmgm`) | Implemented | Yes | Yes | Yes | No | No | Required | Account/API token required | Region/KYC limited |
 | PrizePicks (`prizepicks`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
