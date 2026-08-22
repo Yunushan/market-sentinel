@@ -1170,6 +1170,65 @@ class WebApiTests(unittest.TestCase):
         self.assertTrue(offers["parameters"]["include_edits"])
         self.assertEqual(offers["parameters"]["aggregation_type"], "average")
 
+    def test_matchbook_order_management_payload_forwards_only_documented_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="matchbook",
+            display_name="Matchbook",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_offers", "edit_offer")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["matchbook"].enabled = True
+        batch = market_order_management_payload(
+            cfg,
+            Registry(),
+            "matchbook",
+            "cancel_offers",
+            {
+                "offer_ids": [404, 405],
+                "event_ids": "101",
+                "market_ids": "202",
+                "runner_ids": "303",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(batch["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["offer_ids"], [404, 405])
+        self.assertEqual(calls[0][1]["event_ids"], "101")
+        self.assertNotIn("unexpected", calls[0][1])
+
+        single = market_order_management_payload(
+            cfg,
+            Registry(),
+            "matchbook",
+            "edit_offer",
+            {
+                "offer_id": 404,
+                "current_odds": 1.5,
+                "new_odds": 2.0,
+                "current_stake": 5,
+                "new_stake": 6,
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            },
+        )
+        self.assertEqual(single["operation"], "edit_offer")
+        self.assertEqual(calls[1][1]["offer_id"], 404)
+        self.assertEqual(calls[1][1]["new_stake"], 6)
+
     def test_limitless_account_payload_forwards_delegated_read_parameters(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(

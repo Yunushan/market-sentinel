@@ -208,7 +208,12 @@ export type MarketOrderManagementOperation =
   | "cancel_order"
   | "batch_cancel_orders"
   | "amend_order"
-  | "decrease_order";
+  | "decrease_order"
+  | "cancel_offer"
+  | "cancel_offers"
+  | "cancel_all_offers"
+  | "edit_offer"
+  | "edit_offers";
 
 export interface MarketOrderManagementPayload {
   market_id: string;

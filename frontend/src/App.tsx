@@ -201,6 +201,14 @@ interface MarketReadForm {
   order_management_async: boolean;
   order_management_confirmation: string;
   order_management_order_id: string;
+  order_management_offer_ids: string;
+  order_management_event_ids: string;
+  order_management_market_ids: string;
+  order_management_runner_ids: string;
+  order_management_current_odds: string;
+  order_management_new_odds: string;
+  order_management_current_stake: string;
+  order_management_new_stake: string;
   order_management_ticker: string;
   order_management_side: string;
   order_management_price: string;
@@ -445,6 +453,14 @@ function emptyMarketReadForm(): MarketReadForm {
     order_management_async: false,
     order_management_confirmation: "",
     order_management_order_id: "",
+    order_management_offer_ids: "",
+    order_management_event_ids: "",
+    order_management_market_ids: "",
+    order_management_runner_ids: "",
+    order_management_current_odds: "",
+    order_management_new_odds: "",
+    order_management_current_stake: "",
+    order_management_new_stake: "",
     order_management_ticker: "",
     order_management_side: "bid",
     order_management_price: "",
@@ -769,6 +785,10 @@ export default function App() {
       patch.settings = {
         gemini_order_management_enabled: form.get("gemini_order_management_enabled") === "on"
       };
+    } else if (selectedMarket.market_id === "matchbook") {
+      patch.settings = {
+        matchbook_order_management_enabled: form.get("matchbook_order_management_enabled") === "on"
+      };
     }
     setBusyMarket(selectedMarket.market_id);
     setError(null);
@@ -934,8 +954,13 @@ export default function App() {
     const isKalshi = marketId === "kalshi";
     const isPolymarket = marketId === "polymarket";
     const isGemini = marketId === "gemini_titan";
+    const isMatchbook = marketId === "matchbook";
     let instructions: unknown = [];
-    const needsInstructions = (!isPolymarket && !isGemini) || operation === "cancel_orders" || operation === "batch_cancel_orders";
+    const needsInstructions =
+      (!isPolymarket && !isGemini && !isMatchbook) ||
+      operation === "cancel_orders" ||
+      operation === "batch_cancel_orders" ||
+      (isMatchbook && (operation === "cancel_offers" || operation === "edit_offers"));
     if (needsInstructions) {
       try {
         instructions = JSON.parse(marketReadForm.order_management_instructions || "[]");
@@ -968,6 +993,30 @@ export default function App() {
       setError("Gemini batch cancellation requires at least one numeric order id.");
       return;
     }
+    if (isMatchbook && operation === "cancel_offer" && !marketReadForm.order_management_order_id.trim()) {
+      setError("A Matchbook offer id is required for cancel_offer.");
+      return;
+    }
+    if (isMatchbook && operation === "cancel_offers" && !(instructions as unknown[]).length &&
+      !marketReadForm.order_management_offer_ids.trim() &&
+      !marketReadForm.order_management_event_ids.trim() && !marketReadForm.order_management_market_ids.trim() &&
+      !marketReadForm.order_management_runner_ids.trim()) {
+      setError("Matchbook cancel_offers requires offer ids, offer ids JSON, or a scope filter.");
+      return;
+    }
+    if (isMatchbook && operation === "cancel_all_offers" &&
+      marketReadForm.order_management_confirmation.trim() !== "CANCEL ALL MATCHBOOK OFFERS") {
+      setError("Global Matchbook cancellation requires exact confirmation: CANCEL ALL MATCHBOOK OFFERS.");
+      return;
+    }
+    if (isMatchbook && operation === "edit_offer" && !marketReadForm.order_management_order_id.trim()) {
+      setError("A Matchbook offer id is required for edit_offer.");
+      return;
+    }
+    if (isMatchbook && operation === "edit_offers" && !(instructions as unknown[]).length) {
+      setError("Matchbook edit_offers requires an array of offer edit objects.");
+      return;
+    }
     if (!isKalshi && !isPolymarket && !isGemini && (operation === "update_orders" || operation === "replace_orders") && !marketReadForm.order_management_market_id.trim()) {
       setError("A Betfair exchange market id is required for update and replace operations.");
       return;
@@ -984,9 +1033,9 @@ export default function App() {
       setError("A Kalshi ticker is required for amend_order.");
       return;
     }
-    const warning = !isKalshi && !isPolymarket && !isGemini && operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()
+    const warning = !isKalshi && !isPolymarket && !isGemini && !isMatchbook && operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()
       ? "This submits a GLOBAL Betfair cancellation for the account."
-      : `This submits a live ${isKalshi ? "Kalshi" : isPolymarket ? "Polymarket" : isGemini ? "Gemini" : "Betfair"} ${operation.replaceAll("_", " ")} request.`;
+      : `This submits a live ${isKalshi ? "Kalshi" : isPolymarket ? "Polymarket" : isGemini ? "Gemini" : isMatchbook ? "Matchbook" : "Betfair"} ${operation.replaceAll("_", " ")} request.`;
     if (!window.confirm(`${warning} Continue only if the live-safety gates and request details are intentional.`)) {
       return;
     }
@@ -1006,13 +1055,30 @@ export default function App() {
             orders: operation === "batch_cancel_orders" ? instructions : undefined,
             confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined
           }
+      : isMatchbook
+        ? {
+            order_id: marketReadForm.order_management_order_id.trim() || undefined,
+            offer_id: marketReadForm.order_management_order_id.trim() || undefined,
+            offer_ids: marketReadForm.order_management_offer_ids.trim() || undefined,
+            orders: operation === "cancel_offers" && (instructions as unknown[]).length ? instructions : undefined,
+            instructions: operation === "edit_offers" ? instructions : undefined,
+            event_ids: marketReadForm.order_management_event_ids.trim() || undefined,
+            market_ids: marketReadForm.order_management_market_ids.trim() || undefined,
+            runner_ids: marketReadForm.order_management_runner_ids.trim() || undefined,
+            current_odds: marketReadForm.order_management_current_odds.trim() || undefined,
+            new_odds: marketReadForm.order_management_new_odds.trim() || undefined,
+            current_stake: marketReadForm.order_management_current_stake.trim() || undefined,
+            new_stake: marketReadForm.order_management_new_stake.trim() || undefined,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined,
+            confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
+          }
       : {
           market_id: marketReadForm.order_management_market_id.trim() || undefined,
           instructions,
           customer_ref: marketReadForm.order_management_customer_ref.trim() || undefined,
           confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
         };
-    if (!isKalshi && !isPolymarket && !isGemini && marketReadForm.order_management_market_version.trim()) {
+    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && marketReadForm.order_management_market_version.trim()) {
       const version = Number(marketReadForm.order_management_market_version.trim());
       if (!Number.isInteger(version) || version < 1) {
         setError("Market version must be a positive integer.");
@@ -1020,7 +1086,7 @@ export default function App() {
       }
       payload.market_version = version;
     }
-    if (!isKalshi && !isPolymarket && !isGemini && marketReadForm.order_management_async) {
+    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && marketReadForm.order_management_async) {
       payload.async_request = true;
     }
     if (isKalshi) {
@@ -2166,6 +2232,15 @@ function MarketsView({
                 />
                 <span>Enable Gemini order management</span>
               </label>
+            ) : selectedMarket.market_id === "matchbook" ? (
+              <label className="check-row">
+                <input
+                  name="matchbook_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Matchbook order management</span>
+              </label>
             ) : null}
             <label>
               <span>Max size</span>
@@ -2506,9 +2581,11 @@ function MarketsView({
                       ? "Kalshi mutations are disabled by default and require the shared live-safety gates, Kalshi-specific opt-in, and exact operator confirmation."
                       : selectedMarket.market_id === "polymarket"
                         ? "Polymarket CLOB cancellations are disabled by default and require the shared live-safety gates, explicit L2 headers, a separate opt-in, and exact operator confirmation."
-                        : selectedMarket.market_id === "gemini_titan"
-                          ? "Gemini cancellations are disabled by default and require the shared live-safety gates, Gemini-specific opt-in, authenticated Trader credentials, and exact operator confirmation."
-                          : "Betfair mutations are disabled by default and require the shared live-safety gates plus the Betfair-specific opt-in. The UI never sends a request without explicit confirmation."}
+                          : selectedMarket.market_id === "gemini_titan"
+                            ? "Gemini cancellations are disabled by default and require the shared live-safety gates, Gemini-specific opt-in, authenticated Trader credentials, and exact operator confirmation."
+                            : selectedMarket.market_id === "matchbook"
+                              ? "Matchbook offer cancellation and edits are disabled by default and require the shared live-safety gates, Matchbook-specific opt-in, a session, and exact operator confirmation."
+                              : "Betfair mutations are disabled by default and require the shared live-safety gates plus the Betfair-specific opt-in. The UI never sends a request without explicit confirmation."}
                   </p>
                 </div>
                 <StatusPill tone={selectedMarket.health.order_management_enabled ? "warn" : "neutral"}>
@@ -2701,6 +2778,107 @@ function MarketsView({
                         rows={3}
                         spellCheck={false}
                         placeholder='[106817811, 106817812]'
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "matchbook" ? (
+                  <>
+                    <label>
+                      <span>Offer id</span>
+                      <input
+                        value={marketReadForm.order_management_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_order_id: event.target.value })}
+                        placeholder="Positive numeric id"
+                      />
+                    </label>
+                    <label>
+                      <span>Offer ids (cancel_offers)</span>
+                      <input
+                        value={marketReadForm.order_management_offer_ids}
+                        onChange={(event) => onMarketReadFormChange({ order_management_offer_ids: event.target.value })}
+                        placeholder="404,405"
+                      />
+                    </label>
+                    <label>
+                      <span>Event ids filter</span>
+                      <input
+                        value={marketReadForm.order_management_event_ids}
+                        onChange={(event) => onMarketReadFormChange({ order_management_event_ids: event.target.value })}
+                        placeholder="101"
+                      />
+                    </label>
+                    <label>
+                      <span>Market ids filter</span>
+                      <input
+                        value={marketReadForm.order_management_market_ids}
+                        onChange={(event) => onMarketReadFormChange({ order_management_market_ids: event.target.value })}
+                        placeholder="202"
+                      />
+                    </label>
+                    <label>
+                      <span>Runner ids filter</span>
+                      <input
+                        value={marketReadForm.order_management_runner_ids}
+                        onChange={(event) => onMarketReadFormChange({ order_management_runner_ids: event.target.value })}
+                        placeholder="303"
+                      />
+                    </label>
+                    <label>
+                      <span>Current odds (edit)</span>
+                      <input
+                        value={marketReadForm.order_management_current_odds}
+                        onChange={(event) => onMarketReadFormChange({ order_management_current_odds: event.target.value })}
+                        placeholder="1.50"
+                      />
+                    </label>
+                    <label>
+                      <span>New odds (edit)</span>
+                      <input
+                        value={marketReadForm.order_management_new_odds}
+                        onChange={(event) => onMarketReadFormChange({ order_management_new_odds: event.target.value })}
+                        placeholder="2.00"
+                      />
+                    </label>
+                    <label>
+                      <span>Current stake (edit)</span>
+                      <input
+                        value={marketReadForm.order_management_current_stake}
+                        onChange={(event) => onMarketReadFormChange({ order_management_current_stake: event.target.value })}
+                        placeholder="5"
+                      />
+                    </label>
+                    <label>
+                      <span>New stake (edit)</span>
+                      <input
+                        value={marketReadForm.order_management_new_stake}
+                        onChange={(event) => onMarketReadFormChange({ order_management_new_stake: event.target.value })}
+                        placeholder="6"
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Offer edits JSON (edit_offers)</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={3}
+                        spellCheck={false}
+                        placeholder='[{"id":404,"current-odds":1.5,"new-odds":2,"current-stake":5,"new-stake":6}]'
+                      />
+                    </label>
+                    <label>
+                      <span>Global cancellation confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_confirmation: event.target.value })}
+                        placeholder="CANCEL ALL MATCHBOOK OFFERS"
                       />
                     </label>
                     <label className="wide-field">

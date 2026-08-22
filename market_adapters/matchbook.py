@@ -28,6 +28,22 @@ from .types import (
 
 DEFAULT_MATCHBOOK_API_BASE_URL = "https://api.matchbook.com/edge/rest"
 DEFAULT_MATCHBOOK_LOGIN_BASE_URL = "https://api.matchbook.com/bpapi/rest"
+MATCHBOOK_ORDER_MANAGEMENT_OPERATIONS = (
+    "cancel_offer",
+    "cancel_offers",
+    "cancel_all_offers",
+    "edit_offer",
+    "edit_offers",
+)
+MATCHBOOK_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+MATCHBOOK_GLOBAL_CANCEL_CONFIRMATION = "CANCEL ALL MATCHBOOK OFFERS"
+MATCHBOOK_ORDER_MANAGEMENT_MAX_BATCH = 100
+MATCHBOOK_ORDER_MANAGEMENT_REFERENCES = (
+    "https://developers.matchbook.com/reference/cancel-offer-v2",
+    "https://developers.matchbook.com/reference/cancel-offers-v2",
+    "https://developers.matchbook.com/reference/edit-offer-v2",
+    "https://developers.matchbook.com/reference/edit-offers-v2",
+)
 MATCHBOOK_REFERENCES = (
     "https://developers.matchbook.com/",
     "https://developers.matchbook.com/reference/get-events",
@@ -41,6 +57,7 @@ MATCHBOOK_REFERENCES = (
     "https://developers.matchbook.com/reference/get-current-bets-v2",
     "https://developers.matchbook.com/reference/get-offers-v2",
     "https://developers.matchbook.com/reference/get-current-offers-v2",
+    *MATCHBOOK_ORDER_MANAGEMENT_REFERENCES,
     "https://developers.matchbook.com/reference/get-new-wallet-balance",
     "https://developers.matchbook.com/reference/get-account",
 )
@@ -50,6 +67,7 @@ class MatchbookAdapter(MarketAdapter):
     """Matchbook REST adapter with guarded session-authenticated offers."""
 
     live_order_sides = ("BUY", "SELL", "BACK", "LAY")
+    order_management_operations = MATCHBOOK_ORDER_MANAGEMENT_OPERATIONS
     metadata = get_market_metadata("matchbook")
     account_recovery_operations = (
         "settled_bets",
@@ -87,12 +105,18 @@ class MatchbookAdapter(MarketAdapter):
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "session_token_required_for_live": True,
                 "account_recovery_operations": list(self.account_recovery_operations),
+                "order_management_operations": list(self.order_management_operations),
+                "order_management_enabled": self.config_bool("matchbook_order_management_enabled", False),
                 "authenticated_account_endpoints": [
                     "/reports/v2/bets/settled",
                     "/reports/v2/bets/current",
                     "/v2/offers",
                     "/account/balance",
                     "/account",
+                ],
+                "authenticated_order_management_endpoints": [
+                    "/v2/offers/{offer_id}",
+                    "/v2/offers",
                 ],
             }
         )
@@ -425,6 +449,94 @@ class MatchbookAdapter(MarketAdapter):
         supported = ", ".join(self.account_recovery_operations)
         raise MarketConfigurationError(f"Matchbook account recovery supports only: {supported}.")
 
+    def manage_orders(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Run one guarded Matchbook offer cancellation or edit mutation.
+
+        Matchbook exposes fixed ``DELETE`` and ``PUT`` offer endpoints.  The
+        adapter accepts only the documented operation allow-list and validates
+        every identifier, filter, odds, and stake locally before sending a
+        session-authenticated request.  No caller-provided URL or HTTP method
+        is accepted.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.order_management_operations:
+            supported = ", ".join(self.order_management_operations)
+            raise MarketConfigurationError(
+                f"Matchbook order-management operation must be one of: {supported}."
+            )
+        self.ensure_capability("live_trading")
+        if not self.config_bool("matchbook_order_management_enabled", False):
+            raise MarketConfigurationError(
+                "Matchbook order management is disabled by adapter config. "
+                "Set matchbook_order_management_enabled=true only after reviewing offer mutation risk."
+            )
+        self.ensure_live_trading_enabled("Matchbook order management")
+        if str(kwargs.get("confirm_order_management") or "").strip() != MATCHBOOK_ORDER_MANAGEMENT_CONFIRMATION:
+            raise MarketConfigurationError(
+                "Matchbook order management requires exact confirmation text "
+                f"{MATCHBOOK_ORDER_MANAGEMENT_CONFIRMATION}."
+            )
+        if bool(kwargs.get("async_request")):
+            raise MarketConfigurationError("Matchbook order-management requests are synchronous.")
+
+        request_params: Dict[str, Any] = {}
+        request_body: Optional[Dict[str, Any]] = None
+        if normalized == "cancel_offer":
+            offer_id = self._order_management_id(kwargs.get("offer_id", kwargs.get("order_id")))
+            path = f"/v2/offers/{offer_id}"
+            response = self._request_json("DELETE", path, auth=True)
+            request_params = {"offer_id": offer_id}
+        elif normalized == "cancel_offers":
+            request_params = self._cancel_offer_filters(kwargs)
+            if not request_params:
+                raise MarketConfigurationError(
+                    "Matchbook cancel_offers requires offer_ids or at least one event_ids, market_ids, or runner_ids filter."
+                )
+            response = self._request_json("DELETE", "/v2/offers", params=request_params, auth=True)
+        elif normalized == "cancel_all_offers":
+            if str(kwargs.get("confirm_global_cancel") or "").strip() != MATCHBOOK_GLOBAL_CANCEL_CONFIRMATION:
+                raise MarketConfigurationError(
+                    "Matchbook global cancellation requires exact confirmation text "
+                    f"{MATCHBOOK_GLOBAL_CANCEL_CONFIRMATION}."
+                )
+            response = self._request_json("DELETE", "/v2/offers", auth=True)
+        elif normalized == "edit_offer":
+            offer_id = self._order_management_id(kwargs.get("offer_id", kwargs.get("order_id")))
+            request_body = self._offer_edit_payload(
+                {key: value for key, value in kwargs.items() if key not in {"id", "offer_id", "offer-id", "order_id"}},
+                require_id=False,
+            )
+            response = self._request_json("PUT", f"/v2/offers/{offer_id}", body=request_body, auth=True)
+            request_params = {"offer_id": offer_id}
+        else:
+            offers_value = kwargs.get("offers", kwargs.get("instructions"))
+            offers = self._offer_edit_list(offers_value)
+            request_body = {"offers": offers}
+            response = self._request_json("PUT", "/v2/offers", body=request_body, auth=True)
+
+        return {
+            "market_id": self.market_id,
+            "operation": normalized,
+            "live": True,
+            "preflight": {
+                "market_id": self.market_id,
+                "display_name": self.display_name,
+                "feature": "order management",
+                "operation": normalized,
+                "live_trading_enabled": True,
+                "order_management_enabled": True,
+                "confirmed": True,
+                "requires_credentials": True,
+                "references": list(MATCHBOOK_ORDER_MANAGEMENT_REFERENCES),
+            },
+            "request": {
+                "params": request_params,
+                "body": request_body,
+            },
+            "response": response,
+        }
+
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
         self._validate_order(order)
@@ -577,6 +689,128 @@ class MatchbookAdapter(MarketAdapter):
             raise MarketConfigurationError("Matchbook login response did not include a session token.")
         self._session_token = str(session)
         return self._session_token
+
+    @classmethod
+    def _order_management_id(cls, value: Any) -> int:
+        if isinstance(value, bool):
+            raise MarketConfigurationError("Matchbook offer id must be a positive integer.")
+        text = str(value or "").strip()
+        if not text.isdigit():
+            raise MarketConfigurationError("Matchbook offer id must be a positive integer.")
+        parsed = int(text)
+        if parsed < 1 or parsed > 9_223_372_036_854_775_807:
+            raise MarketConfigurationError("Matchbook offer id must be a positive signed int64.")
+        return parsed
+
+    @classmethod
+    def _order_management_ids(cls, value: Any, *, label: str = "offer_ids") -> List[int]:
+        if isinstance(value, str):
+            values: Any = [part.strip() for part in value.split(",") if part.strip()]
+        elif isinstance(value, (list, tuple)):
+            values = list(value)
+        else:
+            raise MarketConfigurationError(f"Matchbook {label} must be a list or comma-separated string of ids.")
+        if not values or len(values) > MATCHBOOK_ORDER_MANAGEMENT_MAX_BATCH:
+            raise MarketConfigurationError(
+                f"Matchbook {label} must contain between 1 and {MATCHBOOK_ORDER_MANAGEMENT_MAX_BATCH} ids."
+            )
+        parsed = [cls._order_management_id(item) for item in values]
+        if len(set(parsed)) != len(parsed):
+            raise MarketConfigurationError(f"Matchbook {label} must not contain duplicate ids.")
+        return parsed
+
+    @classmethod
+    def _order_management_float(cls, value: Any, label: str, *, minimum: float = 0.0) -> float:
+        if isinstance(value, bool):
+            raise MarketConfigurationError(f"Matchbook {label} must be a finite number.")
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Matchbook {label} must be a finite number.") from exc
+        if not math.isfinite(parsed) or parsed <= minimum:
+            comparator = "greater than" if minimum else "greater than or equal to"
+            raise MarketConfigurationError(f"Matchbook {label} must be {comparator} {minimum:g}.")
+        if parsed > 1_000_000_000_000:
+            raise MarketConfigurationError(f"Matchbook {label} is outside the supported range.")
+        return parsed
+
+    @classmethod
+    def _offer_edit_payload(cls, value: Mapping[str, Any], *, require_id: bool) -> Dict[str, Any]:
+        offer_id_value = value.get("id", value.get("offer_id", value.get("offer-id")))
+        payload: Dict[str, Any] = {}
+        if require_id or offer_id_value not in (None, ""):
+            payload["id"] = cls._order_management_id(offer_id_value)
+        aliases = (
+            ("current-odds", "current_odds"),
+            ("new-odds", "new_odds"),
+            ("current-stake", "current_stake"),
+            ("new-stake", "new_stake"),
+        )
+        for target, alias in aliases:
+            raw = value.get(target, value.get(alias))
+            if raw in (None, ""):
+                raise MarketConfigurationError(f"Matchbook offer edit requires {target}.")
+            minimum = 1.0 if target.endswith("odds") else 0.0
+            payload[target] = cls._order_management_float(raw, target, minimum=minimum)
+        return payload
+
+    @classmethod
+    def _offer_edit_list(cls, value: Any) -> List[Dict[str, Any]]:
+        if not isinstance(value, (list, tuple)):
+            raise MarketConfigurationError("Matchbook edit_offers requires an array of offer edits.")
+        if not value or len(value) > MATCHBOOK_ORDER_MANAGEMENT_MAX_BATCH:
+            raise MarketConfigurationError(
+                f"Matchbook edit_offers requires between 1 and {MATCHBOOK_ORDER_MANAGEMENT_MAX_BATCH} edits."
+            )
+        edits: List[Dict[str, Any]] = []
+        seen: set[int] = set()
+        for item in value:
+            if not isinstance(item, Mapping):
+                raise MarketConfigurationError("Matchbook each offer edit must be a JSON object.")
+            payload = cls._offer_edit_payload(item, require_id=True)
+            offer_id = int(payload["id"])
+            if offer_id in seen:
+                raise MarketConfigurationError("Matchbook edit_offers must not contain duplicate offer ids.")
+            seen.add(offer_id)
+            edits.append(payload)
+        return edits
+
+    @classmethod
+    def _cancel_offer_filter(cls, value: Any, label: str) -> str:
+        if isinstance(value, (list, tuple)):
+            values = list(value)
+        elif isinstance(value, str):
+            values = [part.strip() for part in value.split(",") if part.strip()]
+        else:
+            raise MarketConfigurationError(f"Matchbook {label} must be a list or comma-separated string of ids.")
+        if not values or len(values) > MATCHBOOK_ORDER_MANAGEMENT_MAX_BATCH:
+            raise MarketConfigurationError(
+                f"Matchbook {label} must contain between 1 and {MATCHBOOK_ORDER_MANAGEMENT_MAX_BATCH} ids."
+            )
+        parsed = [cls._order_management_id(item) for item in values]
+        if len(set(parsed)) != len(parsed):
+            raise MarketConfigurationError(f"Matchbook {label} must not contain duplicate ids.")
+        return ",".join(str(item) for item in parsed)
+
+    @classmethod
+    def _cancel_offer_filters(cls, kwargs: Mapping[str, Any]) -> Dict[str, Any]:
+        values: Dict[str, Any] = {}
+        offer_ids = kwargs.get("offer_ids")
+        if offer_ids is None:
+            offer_ids = kwargs.get("orders", kwargs.get("instructions"))
+        if offer_ids not in (None, "", []):
+            values["offer-ids"] = cls._cancel_offer_filter(offer_ids, "offer_ids")
+        for key, parameter in (
+            ("event_ids", "event-ids"),
+            ("market_ids", "market-ids"),
+            ("runner_ids", "runner-ids"),
+        ):
+            raw = kwargs.get(key)
+            if raw not in (None, "", []):
+                if "offer-ids" in values:
+                    raise MarketConfigurationError("Matchbook cancel_offers accepts offer_ids or scope filters, not both.")
+                values[parameter] = cls._cancel_offer_filter(raw, key)
+        return values
 
     def _account_bet_params(
         self,

@@ -353,6 +353,79 @@ class MarketSentinelCliTests(unittest.TestCase):
         self.assertEqual(calls[1][1]["confirm_order_management"], confirmation)
         self.assertNotIn("instructions", calls[1][1])
 
+    def test_matchbook_order_management_command_forwards_offer_mutation_fields(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="matchbook")
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"operation": operation, "request": kwargs}
+
+        adapter = SimpleNamespace(
+            order_management_operations=(
+                "cancel_offer",
+                "cancel_offers",
+                "cancel_all_offers",
+                "edit_offer",
+                "edit_offers",
+            ),
+            manage_orders=manage_orders,
+        )
+        confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "cancel_offers",
+                        "--market",
+                        "matchbook",
+                        "--offer-ids",
+                        "404,405",
+                        "--confirm-order-management",
+                        confirmation,
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls[0][0], "cancel_offers")
+        self.assertEqual(calls[0][1]["offer_ids"], "404,405")
+        self.assertEqual(calls[0][1]["confirm_order_management"], confirmation)
+
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "edit_offers",
+                        "--market",
+                        "matchbook",
+                        "--instructions",
+                        '[{"id":404,"current-odds":1.5,"new-odds":2,"current-stake":5,"new-stake":6}]',
+                        "--confirm-order-management",
+                        confirmation,
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls[1][0], "edit_offers")
+        self.assertEqual(calls[1][1]["instructions"][0]["id"], 404)
+        self.assertEqual(calls[1][1]["confirm_order_management"], confirmation)
+
     def test_hyperliquid_account_command_forwards_dex_and_history_limit(self) -> None:
         cfg = SimpleNamespace(selected_market_id="hyperliquid")
         adapter = SimpleNamespace(

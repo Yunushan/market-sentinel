@@ -1624,12 +1624,20 @@ POLYMARKET_ORDER_MANAGEMENT_OPERATIONS = (
     "cancel_market_orders",
 )
 GEMINI_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "batch_cancel_orders")
+MATCHBOOK_ORDER_MANAGEMENT_OPERATIONS = (
+    "cancel_offer",
+    "cancel_offers",
+    "cancel_all_offers",
+    "edit_offer",
+    "edit_offers",
+)
 MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
     dict.fromkeys(
         BETFAIR_ORDER_MANAGEMENT_OPERATIONS
         + KALSHI_ORDER_MANAGEMENT_OPERATIONS
         + POLYMARKET_ORDER_MANAGEMENT_OPERATIONS
         + GEMINI_ORDER_MANAGEMENT_OPERATIONS
+        + MATCHBOOK_ORDER_MANAGEMENT_OPERATIONS
     )
 )
 
@@ -1669,6 +1677,15 @@ def run_market_order_management(args: argparse.Namespace) -> int:
     _put_optional(payload, "confirm_global_cancel", getattr(args, "confirm_global_cancel", None))
     for key, argument in (
         ("order_id", "order_id"),
+        ("offer_id", "offer_id"),
+        ("offer_ids", "offer_ids"),
+        ("event_ids", "event_ids"),
+        ("market_ids", "market_ids"),
+        ("runner_ids", "runner_ids"),
+        ("current_odds", "current_odds"),
+        ("new_odds", "new_odds"),
+        ("current_stake", "current_stake"),
+        ("new_stake", "new_stake"),
         ("ticker", "ticker"),
         ("side", "side"),
         ("price", "price"),
@@ -2701,7 +2718,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_orders = markets_sub.add_parser(
         "manage-orders",
         parents=[common],
-        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Kalshi, or Polymarket).",
+        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Kalshi, Matchbook, or Polymarket).",
     )
     market_orders.add_argument("operation", choices=MARKET_ORDER_MANAGEMENT_OPERATIONS)
     market_orders.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
@@ -2719,9 +2736,18 @@ def build_parser() -> argparse.ArgumentParser:
     market_orders.add_argument(
         "--confirm-global-cancel",
         default=None,
-        help="Exact text CANCEL ALL BETS is required for a Betfair all-account cancellation.",
+        help="Exact text CANCEL ALL BETS (Betfair) or CANCEL ALL MATCHBOOK OFFERS is required for global cancellation.",
     )
     market_orders.add_argument("--order-id", default=None, help="Venue order identifier for single-order mutations.")
+    market_orders.add_argument("--offer-id", default=None, help="Matchbook offer identifier for single-offer mutations.")
+    market_orders.add_argument("--offer-ids", default=None, help="Matchbook comma-separated offer ids for cancel_offers.")
+    market_orders.add_argument("--event-ids", default=None, help="Matchbook comma-separated event ids for scoped cancellation.")
+    market_orders.add_argument("--market-ids", default=None, help="Matchbook comma-separated market ids for scoped cancellation.")
+    market_orders.add_argument("--runner-ids", default=None, help="Matchbook comma-separated runner ids for scoped cancellation.")
+    market_orders.add_argument("--current-odds", default=None, help="Matchbook edit_offer current decimal odds.")
+    market_orders.add_argument("--new-odds", default=None, help="Matchbook edit_offer replacement decimal odds.")
+    market_orders.add_argument("--current-stake", default=None, help="Matchbook edit_offer current remaining stake.")
+    market_orders.add_argument("--new-stake", default=None, help="Matchbook edit_offer replacement remaining stake.")
     market_orders.add_argument("--trade-id", default=None, help="Polymarket trade id for account fills reads.")
     market_orders.add_argument("--ticker", default=None, help="Kalshi market ticker for amend_order.")
     market_orders.add_argument("--side", choices=["bid", "ask"], default=None, help="Kalshi V2 amend side.")
@@ -2736,7 +2762,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_orders.add_argument(
         "--confirm-order-management",
         default=None,
-        help="Exact Kalshi text I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS is required for mutations.",
+        help="Exact text I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS is required for live mutations.",
     )
     market_orders.add_argument("--json", default=None, help="Inline JSON object or @file to merge before explicit flags.")
     _add_json_output_args(market_orders)

@@ -580,7 +580,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | SportsTrade (`sportstrade`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
 | Prophet Exchange (`prophet_exchange`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | API credentials required | Region/KYC limited |
 | Sporttrade Prediction / Exchange Products (`sporttrade_products`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
-| Matchbook (`matchbook`) | Implemented | Yes | Yes | Yes (matched, settled/current bets) | Guarded, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
+| Matchbook (`matchbook`) | Implemented | Yes | Yes | Yes (matched, settled/current bets) | Guarded, off by default; cancel/edit offer mutations are separately opt-in | No | Required | Exchange account/API keys | Region/KYC limited |
 | Meta Arena (`meta_arena`) | Verified blocked | No | No | No | No | No | Required | Account required | Jurisdiction varies |
 
 ## Verification

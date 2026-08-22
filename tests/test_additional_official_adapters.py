@@ -1265,6 +1265,105 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         with self.assertRaises(UnsupportedFeatureError):
             live_adapter.copy_trade_from_activity({"side": "BUY"})
 
+    def test_matchbook_order_management_uses_fixed_cancel_and_edit_contracts(self) -> None:
+        confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+        adapter = MatchbookAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "matchbook_order_management_enabled": True,
+            }
+        )
+        calls = []
+
+        def fake_request(method: str, url: str, *, params=None, json=None, headers=None, timeout=None):
+            calls.append((method, url, params, json, headers, timeout))
+            if method == "DELETE" and url.endswith("/v2/offers/404"):
+                return FakeResponse(load_fixture("matchbook", "cancel_offer_response"))
+            if method == "DELETE" and url.endswith("/v2/offers"):
+                if params and params.get("offer-ids") == "404,405":
+                    return FakeResponse(load_fixture("matchbook", "cancel_offers_response"))
+                return FakeResponse(load_fixture("matchbook", "cancel_all_offers_response"))
+            if method == "PUT" and url.endswith("/v2/offers/404"):
+                return FakeResponse(load_fixture("matchbook", "edit_offer_response"))
+            if method == "PUT" and url.endswith("/v2/offers"):
+                return FakeResponse(load_fixture("matchbook", "edit_offers_response"))
+            raise AssertionError(f"unexpected Matchbook mutation request: {method} {url}")
+
+        adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"MATCHBOOK_SESSION_TOKEN": "session-123"}):
+            cancelled = adapter.manage_orders(
+                "cancel_offer",
+                order_id=404,
+                confirm_order_management=confirmation,
+            )
+            cancelled_batch = adapter.manage_orders(
+                "cancel_offers",
+                offer_ids=[404, 405],
+                confirm_order_management=confirmation,
+            )
+            with self.assertRaises(MarketConfigurationError):
+                adapter.manage_orders(
+                    "cancel_all_offers",
+                    confirm_order_management=confirmation,
+                    confirm_global_cancel="wrong",
+                )
+            cancelled_all = adapter.manage_orders(
+                "cancel_all_offers",
+                confirm_order_management=confirmation,
+                confirm_global_cancel="CANCEL ALL MATCHBOOK OFFERS",
+            )
+            edited = adapter.manage_orders(
+                "edit_offer",
+                order_id=404,
+                current_odds=1.5,
+                new_odds=2.0,
+                current_stake=5,
+                new_stake=6,
+                confirm_order_management=confirmation,
+            )
+            edited_batch = adapter.manage_orders(
+                "edit_offers",
+                offers=[
+                    {
+                        "id": 404,
+                        "current-odds": 1.5,
+                        "new-odds": 2.0,
+                        "current-stake": 5,
+                        "new-stake": 6,
+                    }
+                ],
+                confirm_order_management=confirmation,
+            )
+
+        self.assertTrue(cancelled["live"])
+        self.assertEqual(cancelled["response"]["offers"][0]["status"], "cancelled")
+        self.assertEqual(cancelled_batch["response"]["offers"][0]["id"], 404)
+        self.assertEqual(cancelled_all["response"]["cancelled"], "all")
+        self.assertEqual(edited["request"]["body"]["new-odds"], 2.0)
+        self.assertEqual(edited_batch["request"]["body"]["offers"][0]["id"], 404)
+        self.assertEqual(calls[0][0], "DELETE")
+        self.assertTrue(calls[0][1].endswith("/v2/offers/404"))
+        self.assertEqual(calls[1][2]["offer-ids"], "404,405")
+        self.assertEqual(calls[2][0], "DELETE")
+        self.assertEqual(calls[2][2], None)
+        self.assertEqual(calls[3][0], "PUT")
+        self.assertEqual(calls[3][3]["current-odds"], 1.5)
+        self.assertEqual(calls[4][0], "PUT")
+        self.assertEqual(calls[4][3]["offers"][0]["new-stake"], 6.0)
+        self.assertEqual(calls[0][4]["session-token"], "session-123")
+        self.assertEqual(adapter.health_check()["order_management_operations"], [
+            "cancel_offer",
+            "cancel_offers",
+            "cancel_all_offers",
+            "edit_offer",
+            "edit_offers",
+        ])
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders("cancel_offers", offer_ids=[404, 404], confirm_order_management=confirmation)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders("edit_offers", offers=[{"id": 404}], confirm_order_management=confirmation)
+
     def test_probable_adapter_maps_events_tokens_orderbooks_paper_orders_and_guarded_signed_orders(self) -> None:
         adapter = ProbableAdapter()
         events = load_fixture("probable", "events")

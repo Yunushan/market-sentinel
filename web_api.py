@@ -3821,6 +3821,15 @@ def market_order_management_payload(
         )
     for key in (
         "order_id",
+        "offer_id",
+        "offer_ids",
+        "event_ids",
+        "market_ids",
+        "runner_ids",
+        "current_odds",
+        "new_odds",
+        "current_stake",
+        "new_stake",
         "ticker",
         "side",
         "price",

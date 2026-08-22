@@ -914,7 +914,8 @@
         "adapter_status": "implemented",
         "credential_env_vars": ["MATCHBOOK_SESSION_TOKEN", "MATCHBOOK_USERNAME", "MATCHBOOK_PASSWORD", "MATCHBOOK_MFA_CODE"],
         "live_trading_enabled": false,
-        "notes": "Official Matchbook event/market/runner discovery, decimal-odds prices, orderbooks, alerts, paper orders, and guarded session-authenticated offer submission are implemented. Account session, region eligibility, API terms, and funded execution remain external gates."
+        "matchbook_order_management_enabled": false,
+        "notes": "Official Matchbook event/market/runner discovery, decimal-odds prices, orderbooks, alerts, paper orders, guarded session-authenticated offer submission, and fixed cancel/edit offer mutations are implemented. Account session, region eligibility, API terms, and funded execution remain external gates; order management is opt-in and disabled by default."
       }
     },
     "meta_arena": {
