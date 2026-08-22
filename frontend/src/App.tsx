@@ -817,6 +817,10 @@ export default function App() {
       patch.settings = {
         limitless_order_management_enabled: form.get("limitless_order_management_enabled") === "on"
       };
+    } else if (selectedMarket.market_id === "smarkets") {
+      patch.settings = {
+        smarkets_order_management_enabled: form.get("smarkets_order_management_enabled") === "on"
+      };
     }
     setBusyMarket(selectedMarket.market_id);
     setError(null);
@@ -986,10 +990,11 @@ export default function App() {
     const isMyriad = marketId === "myriad_markets";
     const isOpinion = marketId === "opinion_labs";
     const isLimitless = marketId === "limitless_exchange";
+    const isSmarkets = marketId === "smarkets";
     let instructions: unknown = [];
     const needsInstructions =
-      (!isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless) ||
-      operation === "cancel_orders" ||
+      (!isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets) ||
+      (operation === "cancel_orders" && !isSmarkets) ||
       operation === "batch_cancel_orders" ||
       (isMatchbook && (operation === "cancel_offers" || operation === "edit_offers")) ||
       (isMyriad && (operation === "cancel_order" || operation === "batch_modify_orders"));
@@ -1102,6 +1107,14 @@ export default function App() {
       setError("Limitless cancellation requires a market slug and exact confirmation: CANCEL ALL LIMITLESS ORDERS.");
       return;
     }
+    if (isSmarkets && operation === "cancel_order" && !marketReadForm.order_management_order_id.trim()) {
+      setError("A Smarkets order id is required for cancel_order.");
+      return;
+    }
+    if (isSmarkets && operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()) {
+      setError("A Smarkets market id is required for market-scoped cancel_orders.");
+      return;
+    }
     if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && (operation === "update_orders" || operation === "replace_orders") && !marketReadForm.order_management_market_id.trim()) {
       setError("A Betfair exchange market id is required for update and replace operations.");
       return;
@@ -1118,9 +1131,9 @@ export default function App() {
       setError("A Kalshi ticker is required for amend_order.");
       return;
     }
-    const warning = !isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()
+    const warning = !isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()
       ? "This submits a GLOBAL Betfair cancellation for the account."
-      : `This submits a live ${isKalshi ? "Kalshi" : isPolymarket ? "Polymarket" : isGemini ? "Gemini" : isMatchbook ? "Matchbook" : isMyriad ? "Myriad" : isOpinion ? "Opinion" : isLimitless ? "Limitless" : "Betfair"} ${operation.replaceAll("_", " ")} request.`;
+      : `This submits a live ${isKalshi ? "Kalshi" : isPolymarket ? "Polymarket" : isGemini ? "Gemini" : isMatchbook ? "Matchbook" : isMyriad ? "Myriad" : isOpinion ? "Opinion" : isLimitless ? "Limitless" : isSmarkets ? "Smarkets" : "Betfair"} ${operation.replaceAll("_", " ")} request.`;
     if (!window.confirm(`${warning} Continue only if the live-safety gates and request details are intentional.`)) {
       return;
     }
@@ -1174,6 +1187,12 @@ export default function App() {
             confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined,
             confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
           }
+      : isSmarkets
+        ? {
+            market_id: marketReadForm.order_management_market_id.trim() || undefined,
+            order_id: marketReadForm.order_management_order_id.trim() || undefined,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined
+          }
       : isMatchbook
         ? {
             order_id: marketReadForm.order_management_order_id.trim() || undefined,
@@ -1197,7 +1216,7 @@ export default function App() {
           customer_ref: marketReadForm.order_management_customer_ref.trim() || undefined,
           confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
         };
-    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && marketReadForm.order_management_market_version.trim()) {
+    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && marketReadForm.order_management_market_version.trim()) {
       const version = Number(marketReadForm.order_management_market_version.trim());
       if (!Number.isInteger(version) || version < 1) {
         setError("Market version must be a positive integer.");
@@ -1205,7 +1224,7 @@ export default function App() {
       }
       payload.market_version = version;
     }
-    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && marketReadForm.order_management_async) {
+    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && !isOpinion && !isLimitless && !isSmarkets && marketReadForm.order_management_async) {
       payload.async_request = true;
     }
     if (isKalshi) {
@@ -2387,6 +2406,15 @@ function MarketsView({
                 />
                 <span>Enable Limitless order management</span>
               </label>
+            ) : selectedMarket.market_id === "smarkets" ? (
+              <label className="check-row">
+                <input
+                  name="smarkets_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Smarkets order management</span>
+              </label>
             ) : null}
             <label>
               <span>Max size</span>
@@ -2737,6 +2765,8 @@ function MarketsView({
                                 ? "Opinion CLOB cancellations are disabled by default and require the official SDK, wallet credentials, shared live-safety gates, a separate opt-in, and exact operator confirmation."
                               : selectedMarket.market_id === "limitless_exchange"
                                 ? "Limitless cancellations are disabled by default and require HMAC token credentials, shared live-safety gates, a separate opt-in, and exact operator/global confirmation."
+                              : selectedMarket.market_id === "smarkets"
+                                ? "Smarkets cancellations are disabled by default and require an approved session token, shared live-safety gates, a separate opt-in, and exact operator confirmation."
                               : "Betfair mutations are disabled by default and require the shared live-safety gates plus the Betfair-specific opt-in. The UI never sends a request without explicit confirmation."}
                   </p>
                 </div>
@@ -3127,6 +3157,33 @@ function MarketsView({
                         value={marketReadForm.order_management_confirmation}
                         onChange={(event) => onMarketReadFormChange({ order_management_confirmation: event.target.value })}
                         placeholder="CANCEL ALL LIMITLESS ORDERS"
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "smarkets" ? (
+                  <>
+                    <label>
+                      <span>Order id</span>
+                      <input
+                        value={marketReadForm.order_management_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_order_id: event.target.value })}
+                        placeholder="Required for cancel_order"
+                      />
+                    </label>
+                    <label>
+                      <span>Market id</span>
+                      <input
+                        value={marketReadForm.order_management_market_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_market_id: event.target.value })}
+                        placeholder="Required for cancel_orders"
                       />
                     </label>
                     <label className="wide-field">

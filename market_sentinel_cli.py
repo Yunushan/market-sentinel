@@ -1343,6 +1343,7 @@ KALSHI_ACCOUNT_OPERATIONS = (
 )
 LIMITLESS_ACCOUNT_OPERATIONS = ("positions", "account_history", "user_orders")
 XMARKET_ACCOUNT_OPERATIONS = ("positions", "user_orders", "market_orders")
+SMARKETS_ACCOUNT_OPERATIONS = ("order_history", "account")
 OPINION_ACCOUNT_OPERATIONS = ("order_history", "order_detail", "positions")
 OPINION_ORDER_MANAGEMENT_OPERATIONS = (
     "cancel_order",
@@ -1379,6 +1380,7 @@ MARKET_ACCOUNT_OPERATIONS = tuple(
         + KALSHI_ACCOUNT_OPERATIONS
         + LIMITLESS_ACCOUNT_OPERATIONS
         + XMARKET_ACCOUNT_OPERATIONS
+        + SMARKETS_ACCOUNT_OPERATIONS
         + OPINION_ACCOUNT_OPERATIONS
         + BETFAIR_ACCOUNT_OPERATIONS
         + MATCHBOOK_ACCOUNT_OPERATIONS
@@ -1411,6 +1413,11 @@ def run_market_account(args: argparse.Namespace) -> int:
         }
         if operation == "market_orders":
             kwargs["market_id"] = market_id_filter
+    elif market_id == "smarkets":
+        kwargs = {
+            "status": str(getattr(args, "status", "") or "").strip().lower(),
+            "limit": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 1000),
+        }
     elif market_id == "kalshi":
         ticker = str(args.ticker or "").strip()
         if not ticker and args.contract:
@@ -1656,6 +1663,7 @@ MYRIAD_ORDER_MANAGEMENT_OPERATIONS = (
     "batch_modify_orders",
 )
 LIMITLESS_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "batch_cancel_orders", "cancel_all_orders")
+SMARKETS_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_orders")
 MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
     dict.fromkeys(
         BETFAIR_ORDER_MANAGEMENT_OPERATIONS
@@ -1666,6 +1674,7 @@ MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
         + MYRIAD_ORDER_MANAGEMENT_OPERATIONS
         + OPINION_ORDER_MANAGEMENT_OPERATIONS
         + LIMITLESS_ORDER_MANAGEMENT_OPERATIONS
+        + SMARKETS_ORDER_MANAGEMENT_OPERATIONS
     )
 )
 
@@ -2768,7 +2777,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_orders = markets_sub.add_parser(
         "manage-orders",
         parents=[common],
-        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Kalshi, Limitless, Matchbook, Myriad, Opinion, or Polymarket).",
+        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Kalshi, Limitless, Matchbook, Myriad, Opinion, Polymarket, or Smarkets).",
     )
     market_orders.add_argument("operation", choices=MARKET_ORDER_MANAGEMENT_OPERATIONS)
     market_orders.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")

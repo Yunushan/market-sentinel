@@ -456,12 +456,18 @@ class VerificationFixtureTests(unittest.TestCase):
         contracts = json.loads((FIXTURE_ROOT / "smarkets" / "contracts.json").read_text(encoding="utf-8"))
         quotes = json.loads((FIXTURE_ROOT / "smarkets" / "quotes.json").read_text(encoding="utf-8"))
         order = json.loads((FIXTURE_ROOT / "smarkets" / "order_response.json").read_text(encoding="utf-8"))
+        account_orders = json.loads((FIXTURE_ROOT / "smarkets" / "orders.json").read_text(encoding="utf-8"))
+        account = json.loads((FIXTURE_ROOT / "smarkets" / "account.json").read_text(encoding="utf-8"))
+        cancellation = json.loads((FIXTURE_ROOT / "smarkets" / "cancel_response.json").read_text(encoding="utf-8"))
 
         self.assertIsInstance(events.get("events"), list)
         self.assertIsInstance(markets.get("markets"), list)
         self.assertIsInstance(contracts.get("contracts"), list)
         self.assertIsInstance(quotes["quotes"][0].get("back_offers"), list)
         self.assertIsInstance(order.get("orders"), list)
+        self.assertIsInstance(account_orders.get("orders"), list)
+        self.assertIsInstance(account.get("accounts"), list)
+        self.assertEqual(cancellation.get("success"), True)
 
     def test_hedgehog_fixture_covers_market_v1_program_account_shape(self) -> None:
         payload = json.loads(

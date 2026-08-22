@@ -3574,6 +3574,11 @@ def market_account_payload(
         }
         if normalized_operation == "market_orders":
             kwargs["market_id"] = market_id_filter
+    elif normalized_market_id == "smarkets":
+        kwargs = {
+            "status": _query_value(query_params, "status"),
+            "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 1000),
+        }
     elif normalized_market_id == "kalshi":
         raw_contract = _query_value(query_params, "contract_id")
         ticker = _query_value(query_params, "ticker") or raw_contract.split(":", 1)[0]
@@ -3745,7 +3750,7 @@ def market_account_payload(
                 "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
             }
         )
-    if normalized_market_id not in {"kalshi", "limitless_exchange", "opinion_labs", "xmarket"} and normalized_operation == "order_history":
+    if normalized_market_id not in {"kalshi", "limitless_exchange", "opinion_labs", "xmarket", "smarkets"} and normalized_operation == "order_history":
         kwargs.update(
             {
                 "status": _query_value(query_params, "status", "filled").lower(),

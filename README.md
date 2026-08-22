@@ -554,7 +554,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | SX Bet / SX Network (`sx_bet`) | Implemented | Yes | Yes | Yes (public trades) | Guarded, off by default | No | Required | Live/WebSocket only | Jurisdiction varies |
 | Limitless Exchange (`limitless_exchange`) | Implemented | Yes | Yes | Yes | Guarded place/cancel/batch/market-cancel, off by default | No | Required | Account/API token required | Jurisdiction varies |
 | Predict.fun (`predict_fun`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | API credentials required | Jurisdiction varies |
-| Smarkets (`smarkets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
+| Smarkets (`smarkets`) | Implemented | Yes | Yes (authenticated orders/account) | Yes | Guarded place/cancel, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
 | Betfair Exchange (`betfair_exchange`) | Implemented | Yes | Yes (current/cleared account orders, funds, account details, statements, currency rates) | Yes | Guarded place/cancel/update/replace, off by default | No | Required | Exchange account/API keys | Region/KYC limited |
 | Probo (`probo`) | Verified blocked | No | No | No | No | No | Required | Account required | Region limited |
 | Coinbase Prediction Markets (`coinbase_prediction_markets`) | Implemented | Yes | Yes | Yes | No | No | Required | No | Region/KYC limited |

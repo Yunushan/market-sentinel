@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
@@ -18,10 +19,16 @@ from .types import (
 
 
 DEFAULT_SMARKETS_API_BASE_URL = "https://api.smarkets.com/v3"
+SMARKETS_ACCOUNT_OPERATIONS = ("order_history", "account")
+SMARKETS_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "cancel_orders")
+SMARKETS_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+SMARKETS_ORDER_STATES = ("created", "filled", "partial", "cancelled", "rejected", "expired")
+SMARKETS_DEFAULT_ORDER_STATES = ("created", "filled", "partial", "cancelled", "rejected", "expired")
 SMARKETS_REFERENCES = (
     "https://docs.smarkets.com/",
     "https://help.smarkets.com/hc/en-gb/articles/34720906181021-Smarkets-API-Documentation-Resources",
     "https://help.smarkets.com/hc/en-gb/articles/34697834941085-Smarkets-API-Access-Integration-T-Cs",
+    "https://github.com/smarkets/smk_trading_bot/blob/master/client.py",
 )
 
 
@@ -37,6 +44,8 @@ class SmarketsAdapter(MarketAdapter):
 
     metadata = get_market_metadata("smarkets")
     live_order_sides = ("BUY", "SELL")
+    account_recovery_operations = SMARKETS_ACCOUNT_OPERATIONS
+    order_management_operations = SMARKETS_ORDER_MANAGEMENT_OPERATIONS
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -54,6 +63,14 @@ class SmarketsAdapter(MarketAdapter):
                 "api_approval_required": True,
                 "live_trading_supported": True,
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
+                "account_recovery_operations": list(self.account_recovery_operations),
+                "authenticated_account_endpoints": ["/orders/", "/accounts/"],
+                "order_management_operations": list(self.order_management_operations),
+                "order_management_enabled": self.config_bool("smarkets_order_management_enabled", False),
+                "authenticated_order_management_endpoints": [
+                    "/orders/{order_id}/",
+                    "/orders/?market_id={market_id}",
+                ],
             }
         )
         return health
@@ -162,6 +179,95 @@ class SmarketsAdapter(MarketAdapter):
             "response": response,
         }
 
+    def list_orders(self, *, status: str = "", limit: int = 50) -> Any:
+        """Read the authenticated Smarkets order feed without changing state.
+
+        The official client exposes ``GET /orders/`` with repeated ``states``
+        filters and a bounded ``limit``.  The raw response is preserved so
+        callers can inspect venue-specific pagination and order fields.
+        """
+
+        states = self._order_states(status)
+        params: Dict[str, Any] = {"limit": self._account_limit(limit)}
+        if states:
+            params["states"] = states
+        return self._get("/orders/", params=params)
+
+    def get_account(self) -> Any:
+        """Read the authenticated Smarkets account summary."""
+
+        return self._get("/accounts/", params=None)
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Any:
+        normalized = str(operation or "").strip().lower()
+        if normalized == "order_history":
+            return self.list_orders(
+                status=str(kwargs.get("status") or ""),
+                limit=kwargs.get("limit", 50),
+            )
+        if normalized == "account":
+            return self.get_account()
+        supported = ", ".join(self.account_recovery_operations)
+        raise MarketConfigurationError(f"Smarkets account recovery supports only: {supported}.")
+
+    def manage_orders(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Run a guarded documented Smarkets cancellation mutation.
+
+        Smarkets' official client documents a single-order ``DELETE
+        /orders/{order_id}/`` route and a market-scoped ``DELETE /orders/``
+        route with ``market_id``.  There is deliberately no unscoped global
+        cancellation operation here.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.order_management_operations:
+            supported = ", ".join(self.order_management_operations)
+            raise MarketConfigurationError(
+                f"Smarkets order-management operation must be one of: {supported}."
+            )
+        self.ensure_capability("live_trading")
+        if not self.config_bool("smarkets_order_management_enabled", False):
+            raise MarketConfigurationError(
+                "Smarkets order management is disabled by adapter config. "
+                "Set smarkets_order_management_enabled=true only after reviewing live-order risk controls."
+            )
+        self.ensure_live_trading_enabled("Smarkets order management")
+        if str(kwargs.get("confirm_order_management") or "").strip() != SMARKETS_ORDER_MANAGEMENT_CONFIRMATION:
+            raise MarketConfigurationError(
+                "Smarkets order management requires exact confirmation text "
+                f"{SMARKETS_ORDER_MANAGEMENT_CONFIRMATION}."
+            )
+
+        request_params: Dict[str, Any] = {}
+        if normalized == "cancel_order":
+            order_id = self._safe_identifier(kwargs.get("order_id"), "order")
+            path = f"/orders/{order_id}"
+            response = self._request_json("DELETE", path, params=None, auth=True)
+            request_params = {"order_id": order_id}
+        else:
+            market_id = self._safe_identifier(kwargs.get("market_id"), "market")
+            request_params = {"market_id": market_id}
+            response = self._request_json("DELETE", "/orders/", params=request_params, auth=True)
+
+        return {
+            "market_id": self.market_id,
+            "operation": normalized,
+            "live": True,
+            "preflight": {
+                "market_id": self.market_id,
+                "display_name": self.display_name,
+                "feature": "order management",
+                "operation": normalized,
+                "live_trading_enabled": True,
+                "order_management_enabled": True,
+                "confirmed": True,
+                "requires_credentials": True,
+                "references": list(SMARKETS_REFERENCES),
+            },
+            "request": {"params": request_params},
+            "response": response,
+        }
+
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
         raise UnsupportedFeatureError(
             self.market_id,
@@ -180,21 +286,27 @@ class SmarketsAdapter(MarketAdapter):
         self,
         method: str,
         path: str,
-        body: Mapping[str, Any],
+        body: Optional[Mapping[str, Any]] = None,
         *,
         auth: bool,
+        params: Optional[Mapping[str, Any]] = None,
     ) -> Any:
         self.runtime.rate_limiter.wait()
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
         if auth:
             headers.update(self._headers(required=True))
+        request_kwargs: Dict[str, Any] = {
+            "json": dict(body) if body is not None else None,
+            "headers": {"User-Agent": self.runtime.user_agent, **headers},
+            "timeout": self.runtime.timeout_seconds,
+        }
+        if params is not None:
+            request_kwargs["params"] = dict(params)
         try:
             response = self.runtime.session.request(
                 method.upper(),
                 self._url(self.api_base_url, path),
-                json=dict(body),
-                headers={"User-Agent": self.runtime.user_agent, **headers},
-                timeout=self.runtime.timeout_seconds,
+                **request_kwargs,
             )
         except Exception as exc:
             raise MarketHTTPError(f"{self.market_id} HTTP request failed: {exc}") from exc
@@ -405,10 +517,37 @@ class SmarketsAdapter(MarketAdapter):
 
     @staticmethod
     def _required_id(value: Any, label: str) -> str:
+        return SmarketsAdapter._safe_identifier(value, label)
+
+    @classmethod
+    def _safe_identifier(cls, value: Any, label: str) -> str:
         clean = str(value or "").strip()
         if not clean:
             raise MarketConfigurationError(f"Smarkets {label} id cannot be empty.")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,199}", clean):
+            raise MarketConfigurationError(f"Smarkets {label} id contains unsupported path characters.")
         return clean
+
+    @classmethod
+    def _order_states(cls, value: Any) -> List[str]:
+        raw = str(value or "").strip().lower()
+        if not raw or raw == "all":
+            return list(SMARKETS_DEFAULT_ORDER_STATES)
+        states = [part.strip() for part in raw.replace(";", ",").split(",") if part.strip()]
+        if not states or any(state not in SMARKETS_ORDER_STATES for state in states):
+            allowed = ", ".join(SMARKETS_ORDER_STATES)
+            raise MarketConfigurationError(f"Smarkets order states must be all or a comma-separated list of: {allowed}.")
+        return list(dict.fromkeys(states))
+
+    @staticmethod
+    def _account_limit(value: Any) -> int:
+        try:
+            limit = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Smarkets account limit must be an integer.") from exc
+        if limit < 1 or limit > 1000:
+            raise MarketConfigurationError("Smarkets account limit must be between 1 and 1000.")
+        return limit
 
     @staticmethod
     def _contract_id(market_id: str, contract_id: str) -> str:
@@ -419,7 +558,7 @@ class SmarketsAdapter(MarketAdapter):
         parts = [part.strip() for part in str(contract_id or "").split(":")]
         if len(parts) != 2 or any(not part for part in parts):
             raise MarketConfigurationError("Smarkets contract id must be MARKET_ID:CONTRACT_ID.")
-        return parts[0], parts[1]
+        return SmarketsAdapter._safe_identifier(parts[0], "market"), SmarketsAdapter._safe_identifier(parts[1], "contract")
 
     @staticmethod
     def _url(base: str, path: str) -> str:

@@ -918,6 +918,8 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         markets = load_fixture("smarkets", "markets")
         contracts = load_fixture("smarkets", "contracts")
         quotes = load_fixture("smarkets", "quotes")
+        orders = load_fixture("smarkets", "orders")
+        account = load_fixture("smarkets", "account")
 
         def fake_get_json(url: str, *, params=None, headers=None):
             self.assertEqual(headers, {"Authorization": "Session-Token smk-token"})
@@ -929,6 +931,10 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 return contracts
             if url.endswith("/markets/market-1/quotes/"):
                 return quotes
+            if url.endswith("/orders/"):
+                return orders
+            if url.endswith("/accounts/"):
+                return account
             raise AssertionError(f"unexpected Smarkets URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
@@ -939,6 +945,8 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             book = adapter.get_orderbook(order.contract_id)
             price = adapter.get_price(order.contract_id)
             paper = adapter.place_paper_order(order)
+            recovered_orders = adapter.account_recovery("order_history", status="created", limit=25)
+            recovered_account = adapter.account_recovery("account")
 
         self.assertEqual(events_result[0].event_id, "event-1")
         self.assertEqual([contract.contract_id for contract in contract_rows], ["market-1:contract-yes", "market-1:contract-no"])
@@ -947,6 +955,10 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertAlmostEqual(price.last or 0.0, 0.43)
         self.assertTrue(paper.accepted)
         self.assertEqual(paper.raw["request"]["price"], "4400")
+        self.assertEqual(recovered_orders["orders"][0]["id"], "order-1")
+        self.assertEqual(recovered_account["accounts"][0]["currency"], "GBP")
+        self.assertEqual(adapter.health_check()["account_recovery_operations"], ["order_history", "account"])
+        self.assertEqual(adapter.health_check()["order_management_operations"], ["cancel_order", "cancel_orders"])
         with self.assertRaises(MarketConfigurationError):
             adapter.place_live_order(order)
 
@@ -966,6 +978,43 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertTrue(calls[0][1].endswith("/orders/"))
         self.assertEqual(calls[0][2]["side"], "buy")
         self.assertEqual(calls[0][3]["Authorization"], "Session-Token smk-token")
+
+        management_adapter = SmarketsAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "smarkets_order_management_enabled": True,
+            }
+        )
+        management_calls = []
+
+        def fake_management_request(method: str, url: str, *, json=None, headers=None, timeout=None, params=None):
+            management_calls.append((method, url, json, headers, timeout, params))
+            return FakeResponse(load_fixture("smarkets", "cancel_response"))
+
+        management_adapter.runtime.session.request = fake_management_request  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"SMARKETS_SESSION_TOKEN": "smk-token"}):
+            cancelled = management_adapter.manage_orders(
+                "cancel_order",
+                order_id="order-1",
+                confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            )
+            scoped_cancel = management_adapter.manage_orders(
+                "cancel_orders",
+                market_id="market-1",
+                confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            )
+        self.assertTrue(cancelled["response"]["success"])
+        self.assertTrue(scoped_cancel["response"]["success"])
+        self.assertEqual(management_calls[0][0], "DELETE")
+        self.assertTrue(management_calls[0][1].endswith("/orders/order-1/"))
+        self.assertEqual(management_calls[1][5], {"market_id": "market-1"})
+        with self.assertRaises(MarketConfigurationError):
+            management_adapter.manage_orders(
+                "cancel_orders",
+                market_id="../unsafe",
+                confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            )
 
         with self.assertRaises(UnsupportedFeatureError):
             live_adapter.copy_trade_from_activity({"side": "BUY"})

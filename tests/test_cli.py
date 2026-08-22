@@ -1103,6 +1103,72 @@ class MarketSentinelCliTests(unittest.TestCase):
         )
         self.assertEqual(payload["data"]["items"][0]["id"], "xorder-1")
 
+    def test_smarkets_account_and_order_management_commands_forward_allow_listed_fields(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="smarkets")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("order_history", "account"),
+            order_management_operations=("cancel_order", "cancel_orders"),
+            account_recovery=lambda operation, **kwargs: {"operation": operation, "parameters": kwargs},
+            manage_orders=lambda operation, **kwargs: {"operation": operation, "parameters": kwargs},
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "order_history",
+                        "--market",
+                        "smarkets",
+                        "--status",
+                        "created,filled",
+                        "--limit",
+                        "25",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        account_payload = json.loads(stdout.getvalue())
+        self.assertEqual(account_payload["parameters"], {"status": "created,filled", "limit": 25})
+
+        stdout.seek(0)
+        stdout.truncate(0)
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "cancel_orders",
+                        "--market",
+                        "smarkets",
+                        "--market-id",
+                        "market-1",
+                        "--confirm-order-management",
+                        "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        order_payload = json.loads(stdout.getvalue())
+        self.assertEqual(order_payload["operation"], "cancel_orders")
+        self.assertEqual(order_payload["parameters"]["market_id"], "market-1")
+        self.assertEqual(
+            order_payload["parameters"]["confirm_order_management"],
+            "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        )
+
     def test_polymarket_leaderboard_cli_builds_unlimited_scan_params(self) -> None:
         parser = market_sentinel_cli.build_parser()
         args = parser.parse_args(

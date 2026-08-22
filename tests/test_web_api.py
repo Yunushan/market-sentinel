@@ -1102,6 +1102,71 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["confirm_order_management"], "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS")
         self.assertNotIn("unexpected", calls[0][1])
 
+    def test_smarkets_account_and_order_management_payloads_forward_bounded_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="smarkets",
+            display_name="Smarkets",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.account_recovery_operations = ("order_history", "account")  # type: ignore[attr-defined]
+        adapter.order_management_operations = ("cancel_order", "cancel_orders")  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+        }
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["smarkets"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "smarkets",
+            "order_history",
+            {"status": ["created,filled"], "limit": ["24"], "unexpected": ["ignored"]},
+        )
+        self.assertEqual(account["parameters"], {"status": "created,filled", "limit": 24})
+        mutation = market_order_management_payload(
+            cfg,
+            Registry(),
+            "smarkets",
+            "cancel_orders",
+            {
+                "market_id": "market-1",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(mutation["data"], {"status": "accepted"})
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "cancel_orders",
+                    {
+                        "market_id": "market-1",
+                        "instructions": None,
+                        "customer_ref": "",
+                        "market_version": None,
+                        "async_request": False,
+                        "confirm_global_cancel": "",
+                        "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                    },
+                )
+            ],
+        )
+
     def test_matchbook_account_payload_forwards_report_and_offer_filters(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(
