@@ -420,6 +420,7 @@ class VerificationFixtureTests(unittest.TestCase):
         cme_search = json.loads((FIXTURE_ROOT / "cme_prediction_markets" / "search.json").read_text(encoding="utf-8"))
         cme_info = json.loads((FIXTURE_ROOT / "cme_prediction_markets" / "info.json").read_text(encoding="utf-8"))
         snapshot = json.loads((FIXTURE_ROOT / "ibkr_forecasttrader" / "snapshot.json").read_text(encoding="utf-8"))
+        history = json.loads((FIXTURE_ROOT / "ibkr_forecasttrader" / "history.json").read_text(encoding="utf-8"))
 
         self.assertEqual(forecast_search[0]["symbol"], "FF")
         self.assertIn(4.875, forecast_strikes["call"])
@@ -427,6 +428,9 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertEqual(cme_search[0]["sections"][-1]["secType"], "EC")
         self.assertEqual({record["tradingClass"] for record in cme_info}, {"ECNQ", "Q4A"})
         self.assertEqual(snapshot[0]["conid"], 721095497)
+        self.assertEqual(history["barLength"], 3600)
+        self.assertEqual(len(history["data"]), 4)
+        self.assertEqual(history["data"][1]["c"], 0.47)
 
 
 if __name__ == "__main__":

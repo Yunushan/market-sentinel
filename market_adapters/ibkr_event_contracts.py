@@ -9,6 +9,9 @@ creates a session on behalf of a user.
 
 from __future__ import annotations
 
+import math
+import time
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .base import MarketAdapter
@@ -16,6 +19,7 @@ from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, UnsupportedFeatureError
 from .types import (
     MarketCapabilities,
+    MarketCandle,
     MarketContract,
     MarketEvent,
     OrderBookLevel,
@@ -29,6 +33,7 @@ from .types import (
 DEFAULT_IBKR_API_BASE_URL = "https://api.ibkr.com/v1/api"
 IBKR_REFERENCES = (
     "https://www.interactivebrokers.com/campus/ibkr-api-page/event-contracts/",
+    "https://www.interactivebrokers.com/docs/web-api/api-reference/trading/trading-market-data/get-md-history",
     "https://www.interactivebrokers.com/campus/ibkr-api-page/cpapi-v1/",
     "https://www.interactivebrokers.com/campus/ibkr-api-page/web-api-trading/",
 )
@@ -47,6 +52,25 @@ IBKR_EVENT_CAPABILITIES = MarketCapabilities(
     kyc_required=True,
     region_limited=True,
 )
+
+IBKR_CANDLE_RESOLUTIONS = (
+    "1min",
+    "2min",
+    "3min",
+    "5min",
+    "10min",
+    "15min",
+    "30min",
+    "1h",
+    "2h",
+    "3h",
+    "4h",
+    "8h",
+    "1d",
+    "1w",
+    "1m",
+)
+
 
 
 class IBKREventContractsAdapter(MarketAdapter):
@@ -233,6 +257,82 @@ class IBKREventContractsAdapter(MarketAdapter):
             asks=asks,
             raw=dict(snapshot),
         )
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Return historical Last Trade OHLC bars for an IBKR event contract.
+
+        IBKR's documented ``/iserver/marketdata/history`` endpoint anchors a
+        period at ``startTime`` and, with ``direction=-1``, walks backwards.
+        The normalized ``to_timestamp`` therefore becomes that anchor and the
+        requested range is converted to the smallest supported period.  The
+        response is filtered locally so rounded-up periods cannot leak bars
+        outside the caller's requested range.
+        """
+
+        self.ensure_capability("price_reading")
+        canonical, conid = self._parse_contract_id(contract_id)
+        clean_resolution = str(resolution or "").strip()
+        if clean_resolution not in IBKR_CANDLE_RESOLUTIONS:
+            allowed = ", ".join(IBKR_CANDLE_RESOLUTIONS)
+            raise MarketConfigurationError(f"{self.mode_name} candle resolution must be one of: {allowed}.")
+
+        end_ts = self._history_timestamp(to_timestamp, "to_timestamp") if to_timestamp is not None else int(time.time())
+        default_lookback = self._candle_lookback_seconds(clean_resolution)
+        start_ts = (
+            self._history_timestamp(from_timestamp, "from_timestamp")
+            if from_timestamp is not None
+            else max(0, end_ts - default_lookback)
+        )
+        if end_ts <= start_ts:
+            raise MarketConfigurationError(f"{self.mode_name} candle history requires to_timestamp greater than from_timestamp.")
+
+        params: Dict[str, Any] = {
+            "conid": conid,
+            "period": self._period_for_seconds(end_ts - start_ts),
+            "bar": clean_resolution,
+            "startTime": datetime.fromtimestamp(end_ts, tz=timezone.utc).strftime("%Y%m%d-%H:%M:%S"),
+            "direction": -1,
+            "source": "Last",
+            "outsideRth": self.config_bool("ibkr_history_outside_rth", False),
+        }
+        payload = self._get("/iserver/marketdata/history", params=params)
+        rows = payload.get("data") if isinstance(payload, Mapping) else []
+        if not isinstance(rows, list):
+            return []
+
+        candles: List[MarketCandle] = []
+        for raw in rows:
+            if not isinstance(raw, Mapping):
+                continue
+            timestamp = self._timestamp_seconds(raw.get("t"))
+            values = tuple(self._number(raw.get(key)) for key in ("o", "h", "l", "c"))
+            volume = self._number(raw.get("v"))
+            if timestamp is None or timestamp < start_ts or timestamp > end_ts or any(value is None for value in values):
+                continue
+            if volume is not None and volume < 0:
+                volume = None
+            candles.append(
+                MarketCandle(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    timestamp=timestamp,
+                    open=float(values[0]),
+                    high=float(values[1]),
+                    low=float(values[2]),
+                    close=float(values[3]),
+                    volume=volume,
+                    raw=dict(raw),
+                )
+            )
+        candles.sort(key=lambda item: item.timestamp)
+        return candles
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -539,6 +639,58 @@ class IBKREventContractsAdapter(MarketAdapter):
             return float(str(value).replace(",", ""))
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _history_timestamp(value: Any, label: str) -> int:
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"{label} must be a numeric epoch timestamp.") from exc
+        if not math.isfinite(number) or number < 0:
+            raise MarketConfigurationError(f"{label} must be a non-negative finite epoch timestamp.")
+        return int(number)
+
+    @staticmethod
+    def _timestamp_seconds(value: Any) -> Optional[float]:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(number) or number <= 0:
+            return None
+        if number >= 100_000_000_000:
+            number /= 1000.0
+        return number
+
+    @staticmethod
+    def _candle_lookback_seconds(resolution: str) -> int:
+        if resolution.endswith("min"):
+            return max(3600, int(resolution[:-3]) * 60 * 100)
+        if resolution.endswith("h"):
+            return max(86400, int(resolution[:-1]) * 3600 * 100)
+        if resolution.endswith("d"):
+            return max(86400, int(resolution[:-1]) * 86400 * 30)
+        if resolution.endswith("w"):
+            return int(resolution[:-1]) * 604800 * 20
+        return 30 * 86400
+
+    @staticmethod
+    def _period_for_seconds(seconds: int) -> str:
+        if seconds <= 0:
+            raise MarketConfigurationError("IBKR candle history period must be positive.")
+        units = (
+            (60, "min", 30),
+            (3600, "h", 8),
+            (86400, "d", 1000),
+            (604800, "w", 792),
+            (2_592_000, "m", 182),
+            (31_536_000, "y", 15),
+        )
+        for size, suffix, maximum in units:
+            count = int(math.ceil(seconds / size))
+            if count <= maximum:
+                return f"{max(1, count)}{suffix}"
+        raise MarketConfigurationError("IBKR candle history range exceeds the documented 15-year maximum.")
 
     @staticmethod
     def _finite_positive(value: Any, label: str) -> float:

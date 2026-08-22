@@ -568,6 +568,7 @@ def run_fixture_check() -> None:
         fixture_root / "opinion_labs" / "price.json",
         fixture_root / "opinion_labs" / "orderbook.json",
         fixture_root / "opinion_labs" / "price_history.json",
+        fixture_root / "ibkr_forecasttrader" / "history.json",
         fixture_root / "predict_fun" / "markets.json",
         fixture_root / "predict_fun" / "market.json",
         fixture_root / "predict_fun" / "orderbook.json",

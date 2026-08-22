@@ -56,7 +56,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
     def test_ibkr_event_contract_adapters_map_forecastex_cme_snapshots_paper_and_guarded_orders(self) -> None:
         forecast_fixtures = {
             name: load_fixture("ibkr_forecasttrader", name)
-            for name in ("category_tree", "search", "strikes", "info", "accounts", "snapshot", "order_response")
+            for name in ("category_tree", "search", "strikes", "info", "accounts", "snapshot", "history", "order_response")
         }
         adapter = IBKRForecastTraderAdapter({"ibkr_session_cookie": "api=test-session"})
 
@@ -77,6 +77,15 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 return forecast_fixtures["accounts"]
             if url.endswith("/iserver/marketdata/snapshot"):
                 return forecast_fixtures["snapshot"]
+            if url.endswith("/iserver/marketdata/history"):
+                self.assertEqual(params["conid"], 721095497)
+                self.assertEqual(params["period"], "1h")
+                self.assertEqual(params["bar"], "1h")
+                self.assertEqual(params["startTime"], "20251009-11:00:00")
+                self.assertEqual(params["direction"], -1)
+                self.assertEqual(params["source"], "Last")
+                self.assertFalse(params["outsideRth"])
+                return forecast_fixtures["history"]
             raise AssertionError(f"unexpected IBKR URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
@@ -85,6 +94,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         order = PaperOrderRequest("ibkr_forecasttrader", contracts[0].contract_id, "BUY", 5, 0.48)
         book = adapter.get_orderbook(order.contract_id)
         price = adapter.get_price(order.contract_id)
+        candles = adapter.list_candles(
+            order.contract_id,
+            resolution="1h",
+            from_timestamp=1760004000,
+            to_timestamp=1760007600,
+        )
         paper = adapter.place_paper_order(order)
 
         self.assertEqual(events[0].event_id, "IBKR:FF")
@@ -92,6 +107,9 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual([level.price for level in book.bids], [0.45])
         self.assertEqual([level.price for level in book.asks], [0.5])
         self.assertAlmostEqual(price.midpoint or 0.0, 0.475)
+        self.assertEqual([candle.timestamp for candle in candles], [1760004000.0, 1760007600.0])
+        self.assertEqual([candle.close for candle in candles], [0.47, 0.49])
+        self.assertEqual([candle.volume for candle in candles], [4.0, 5.0])
         self.assertTrue(paper.accepted)
 
         calls = []
@@ -145,6 +163,11 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(forecastex.metadata.market_id, "forecastex")
         with self.assertRaises(UnsupportedFeatureError):
             adapter.copy_trade_from_activity({"side": "BUY"})
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles(order.contract_id, resolution="5sec")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles(order.contract_id, from_timestamp=1760007600, to_timestamp=1760004000)
 
     def test_hyperliquid_public_hip4_fills_support_safe_simulation_copy(self) -> None:
         wallet = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"

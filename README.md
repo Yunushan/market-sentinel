@@ -414,7 +414,7 @@ Useful local API endpoints:
 - `GET /api/health` returns API version, route metadata, React dev/build/prod commands, build availability, and confirms the Tkinter fallback remains `run_gui.bat` or `python app.py`.
 - `PATCH /api/config` updates shared local config fields such as selected market, theme, and Tkinter UI design.
 - `GET /api/markets` returns market capabilities, health, status text, credential source diagnostics without secret values, and live-safety settings.
-- `GET /api/markets/{market_id}/trades?contract_id=...` and `GET /api/markets/{market_id}/candles?contract_id=...&resolution=1h` expose normalized history for adapters that document those feeds (currently Kalshi, Hyperliquid candles, Manifold trades, Opinion price history, Polymarket price history, and Space; Opinion and Polymarket's one-price-per-timestamp feeds are represented as flat OHLC points; Polymarket trade history still requires explicit operator-supplied CLOB L2 headers); unsupported adapters fail closed with a structured error.
+- `GET /api/markets/{market_id}/trades?contract_id=...` and `GET /api/markets/{market_id}/candles?contract_id=...&resolution=1h` expose normalized history for adapters that document those feeds (currently Kalshi, Hyperliquid candles, Manifold trades, Opinion price history, Polymarket price history, IBKR event-contract candles, and Space; Opinion and Polymarket's one-price-per-timestamp feeds are represented as flat OHLC points; Polymarket trade history still requires explicit operator-supplied CLOB L2 headers); unsupported adapters fail closed with a structured error.
 - `PATCH /api/markets/{market_id}` toggles a market and persists live-safety settings such as enablement, acknowledgement, kill switch, max size, and max notional.
 - `GET /api/alerts` returns alert rows enriched with adapter-backed status and current in-memory price state.
 - `POST /api/alerts` creates a market-scoped price alert after validating the selected adapter supports alerts.
@@ -505,9 +505,9 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | Robinhood Prediction Markets (`robinhood_prediction_markets`) | Verified blocked | No | No | No | No | No | Required | Brokerage account required | Region/KYC limited |
 | Fanatics Markets (`fanatics_markets`) | Implemented | Yes | Yes | Yes | No | No | Required | Optional API key | Region/KYC limited |
 | DraftKings Predictions (`draftkings_predictions`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
-| Interactive Brokers ForecastTrader / IBKR Prediction Markets (`ibkr_forecasttrader`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | IBKR account required | Region/KYC limited |
-| ForecastEx (`forecastex`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | IBKR account required | Region/KYC limited |
-| CME Group Prediction Markets (`cme_prediction_markets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | IBKR account required | Region/KYC limited |
+| Interactive Brokers ForecastTrader / IBKR Prediction Markets (`ibkr_forecasttrader`) | Implemented | Yes | Yes (OHLC history) | Yes | Guarded, off by default | No | Required | IBKR account required | Region/KYC limited |
+| ForecastEx (`forecastex`) | Implemented | Yes | Yes (OHLC history) | Yes | Guarded, off by default | No | Required | IBKR account required | Region/KYC limited |
+| CME Group Prediction Markets (`cme_prediction_markets`) | Implemented | Yes | Yes (OHLC history) | Yes | Guarded, off by default | No | Required | IBKR account required | Region/KYC limited |
 | Nadex (`nadex`) | Implemented | Yes | Yes | Yes | No | No | Required | Optional API key | Region/KYC limited |
 | Crypto.com Predict / CDNA (`crypto_com_predict`) | Implemented | Yes | Yes | Yes | No | No | Required | Optional API key | Not KYC limited |
 | Hyperliquid (`hyperliquid`) | Implemented | Yes | Yes (HIP-4 candles) | Yes | Guarded, off by default | Yes (HIP-4 wallet fills; simulation-first) | Required | No API key for reads; externally signed wallet payload required for live orders | Jurisdiction varies |
