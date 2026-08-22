@@ -527,7 +527,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | Opinion Labs (`opinion_labs`) | Implemented | Yes | Yes | Yes | Guarded, off by default | Yes, simulation only | Required | API credentials required | Jurisdiction varies |
 | Gemini Titan / Gemini Predictions (`gemini_titan`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | Live trading only | Region/KYC limited |
 | Augur (`augur`) | Implemented | No | Yes | No | No | No | Required | Subgraph endpoint required | Jurisdiction varies |
-| BetMGM (`betmgm`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
+| BetMGM (`betmgm`) | Implemented | Yes | Yes | Yes | No | No | Required | Account/API token required | Region/KYC limited |
 | PrizePicks (`prizepicks`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
 | Underdog Sports (`underdog_sports`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
 | Drift BET (`drift_bet`) | Implemented | Yes | Yes | Yes | No | No | Required | No API key; wallet/collateral required only for future live chain flow | Jurisdiction varies |

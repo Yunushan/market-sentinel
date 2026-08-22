@@ -23,6 +23,7 @@ REQUIRED_COLUMNS = (
     "Reference",
 )
 IMPLEMENTED_MARKETS = {
+    "betmgm",
     "polymarket",
     "blinq",
     "kalshi",

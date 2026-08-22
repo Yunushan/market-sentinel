@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .azuro import AzuroAdapter
 from .base import MarketAdapter
+from .betmgm import BetMGMAdapter
 from .betfair import BetfairExchangeAdapter
 from .blinq import BlinqAdapter
 from .coinbase_prediction import CoinbasePredictionMarketsAdapter
@@ -77,6 +78,7 @@ __all__ = [
     "AdapterRuntime",
     "AugurAdapter",
     "AzuroAdapter",
+    "BetMGMAdapter",
     "BetfairExchangeAdapter",
     "BlinqAdapter",
     "CoinbasePredictionMarketsAdapter",

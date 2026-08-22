@@ -112,13 +112,13 @@ This project is not 100% feature-complete across every listed market. The comple
 Current catalog snapshot:
 
 - Total markets: 68
-- Implemented or partially implemented adapters: 54
-- Verified-blocked/stub adapters: 14
-- Market/event discovery supported: 54 yes, 14 no
-- Alerts supported: 53 yes, 15 no
-- Read-only price data supported: 52 yes, 16 no
+- Implemented or partially implemented adapters: 55
+- Verified-blocked/stub adapters: 13
+- Market/event discovery supported: 55 yes, 13 no
+- Alerts supported: 54 yes, 14 no
+- Read-only price data supported: 53 yes, 15 no
 - Orderbook reading supported: 26 yes, 42 no
-- Paper trading supported: 51 yes, 17 no
+- Paper trading supported: 52 yes, 16 no
 - Live trading supported: 35 guarded/off by default, 33 no
 - Copy trading supported: 5 yes, 63 no (Polymarket, Opinion Labs, Manifold, Myriad, and Hyperliquid HIP-4 wallet fills; all simulation-first and guarded)
 

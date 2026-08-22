@@ -70,6 +70,7 @@ CONCRETE_REQUIREMENT_VALUES = (
     "Devnet example; production deployment must be reviewed",
 )
 IMPLEMENTED_MARKETS = {
+    "betmgm",
     "polymarket",
     "blinq",
     "kalshi",

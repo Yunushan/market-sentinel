@@ -58,17 +58,6 @@ VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
             "https://www.randforecastinginitiative.org/questions",
         ],
     },
-    "betmgm": {
-        "reason": (
-            "Verified 2026-05-26: BetMGM is a regulated consumer sportsbook/casino product and does not "
-            "publish a public prediction/event-market API, SDK, or automation permission flow for this app. "
-            "Consumer app automation is intentionally unsupported."
-        ),
-        "references": [
-            "https://www.betmgm.com",
-            "https://www.betmgminc.com",
-        ],
-    },
     "prizepicks": {
         "reason": (
             "Verified 2026-05-26: PrizePicks exposes consumer fantasy/pick products and support pages, "
@@ -185,6 +174,7 @@ def build_default_registry() -> AdapterRegistry:
     for metadata in MARKET_CATALOG:
         registry.register_metadata(metadata)
     from .azuro import AzuroAdapter
+    from .betmgm import BetMGMAdapter
     from .betfair import BetfairExchangeAdapter
     from .blinq import BlinqAdapter
     from .coinbase_prediction import CoinbasePredictionMarketsAdapter
@@ -239,6 +229,7 @@ def build_default_registry() -> AdapterRegistry:
     from .xmarket import XMarketAdapter
 
     implemented_adapters = (
+        BetMGMAdapter,
         PolymarketAdapter,
         BlinqAdapter,
         CoinbasePredictionMarketsAdapter,
@@ -295,6 +286,7 @@ def build_default_registry() -> AdapterRegistry:
         SciCastAdapter,
     )
     registry.register_adapter(PolymarketAdapter, replace=True)
+    registry.register_adapter(BetMGMAdapter, replace=True)
     registry.register_adapter(BlinqAdapter, replace=True)
     registry.register_adapter(CoinbasePredictionMarketsAdapter, replace=True)
     registry.register_adapter(RobinhoodPredictionMarketsAdapter, replace=True)

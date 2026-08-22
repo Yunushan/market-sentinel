@@ -87,6 +87,21 @@ PREDICTIT_CAPABILITIES = MarketCapabilities(
     region_limited=True,
 )
 
+BETMGM_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    alerts=True,
+    paper_trading=True,
+    live_trading=False,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=True,
+    kyc_required=True,
+    region_limited=True,
+)
+
 CRYPTO_COM_PREDICT_CAPABILITIES = MarketCapabilities(
     market_discovery=True,
     event_listing=True,
@@ -716,7 +731,16 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         description="Legacy Augur v2 read-only market/outcome adapter using the documented subgraph schema with a user-configured GraphQL endpoint.",
         capabilities=AUGUR_CAPABILITIES,
     ),
-    MarketMetadata(market_id="betmgm", display_name="BetMGM", homepage_url="https://www.betmgm.com"),
+    MarketMetadata(
+        market_id="betmgm",
+        display_name="BetMGM",
+        homepage_url="https://www.betmgm.com",
+        description=(
+            "Official BetMGM partner Sports API adapter for fixture, market, option, and implied-price reads, "
+            "alerts, and local paper orders; the partner API publishes no supported order or account-activity endpoint."
+        ),
+        capabilities=BETMGM_CAPABILITIES,
+    ),
     MarketMetadata(market_id="prizepicks", display_name="PrizePicks", homepage_url="https://www.prizepicks.com"),
     MarketMetadata(market_id="underdog_sports", display_name="Underdog Sports", homepage_url="https://underdogfantasy.com"),
     MarketMetadata(

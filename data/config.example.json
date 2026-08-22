@@ -68,10 +68,17 @@
     "betmgm": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "betmgm_api_base_url": "https://sportsapi.wv.betmgm.com",
+        "betmgm_sport_id": 4,
+        "betmgm_country": "at",
+        "betmgm_language": "en",
+        "credential_env_vars": [
+          "BETMGM_ACCESS_ID",
+          "BETMGM_ACCESS_ID_TOKEN"
+        ],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-05-26: no public documented BetMGM prediction/event-market API, SDK, or automation permission flow is published. Consumer app automation is unsupported."
+        "notes": "Official partner Sports API fixture, market, option, and implied-price reads plus local paper orders are implemented. Partner approval and AccessId/AccessIdToken are required; live betting and copy trading are unsupported because no order/account-activity endpoint is documented."
       }
     },
     "cme_prediction_markets": {

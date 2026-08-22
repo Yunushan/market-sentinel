@@ -286,6 +286,19 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("session-token", login)
         self.assertIsInstance(order.get("offers"), list)
 
+    def test_betmgm_fixtures_cover_partner_sports_api_shapes(self) -> None:
+        payload = json.loads((FIXTURE_ROOT / "betmgm" / "fixtures.json").read_text(encoding="utf-8"))
+
+        self.assertIsInstance(payload.get("items"), list)
+        fixture = payload["items"][0]
+        self.assertIn("full", fixture["id"])
+        self.assertIsInstance(fixture.get("markets"), list)
+        market = fixture["markets"][0]
+        self.assertIsInstance(market.get("options"), list)
+        option = market["options"][0]
+        self.assertIn("odds", option["price"])
+        self.assertIn("fraction", option["price"])
+
     def test_dflow_fixtures_cover_nested_market_and_orderbook_shapes(self) -> None:
         events = json.loads((FIXTURE_ROOT / "dflow" / "events.json").read_text(encoding="utf-8"))
         orderbook = json.loads((FIXTURE_ROOT / "dflow" / "orderbook.json").read_text(encoding="utf-8"))
