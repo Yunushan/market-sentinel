@@ -5109,12 +5109,23 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
     def _static_file_catalog(frontend_dir: Optional[Path] = None) -> Dict[str, Path]:
         """Return supported static files beneath a trusted deployment root."""
         try:
-            # The root is normalized and constrained before any filesystem
-            # lookup. It is deployment configuration, never request data.
-            root = _resolve_trusted_frontend_dir(frontend_dir or DEFAULT_FRONTEND_DIR)
-        except (OSError, RuntimeError, ValueError):
+            configured = frontend_dir if frontend_dir is not None else DEFAULT_FRONTEND_DIR
+            normalized_root = os.path.normcase(
+                os.path.realpath(os.path.expanduser(os.fspath(configured)))
+            )
+            normalized_default = os.path.normcase(
+                os.path.realpath(os.path.expanduser(os.fspath(DEFAULT_FRONTEND_DIR)))
+            )
+            normalized_allowed = os.path.normcase(os.path.realpath(os.fspath(_RESOURCE_ROOT)))
+            allowed_prefix = normalized_allowed.rstrip(os.sep) + os.sep
+            if normalized_root != normalized_default and not normalized_root.startswith(allowed_prefix):
+                return {}
+            # The canonical root is normalized and constrained immediately
+            # above, before any filesystem lookup.
+            root = Path(normalized_root)
+        except (OSError, RuntimeError, ValueError, TypeError):
             return {}
-        if root is None or not root.is_dir():  # codeql[py/path-injection]
+        if not root.is_dir():
             return {}
 
         catalog: Dict[str, Path] = {}
@@ -5123,26 +5134,26 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             try:
                 # Candidates come only from the validated root and are
                 # confined with relative_to below.
-                target = candidate.resolve()  # codeql[py/path-injection]
+                target = candidate.resolve()
                 target.relative_to(root)
             except (OSError, RuntimeError, ValueError):
                 return
-            if target.is_file():  # codeql[py/path-injection]
+            if target.is_file():
                 catalog[relative_path] = target
 
-        add_file("index.html", root / "index.html")  # codeql[py/path-injection]
+        add_file("index.html", root / "index.html")
         try:
-            root_entries = tuple(root.iterdir())  # codeql[py/path-injection]
+            root_entries = tuple(root.iterdir())
         except OSError:
             return catalog
         for candidate in root_entries:
             if candidate.name != "index.html" and STATIC_FRONTEND_FILENAME_RE.fullmatch(candidate.name):
                 add_file(candidate.name, candidate)
 
-        assets_dir = root / "assets"  # codeql[py/path-injection]
+        assets_dir = root / "assets"
         try:
             asset_entries = (
-                tuple(assets_dir.iterdir()) if assets_dir.is_dir() else ()  # codeql[py/path-injection]
+                tuple(assets_dir.iterdir()) if assets_dir.is_dir() else ()
             )
         except OSError:
             return catalog
