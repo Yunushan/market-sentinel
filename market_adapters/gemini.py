@@ -21,6 +21,7 @@ from .types import (
     PaperOrderRequest,
     PaperOrderResult,
     PriceSnapshot,
+    MarketTrade,
 )
 
 
@@ -196,6 +197,105 @@ class GeminiPredictionAdapter(MarketAdapter):
             )
         candles.sort(key=lambda candle: candle.timestamp)
         return candles
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Normalize authenticated filled Gemini orders as account trades.
+
+        Gemini's documented history endpoint is an authenticated order-history
+        feed, not a public market tape.  Only filled rows are exposed here;
+        the normalized side therefore preserves the account order direction
+        (BUY/SELL), while the requested contract and time bounds are checked
+        again locally for deterministic fixture/live behavior.
+        """
+
+        self.ensure_capability("trade_history")
+        event_ticker, instrument_symbol = self._split_contract_id(contract_id)
+        desired = self._bounded_int(limit, "trade limit", minimum=1, maximum=1000)
+        lower = self._history_timestamp(after, "after") if after is not None else None
+        upper = self._history_timestamp(before, "before") if before is not None else None
+        if lower is not None and upper is not None and upper < lower:
+            raise MarketConfigurationError("Gemini trade history before must not precede after.")
+        payload = self.list_order_history(
+            status="filled",
+            contract_id=self._contract_id(event_ticker, instrument_symbol),
+            limit=desired,
+            offset=0,
+            from_timestamp=lower,
+            to_timestamp=upper,
+        )
+        rows = self._list_from_payload(payload, "orders", "data")
+        trades: List[MarketTrade] = []
+        canonical = self._contract_id(event_ticker, instrument_symbol)
+        for index, row in enumerate(rows):
+            status = str(row.get("status") or "filled").strip().lower()
+            if status != "filled":
+                continue
+            row_symbol = str(
+                row.get("symbol")
+                or row.get("instrumentSymbol")
+                or row.get("instrument_symbol")
+                or instrument_symbol
+            ).strip()
+            if row_symbol and row_symbol != instrument_symbol:
+                continue
+            side = str(row.get("side") or row.get("orderSide") or "").strip().upper()
+            if side not in {"BUY", "SELL"}:
+                continue
+            size = self._positive_number(
+                row.get("filledQuantity")
+                or row.get("filled_quantity")
+                or row.get("executedQuantity")
+                or row.get("quantity")
+                or row.get("size")
+            )
+            price = self._safe_probability(
+                row.get("averageFillPrice")
+                or row.get("average_fill_price")
+                or row.get("avgFillPrice")
+                or row.get("fillPrice")
+                or row.get("price")
+            )
+            timestamp = self._history_timestamp(
+                row.get("filledAt")
+                or row.get("filled_at")
+                or row.get("executedAt")
+                or row.get("updatedAt")
+                or row.get("updated_at")
+                or row.get("createdAt")
+                or row.get("created_at"),
+                "trade timestamp",
+            )
+            if size is None or price is None or timestamp is None:
+                continue
+            if lower is not None and timestamp < lower:
+                continue
+            if upper is not None and timestamp > upper:
+                continue
+            trade_id = str(row.get("orderId") or row.get("order_id") or row.get("id") or "").strip()
+            if not trade_id:
+                trade_id = f"gemini:{instrument_symbol}:{int(timestamp * 1000)}:{index}"
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    trade_id=trade_id,
+                    side=side,
+                    price=price,
+                    size=size,
+                    timestamp=timestamp,
+                    raw=dict(row),
+                )
+            )
+            if len(trades) >= desired:
+                break
+        return trades
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -737,6 +837,14 @@ class GeminiPredictionAdapter(MarketAdapter):
             raise MarketConfigurationError(
                 f"Gemini {label} must be a Unix timestamp or ISO-8601 value."
             ) from exc
+
+    @staticmethod
+    def _positive_number(value: Any) -> Optional[float]:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) and number > 0 else None
 
     @staticmethod
     def _value_at(data: Any, *keys: str) -> Any:

@@ -1426,6 +1426,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 from_timestamp=1787385600,
                 to_timestamp=1787389200,
             )
+            trades = adapter.list_trades(
+                "BTC100K2026:GEMI-BTC100K26-YES",
+                limit=50,
+                after=1787385600,
+                before=1787389200,
+            )
             positions = adapter.get_positions(
                 "BTC100K2026",
                 limit=100,
@@ -1449,14 +1455,20 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
 
         self.assertEqual(active["orders"][0]["orderId"], "order-1001")
         self.assertEqual(history["orders"][0]["status"], "filled")
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0].trade_id, "order-0999")
+        self.assertEqual(trades[0].side, "BUY")
+        self.assertEqual(trades[0].size, 2.0)
+        self.assertAlmostEqual(trades[0].price, 0.41)
         self.assertEqual(positions["positions"][0]["symbol"], "GEMI-BTC100K26-YES")
         self.assertEqual(settled["positions"][0]["settlementStatus"], "settled")
         self.assertEqual(volume["eventTicker"], "BTC100K2026")
-        self.assertEqual([call[0] for call in calls], ["POST"] * 5)
+        self.assertEqual([call[0] for call in calls], ["POST"] * 6)
         self.assertEqual(
             [call[1] for call in calls],
             [
                 "/v1/prediction-markets/orders/active",
+                "/v1/prediction-markets/orders/history",
                 "/v1/prediction-markets/orders/history",
                 "/v1/prediction-markets/positions",
                 "/v1/prediction-markets/positions/settled",
@@ -1468,10 +1480,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(calls[1][2]["status"], "filled")
         self.assertEqual(calls[1][2]["from"], 1787385600000)
         self.assertEqual(calls[1][2]["to"], 1787389200000)
-        self.assertEqual(calls[2][2]["sort"], "-unrealizedPnl")
-        self.assertTrue(calls[3][2]["withCashOuts"])
-        self.assertEqual(calls[4][2]["startTime"], 1787385600000)
-        self.assertEqual(calls[4][2]["endTime"], 1787389200000)
+        self.assertEqual(calls[2][2]["status"], "filled")
+        self.assertEqual(calls[2][2]["symbol"], "GEMI-BTC100K26-YES")
+        self.assertEqual(calls[3][2]["sort"], "-unrealizedPnl")
+        self.assertTrue(calls[4][2]["withCashOuts"])
+        self.assertEqual(calls[5][2]["startTime"], 1787385600000)
+        self.assertEqual(calls[5][2]["endTime"], 1787389200000)
         self.assertTrue(all(call[3]["X-GEMINI-APIKEY"] == "gemini-key" for call in calls))
         self.assertTrue(all("gemini-secret" not in json.dumps(call[2]) for call in calls))
 

@@ -533,7 +533,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | INFER / INFER-pub (`infer`) | Verified blocked | No | No | No | No | No | Required | Account/export access required | Not trading/KYC limited |
 | Fact Machine (`fact_machine`) | Verified blocked | No | No | No | No | No | Required | Wallet/personhood required | Identity/jurisdiction limited |
 | Opinion Labs (`opinion_labs`) | Implemented | Yes | Yes (price history, authenticated filled trades) | Yes | Guarded, off by default | Yes, simulation only | Required | API credentials required | Jurisdiction varies |
-| Gemini Titan / Gemini Predictions (`gemini_titan`) | Implemented | Yes | Yes (price-history points) | Yes | Guarded, off by default | No | Required | Live trading only | Region/KYC limited |
+| Gemini Titan / Gemini Predictions (`gemini_titan`) | Implemented | Yes | Yes (filled account trades/price-history points) | Yes | Guarded, off by default | No | Required | Live trading only | Region/KYC limited |
 | Augur (`augur`) | Implemented | No | Yes | No | No | No | Required | Subgraph endpoint required | Jurisdiction varies |
 | BetMGM (`betmgm`) | Implemented | Yes | Yes | Yes | No | No | Required | Account/API token required | Region/KYC limited |
 | PrizePicks (`prizepicks`) | Verified blocked | No | No | No | No | No | Required | Account required | Region/KYC limited |
