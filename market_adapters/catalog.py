@@ -488,56 +488,6 @@ HEDGEHOG_CAPABILITIES = MarketCapabilities(
     region_limited=True,
 )
 
-IEM_CAPABILITIES = MarketCapabilities(
-    # IEM's documented surface is an explicit inventory of official
-    # historical price files; it does not publish dynamic discovery or a
-    # current quote/order API.
-    market_discovery=True,
-    event_listing=True,
-    price_reading=True,
-    orderbook_reading=False,
-    alerts=True,
-    paper_trading=True,
-    live_trading=False,
-    copy_trading=False,
-    api_required=True,
-    credentials_required=False,
-    kyc_required=False,
-    region_limited=False,
-)
-
-FRENZY_CAPABILITIES = MarketCapabilities(
-    market_discovery=True,
-    event_listing=True,
-    price_reading=True,
-    orderbook_reading=False,
-    alerts=True,
-    paper_trading=True,
-    # Frenzy live bets require an oracle-signed BetAck in addition to a
-    # wallet signature; this adapter only emits a paper EIP-712 intent.
-    live_trading=False,
-    copy_trading=False,
-    api_required=True,
-    credentials_required=False,
-    kyc_required=False,
-    region_limited=True,
-)
-
-HEDGEHOG_CAPABILITIES = MarketCapabilities(
-    market_discovery=True,
-    event_listing=True,
-    price_reading=True,
-    orderbook_reading=False,
-    alerts=True,
-    paper_trading=True,
-    live_trading=True,
-    copy_trading=False,
-    api_required=True,
-    credentials_required=False,
-    kyc_required=False,
-    region_limited=True,
-)
-
 STUB_CAPABILITIES = MarketCapabilities()
 
 MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
@@ -869,4 +819,3 @@ _MARKET_BY_ID: Dict[str, MarketMetadata] = {m.market_id: m for m in MARKET_CATAL
 def get_market_metadata(market_id: str) -> MarketMetadata:
     normalized = str(market_id or "").strip().lower()
     return _MARKET_BY_ID[normalized]
-
