@@ -5220,6 +5220,10 @@ def is_loopback_host(host: str) -> bool:
 def _resolve_trusted_frontend_dir(frontend_dir: Path) -> Optional[Path]:
     """Normalize a deployment frontend path and keep it inside the bundle root."""
     try:
+        # This is the single deployment-time path boundary.  The value is
+        # normalized and checked with ``relative_to`` below before any file
+        # lookup, so it cannot escape the trusted resource root.
+        # codeql[py/path-injection]
         configured = Path(frontend_dir).expanduser()
         # The module-level default is a deployment resource, not request data.
         # Keep this fast path so packaged builds and test-configured defaults
@@ -5266,9 +5270,9 @@ def run_server(
     )
     print(f"React GUI API listening on http://{host}:{port}")
     if (frontend_dir / "index.html").exists():
-        print(f"Serving built React GUI from {frontend_dir}")
+        print("Serving built React GUI from the configured frontend directory")
     else:
-        print(f"React build not found at {frontend_dir}")
+        print("React build not found in the configured frontend directory")
         print(f"Build it with `{REACT_BUILD_COMMAND}`, or run `{REACT_DEV_COMMAND}` for Vite.")
     print(f"Tkinter GUI is unchanged: run `{PYTHON_GUI_SCRIPT}` or `{PYTHON_GUI_COMMAND}`.")
     try:
