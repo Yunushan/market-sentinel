@@ -5225,12 +5225,14 @@ def _resolve_trusted_frontend_dir(frontend_dir: Path) -> Optional[Path]:
         # lookup, so it cannot escape the trusted resource root.
         # codeql[py/path-injection]
         configured = Path(frontend_dir).expanduser()
+        configured_root = configured.resolve()
+        default_root = Path(DEFAULT_FRONTEND_DIR).expanduser().resolve()
         # The module-level default is a deployment resource, not request data.
         # Keep this fast path so packaged builds and test-configured defaults
         # do not need to widen the trusted-root boundary.
-        if configured == Path(DEFAULT_FRONTEND_DIR).expanduser():
-            return configured.resolve()
-        root = configured.resolve()
+        if configured_root == default_root:
+            return configured_root
+        root = configured_root
         allowed_root = _RESOURCE_ROOT.resolve()
         root.relative_to(allowed_root)
     except (OSError, RuntimeError, ValueError, TypeError):
