@@ -37,6 +37,10 @@ class KalshiAdapterTests(unittest.TestCase):
                 return {"market": markets["markets"][0]}
             if url.endswith("/markets/KXFED-26MAY-TARGET-425/orderbook"):
                 return orderbook
+            if url.endswith("/markets/trades"):
+                return load_fixture("trades")
+            if url.endswith("/series/KXFED/markets/KXFED-26MAY-TARGET-425/candlesticks"):
+                return load_fixture("candlesticks")
             raise AssertionError(f"unexpected Kalshi URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
@@ -98,6 +102,59 @@ class KalshiAdapterTests(unittest.TestCase):
         self.assertAlmostEqual(price.bid or 0, 0.58)
         self.assertAlmostEqual(price.ask or 0, 0.59)
         self.assertAlmostEqual(price.midpoint or 0, 0.585)
+
+    def test_public_trade_history_is_filtered_and_normalized(self) -> None:
+        adapter = self.make_adapter()
+
+        yes_trades = adapter.list_trades(
+            "KXFED-26MAY-TARGET-425:YES",
+            limit=25,
+            after=1777630000,
+            before=1777640000,
+        )
+
+        self.assertEqual(len(yes_trades), 1)
+        self.assertEqual(yes_trades[0].trade_id, "trade-kalshi-1")
+        self.assertEqual(yes_trades[0].side, "YES")
+        self.assertAlmostEqual(yes_trades[0].price, 0.42)
+        self.assertAlmostEqual(yes_trades[0].size, 12.0)
+        self.assertIsNotNone(yes_trades[0].timestamp)
+
+    def test_public_candles_are_normalized_and_no_prices_are_complemented(self) -> None:
+        adapter = self.make_adapter()
+
+        yes = adapter.list_candles(
+            "KXFED-26MAY-TARGET-425:YES",
+            resolution="1h",
+            from_timestamp=1777630000,
+            to_timestamp=1777640000,
+        )
+        no = adapter.list_candles(
+            "KXFED-26MAY-TARGET-425:NO",
+            resolution="1h",
+            from_timestamp=1777630000,
+            to_timestamp=1777640000,
+        )
+
+        self.assertEqual(len(yes), 1)
+        self.assertEqual(yes[0].timestamp, 1777636800.0)
+        self.assertEqual((yes[0].open, yes[0].high, yes[0].low, yes[0].close), (0.4, 0.45, 0.39, 0.42))
+        self.assertEqual((no[0].open, no[0].high, no[0].low, no[0].close), (0.6, 0.61, 0.55, 0.58))
+        self.assertEqual(yes[0].volume, 125.0)
+
+    def test_history_validation_rejects_invalid_ranges(self) -> None:
+        adapter = self.make_adapter()
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades("KXFED-26MAY-TARGET-425:YES", limit=1001)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles("KXFED-26MAY-TARGET-425:YES", resolution="15m")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles(
+                "KXFED-26MAY-TARGET-425:YES",
+                from_timestamp=1777640000,
+                to_timestamp=1777630000,
+            )
 
     def test_paper_order_is_dry_run_and_validates_input(self) -> None:
         adapter = self.make_adapter()

@@ -7,6 +7,7 @@ from .blinq import BlinqAdapter
 from .coinbase_prediction import CoinbasePredictionMarketsAdapter
 from .catalog import MARKET_CATALOG, MARKET_IDS, get_market_metadata
 from .crypto_com_predict import CryptoComPredictAdapter, FanaticsMarketsAdapter
+from .draftkings_predictions import DraftKingsPredictionsAdapter
 from .context_v2 import ContextV2Adapter
 from .dflow import DFlowAdapter
 from .drift_bet import DriftBetAdapter
@@ -17,7 +18,9 @@ from .gemini import GeminiPredictionAdapter
 from .hyperliquid import HyperliquidAdapter
 from .hedgehog import HedgehogMarketsAdapter
 from .ibkr_event_contracts import CMEPredictionMarketsAdapter, ForecastExAdapter, IBKREventContractsAdapter, IBKRForecastTraderAdapter
+from .iowa_electronic_markets import IowaElectronicMarketsAdapter
 from .kalshi import KalshiAdapter
+from .robinhood_prediction import KalshiViaRobinhoodAdapter, RobinhoodPredictionMarketsAdapter
 from .lamas_finance import LamasFinanceAdapter
 from .legacy_web3 import (
     AugurAdapter,
@@ -46,6 +49,7 @@ from .registry import AdapterRegistry, VERIFIED_BLOCKERS, build_default_registry
 from .runtime import AdapterRuntime, RateLimiter, ResolvedCredential, load_json_fixture, load_market_fixture
 from .smarkets import SmarketsAdapter
 from .seer import SeerAdapter
+from .scicast import SciCastAdapter
 from .space import SpaceAdapter
 from .thales import ThalesMarketAdapter
 from .trueo import TrueoAdapter
@@ -56,6 +60,7 @@ from .xo import XOMarketAdapter
 from .xmarket import XMarketAdapter
 from .types import (
     MarketCapabilities,
+    MarketCandle,
     MarketContract,
     MarketEvent,
     MarketMetadata,
@@ -64,6 +69,7 @@ from .types import (
     PaperOrderRequest,
     PaperOrderResult,
     PriceSnapshot,
+    MarketTrade,
 )
 
 __all__ = [
@@ -75,6 +81,7 @@ __all__ = [
     "BlinqAdapter",
     "CoinbasePredictionMarketsAdapter",
     "CryptoComPredictAdapter",
+    "DraftKingsPredictionsAdapter",
     "FanaticsMarketsAdapter",
     "ContextV2Adapter",
     "DFlowAdapter",
@@ -87,6 +94,7 @@ __all__ = [
     "HedgehogMarketsAdapter",
     "IBKREventContractsAdapter",
     "IBKRForecastTraderAdapter",
+    "IowaElectronicMarketsAdapter",
     "ForecastExAdapter",
     "CMEPredictionMarketsAdapter",
     "MARKET_CATALOG",
@@ -94,12 +102,15 @@ __all__ = [
     "MarketAdapter",
     "MarketAdapterError",
     "MarketCapabilities",
+    "MarketCandle",
     "MarketConfigurationError",
     "MarketContract",
     "MarketEvent",
     "MarketHTTPError",
     "MarketMetadata",
+    "MarketTrade",
     "KalshiAdapter",
+    "KalshiViaRobinhoodAdapter",
     "LamasFinanceAdapter",
     "LimitlessAdapter",
     "ManifoldAdapter",
@@ -123,10 +134,12 @@ __all__ = [
     "PredictItAdapter",
     "PriceSnapshot",
     "RateLimiter",
+    "RobinhoodPredictionMarketsAdapter",
     "ResolvedCredential",
     "SxBetAdapter",
     "SmarketsAdapter",
     "SeerAdapter",
+    "SciCastAdapter",
     "SpaceAdapter",
     "ThalesMarketAdapter",
     "TrueoAdapter",

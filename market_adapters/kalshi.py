@@ -4,6 +4,7 @@ import base64
 import math
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urlparse
@@ -12,8 +13,10 @@ from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError
 from .types import (
+    MarketCandle,
     MarketContract,
     MarketEvent,
+    MarketTrade,
     OrderBookLevel,
     OrderBookSnapshot,
     PaperOrderRequest,
@@ -157,6 +160,142 @@ class KalshiAdapter(MarketAdapter):
             raw=payload if isinstance(payload, dict) else {},
         )
 
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Return normalized public Kalshi trades for one binary outcome.
+
+        Kalshi's documented ``GET /markets/trades`` feed is public and can be
+        filtered by ticker and timestamp.  Its ``taker_outcome_side`` field is
+        an outcome (YES/NO), rather than a buy/sell direction, so that value is
+        retained in the normalized ``side`` field and the raw row remains
+        available for callers that need the exchange-specific semantics.
+        """
+
+        ticker, outcome = self._split_contract_id(contract_id)
+        params: Dict[str, Any] = {
+            "ticker": ticker,
+            "limit": self._history_limit(limit),
+        }
+        if after is not None:
+            params["min_ts"] = self._history_timestamp(after, "after")
+        if before is not None:
+            params["max_ts"] = self._history_timestamp(before, "before")
+        payload = self._get("/markets/trades", params=params)
+        rows = payload.get("trades") if isinstance(payload, Mapping) else []
+        if not isinstance(rows, list):
+            return []
+
+        trades: List[MarketTrade] = []
+        for raw in rows:
+            if not isinstance(raw, Mapping):
+                continue
+            row_ticker = str(raw.get("ticker") or "").strip().upper()
+            if row_ticker and row_ticker != ticker:
+                continue
+            row_outcome = str(raw.get("taker_outcome_side") or raw.get("taker_side") or "").strip().lower()
+            if row_outcome and row_outcome not in {"yes", "no"}:
+                continue
+            if row_outcome and row_outcome != outcome:
+                continue
+            price = self._trade_price(raw, outcome)
+            size = self._positive_number(raw.get("count_fp") or raw.get("count") or raw.get("quantity"))
+            trade_id = str(raw.get("trade_id") or raw.get("tradeId") or "").strip()
+            if price is None or size is None or not trade_id:
+                continue
+            timestamp = self._timestamp_seconds(raw.get("created_time") or raw.get("created_ts") or raw.get("timestamp"))
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=self._contract_id(ticker, outcome),
+                    trade_id=trade_id,
+                    side=(row_outcome or outcome).upper(),
+                    price=price,
+                    size=size,
+                    timestamp=timestamp,
+                    raw=dict(raw),
+                )
+            )
+        return trades
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Return normalized Kalshi OHLCV history for one outcome.
+
+        The official single-market endpoint requires a series ticker and a
+        bounded time range.  The adapter obtains the series from the public
+        market record, maps the common resolutions to Kalshi's documented
+        1/60/1440-minute intervals, and complements YES prices for NO candles.
+        """
+
+        ticker, outcome = self._split_contract_id(contract_id)
+        interval = self._candle_interval(resolution)
+        market = self._get_market(ticker)
+        series_ticker = str((market or {}).get("series_ticker") or self.config.get("kalshi_series_ticker") or "").strip().upper()
+        if not series_ticker:
+            raise MarketConfigurationError(
+                f"Kalshi market {ticker} did not provide a series_ticker required for candlestick history."
+            )
+
+        end_ts = self._history_timestamp(to_timestamp, "to_timestamp") if to_timestamp is not None else int(time.time())
+        default_lookback = max(interval * 100, 3600)
+        start_ts = (
+            self._history_timestamp(from_timestamp, "from_timestamp")
+            if from_timestamp is not None
+            else max(0, end_ts - default_lookback)
+        )
+        if end_ts <= start_ts:
+            raise MarketConfigurationError("Kalshi candle history requires to_timestamp greater than from_timestamp.")
+
+        path = f"/series/{series_ticker}/markets/{ticker}/candlesticks"
+        payload = self._get(
+            path,
+            params={
+                "start_ts": start_ts,
+                "end_ts": end_ts,
+                "period_interval": interval,
+                "include_latest_before_start": False,
+            },
+        )
+        rows = payload.get("candlesticks") if isinstance(payload, Mapping) else []
+        if not isinstance(rows, list):
+            return []
+
+        candles: List[MarketCandle] = []
+        for raw in rows:
+            if not isinstance(raw, Mapping):
+                continue
+            timestamp = self._timestamp_seconds(raw.get("end_period_ts") or raw.get("end_period"))
+            values = self._candle_values(raw, outcome)
+            if timestamp is None or values is None:
+                continue
+            volume = self._nonnegative_number(raw.get("volume_fp") or raw.get("volume"))
+            candles.append(
+                MarketCandle(
+                    market_id=self.market_id,
+                    contract_id=self._contract_id(ticker, outcome),
+                    timestamp=timestamp,
+                    open=values[0],
+                    high=values[1],
+                    low=values[2],
+                    close=values[3],
+                    volume=volume,
+                    raw=dict(raw),
+                )
+            )
+        return candles
+
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
         self._validate_order(order)
@@ -237,6 +376,110 @@ class KalshiAdapter(MarketAdapter):
 
     def _request_path(self, path: str) -> str:
         return urlparse(self._url(path)).path
+
+    @staticmethod
+    def _history_limit(value: Any) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Kalshi history limit must be an integer between 1 and 1000.") from exc
+        if parsed < 1 or parsed > 1000:
+            raise MarketConfigurationError("Kalshi history limit must be between 1 and 1000.")
+        return parsed
+
+    @staticmethod
+    def _history_timestamp(value: Any, label: str) -> int:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Kalshi {label} timestamp must be numeric.") from exc
+        if not math.isfinite(parsed) or parsed < 0:
+            raise MarketConfigurationError(f"Kalshi {label} timestamp must be a finite non-negative number.")
+        return int(parsed)
+
+    @staticmethod
+    def _candle_interval(resolution: str) -> int:
+        normalized = str(resolution or "").strip().lower()
+        intervals = {"1m": 1, "1h": 60, "1d": 1440, "60m": 60, "1440m": 1440}
+        try:
+            return intervals[normalized]
+        except KeyError as exc:
+            raise MarketConfigurationError("Kalshi candle resolution must be 1m, 1h, or 1d.") from exc
+
+    @classmethod
+    def _trade_price(cls, raw: Mapping[str, Any], outcome: str) -> Optional[float]:
+        keys = (
+            ("yes_price_dollars", "yes_price") if outcome == "yes" else ("no_price_dollars", "no_price")
+        ) + ("price_dollars", "price")
+        for key in keys:
+            value = cls._safe_probability(raw.get(key))
+            if value is not None:
+                return value
+        return None
+
+    @classmethod
+    def _candle_values(cls, raw: Mapping[str, Any], outcome: str) -> Optional[Tuple[float, float, float, float]]:
+        price = raw.get("price")
+        if not isinstance(price, Mapping):
+            price = raw.get("yes_bid") if outcome == "yes" else raw.get("no_bid")
+        if not isinstance(price, Mapping):
+            return None
+        values: Dict[str, float] = {}
+        for name in ("open", "high", "low", "close"):
+            value = cls._safe_probability(price.get(f"{name}_dollars") or price.get(name))
+            if value is None:
+                return None
+            values[name] = value
+        if outcome == "no":
+            return (
+                round(1.0 - values["open"], 10),
+                round(1.0 - values["low"], 10),
+                round(1.0 - values["high"], 10),
+                round(1.0 - values["close"], 10),
+            )
+        return (values["open"], values["high"], values["low"], values["close"])
+
+    @staticmethod
+    def _timestamp_seconds(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        if isinstance(value, (int, float)):
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(parsed):
+                return None
+            return parsed / 1000.0 if parsed > 10_000_000_000 else parsed
+        text = str(value).strip()
+        try:
+            parsed = float(text)
+            return parsed / 1000.0 if parsed > 10_000_000_000 else parsed
+        except ValueError:
+            pass
+        try:
+            parsed_dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed_dt.tzinfo is None:
+                parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
+            return parsed_dt.timestamp()
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _positive_number(value: Any) -> Optional[float]:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) and parsed > 0 else None
+
+    @staticmethod
+    def _nonnegative_number(value: Any) -> Optional[float]:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) and parsed >= 0 else None
 
     def _contracts_from_market(self, market: Mapping[str, Any]) -> List[MarketContract]:
         ticker = str(market.get("ticker") or "").strip().upper()

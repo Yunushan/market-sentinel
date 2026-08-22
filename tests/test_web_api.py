@@ -19,12 +19,14 @@ from core.storage import ConfigLoadError, load_config, save_config
 from market_adapters.base import MarketAdapter
 from market_adapters.types import (
     MarketCapabilities,
+    MarketCandle,
     MarketMetadata,
     OrderBookLevel,
     OrderBookSnapshot,
     PaperOrderRequest,
     PaperOrderResult,
     PriceSnapshot,
+    MarketTrade,
 )
 from polymarket.analytics_cache import POLYMARKET_MDD_AUDIT_KIND, store_analytics_artifact
 from polymarket.gamma import ProfileResult
@@ -53,6 +55,8 @@ from web_api import (
     live_preflight_payload,
     live_safety_payload,
     markets_payload,
+    market_candles_payload,
+    market_trades_payload,
     paper_payload,
     paper_order_impact,
     paper_order_from_payload,
@@ -505,6 +509,35 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["selected_market_id"], "kalshi")
         self.assertGreaterEqual(payload["counts"]["total"], 1)
         self.assertGreaterEqual(payload["counts"]["implemented"], 1)
+
+    def test_market_history_payloads_serialize_normalized_records(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="space",
+            display_name="Space",
+            capabilities=MarketCapabilities(price_reading=True),
+        )
+        adapter.list_trades = lambda contract_id, **_kwargs: [  # type: ignore[method-assign]
+            MarketTrade("space", contract_id, "trade-1", "BUY", 0.4, 3.0, 1700000000.0)
+        ]
+        adapter.list_candles = lambda contract_id, **_kwargs: [  # type: ignore[method-assign]
+            MarketCandle("space", contract_id, 1700000000.0, 0.35, 0.42, 0.34, 0.4, 100.0)
+        ]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["space"].enabled = True
+        registry = Registry()
+        trades = market_trades_payload(cfg, registry, "space", {"contract_id": ["m:YES"], "limit": ["1"]})
+        candles = market_candles_payload(cfg, registry, "space", {"contract_id": ["m:YES"], "resolution": ["1h"]})
+
+        self.assertEqual(trades["trades"][0]["trade_id"], "trade-1")
+        self.assertEqual(trades["trades"][0]["size"], 3.0)
+        self.assertEqual(candles["candles"][0]["close"], 0.4)
+        self.assertEqual(candles["resolution"], "1h")
 
     def test_markets_payload_includes_diagnostics_without_secret_values(self) -> None:
         cfg = AppConfig()

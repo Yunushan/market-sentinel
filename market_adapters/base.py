@@ -7,10 +7,12 @@ from .errors import MarketConfigurationError, UnsupportedFeatureError
 from .runtime import AdapterRuntime, ResolvedCredential
 from .types import (
     MarketCapabilities,
+    MarketCandle,
     MarketContract,
     MarketEvent,
     MarketMetadata,
     OrderBookSnapshot,
+    MarketTrade,
     PaperOrderRequest,
     PaperOrderResult,
     PriceSnapshot,
@@ -216,6 +218,32 @@ class MarketAdapter:
     def get_orderbook(self, contract_id: str) -> OrderBookSnapshot:
         self.ensure_capability("orderbook_reading")
         raise UnsupportedFeatureError(self.market_id, "orderbook_reading")
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Return normalized public trades when an adapter documents that feed."""
+
+        self.ensure_capability("trade_history")
+        raise UnsupportedFeatureError(self.market_id, "trade_history")
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Return normalized OHLCV history when an adapter documents that feed."""
+
+        self.ensure_capability("candle_history")
+        raise UnsupportedFeatureError(self.market_id, "candle_history")
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")

@@ -56,7 +56,16 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
     def test_ibkr_event_contract_adapters_map_forecastex_cme_snapshots_paper_and_guarded_orders(self) -> None:
         forecast_fixtures = {
             name: load_fixture("ibkr_forecasttrader", name)
-            for name in ("category_tree", "search", "strikes", "info", "accounts", "snapshot", "order_response")
+            for name in (
+                "category_tree",
+                "search",
+                "strikes",
+                "info",
+                "accounts",
+                "snapshot",
+                "history",
+                "order_response",
+            )
         }
         adapter = IBKRForecastTraderAdapter({"ibkr_session_cookie": "api=test-session"})
 
@@ -77,6 +86,15 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 return forecast_fixtures["accounts"]
             if url.endswith("/iserver/marketdata/snapshot"):
                 return forecast_fixtures["snapshot"]
+            if url.endswith("/iserver/marketdata/history"):
+                self.assertEqual(params["conid"], 721095497)
+                self.assertEqual(params["period"], "1h")
+                self.assertEqual(params["bar"], "1h")
+                self.assertEqual(params["startTime"], "20251009-11:00:00")
+                self.assertEqual(params["direction"], -1)
+                self.assertEqual(params["source"], "Last")
+                self.assertFalse(params["outsideRth"])
+                return forecast_fixtures["history"]
             raise AssertionError(f"unexpected IBKR URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
@@ -85,6 +103,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         order = PaperOrderRequest("ibkr_forecasttrader", contracts[0].contract_id, "BUY", 5, 0.48)
         book = adapter.get_orderbook(order.contract_id)
         price = adapter.get_price(order.contract_id)
+        candles = adapter.list_candles(
+            order.contract_id,
+            resolution="1h",
+            from_timestamp=1760004000,
+            to_timestamp=1760007600,
+        )
         paper = adapter.place_paper_order(order)
 
         self.assertEqual(events[0].event_id, "IBKR:FF")
@@ -92,6 +116,9 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual([level.price for level in book.bids], [0.45])
         self.assertEqual([level.price for level in book.asks], [0.5])
         self.assertAlmostEqual(price.midpoint or 0.0, 0.475)
+        self.assertEqual([candle.timestamp for candle in candles], [1760004000.0, 1760007600.0])
+        self.assertEqual([candle.close for candle in candles], [0.47, 0.49])
+        self.assertEqual([candle.volume for candle in candles], [4.0, 5.0])
         self.assertTrue(paper.accepted)
 
         calls = []
@@ -145,6 +172,11 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(forecastex.metadata.market_id, "forecastex")
         with self.assertRaises(UnsupportedFeatureError):
             adapter.copy_trade_from_activity({"side": "BUY"})
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles(order.contract_id, resolution="5sec")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles(order.contract_id, from_timestamp=1760007600, to_timestamp=1760004000)
 
     def test_hyperliquid_public_hip4_fills_support_safe_simulation_copy(self) -> None:
         wallet = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
@@ -336,6 +368,58 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
 
         with self.assertRaises(MarketConfigurationError):
             adapter.copy_trade_from_activity({"side": "BUY"})
+
+    def test_hyperliquid_public_hip4_candles_are_normalized_with_documented_bounds(self) -> None:
+        adapter = HyperliquidAdapter()
+        candles = load_fixture("hyperliquid", "candles")
+        requests = []
+
+        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+            self.assertEqual(method, "POST")
+            self.assertIsNone(params)
+            self.assertEqual(headers["Content-Type"], "application/json")
+            requests.append(json_body)
+            self.assertTrue(url.endswith("/info"))
+            return candles
+
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        result = adapter.list_candles(
+            "outcome:1:0",
+            resolution="1h",
+            from_timestamp=1788264000,
+            to_timestamp=1788271200,
+        )
+
+        self.assertEqual(
+            requests,
+            [
+                {
+                    "type": "candleSnapshot",
+                    "req": {
+                        "coin": "#10",
+                        "interval": "1h",
+                        "startTime": 1788264000000,
+                        "endTime": 1788271200000,
+                    },
+                }
+            ],
+        )
+        self.assertEqual([candle.contract_id for candle in result], ["outcome:1:0", "outcome:1:0"])
+        self.assertEqual([candle.timestamp for candle in result], [1788264000.0, 1788267600.0])
+        self.assertAlmostEqual(result[0].open, 0.62)
+        self.assertAlmostEqual(result[0].high, 0.66)
+        self.assertAlmostEqual(result[0].low, 0.60)
+        self.assertAlmostEqual(result[0].close, 0.64)
+        self.assertAlmostEqual(result[0].volume or 0.0, 150.5)
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles("outcome:1:0", resolution="45m")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles(
+                "outcome:1:0",
+                from_timestamp=1788271200,
+                to_timestamp=1788264000,
+            )
 
     def test_trueo_adapter_maps_onchain_manager_pools_prices_paper_and_signed_tx(self) -> None:
         from eth_abi import encode
@@ -1228,6 +1312,31 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(calls[0][2]["network_id"], 56)
         self.assertEqual(calls[0][3]["x-api-key"], "myriad-key")
 
+    def test_myriad_public_orderbook_trades_are_normalized_and_bounded(self) -> None:
+        adapter = MyriadAdapter({"myriad_network_id": 56})
+        trades = load_fixture("myriad_markets", "trades")
+
+        def fake_get_json(url: str, *, params=None, headers=None):
+            self.assertTrue(url.endswith("/markets/501/trades"))
+            self.assertEqual(params["page"], 1)
+            self.assertEqual(params["limit"], 3)
+            self.assertEqual(params["outcome"], 1)
+            self.assertEqual(params["network_id"], 56)
+            return trades
+
+        adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+        result = adapter.list_trades("501:1", limit=3, after=1719835050, before=1719835250)
+
+        self.assertEqual([trade.trade_id for trade in result], ["0xmyriadtradebuy", "0xmyriadtradesell"])
+        self.assertEqual([trade.side for trade in result], ["BUY", "SELL"])
+        self.assertAlmostEqual(result[0].price, 0.55)
+        self.assertAlmostEqual(result[0].size, 2.0)
+        self.assertEqual(result[0].timestamp, 1719835200.0)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades("501:1", limit=201)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades("501:1", before=100, after=100)
+
     def test_myriad_public_wallet_events_support_safe_simulation_copy(self) -> None:
         wallet = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
         adapter = MyriadAdapter({"myriad_network_id": 56})
@@ -1271,6 +1380,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         market = load_fixture("opinion_labs", "market")
         price_payload = load_fixture("opinion_labs", "price")
         orderbook = load_fixture("opinion_labs", "orderbook")
+        price_history = load_fixture("opinion_labs", "price_history")
         trades = load_fixture("opinion_labs", "trades")
 
         def fake_get_json(url: str, *, params=None, headers=None):
@@ -1283,6 +1393,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 return price_payload
             if url.endswith("/token/orderbook"):
                 return orderbook
+            if url.endswith("/token/price-history"):
+                self.assertEqual(params["token_id"], "0xyes")
+                self.assertEqual(params["interval"], "1d")
+                self.assertEqual(params["start_at"], 1733184000)
+                self.assertEqual(params["end_at"], 1733356800)
+                return price_history
             if url.endswith("/trade/user/0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"):
                 return trades
             raise AssertionError(f"unexpected Opinion URL: {url}")
@@ -1297,6 +1413,12 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             contracts = adapter.list_contracts("77")
             price = adapter.get_price("77:YES:0xyes")
             book = adapter.get_orderbook("77:YES:0xyes")
+            candles = adapter.list_candles(
+                "77:YES:0xyes",
+                resolution="1d",
+                from_timestamp=1733184000,
+                to_timestamp=1733356800,
+            )
             paper = adapter.place_paper_order(PaperOrderRequest("opinion_labs", "77:YES:0xyes", "SELL", 4, 0.64))
             activity = adapter.list_activity("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
             copied = adapter.copy_trade_from_activity(activity[0])
@@ -1305,6 +1427,9 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual([contract.contract_id for contract in contracts], ["77:YES:0xyes", "77:NO:0xno"])
         self.assertEqual(price.last, 0.65)
         self.assertEqual([level.price for level in book.bids], [0.64, 0.62])
+        self.assertEqual([candle.timestamp for candle in candles], [1733184000.0, 1733270400.0, 1733356800.0])
+        self.assertEqual([candle.close for candle in candles], [0.58, 0.62, 0.65])
+        self.assertTrue(all(candle.volume is None for candle in candles))
         self.assertTrue(paper.accepted)
         self.assertEqual(len(activity), 2)
         self.assertEqual(activity[0]["asset"], "77:YES:0xyes")
@@ -1314,6 +1439,87 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
 
         with self.assertRaises(MarketConfigurationError):
             adapter.list_activity("not-a-wallet")
+
+        with patch.dict("os.environ", {"OPINION_API_KEY": "opinion-key"}):
+            with self.assertRaises(MarketConfigurationError):
+                adapter.list_candles("77:YES:0xyes", resolution="30m")
+            with self.assertRaises(MarketConfigurationError):
+                adapter.list_candles(
+                    "77:YES:0xyes",
+                    from_timestamp=1733356800,
+                    to_timestamp=1733184000,
+                )
+
+    def test_opinion_guarded_clob_orders_build_signed_limit_and_market_requests(self) -> None:
+        adapter = OpinionAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "live_trading_max_size": 25,
+                "opinion_live_check_approval": False,
+            }
+        )
+        submitted = []
+
+        class FakeClient:
+            def place_order(self, payload, *, check_approval=False):
+                submitted.append((payload, check_approval))
+                return {"order_id": "opinion-order-1", "status": "submitted"}
+
+        def fake_builder(**kwargs):
+            return kwargs
+
+        with patch.object(adapter, "_create_clob_client", return_value=FakeClient()), patch.object(
+            OpinionAdapter, "_build_sdk_order", side_effect=fake_builder
+        ):
+            limit = adapter.place_live_order(
+                PaperOrderRequest("opinion_labs", "77:YES:0xyes", "BUY", 4, 0.64)
+            )
+            market = adapter.place_live_order(
+                PaperOrderRequest(
+                    "opinion_labs",
+                    "77:NO:0xno",
+                    "SELL",
+                    3,
+                    None,
+                    {"order_type": "market", "maker_amount_in_base_token": "3"},
+                )
+            )
+
+        self.assertTrue(limit["live"])
+        self.assertEqual(limit["request"]["marketId"], 77)
+        self.assertEqual(limit["request"]["tokenId"], "0xyes")
+        self.assertEqual(limit["request"]["price"], "0.64")
+        self.assertEqual(limit["request"]["makerAmountInQuoteToken"], "4")
+        self.assertIsNone(limit["request"]["makerAmountInBaseToken"])
+        self.assertEqual(limit["response"]["order_id"], "opinion-order-1")
+        self.assertEqual(market["order_type"], "market")
+        self.assertEqual(market["request"]["price"], "0")
+        self.assertEqual(market["request"]["makerAmountInBaseToken"], "3")
+        self.assertEqual(len(submitted), 2)
+        self.assertFalse(submitted[0][1])
+
+        with patch.object(adapter, "_create_clob_client", return_value=FakeClient()), patch.object(
+            OpinionAdapter, "_build_sdk_order", side_effect=fake_builder
+        ):
+            with self.assertRaises(MarketConfigurationError):
+                adapter.place_live_order(
+                    PaperOrderRequest("opinion_labs", "77:YES:0xyes", "BUY", 1, 0.005)
+                )
+            with self.assertRaises(MarketConfigurationError):
+                adapter.place_live_order(
+                    PaperOrderRequest(
+                        "opinion_labs",
+                        "77:YES:0xyes",
+                        "BUY",
+                        1,
+                        0.5,
+                        {
+                            "maker_amount_in_quote_token": "1",
+                            "maker_amount_in_base_token": "1",
+                        },
+                    )
+                )
 
     def test_predict_fun_adapter_maps_markets_orderbooks_and_no_prices(self) -> None:
         adapter = PredictFunAdapter()

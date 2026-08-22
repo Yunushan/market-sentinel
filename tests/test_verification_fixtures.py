@@ -29,6 +29,8 @@ class VerificationFixtureTests(unittest.TestCase):
         event = json.loads((FIXTURE_ROOT / "polymarket" / "event.json").read_text(encoding="utf-8"))
         orderbook = json.loads((FIXTURE_ROOT / "polymarket" / "orderbook.json").read_text(encoding="utf-8"))
         activity = json.loads((FIXTURE_ROOT / "polymarket" / "activity_buy.json").read_text(encoding="utf-8"))
+        clob_trades = json.loads((FIXTURE_ROOT / "polymarket" / "clob_trades.json").read_text(encoding="utf-8"))
+        price_history = json.loads((FIXTURE_ROOT / "polymarket" / "price_history.json").read_text(encoding="utf-8"))
 
         self.assertIn("clobTokenIds", market)
         self.assertIn("outcomes", market)
@@ -37,10 +39,16 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("asks", orderbook)
         self.assertEqual(activity.get("side"), "BUY")
         self.assertIn("asset", activity)
+        self.assertIsInstance(clob_trades.get("data"), list)
+        self.assertIn("asset_id", clob_trades["data"][0])
+        self.assertIsInstance(price_history.get("history"), list)
+        self.assertIn("p", price_history["history"][0])
 
     def test_kalshi_fixtures_cover_core_payload_shapes(self) -> None:
         markets = json.loads((FIXTURE_ROOT / "kalshi" / "markets.json").read_text(encoding="utf-8"))
         orderbook = json.loads((FIXTURE_ROOT / "kalshi" / "orderbook.json").read_text(encoding="utf-8"))
+        trades = json.loads((FIXTURE_ROOT / "kalshi" / "trades.json").read_text(encoding="utf-8"))
+        candles = json.loads((FIXTURE_ROOT / "kalshi" / "candlesticks.json").read_text(encoding="utf-8"))
 
         self.assertIsInstance(markets.get("markets"), list)
         self.assertGreaterEqual(len(markets["markets"]), 1)
@@ -49,18 +57,25 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("orderbook_fp", orderbook)
         self.assertIn("yes_dollars", orderbook["orderbook_fp"])
         self.assertIn("no_dollars", orderbook["orderbook_fp"])
+        self.assertIsInstance(trades.get("trades"), list)
+        self.assertIn("trade_id", trades["trades"][0])
+        self.assertIsInstance(candles.get("candlesticks"), list)
+        self.assertIn("price", candles["candlesticks"][0])
 
     def test_manifold_fixtures_cover_core_payload_shapes(self) -> None:
         search = json.loads((FIXTURE_ROOT / "manifold" / "search_markets.json").read_text(encoding="utf-8"))
         market = json.loads((FIXTURE_ROOT / "manifold" / "market_binary.json").read_text(encoding="utf-8"))
         multi = json.loads((FIXTURE_ROOT / "manifold" / "market_multi.json").read_text(encoding="utf-8"))
         prob = json.loads((FIXTURE_ROOT / "manifold" / "prob_binary.json").read_text(encoding="utf-8"))
+        trades = json.loads((FIXTURE_ROOT / "manifold" / "bets_trades.json").read_text(encoding="utf-8"))
 
         self.assertIsInstance(search.get("results"), list)
         self.assertIn("id", search["results"][0])
         self.assertEqual(market.get("outcomeType"), "BINARY")
         self.assertIsInstance(multi.get("answers"), list)
         self.assertIn("prob", prob)
+        self.assertIsInstance(trades, list)
+        self.assertIn("fills", trades[0])
 
     def test_metaculus_fixtures_cover_core_payload_shapes(self) -> None:
         posts = json.loads((FIXTURE_ROOT / "metaculus" / "posts.json").read_text(encoding="utf-8"))
@@ -71,6 +86,8 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIsInstance(posts.get("results"), list)
         self.assertIn("question", binary)
         self.assertIn("aggregations", binary["question"])
+        self.assertIsInstance(binary["question"]["aggregations"].get("recency_weighted", {}).get("history"), list)
+        self.assertGreaterEqual(len(binary["question"]["aggregations"]["recency_weighted"]["history"]), 1)
         self.assertIsInstance(multiple.get("questions"), list)
         self.assertEqual(numeric["question"].get("type"), "numeric")
 
@@ -89,6 +106,10 @@ class VerificationFixtureTests(unittest.TestCase):
         active = json.loads((FIXTURE_ROOT / "limitless_exchange" / "active.json").read_text(encoding="utf-8"))
         market = json.loads((FIXTURE_ROOT / "limitless_exchange" / "market.json").read_text(encoding="utf-8"))
         orderbook = json.loads((FIXTURE_ROOT / "limitless_exchange" / "orderbook.json").read_text(encoding="utf-8"))
+        historical_price = json.loads(
+            (FIXTURE_ROOT / "limitless_exchange" / "historical_price.json").read_text(encoding="utf-8")
+        )
+        events = json.loads((FIXTURE_ROOT / "limitless_exchange" / "events.json").read_text(encoding="utf-8"))
 
         self.assertIsInstance(active.get("data"), list)
         self.assertGreaterEqual(len(active["data"]), 1)
@@ -97,6 +118,11 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("tokens", market)
         self.assertIsInstance(orderbook.get("bids"), list)
         self.assertIsInstance(orderbook.get("asks"), list)
+        self.assertIsInstance(historical_price.get("prices"), list)
+        self.assertIn("timestamp", historical_price["prices"][0])
+        self.assertIsInstance(events.get("events"), list)
+        self.assertIn("tokenId", events["events"][0])
+        self.assertIn("matchedSize", events["events"][0])
 
     def test_sx_bet_fixtures_cover_core_payload_shapes(self) -> None:
         active = json.loads((FIXTURE_ROOT / "sx_bet" / "active_markets.json").read_text(encoding="utf-8"))
@@ -167,12 +193,16 @@ class VerificationFixtureTests(unittest.TestCase):
         myriad_questions = json.loads((FIXTURE_ROOT / "myriad_markets" / "questions.json").read_text(encoding="utf-8"))
         opinion_markets = json.loads((FIXTURE_ROOT / "opinion_labs" / "markets.json").read_text(encoding="utf-8"))
         opinion_trades = json.loads((FIXTURE_ROOT / "opinion_labs" / "trades.json").read_text(encoding="utf-8"))
+        opinion_price_history = json.loads(
+            (FIXTURE_ROOT / "opinion_labs" / "price_history.json").read_text(encoding="utf-8")
+        )
         predict_markets = json.loads((FIXTURE_ROOT / "predict_fun" / "markets.json").read_text(encoding="utf-8"))
         xo_markets = json.loads((FIXTURE_ROOT / "xo_market" / "markets.json").read_text(encoding="utf-8"))
         betfair_catalogue = json.loads(
             (FIXTURE_ROOT / "betfair_exchange" / "market_catalogue.json").read_text(encoding="utf-8")
         )
         myriad_orderbook = json.loads((FIXTURE_ROOT / "myriad_markets" / "orderbook.json").read_text(encoding="utf-8"))
+        myriad_trades = json.loads((FIXTURE_ROOT / "myriad_markets" / "trades.json").read_text(encoding="utf-8"))
         gemini_order = json.loads((FIXTURE_ROOT / "gemini" / "order_response.json").read_text(encoding="utf-8"))
         predict_order = json.loads((FIXTURE_ROOT / "predict_fun" / "order_response.json").read_text(encoding="utf-8"))
         betfair_order = json.loads(
@@ -187,6 +217,8 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("yesTokenId", opinion_markets["result"]["list"][0])
         self.assertIsInstance(opinion_trades.get("result", {}).get("list"), list)
         self.assertIn("tokenId", opinion_trades["result"]["list"][0])
+        self.assertIsInstance(opinion_price_history.get("result", {}).get("history"), list)
+        self.assertIn("p", opinion_price_history["result"]["history"][0])
         self.assertIsInstance(predict_markets.get("data"), list)
         self.assertIn("outcomes", predict_markets["data"][0])
         self.assertIsInstance(xo_markets.get("markets"), list)
@@ -195,9 +227,37 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("runners", betfair_catalogue["result"][0])
         self.assertIsInstance(myriad_orderbook.get("bids"), list)
         self.assertIsInstance(myriad_orderbook.get("asks"), list)
+        self.assertIsInstance(myriad_trades, list)
+        self.assertEqual(myriad_trades[0].get("side"), "buy")
         self.assertIn("order_id", gemini_order)
         self.assertEqual(predict_order.get("success"), True)
         self.assertEqual(betfair_order.get("status"), "SUCCESS")
+
+    def test_iowa_electronic_markets_fixture_uses_documented_price_file_shape(self) -> None:
+        market = json.loads((FIXTURE_ROOT / "iowa_electronic_markets" / "market.json").read_text(encoding="utf-8"))
+        lines = (FIXTURE_ROOT / "iowa_electronic_markets" / "powell_price_data.txt").read_text(encoding="utf-8").splitlines()
+        self.assertTrue(market.get("archive_only"))
+        self.assertEqual(len(market.get("contracts", [])), 2)
+        self.assertGreaterEqual(len(lines), 1)
+        fields = lines[0].split()
+        self.assertGreaterEqual(len(fields), 9)
+        self.assertRegex(fields[0], r"^\d{2}/\d{2}/\d{2}$")
+        self.assertIn(fields[2], {"P.YES", "P.NO"})
+        self.assertEqual(len(fields[3:9]), 6)
+
+    def test_scicast_fixtures_cover_documented_datamart_shapes(self) -> None:
+        questions = json.loads((FIXTURE_ROOT / "scicast" / "questions.json").read_text(encoding="utf-8"))
+        history = json.loads((FIXTURE_ROOT / "scicast" / "question_history.json").read_text(encoding="utf-8"))
+        trades = json.loads((FIXTURE_ROOT / "scicast" / "trade_history.json").read_text(encoding="utf-8"))
+
+        self.assertIsInstance(questions.get("questions"), list)
+        self.assertIn("question_id", questions["questions"][0])
+        self.assertIsInstance(questions["questions"][0].get("choices"), list)
+        self.assertIsInstance(history.get("history"), list)
+        self.assertIn("probabilities", history["history"][0])
+        self.assertIsInstance(trades.get("trades"), list)
+        self.assertIn("trade_id", trades["trades"][0])
+        self.assertIn("assets_per_option", trades["trades"][0])
 
     def test_probable_fixtures_cover_market_and_clob_payload_shapes(self) -> None:
         events = json.loads((FIXTURE_ROOT / "probable" / "events.json").read_text(encoding="utf-8"))
@@ -322,6 +382,7 @@ class VerificationFixtureTests(unittest.TestCase):
         metadata = json.loads((FIXTURE_ROOT / "hyperliquid" / "outcome_meta.json").read_text(encoding="utf-8"))
         book = json.loads((FIXTURE_ROOT / "hyperliquid" / "l2_book.json").read_text(encoding="utf-8"))
         fills = json.loads((FIXTURE_ROOT / "hyperliquid" / "user_fills.json").read_text(encoding="utf-8"))
+        candles = json.loads((FIXTURE_ROOT / "hyperliquid" / "candles.json").read_text(encoding="utf-8"))
         exchange = json.loads((FIXTURE_ROOT / "hyperliquid" / "exchange_response.json").read_text(encoding="utf-8"))
 
         self.assertEqual(metadata["outcomes"][0].get("outcome"), 1)
@@ -330,6 +391,10 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertEqual(len(book.get("levels", [])), 2)
         self.assertEqual(fills[0].get("coin"), "#10")
         self.assertEqual(fills[1].get("coin"), "BTC")
+        self.assertIsInstance(candles, list)
+        self.assertEqual(candles[0].get("s"), "#10")
+        self.assertIn("o", candles[0])
+        self.assertIn("v", candles[0])
         self.assertEqual(exchange.get("status"), "ok")
 
     def test_trueo_fixtures_cover_onchain_manager_pool_and_signed_transaction_shapes(self) -> None:
@@ -395,6 +460,7 @@ class VerificationFixtureTests(unittest.TestCase):
         cme_search = json.loads((FIXTURE_ROOT / "cme_prediction_markets" / "search.json").read_text(encoding="utf-8"))
         cme_info = json.loads((FIXTURE_ROOT / "cme_prediction_markets" / "info.json").read_text(encoding="utf-8"))
         snapshot = json.loads((FIXTURE_ROOT / "ibkr_forecasttrader" / "snapshot.json").read_text(encoding="utf-8"))
+        history = json.loads((FIXTURE_ROOT / "ibkr_forecasttrader" / "history.json").read_text(encoding="utf-8"))
 
         self.assertEqual(forecast_search[0]["symbol"], "FF")
         self.assertIn(4.875, forecast_strikes["call"])
@@ -402,6 +468,9 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertEqual(cme_search[0]["sections"][-1]["secType"], "EC")
         self.assertEqual({record["tradingClass"] for record in cme_info}, {"ECNQ", "Q4A"})
         self.assertEqual(snapshot[0]["conid"], 721095497)
+        self.assertEqual(history["barLength"], 3600)
+        self.assertEqual(len(history["data"]), 4)
+        self.assertEqual(history["data"][1]["c"], 0.47)
 
 
 if __name__ == "__main__":

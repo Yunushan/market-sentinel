@@ -83,6 +83,77 @@ class PolymarketAdapterTests(unittest.TestCase):
         self.assertEqual([level.price for level in orderbook.bids], [0.50, 0.40])
         self.assertEqual([level.price for level in orderbook.asks], [0.62, 0.70])
 
+    def test_authenticated_clob_trade_history_is_normalized(self) -> None:
+        adapter = PolymarketAdapter(
+            {
+                "polymarket_l2_headers": {
+                    "POLY_ADDRESS": "0x" + "a" * 40,
+                    "POLY_API_KEY": "api-key",
+                    "POLY_PASSPHRASE": "passphrase",
+                    "POLY_SIGNATURE": "signature",
+                    "POLY_TIMESTAMP": "1760000000",
+                }
+            }
+        )
+        trades = load_fixture("clob_trades.json")
+        with patch("market_adapters.polymarket.clob_auth.get_trades", return_value=trades) as get_trades:
+            result = adapter.list_trades("token-yes", limit=2, after=1760000000, before=1760000300)
+
+        get_trades.assert_called_once()
+        headers, = get_trades.call_args.args
+        self.assertEqual(headers["POLY_ADDRESS"], "0x" + "a" * 40)
+        self.assertEqual(get_trades.call_args.kwargs["asset_id"], "token-yes")
+        self.assertEqual([item.trade_id for item in result], ["clob-trade-1", "clob-trade-2"])
+        self.assertEqual([item.side for item in result], ["BUY", "SELL"])
+        self.assertAlmostEqual(result[0].size, 12.5)
+        self.assertAlmostEqual(result[1].price, 0.47)
+
+    def test_authenticated_clob_trade_history_fails_closed_without_headers(self) -> None:
+        adapter = PolymarketAdapter()
+
+        with self.assertRaises(MarketConfigurationError) as ctx:
+            adapter.list_trades("token-yes")
+
+        self.assertIn("explicit L2 headers", str(ctx.exception))
+
+    def test_public_clob_price_history_is_normalized_to_flat_candles(self) -> None:
+        adapter = PolymarketAdapter()
+        history = load_fixture("price_history.json")
+
+        with patch("market_adapters.polymarket.clob_rest.get_price_history", return_value=history) as get_history:
+            result = adapter.list_candles(
+                "token-yes",
+                resolution="1h",
+                from_timestamp=1760000000,
+                to_timestamp=1760000300,
+            )
+
+        get_history.assert_called_once_with(
+            "token-yes",
+            start_ts=1760000000,
+            end_ts=1760000300,
+            interval="1h",
+        )
+        self.assertEqual([candle.timestamp for candle in result], [1760000100.0, 1760000200.0])
+        self.assertEqual([candle.close for candle in result], [0.45, 0.47])
+        self.assertTrue(all(candle.volume is None for candle in result))
+        self.assertEqual(result[0].raw["t"], 1760000100)
+
+    def test_public_clob_price_history_validates_interval_and_range(self) -> None:
+        adapter = PolymarketAdapter()
+
+        with self.assertRaises(MarketConfigurationError) as interval_error:
+            adapter.list_candles("token-yes", resolution="5m")
+        self.assertIn("price-history interval", str(interval_error.exception))
+
+        with self.assertRaises(MarketConfigurationError) as range_error:
+            adapter.list_candles(
+                "token-yes",
+                from_timestamp=1760000300,
+                to_timestamp=1760000000,
+            )
+        self.assertIn("to_timestamp greater than from_timestamp", str(range_error.exception))
+
     def test_get_price_falls_back_to_book_midpoint_when_midpoint_payload_is_bad(self) -> None:
         adapter = PolymarketAdapter()
         book = {

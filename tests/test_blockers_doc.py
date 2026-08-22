@@ -44,9 +44,12 @@ IMPLEMENTED_MARKETS = {
     "predict_fun",
     "betfair_exchange",
     "crypto_com_predict",
+    "draftkings_predictions",
     "fanatics_markets",
     "fanduel_predicts",
     "coinbase_prediction_markets",
+    "robinhood_prediction_markets",
+    "kalshi_via_robinhood",
     "context_v2",
     "smarkets",
     "thales_market",
@@ -72,6 +75,8 @@ IMPLEMENTED_MARKETS = {
     "zetarium_world",
     "lamas_finance",
     "nadex",
+    "iowa_electronic_markets",
+    "scicast",
 }
 VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)
 

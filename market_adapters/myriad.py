@@ -10,6 +10,7 @@ from .identity import require_activity_identity
 from .types import (
     MarketContract,
     MarketEvent,
+    MarketTrade,
     OrderBookLevel,
     OrderBookSnapshot,
     PaperOrderRequest,
@@ -103,6 +104,75 @@ class MyriadAdapter(MarketAdapter):
             asks=self._book_levels(orderbook.get("asks")),
             raw=orderbook,
         )
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Return normalized public Myriad order-book trades for one outcome.
+
+        Myriad documents ``GET /markets/:id/trades`` for recent order-book
+        matches.  The endpoint accepts only pagination/outcome filters, so the
+        shared timestamp bounds are applied locally after parsing the newest
+        page.  Amounts are returned in the quote token's smallest unit and are
+        normalized to the common human-sized trade model.
+        """
+
+        market_id, outcome_id = self._split_contract_id(contract_id)
+        desired = self._trade_limit(limit)
+        before_ts = self._history_timestamp_bound(before, "before") if before is not None else None
+        after_ts = self._history_timestamp_bound(after, "after") if after is not None else None
+        if before_ts is not None and after_ts is not None and before_ts <= after_ts:
+            raise MarketConfigurationError("Myriad trade history requires before greater than after.")
+
+        params: Dict[str, Any] = {
+            "page": 1,
+            "limit": desired,
+            "outcome": self._orderbook_outcome_param(outcome_id),
+        }
+        network_id = self.config.get("myriad_network_id")
+        if network_id not in (None, ""):
+            params["network_id"] = network_id
+        payload = self._get(f"/markets/{market_id}/trades", params=params)
+        rows = self._list_from_payload(payload, "trades", "data", "results", "items")
+        canonical = self._contract_id(market_id, outcome_id)
+        trades: List[MarketTrade] = []
+        for row in rows:
+            raw_outcome = row.get("outcome")
+            if raw_outcome not in (None, "") and str(raw_outcome).strip() != str(outcome_id):
+                continue
+            price = self._safe_probability(row.get("price"))
+            size = self._scaled_decimal(row.get("amount") if row.get("amount") is not None else row.get("size"))
+            side = str(row.get("side") or "").strip().upper()
+            if price is None or size is None or size <= 0 or side not in {"BUY", "SELL", "SPLIT", "MERGE"}:
+                continue
+            timestamp = self._timestamp_seconds(row.get("timestamp") or row.get("ts"))
+            if timestamp <= 0:
+                continue
+            if before_ts is not None and timestamp > before_ts:
+                continue
+            if after_ts is not None and timestamp < after_ts:
+                continue
+            trade_id = str(row.get("txHash") or row.get("tradeId") or row.get("id") or "").strip()
+            if not trade_id:
+                continue
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    trade_id=trade_id,
+                    side=side,
+                    price=price,
+                    size=size,
+                    timestamp=float(timestamp),
+                    raw=dict(row),
+                )
+            )
+        return trades
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -309,6 +379,23 @@ class MyriadAdapter(MarketAdapter):
             label="MYRIAD_API_KEY",
         )
         return {"x-api-key": credential.value} if credential else {}
+
+    @staticmethod
+    def _trade_limit(value: Any) -> int:
+        try:
+            desired = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Myriad trade limit must be an integer between 1 and 200.") from exc
+        if desired < 1 or desired > 200:
+            raise MarketConfigurationError("Myriad trade limit must be between 1 and 200.")
+        return desired
+
+    @staticmethod
+    def _history_timestamp_bound(value: Any, label: str) -> int:
+        number = MyriadAdapter._finite_number(value)
+        if number is None or number <= 0:
+            raise MarketConfigurationError(f"Myriad {label} timestamp must be a positive Unix timestamp.")
+        return int(number)
 
     def _event_from_question(self, question: Mapping[str, Any]) -> MarketEvent:
         question_id = self._question_id(question)

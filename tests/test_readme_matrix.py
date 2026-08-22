@@ -25,6 +25,7 @@ CONCRETE_REQUIREMENT_VALUES = (
     "Yes",
     "No",
     "Live trading only",
+    "Guarded, off by default",
     "Live/WebSocket only",
     "Live signed orders only",
     "Subgraph endpoint required",
@@ -53,6 +54,7 @@ CONCRETE_REQUIREMENT_VALUES = (
     "Live trading only",
     "Not KYC limited",
     "Account/API token required",
+    "API key required",
     "Not trading/KYC limited",
     "Account/export access required",
     "Program access required",
@@ -89,9 +91,12 @@ IMPLEMENTED_MARKETS = {
     "predict_fun",
     "betfair_exchange",
     "crypto_com_predict",
+    "draftkings_predictions",
     "fanatics_markets",
     "fanduel_predicts",
     "coinbase_prediction_markets",
+    "robinhood_prediction_markets",
+    "kalshi_via_robinhood",
     "context_v2",
     "smarkets",
     "dflow",
@@ -117,6 +122,8 @@ IMPLEMENTED_MARKETS = {
     "zetarium_world",
     "lamas_finance",
     "nadex",
+    "iowa_electronic_markets",
+    "scicast",
 }
 VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)
 

@@ -10,30 +10,6 @@ from .types import MarketMetadata
 
 
 VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
-    "robinhood_prediction_markets": {
-        "reason": (
-            "Verified 2026-08-21: Robinhood exposes Prediction Markets as a consumer brokerage/app "
-            "product, but no public documented Robinhood prediction-market API, SDK, or automation "
-            "permission flow is published. The adapter must not automate the consumer app or private endpoints."
-        ),
-        "references": [
-            "https://robinhood.com/us/en/prediction-markets",
-            "https://robinhood.com/us/en/newsroom/robinhood-prediction-markets-hub/",
-        ],
-        "last_reviewed": "2026-08-21",
-    },
-    "draftkings_predictions": {
-        "reason": (
-            "Verified 2026-08-21: DraftKings Predictions is published as an app product, but no public "
-            "documented Predictions API, SDK, or account activity/order automation route is available. "
-            "Private app endpoints are intentionally unsupported."
-        ),
-        "references": [
-            "https://www.draftkings.com/draftkings-debuts-predictions-app-entering-prediction-markets",
-            "https://www.draftkings.com",
-        ],
-        "last_reviewed": "2026-08-21",
-    },
     "fact_machine": {
         "reason": (
             "Verified 2026-05-26: Fact Machine does not publish a public documented API/SDK or stable "
@@ -66,19 +42,6 @@ VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
             "https://www.hypermind.com/products-services/crowd",
             "https://www.hypermind.com/products-services/prescience",
             "https://predict.hypermind.com",
-        ],
-        "last_reviewed": "2026-08-21",
-    },
-    "iowa_electronic_markets": {
-        "reason": (
-            "Verified 2026-08-21: Iowa Electronic Markets publishes official site pages, quote pages, and "
-            "price-history forms, but no stable documented API for discovery, contract listing, live quotes, "
-            "or automated trading. Trading also requires IEM account eligibility."
-        ),
-        "references": [
-            "https://iem.uiowa.edu",
-            "https://iemweb.biz.uiowa.edu/pricehistory/pricehistory_SelectContract.cfm",
-            "https://iemweb.biz.uiowa.edu/quotes/",
         ],
         "last_reviewed": "2026-08-21",
     },
@@ -226,6 +189,7 @@ def build_default_registry() -> AdapterRegistry:
     from .blinq import BlinqAdapter
     from .coinbase_prediction import CoinbasePredictionMarketsAdapter
     from .crypto_com_predict import CryptoComPredictAdapter, FanaticsMarketsAdapter
+    from .draftkings_predictions import DraftKingsPredictionsAdapter
     from .context_v2 import ContextV2Adapter
     from .dflow import DFlowAdapter
     from .drift_bet import DriftBetAdapter
@@ -235,7 +199,9 @@ def build_default_registry() -> AdapterRegistry:
     from .hyperliquid import HyperliquidAdapter
     from .hedgehog import HedgehogMarketsAdapter
     from .ibkr_event_contracts import CMEPredictionMarketsAdapter, ForecastExAdapter, IBKRForecastTraderAdapter
+    from .iowa_electronic_markets import IowaElectronicMarketsAdapter
     from .kalshi import KalshiAdapter
+    from .robinhood_prediction import KalshiViaRobinhoodAdapter, RobinhoodPredictionMarketsAdapter
     from .lamas_finance import LamasFinanceAdapter
     from .legacy_web3 import (
         AugurAdapter,
@@ -263,6 +229,7 @@ def build_default_registry() -> AdapterRegistry:
     from .sx_bet import SxBetAdapter
     from .smarkets import SmarketsAdapter
     from .seer import SeerAdapter
+    from .scicast import SciCastAdapter
     from .space import SpaceAdapter
     from .thales import ThalesMarketAdapter
     from .trueo import TrueoAdapter
@@ -275,6 +242,8 @@ def build_default_registry() -> AdapterRegistry:
         PolymarketAdapter,
         BlinqAdapter,
         CoinbasePredictionMarketsAdapter,
+        RobinhoodPredictionMarketsAdapter,
+        KalshiViaRobinhoodAdapter,
         ProbableAdapter,
         ProphetExchangeAdapter,
         PRDTFinanceAdapter,
@@ -282,6 +251,7 @@ def build_default_registry() -> AdapterRegistry:
         KalshiAdapter,
         PredictItAdapter,
         CryptoComPredictAdapter,
+        DraftKingsPredictionsAdapter,
         FanaticsMarketsAdapter,
         ContextV2Adapter,
         SmarketsAdapter,
@@ -309,6 +279,7 @@ def build_default_registry() -> AdapterRegistry:
         IBKRForecastTraderAdapter,
         ForecastExAdapter,
         CMEPredictionMarketsAdapter,
+        IowaElectronicMarketsAdapter,
         MyriadAdapter,
         OpinionAdapter,
         PredictFunAdapter,
@@ -321,10 +292,13 @@ def build_default_registry() -> AdapterRegistry:
         HedgehogMarketsAdapter,
         ZetariumWorldAdapter,
         NadexAdapter,
+        SciCastAdapter,
     )
     registry.register_adapter(PolymarketAdapter, replace=True)
     registry.register_adapter(BlinqAdapter, replace=True)
     registry.register_adapter(CoinbasePredictionMarketsAdapter, replace=True)
+    registry.register_adapter(RobinhoodPredictionMarketsAdapter, replace=True)
+    registry.register_adapter(KalshiViaRobinhoodAdapter, replace=True)
     registry.register_adapter(ProbableAdapter, replace=True)
     registry.register_adapter(ProphetExchangeAdapter, replace=True)
     registry.register_adapter(PRDTFinanceAdapter, replace=True)
@@ -332,6 +306,7 @@ def build_default_registry() -> AdapterRegistry:
     registry.register_adapter(KalshiAdapter, replace=True)
     registry.register_adapter(PredictItAdapter, replace=True)
     registry.register_adapter(CryptoComPredictAdapter, replace=True)
+    registry.register_adapter(DraftKingsPredictionsAdapter, replace=True)
     registry.register_adapter(FanaticsMarketsAdapter, replace=True)
     registry.register_adapter(ContextV2Adapter, replace=True)
     registry.register_adapter(SmarketsAdapter, replace=True)
@@ -359,6 +334,7 @@ def build_default_registry() -> AdapterRegistry:
     registry.register_adapter(IBKRForecastTraderAdapter, replace=True)
     registry.register_adapter(ForecastExAdapter, replace=True)
     registry.register_adapter(CMEPredictionMarketsAdapter, replace=True)
+    registry.register_adapter(IowaElectronicMarketsAdapter, replace=True)
     registry.register_adapter(MyriadAdapter, replace=True)
     registry.register_adapter(OpinionAdapter, replace=True)
     registry.register_adapter(PredictFunAdapter, replace=True)
@@ -371,6 +347,7 @@ def build_default_registry() -> AdapterRegistry:
     registry.register_adapter(HedgehogMarketsAdapter, replace=True)
     registry.register_adapter(ZetariumWorldAdapter, replace=True)
     registry.register_adapter(NadexAdapter, replace=True)
+    registry.register_adapter(SciCastAdapter, replace=True)
     for metadata in MARKET_CATALOG:
         if metadata.market_id in {adapter.metadata.market_id for adapter in implemented_adapters}:
             continue

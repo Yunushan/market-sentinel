@@ -191,6 +191,27 @@ MATCHBOOK_CAPABILITIES = MarketCapabilities(
 )
 
 
+SCICAST_CAPABILITIES = MarketCapabilities(
+    # SciCast's documented Data Mart is a credentialed historical read API.
+    # It supports question discovery, forecast snapshots, trade history,
+    # alerts, and local paper previews, but it is not a live venue.
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    trade_history=True,
+    candle_history=True,
+    alerts=True,
+    paper_trading=True,
+    live_trading=False,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=True,
+    kyc_required=False,
+    region_limited=False,
+)
+
+
 PROPHET_EXCHANGE_CAPABILITIES = MarketCapabilities(
     market_discovery=True,
     event_listing=True,
@@ -228,6 +249,8 @@ SPACE_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=False,
@@ -271,6 +294,25 @@ COINBASE_PREDICTION_CAPABILITIES = MarketCapabilities(
     kyc_required=True,
     region_limited=True,
 )
+
+ROBINHOOD_PREDICTION_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=True,
+    trade_history=True,
+    candle_history=True,
+    alerts=True,
+    paper_trading=True,
+    live_trading=False,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=True,
+    region_limited=True,
+)
+
+KALSHI_VIA_ROBINHOOD_CAPABILITIES = ROBINHOOD_PREDICTION_CAPABILITIES
 
 
 PRDT_FINANCE_CAPABILITIES = MarketCapabilities(
@@ -347,7 +389,12 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="kalshi_via_robinhood",
         display_name="Kalshi via Robinhood",
         homepage_url="https://robinhood.com/us/en/prediction-markets",
-        description="Verified blocked: the Robinhood distribution surface is a consumer brokerage integration and does not publish a separate public automation contract for Kalshi-through-Robinhood accounts.",
+        description=(
+            "Read-only Kalshi-through-Robinhood distribution alias over the official Kalshi market-data API. "
+            "It supports discovery, contracts, prices, orderbooks, history, alerts, and local paper orders; "
+            "Robinhood account execution and copy trading are not automated."
+        ),
+        capabilities=KALSHI_VIA_ROBINHOOD_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="fanduel_predicts",
@@ -388,8 +435,9 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://docs.into.space/en/api/rest",
         description=(
             "Official Space REST adapter for public market discovery, binary/multi-outcome contracts, "
-            "prices, orderbooks, alerts, and local paper orders; wallet-signed live execution and copy "
-            "trading remain unsupported while the public API release is pending."
+            "prices, orderbooks, public trade history, OHLCV candles, alerts, and local paper orders; "
+            "wallet-signed live execution and copy trading remain unsupported while the public API release "
+            "is pending."
         ),
         capabilities=SPACE_CAPABILITIES,
     ),
@@ -561,7 +609,11 @@ EXPANDED_MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="scicast",
         display_name="SciCast",
         homepage_url="https://scicast.wordpress.com/wp-content/uploads/2014/10/scicast_datamart_guide_v1-21.pdf",
-        description="Verified blocked: SciCast's historical data-mart documentation is not a current production market/trading API contract for this application.",
+        description=(
+            "Archive-only SciCast Data Mart adapter for documented question discovery, historical forecast and "
+            "trade snapshots, alerts, and local paper previews; the retired service has no supported live venue."
+        ),
+        capabilities=SCICAST_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="meta_arena",
@@ -585,11 +637,6 @@ def _blocker(
 
 
 EXPANDED_VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
-    "kalshi_via_robinhood": _blocker(
-        "Robinhood's distribution surface does not publish a separate public automation contract for Kalshi-through-Robinhood accounts; private brokerage endpoints are not supported.",
-        "https://robinhood.com/us/en/prediction-markets",
-        "https://kalshi.com/",
-    ),
     "synstation": _blocker(
         "No stable official market-data and order API contract has been validated for SynStation.",
         "https://synstation.ai",
@@ -615,10 +662,6 @@ EXPANDED_VERIFIED_BLOCKERS: Dict[str, Dict[str, Any]] = {
         "Sporttrade officially ceased all wagering on 2026-05-25; its prediction/exchange products are not an active production integration target.",
         "https://getsporttrade.com/",
         "https://new.getsporttrade.com/",
-    ),
-    "scicast": _blocker(
-        "SciCast's historical data-mart documentation is not a current production market/trading API contract for this application.",
-        "https://scicast.wordpress.com/wp-content/uploads/2014/10/scicast_datamart_guide_v1-21.pdf",
     ),
     "meta_arena": _blocker(
         "Meta Arena is a game platform and does not expose a validated prediction-market API for this adapter model.",

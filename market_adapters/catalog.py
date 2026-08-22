@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, Tuple
 
-from .expanded_catalog import EXPANDED_MARKET_CATALOG
+from .expanded_catalog import EXPANDED_MARKET_CATALOG, ROBINHOOD_PREDICTION_CAPABILITIES
 from .types import MarketCapabilities, MarketMetadata
 
 
@@ -11,6 +11,8 @@ POLYMARKET_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -26,6 +28,8 @@ KALSHI_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -41,6 +45,7 @@ MANIFOLD_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=False,
+    trade_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -56,6 +61,7 @@ METACULUS_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=False,
+    candle_history=True,
     alerts=True,
     paper_trading=False,
     live_trading=False,
@@ -96,6 +102,21 @@ CRYPTO_COM_PREDICT_CAPABILITIES = MarketCapabilities(
     region_limited=False,
 )
 
+DRAFTKINGS_PREDICTIONS_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    alerts=True,
+    paper_trading=True,
+    live_trading=False,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=True,
+    region_limited=True,
+)
+
 FANATICS_MARKETS_CAPABILITIES = MarketCapabilities(
     market_discovery=True,
     event_listing=True,
@@ -131,6 +152,8 @@ LIMITLESS_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -238,6 +261,7 @@ MYRIAD_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -256,12 +280,13 @@ OPINION_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
-    live_trading=False,
-    # The documented OpenAPI exposes filled user trades by wallet.  Those
-    # trades can produce simulation-first copy intents; live execution stays
-    # disabled because it belongs to the separate Opinion CLOB SDK.
+    live_trading=True,
+    # Live execution is guarded by the optional official Opinion CLOB SDK,
+    # explicit live-order gates, and BNB-chain credentials. Copy intents remain
+    # simulation-first and never submit orders automatically.
     copy_trading=True,
     api_required=True,
     credentials_required=True,
@@ -319,6 +344,7 @@ HYPERLIQUID_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -337,6 +363,7 @@ IBKR_EVENT_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -410,6 +437,25 @@ DRIFT_BET_CAPABILITIES = MarketCapabilities(
     region_limited=True,
 )
 
+IEM_CAPABILITIES = MarketCapabilities(
+    # IEM's documented surface is an explicit inventory of official
+    # historical price files; it does not publish dynamic discovery or a
+    # current quote/order API.
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    candle_history=True,
+    alerts=True,
+    paper_trading=True,
+    live_trading=False,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=False,
+    region_limited=False,
+)
+
 FRENZY_CAPABILITIES = MarketCapabilities(
     market_discovery=True,
     event_listing=True,
@@ -471,6 +517,12 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="robinhood_prediction_markets",
         display_name="Robinhood Prediction Markets",
         homepage_url="https://robinhood.com",
+        description=(
+            "Read-only Robinhood Prediction Markets alias over the official Kalshi venue market-data API. "
+            "It supports discovery, contracts, prices, orderbooks, history, alerts, and local paper orders; "
+            "Robinhood account execution and copy trading are not automated."
+        ),
+        capabilities=ROBINHOOD_PREDICTION_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="fanatics_markets",
@@ -487,6 +539,13 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="draftkings_predictions",
         display_name="DraftKings Predictions",
         homepage_url="https://www.draftkings.com",
+        description=(
+            "Read-only DraftKings Predictions/CDNA alias using the official Crypto.com Predictions API for "
+            "event discovery, contracts, prices, alerts, and local dry-run orders; CME-listed contracts "
+            "remain available through cme_prediction_markets. DraftKings account execution and copy trading "
+            "are not automated."
+        ),
+        capabilities=DRAFTKINGS_PREDICTIONS_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="ibkr_forecasttrader",
@@ -619,7 +678,11 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="iowa_electronic_markets",
         display_name="Iowa Electronic Markets",
         homepage_url="https://iem.uiowa.edu",
-        description="Verified blocked: public quote/history pages exist, but no stable documented API is published.",
+        description=(
+            "Official historical price-file adapter with explicit archive inventory, daily candles, latest "
+            "archived prices, alerts, and dry-run orders; current quote/order APIs remain unsupported."
+        ),
+        capabilities=IEM_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="infer",
@@ -634,8 +697,8 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         homepage_url="https://opinion.trade",
         description=(
             "Official Opinion OpenAPI adapter for authenticated market data, orderbooks, prices, "
-            "filled wallet-trade activity, and simulation-first copy intents; live trading remains "
-            "disabled because order signing belongs to the separate CLOB SDK."
+            "filled wallet-trade activity, and simulation-first copy intents; guarded live limit/market "
+            "orders use the optional official CLOB SDK and remain disabled by default."
         ),
         capabilities=OPINION_CAPABILITIES,
     ),

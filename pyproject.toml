@@ -42,6 +42,7 @@ build = [
 ]
 live = [
     "py-clob-client>=0.34.0",
+    "opinion-clob-sdk>=0.7.0",
 ]
 test = [
     "pytest>=8.0",

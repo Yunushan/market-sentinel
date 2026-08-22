@@ -120,10 +120,12 @@
     "draftkings_predictions": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
+        "adapter_status": "implemented",
+        "draftkings_predictions_api_base_url": "https://data-api.crypto.com/api/v1/predictions",
+        "credential_env_vars": ["DRAFTKINGS_PREDICTIONS_API_KEY", "CRYPTO_COM_PREDICTIONS_API_KEY"],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-21: DraftKings Predictions remains an app product, but no public documented Predictions API, SDK, or account activity/order automation route is available."
+        "min_request_interval_seconds": 0.6,
+        "notes": "Read-only DraftKings Predictions/CDNA alias uses the official Crypto.com Predictions API for event, contract, and price data plus local paper orders. Anonymous reads are supported; an optional licensed API key may be supplied. CME-listed contracts use cme_prediction_markets. DraftKings account execution, orderbook depth, live trading, and copy trading are unsupported."
       }
     },
     "drift_bet": {
@@ -280,10 +282,23 @@
     "iowa_electronic_markets": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "iem_allow_custom_data_host": false,
+        "iem_historical_markets": [
+          {
+            "market_id": "1996-powell-nomination",
+            "title": "1996 Powell Nomination Winner Takes All",
+            "status": "closed",
+            "data_url": "https://iemweb.biz.uiowa.edu/historicaldata/uspoliticalmarkets/1996elections/1996powellnomination_wta/powellpricedata.txt",
+            "contracts": {
+              "P.YES": "Powell's name is placed in nomination",
+              "P.NO": "Powell's name is not placed in nomination"
+            }
+          }
+        ],
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-21: official account/practice and quote/history pages exist, but no stable documented API for discovery, contract listing, live quotes, or automated trading is published."
+        "notes": "Archive-only support uses the official IEM historical price-file format; current quote pages, orderbooks, live trading, and copy trading remain unsupported."
       }
     },
     "myriad_markets": {
@@ -369,17 +384,39 @@
         "notes": "Authenticated read-only post/question discovery and probability reads are implemented through the official Metaculus API. Community Prediction data is access-limited by Metaculus API policy. No trading support exists."
       }
     },
+    "scicast": {
+      "enabled": false,
+      "settings": {
+        "adapter_status": "implemented",
+        "scicast_api_base_url": "https://datamart.scicast.org",
+        "credential_env_vars": [
+          "SCICAST_API_KEY"
+        ],
+        "scicast_allow_custom_base_url": false,
+        "live_trading_enabled": false,
+        "notes": "Archive-only reads through SciCast's documented historical Data Mart: question discovery, forecast snapshots, trade history, alerts, and local paper previews. The service is retired; no orderbook, live trading, or copy trading is supported."
+      }
+    },
     "opinion_labs": {
       "enabled": false,
       "settings": {
         "adapter_status": "implemented",
         "opinion_api_base_url": "https://openapi.opinion.trade/openapi",
+        "opinion_clob_host": "https://proxy.opinion.trade:8443",
+        "opinion_chain_id": 56,
         "credential_env_vars": [
-          "OPINION_API_KEY"
+          "OPINION_API_KEY",
+          "OPINION_PRIVATE_KEY",
+          "OPINION_MULTI_SIG_ADDRESS",
+          "OPINION_RPC_URL"
         ],
         "live_trading_enabled": false,
+        "live_trading_confirmed": false,
+        "live_trading_kill_switch": false,
+        "live_trading_max_notional": 25.0,
+        "opinion_live_check_approval": false,
         "min_request_interval_seconds": 0.25,
-        "notes": "Authenticated market discovery, token listing, token prices, orderbooks, alerts, filled wallet-trade activity, and simulation-first copy intents are implemented through the official Opinion OpenAPI. Live trading remains disabled because order signing belongs to the separate CLOB SDK."
+        "notes": "Authenticated market discovery, token listing, token prices, orderbooks, alerts, filled wallet-trade activity, and simulation-first copy intents use the official Opinion OpenAPI. Guarded limit/market live orders use the optional official opinion-clob-sdk on BNB Chain (chain id 56); install requirements-live.lock and provide OPINION_API_KEY, OPINION_PRIVATE_KEY, OPINION_MULTI_SIG_ADDRESS, and OPINION_RPC_URL only when explicitly enabling live trading."
       }
     },
     "nadex": {
@@ -475,10 +512,11 @@
     "robinhood_prediction_markets": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "robinhood_prediction_markets_api_base_url": "https://external-api.kalshi.com/trade-api/v2",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-21: Robinhood exposes active Prediction Markets as a consumer brokerage/app product, but no public documented prediction-market API, SDK, or automation permission flow is published."
+        "notes": "Read-only Robinhood Prediction Markets alias uses the official public Kalshi market-data API for discovery, contracts, prices, orderbooks, trades, candles, alerts, and local paper orders. Robinhood account execution, private endpoints, and copy trading are unsupported."
       }
     },
     "smarkets": {
@@ -590,10 +628,11 @@
     "kalshi_via_robinhood": {
       "enabled": false,
       "settings": {
-        "adapter_status": "verified_blocked",
+        "adapter_status": "implemented",
+        "kalshi_via_robinhood_api_base_url": "https://external-api.kalshi.com/trade-api/v2",
         "credential_env_vars": [],
         "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: Robinhood does not publish a separate public automation contract for Kalshi-through-Robinhood accounts; private brokerage endpoints are unsupported."
+        "notes": "Read-only Kalshi-through-Robinhood distribution alias uses the official public Kalshi market-data API for discovery, contracts, prices, orderbooks, trades, candles, alerts, and local paper orders. Robinhood account execution, private endpoints, and copy trading are unsupported."
       }
     },
     "fanduel_predicts": {
@@ -859,15 +898,6 @@
         "credential_env_vars": ["MATCHBOOK_SESSION_TOKEN", "MATCHBOOK_USERNAME", "MATCHBOOK_PASSWORD", "MATCHBOOK_MFA_CODE"],
         "live_trading_enabled": false,
         "notes": "Official Matchbook event/market/runner discovery, decimal-odds prices, orderbooks, alerts, paper orders, and guarded session-authenticated offer submission are implemented. Account session, region eligibility, API terms, and funded execution remain external gates."
-      }
-    },
-    "scicast": {
-      "enabled": false,
-      "settings": {
-        "adapter_status": "verified_blocked",
-        "credential_env_vars": [],
-        "live_trading_enabled": false,
-        "notes": "Verified 2026-08-16: SciCast historical data-mart documentation is not a current production market/trading API contract."
       }
     },
     "meta_arena": {

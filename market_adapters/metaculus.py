@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import math
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, UnsupportedFeatureError
-from .types import MarketContract, MarketEvent, PriceSnapshot
+from .types import MarketCandle, MarketContract, MarketEvent, PriceSnapshot
 
 
 DEFAULT_METACULUS_BASE_URL = "https://www.metaculus.com/api"
@@ -97,6 +98,92 @@ class MetaculusAdapter(MarketAdapter):
             raw={"post": dict(post), "question": dict(question)},
         )
 
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Return Community Prediction aggregation history as point candles.
+
+        Metaculus is a forecasting platform rather than a traded venue.  Its
+        official API exposes irregularly-timed aggregation snapshots, not
+        exchange OHLCV bars.  The generic candle shape is therefore used as a
+        compatibility envelope: open/high/low/close are the same forecast
+        value, volume is intentionally left unset, and the original
+        aggregation entry is preserved in ``raw``.  No resampling is claimed.
+        """
+
+        self.ensure_capability("price_reading")
+        requested_resolution = str(resolution or "1h").strip().lower()
+        if requested_resolution not in {"raw", "forecast", "1h", "1d"}:
+            raise MarketConfigurationError(
+                "Metaculus forecast history accepts resolution 'raw', 'forecast', '1h', or '1d'; "
+                "the irregular official snapshots are not resampled."
+            )
+        lower = self._optional_timestamp(from_timestamp, "from_timestamp")
+        upper = self._optional_timestamp(to_timestamp, "to_timestamp")
+        if lower is not None and upper is not None and upper < lower:
+            raise MarketConfigurationError("Metaculus forecast history to_timestamp must not precede from_timestamp.")
+
+        post_id, question_id, outcome, choice_id = self._split_contract_id(contract_id)
+        post = self._get_post(post_id)
+        question = self._find_question(post, question_id)
+        if question is None:
+            raise MarketConfigurationError(f"Metaculus post {post_id} did not include question {question_id}.")
+
+        aggregation_method = str(self.config.get("metaculus_aggregation_method") or "").strip().lower()
+        aggregation = self._aggregation_for_history(question, aggregation_method)
+        if aggregation is None:
+            method_text = aggregation_method or "an accessible aggregation"
+            raise MarketConfigurationError(
+                f"Metaculus response did not include {method_text} history for question {question_id}. "
+                "Community Prediction history is access-limited by the official API."
+            )
+        history = aggregation.get("history")
+        if not isinstance(history, list):
+            raise MarketConfigurationError(
+                f"Metaculus response did not include an accessible history list for question {question_id}."
+            )
+
+        candles: List[MarketCandle] = []
+        for entry in history:
+            if not isinstance(entry, Mapping):
+                continue
+            timestamp = self._history_timestamp(entry)
+            if timestamp is None or (lower is not None and timestamp < lower) or (upper is not None and timestamp > upper):
+                continue
+            value = self._history_value(question, outcome, choice_id, entry)
+            if value is None:
+                continue
+            canonical_contract = self._contract_id(post_id, question_id, outcome, choice_id)
+            candles.append(
+                MarketCandle(
+                    market_id=self.market_id,
+                    contract_id=canonical_contract,
+                    timestamp=timestamp,
+                    open=value,
+                    high=value,
+                    low=value,
+                    close=value,
+                    volume=None,
+                    raw={
+                        "source": "metaculus_api",
+                        "aggregation_method": aggregation_method or "recency_weighted",
+                        "resolution_requested": requested_resolution,
+                        "post_id": post_id,
+                        "question_id": question_id,
+                        "outcome": outcome,
+                        "choice_id": choice_id,
+                        "history_entry": dict(entry),
+                    },
+                )
+            )
+        candles.sort(key=lambda candle: candle.timestamp)
+        return candles
+
     def get_orderbook(self, contract_id: str):
         raise UnsupportedFeatureError(
             self.market_id,
@@ -109,6 +196,158 @@ class MetaculusAdapter(MarketAdapter):
             return None
         data = self._get(f"/posts/{ref}/")
         return data if isinstance(data, Mapping) else None
+
+    @classmethod
+    def _aggregation_for_history(
+        cls,
+        question: Mapping[str, Any],
+        configured_method: str = "",
+    ) -> Optional[Mapping[str, Any]]:
+        aggregations = question.get("aggregations")
+        if not isinstance(aggregations, Mapping):
+            return None
+        supported = {"recency_weighted", "metaculus_prediction", "community", "unweighted"}
+        if configured_method and configured_method not in supported:
+            raise MarketConfigurationError(
+                "Metaculus metaculus_aggregation_method must be one of: "
+                + ", ".join(sorted(supported))
+                + "."
+            )
+        methods = [configured_method] if configured_method else [
+            "recency_weighted",
+            "metaculus_prediction",
+            "community",
+            "unweighted",
+        ]
+        for method in methods:
+            aggregation = aggregations.get(method)
+            if isinstance(aggregation, Mapping) and isinstance(aggregation.get("history"), list):
+                return aggregation
+        return None
+
+    @classmethod
+    def _history_value(
+        cls,
+        question: Mapping[str, Any],
+        outcome: str,
+        choice_id: Optional[str],
+        entry: Mapping[str, Any],
+    ) -> Optional[float]:
+        if outcome in {"YES", "NO"}:
+            probability = cls._history_binary_probability(entry)
+            if probability is None:
+                return None
+            return 1.0 - probability if outcome == "NO" else probability
+        if outcome == "CHOICE":
+            if not choice_id:
+                raise MarketConfigurationError("Metaculus choice contract requires a choice id.")
+            return cls._history_choice_probability(question, choice_id, entry)
+        return cls._history_numeric_value(entry)
+
+    @classmethod
+    def _history_binary_probability(cls, entry: Mapping[str, Any]) -> Optional[float]:
+        for key in ("probability", "prob", "center", "median", "q2"):
+            probability = cls._probability_from_value(entry.get(key))
+            if probability is not None:
+                return probability
+        for key in ("centers", "forecast_values", "means"):
+            values = entry.get(key)
+            if isinstance(values, Mapping):
+                for candidate in ("YES", "yes", "probability", "prob", "center"):
+                    if candidate in values:
+                        probability = cls._probability_from_value(values[candidate])
+                        if probability is not None:
+                            return probability
+                values = list(values.values())
+            if isinstance(values, list) and values:
+                probability = cls._probability_from_value(values[0])
+                if probability is not None:
+                    return probability
+        return None
+
+    @classmethod
+    def _history_choice_probability(
+        cls,
+        question: Mapping[str, Any],
+        choice_id: str,
+        entry: Mapping[str, Any],
+    ) -> Optional[float]:
+        for key in ("forecast_values", "choice_probabilities", "choiceProbabilities", "answerProbs"):
+            values = entry.get(key)
+            if isinstance(values, Mapping):
+                if choice_id in values:
+                    return cls._probability_from_value(values.get(choice_id))
+                for raw_key, raw_value in values.items():
+                    if str(raw_key) == choice_id:
+                        return cls._probability_from_value(raw_value)
+            elif isinstance(values, list):
+                index = cls._choice_index(question, choice_id)
+                if index is not None and index < len(values):
+                    return cls._probability_from_value(values[index])
+        return None
+
+    @classmethod
+    def _history_numeric_value(cls, entry: Mapping[str, Any]) -> Optional[float]:
+        for key in ("median", "center", "q2", "mean"):
+            value = cls._number_from_value(entry.get(key))
+            if value is not None:
+                return value
+        for key in ("centers", "means"):
+            values = entry.get(key)
+            if isinstance(values, list) and values:
+                value = cls._number_from_value(values[len(values) // 2])
+                if value is not None:
+                    return value
+        return None
+
+    @classmethod
+    def _choice_index(cls, question: Mapping[str, Any], choice_id: str) -> Optional[int]:
+        for index, (raw_id, _label) in enumerate(cls._choices_from_question(question)):
+            if raw_id == choice_id:
+                return index
+        try:
+            index = int(choice_id)
+        except (TypeError, ValueError):
+            return None
+        return index if index >= 0 else None
+
+    @staticmethod
+    def _optional_timestamp(value: Optional[float], label: str) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Metaculus {label} must be numeric.") from exc
+        if not math.isfinite(timestamp):
+            raise MarketConfigurationError(f"Metaculus {label} must be finite.")
+        return timestamp
+
+    @staticmethod
+    def _history_timestamp(entry: Mapping[str, Any]) -> Optional[float]:
+        raw = entry.get("start_time")
+        if raw is None:
+            raw = entry.get("timestamp") or entry.get("time") or entry.get("end_time")
+        if raw is None:
+            return None
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            value = float(raw)
+            return value if math.isfinite(value) else None
+        text = str(raw).strip()
+        if not text:
+            return None
+        try:
+            value = float(text)
+            return value if math.isfinite(value) else None
+        except ValueError:
+            pass
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
 
     def _get(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> Any:
         return self.runtime.get_json(self._url(path), params=params, headers=self._auth_headers())

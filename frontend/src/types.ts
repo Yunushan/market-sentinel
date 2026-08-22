@@ -6,6 +6,8 @@ export interface MarketCapabilities {
   event_listing: boolean;
   price_reading: boolean;
   orderbook_reading: boolean;
+  trade_history: boolean;
+  candle_history: boolean;
   alerts: boolean;
   paper_trading: boolean;
   live_trading: boolean;

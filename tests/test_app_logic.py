@@ -31,7 +31,6 @@ from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAle
 from core.storage import ConfigLoadError
 from market_adapters import MARKET_IDS, build_default_registry
 from market_adapters.errors import MarketConfigurationError
-from market_adapters.registry import VERIFIED_BLOCKERS
 from market_adapters.types import (
     MarketCapabilities,
     MarketContract,
@@ -830,14 +829,16 @@ class AppLogicTests(unittest.TestCase):
         self.assertEqual(harness.ui_queue.get_nowait()[0], "log")
         save_config.assert_called_once_with(harness.cfg)
 
-    def test_verified_blocked_market_status_includes_blocker_reason(self) -> None:
+    def test_robinhood_distribution_alias_status_is_loaded_and_guarded(self) -> None:
         harness = MarketSelectionHarness()
         harness.cfg.selected_market_id = "robinhood_prediction_markets"
 
         status = App._selected_market_status_text(harness)
 
-        self.assertIn("Robinhood Prediction Markets: verified blocked.", status)
-        self.assertIn(VERIFIED_BLOCKERS["robinhood_prediction_markets"]["reason"], status)
+        self.assertIn("Robinhood Prediction Markets: adapter loaded.", status)
+        self.assertIn("read-only yes", status)
+        self.assertIn("paper yes", status)
+        self.assertIn("live no", status)
 
     def test_market_safety_refresh_populates_selected_market_settings(self) -> None:
         harness = SafetyHarness()
