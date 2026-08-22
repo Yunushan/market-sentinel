@@ -119,6 +119,48 @@ class ManifoldAdapterTests(unittest.TestCase):
         self.assertEqual(activity[0]["timestamp"], 1760000010)
         self.assertTrue(activity[0]["transactionHash"].startswith("manifold-bet:"))
 
+    def test_public_trade_history_normalizes_fills_and_documented_time_filters(self) -> None:
+        adapter = ManifoldAdapter()
+        trades_fixture = load_fixture("bets_trades")
+        calls = []
+
+        def fake_get_json(url: str, *, params=None, headers=None):
+            calls.append((url, params))
+            if url.endswith("/bets"):
+                return trades_fixture
+            raise AssertionError(f"unexpected Manifold URL: {url}")
+
+        adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+
+        trades = adapter.list_trades(
+            "mf-binary-1:YES",
+            limit=2000,
+            before=1760000030,
+            after=1760000000,
+        )
+
+        self.assertEqual(len(trades), 2)
+        self.assertEqual([trade.trade_id for trade in trades], ["trade-bet-1:0", "trade-bet-1:1"])
+        self.assertEqual([trade.side for trade in trades], ["BUY", "BUY"])
+        self.assertAlmostEqual(trades[0].price, 0.6, places=6)
+        self.assertAlmostEqual(trades[1].size, 6.6666666667, places=6)
+        self.assertEqual(trades[0].timestamp, 1760000015)
+        self.assertEqual(trades[0].contract_id, "mf-binary-1:YES")
+        self.assertEqual(
+            calls[0][1],
+            {
+                "contractId": "mf-binary-1",
+                "limit": 1000,
+                "beforeTime": 1760000030000,
+                "afterTime": 1760000000000,
+            },
+        )
+
+        multi_trades = adapter.list_trades("mf-multi-1:ANSWER:answer-a")
+        self.assertEqual(len(multi_trades), 1)
+        self.assertEqual(multi_trades[0].contract_id, "mf-multi-1:ANSWER:answer-a")
+        self.assertAlmostEqual(multi_trades[0].price, 0.6)
+
     def test_activity_requires_prefixed_safe_manifold_identity(self) -> None:
         adapter = self.make_adapter()
 
@@ -271,3 +313,4 @@ class ManifoldAdapterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

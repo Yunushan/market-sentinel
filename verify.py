@@ -528,6 +528,7 @@ def run_fixture_check() -> None:
         fixture_root / "manifold" / "market_multi.json",
         fixture_root / "manifold" / "prob_binary.json",
         fixture_root / "manifold" / "prob_multi.json",
+        fixture_root / "manifold" / "bets_trades.json",
         fixture_root / "metaculus" / "posts.json",
         fixture_root / "metaculus" / "post_binary.json",
         fixture_root / "metaculus" / "post_multiple.json",

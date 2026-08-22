@@ -64,12 +64,15 @@ class VerificationFixtureTests(unittest.TestCase):
         market = json.loads((FIXTURE_ROOT / "manifold" / "market_binary.json").read_text(encoding="utf-8"))
         multi = json.loads((FIXTURE_ROOT / "manifold" / "market_multi.json").read_text(encoding="utf-8"))
         prob = json.loads((FIXTURE_ROOT / "manifold" / "prob_binary.json").read_text(encoding="utf-8"))
+        trades = json.loads((FIXTURE_ROOT / "manifold" / "bets_trades.json").read_text(encoding="utf-8"))
 
         self.assertIsInstance(search.get("results"), list)
         self.assertIn("id", search["results"][0])
         self.assertEqual(market.get("outcomeType"), "BINARY")
         self.assertIsInstance(multi.get("answers"), list)
         self.assertIn("prob", prob)
+        self.assertIsInstance(trades, list)
+        self.assertIn("fills", trades[0])
 
     def test_metaculus_fixtures_cover_core_payload_shapes(self) -> None:
         posts = json.loads((FIXTURE_ROOT / "metaculus" / "posts.json").read_text(encoding="utf-8"))
