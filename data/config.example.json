@@ -62,8 +62,9 @@
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
+        "betfair_order_management_enabled": false,
         "min_request_interval_seconds": 0.25,
-        "notes": "Authenticated market discovery, runner listing, best-offer orderbooks, implied-probability prices, current/cleared account orders, funds/account/statement/currency-rate reads, local paper orders, and guarded placeOrders support are implemented through Betfair's official Exchange and Accounts APIs. Live betting stays disabled by default; copy trading remains unsupported."
+        "notes": "Authenticated market discovery, runner listing, best-offer orderbooks, implied-probability prices, current/cleared account orders, funds/account/statement/currency-rate reads, local paper orders, and guarded placeOrders plus cancelOrders/updateOrders/replaceOrders support are implemented through Betfair's official Exchange and Accounts APIs. Order management requires betfair_order_management_enabled plus the shared live-safety gates and stays disabled by default; copy trading remains unsupported."
       }
     },
     "betmgm": {

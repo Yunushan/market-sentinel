@@ -245,6 +245,15 @@ class VerificationFixtureTests(unittest.TestCase):
         betfair_order = json.loads(
             (FIXTURE_ROOT / "betfair_exchange" / "place_order_response.json").read_text(encoding="utf-8")
         )
+        betfair_cancel = json.loads(
+            (FIXTURE_ROOT / "betfair_exchange" / "cancel_orders_response.json").read_text(encoding="utf-8")
+        )
+        betfair_update = json.loads(
+            (FIXTURE_ROOT / "betfair_exchange" / "update_orders_response.json").read_text(encoding="utf-8")
+        )
+        betfair_replace = json.loads(
+            (FIXTURE_ROOT / "betfair_exchange" / "replace_orders_response.json").read_text(encoding="utf-8")
+        )
         betfair_cleared = json.loads(
             (FIXTURE_ROOT / "betfair_exchange" / "cleared_orders.json").read_text(encoding="utf-8")
         )
@@ -285,6 +294,9 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("orderId", gemini_order)
         self.assertEqual(predict_order.get("success"), True)
         self.assertEqual(betfair_order.get("status"), "SUCCESS")
+        for response in (betfair_cancel, betfair_update, betfair_replace):
+            self.assertEqual(response.get("result", {}).get("status"), "SUCCESS")
+            self.assertIsInstance(response.get("result", {}).get("instructionReports"), list)
         self.assertIsInstance(betfair_cleared.get("result", {}).get("clearedOrders"), list)
         self.assertIn("betId", betfair_cleared["result"]["clearedOrders"][0])
         self.assertIsInstance(betfair_statement.get("result", {}).get("accountStatement"), list)

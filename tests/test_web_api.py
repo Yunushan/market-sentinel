@@ -60,6 +60,7 @@ from web_api import (
     markets_payload,
     market_candles_payload,
     market_account_payload,
+    market_order_management_payload,
     market_contracts_payload,
     market_events_payload,
     market_orderbook_payload,
@@ -862,6 +863,65 @@ class WebApiTests(unittest.TestCase):
             {"from_currency": ["GBP"]},
         )
         self.assertEqual(rates["parameters"], {"from_currency": "GBP"})
+
+    def test_betfair_order_management_payload_forwards_only_allowlisted_mutation_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="betfair_exchange",
+            display_name="Betfair Exchange",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.order_management_operations = ("cancel_orders", "update_orders", "replace_orders")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "SUCCESS"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["betfair_exchange"].enabled = True
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "betfair_exchange",
+            "cancel_orders",
+            {
+                "exchange_market_id": "1.234",
+                "instructions": [{"bet_id": "bet-1", "size_reduction": 1.25}],
+                "customerRef": "cancel-1",
+                "async": False,
+                "confirm_global_cancel": "",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["operation"], "cancel_orders")
+        self.assertEqual(payload["parameters"]["market_id"], "1.234")
+        self.assertEqual(payload["parameters"]["customer_ref"], "cancel-1")
+        self.assertEqual(payload["data"], {"status": "SUCCESS"})
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "cancel_orders",
+                    {
+                        "market_id": "1.234",
+                        "instructions": [{"bet_id": "bet-1", "size_reduction": 1.25}],
+                        "customer_ref": "cancel-1",
+                        "market_version": None,
+                        "async_request": False,
+                        "confirm_global_cancel": "",
+                    },
+                )
+            ],
+        )
+        with self.assertRaises(UnsupportedFeatureError):
+            market_order_management_payload(cfg, Registry(), "betfair_exchange", "place_orders", {})
 
     def test_matchbook_account_payload_forwards_report_and_offer_filters(self) -> None:
         adapter = MarketAdapter({})
@@ -2576,6 +2636,8 @@ class WebApiTests(unittest.TestCase):
         self.assertIn("/api/polymarket/users/mdd/export.csv", payload["routes"]["GET"])
         self.assertIn("/api/config", payload["routes"]["PATCH"])
         self.assertIn("/api/live-safety/preflight", payload["routes"]["POST"])
+        self.assertIn("/api/markets/{market_id}/orders/{operation}", payload["routes"]["POST"])
+        self.assertNotIn("/api/markets/{market_id}/orders/{operation}", payload["routes"]["GET"])
         self.assertIn("/api/polymarket/users/mdd/cache/purge", payload["routes"]["POST"])
         self.assertIn("/api/polymarket/live-validation/reports", payload["routes"]["POST"])
         self.assertIn("/api/polymarket/users/mdd/cache/{key}", payload["routes"]["DELETE"])

@@ -45,6 +45,7 @@ import {
   fetchMarketOrderbook,
   fetchMarketPrice,
   fetchMarketTrades,
+  manageMarketOrders,
   fetchPolymarketLeaderboard,
   fetchPolymarketLiveValidationDecisions,
   fetchPolymarketLiveValidation,
@@ -113,6 +114,8 @@ import type {
   MarketContractsPayload,
   MarketEventsPayload,
   MarketOrderbookPayload,
+  MarketOrderManagementOperation,
+  MarketOrderManagementPayload,
   MarketPricePayload,
   MarketTradesPayload,
   MarketsPayload,
@@ -189,6 +192,13 @@ interface MarketReadForm {
   from: string;
   to: string;
   account_operation: MarketAccountOperation;
+  order_management_operation: MarketOrderManagementOperation;
+  order_management_market_id: string;
+  order_management_instructions: string;
+  order_management_customer_ref: string;
+  order_management_market_version: string;
+  order_management_async: boolean;
+  order_management_confirmation: string;
 }
 
 interface MarketReadState {
@@ -199,6 +209,7 @@ interface MarketReadState {
   trades: MarketTradesPayload | null;
   candles: MarketCandlesPayload | null;
   account: MarketAccountPayload | null;
+  order_management: MarketOrderManagementPayload | null;
 }
 
 function isTab(value: string | null): value is Tab {
@@ -411,12 +422,28 @@ function emptyMarketReadForm(): MarketReadForm {
     resolution: "1h",
     from: "",
     to: "",
-    account_operation: "active_orders"
+    account_operation: "active_orders",
+    order_management_operation: "cancel_orders",
+    order_management_market_id: "",
+    order_management_instructions: "[{\"bet_id\": \"bet-id\", \"size_reduction\": 1}]",
+    order_management_customer_ref: "",
+    order_management_market_version: "",
+    order_management_async: false,
+    order_management_confirmation: ""
   };
 }
 
 function emptyMarketReadState(): MarketReadState {
-  return { events: null, contracts: null, price: null, orderbook: null, trades: null, candles: null, account: null };
+  return {
+    events: null,
+    contracts: null,
+    price: null,
+    orderbook: null,
+    trades: null,
+    candles: null,
+    account: null,
+    order_management: null
+  };
 }
 
 function alertToForm(alert: PriceAlert): AlertForm {
@@ -700,6 +727,11 @@ export default function App() {
       live_trading_max_size: String(form.get("live_trading_max_size") ?? "").trim(),
       live_trading_max_notional: String(form.get("live_trading_max_notional") ?? "").trim()
     };
+    if (selectedMarket.market_id === "betfair_exchange") {
+      patch.settings = {
+        betfair_order_management_enabled: form.get("betfair_order_management_enabled") === "on"
+      };
+    }
     setBusyMarket(selectedMarket.market_id);
     setError(null);
     try {
@@ -839,6 +871,70 @@ export default function App() {
           setMarketReadMessage(`${payload.operation.replaceAll("_", " ")} loaded.`);
         }
       }
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setMarketReadBusy(null);
+    }
+  }
+
+  async function handleMarketOrderManagement() {
+    const marketId = selectedMarket?.market_id;
+    if (!marketId) {
+      setError("Select an enabled market before managing orders.");
+      return;
+    }
+    const supported = selectedMarket.health.order_management_operations ?? [];
+    const operation = marketReadForm.order_management_operation;
+    if (!supported.includes(operation)) {
+      setError(`${selectedMarket.display_name} does not advertise ${operation.replaceAll("_", " ")}.`);
+      return;
+    }
+    if ((operation === "update_orders" || operation === "replace_orders") && !marketReadForm.order_management_market_id.trim()) {
+      setError("A Betfair exchange market id is required for update and replace operations.");
+      return;
+    }
+    let instructions: unknown;
+    try {
+      instructions = JSON.parse(marketReadForm.order_management_instructions || "[]");
+    } catch (exc) {
+      setError(exc instanceof Error ? `Instructions JSON is invalid: ${exc.message}` : "Instructions JSON is invalid.");
+      return;
+    }
+    if (!Array.isArray(instructions)) {
+      setError("Instructions must be a JSON array.");
+      return;
+    }
+    const warning = operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()
+      ? "This submits a GLOBAL Betfair cancellation for the account."
+      : `This submits a live Betfair ${operation.replaceAll("_", " ")} request.`;
+    if (!window.confirm(`${warning} Continue only if the live-safety gates and request details are intentional.`)) {
+      return;
+    }
+    const payload: Record<string, unknown> = {
+      market_id: marketReadForm.order_management_market_id.trim() || undefined,
+      instructions,
+      customer_ref: marketReadForm.order_management_customer_ref.trim() || undefined,
+      confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
+    };
+    if (marketReadForm.order_management_market_version.trim()) {
+      const version = Number(marketReadForm.order_management_market_version.trim());
+      if (!Number.isInteger(version) || version < 1) {
+        setError("Market version must be a positive integer.");
+        return;
+      }
+      payload.market_version = version;
+    }
+    if (marketReadForm.order_management_async) {
+      payload.async_request = true;
+    }
+    setMarketReadBusy("order_management");
+    setMarketReadMessage("");
+    setError(null);
+    try {
+      const result = await manageMarketOrders(marketId, operation, payload);
+      setMarketRead((current) => ({ ...current, order_management: result }));
+      setMarketReadMessage(`${operation.replaceAll("_", " ")} request accepted by the API.`);
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
     } finally {
@@ -1550,6 +1646,7 @@ export default function App() {
             marketReadForm={marketReadForm}
             marketReadMessage={marketReadMessage}
             markets={markets}
+            onMarketOrderManagement={() => void handleMarketOrderManagement()}
             onQueryChange={setMarketQuery}
             onMarketRead={(action) => void handleMarketRead(action)}
             onMarketReadFormChange={(patch) => setMarketReadForm((current) => ({ ...current, ...patch }))}
@@ -1817,6 +1914,7 @@ function MarketsView({
   marketReadForm,
   marketReadMessage,
   markets,
+  onMarketOrderManagement,
   onMarketRead,
   onMarketReadFormChange,
   onQueryChange,
@@ -1834,6 +1932,7 @@ function MarketsView({
   marketReadForm: MarketReadForm;
   marketReadMessage: string;
   markets: MarketsPayload | null;
+  onMarketOrderManagement: () => void;
   onMarketRead: (action: "events" | "contracts" | "price" | "orderbook" | "trades" | "candles" | "account") => void;
   onMarketReadFormChange: (patch: Partial<MarketReadForm>) => void;
   onQueryChange: (value: string) => void;
@@ -1908,6 +2007,16 @@ function MarketsView({
               <input name="live_trading_kill_switch" type="checkbox" defaultChecked={selectedMarket.safety.live_trading_kill_switch} />
               <span>Kill switch</span>
             </label>
+            {selectedMarket.market_id === "betfair_exchange" ? (
+              <label className="check-row">
+                <input
+                  name="betfair_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Betfair order management</span>
+              </label>
+            ) : null}
             <label>
               <span>Max size</span>
               <input name="live_trading_max_size" defaultValue={selectedMarket.safety.live_trading_max_size ?? ""} />
@@ -2229,6 +2338,94 @@ function MarketsView({
               </button>
             ) : null}
           </div>
+          {selectedMarket.health.order_management_operations?.length ? (
+            <div className="order-management-panel">
+              <div className="market-detail-main">
+                <div>
+                  <h4>Guarded live order management</h4>
+                  <p>
+                    Betfair mutations are disabled by default and still require the shared live-safety gates plus the
+                    Betfair-specific opt-in. The UI never sends a request without an explicit confirmation.
+                  </p>
+                </div>
+                <StatusPill tone={selectedMarket.health.order_management_enabled ? "warn" : "neutral"}>
+                  {selectedMarket.health.order_management_enabled ? "opt-in enabled" : "opt-in disabled"}
+                </StatusPill>
+              </div>
+              <div className="safety-grid">
+                <label>
+                  <span>Operation</span>
+                  <select
+                    value={marketReadForm.order_management_operation}
+                    onChange={(event) => onMarketReadFormChange({ order_management_operation: event.target.value as MarketOrderManagementOperation })}
+                  >
+                    {selectedMarket.health.order_management_operations.map((operation) => (
+                      <option key={operation} value={operation}>{operation.replaceAll("_", " ")}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Exchange market id</span>
+                  <input
+                    value={marketReadForm.order_management_market_id}
+                    onChange={(event) => onMarketReadFormChange({ order_management_market_id: event.target.value })}
+                    placeholder="1.234 (blank = global cancel only)"
+                  />
+                </label>
+                <label>
+                  <span>Customer reference</span>
+                  <input
+                    value={marketReadForm.order_management_customer_ref}
+                    onChange={(event) => onMarketReadFormChange({ order_management_customer_ref: event.target.value })}
+                    placeholder="Optional, max 32 safe chars"
+                  />
+                </label>
+                <label>
+                  <span>Market version (replace)</span>
+                  <input
+                    value={marketReadForm.order_management_market_version}
+                    onChange={(event) => onMarketReadFormChange({ order_management_market_version: event.target.value })}
+                    placeholder="Optional positive integer"
+                  />
+                </label>
+                <label className="wide-field">
+                  <span>Instructions JSON (max 60)</span>
+                  <textarea
+                    value={marketReadForm.order_management_instructions}
+                    onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                    rows={3}
+                    spellCheck={false}
+                  />
+                </label>
+                <label>
+                  <span>Global-cancel confirmation</span>
+                  <input
+                    value={marketReadForm.order_management_confirmation}
+                    onChange={(event) => onMarketReadFormChange({ order_management_confirmation: event.target.value })}
+                    placeholder="Type CANCEL ALL BETS"
+                  />
+                </label>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={marketReadForm.order_management_async}
+                    onChange={(event) => onMarketReadFormChange({ order_management_async: event.target.checked })}
+                  />
+                  <span>Async replace request</span>
+                </label>
+              </div>
+              <div className="button-row compact">
+                <button
+                  className="danger-button"
+                  type="button"
+                  disabled={marketReadBusy !== null}
+                  onClick={onMarketOrderManagement}
+                >
+                  Submit guarded live mutation
+                </button>
+              </div>
+            </div>
+          ) : null}
           {marketRead.events ? (
             <div className="table-wrap">
               <h4>Events ({marketRead.events.events.length})</h4>
@@ -2312,6 +2509,12 @@ function MarketsView({
             <div className="table-wrap">
               <h4>Account: {marketRead.account.operation.replaceAll("_", " ")}</h4>
               <pre className="account-json">{JSON.stringify(marketRead.account.data, null, 2)}</pre>
+            </div>
+          ) : null}
+          {marketRead.order_management ? (
+            <div className="table-wrap">
+              <h4>Order-management response: {marketRead.order_management.operation.replaceAll("_", " ")}</h4>
+              <pre className="account-json">{JSON.stringify(marketRead.order_management.data, null, 2)}</pre>
             </div>
           ) : null}
         </div>

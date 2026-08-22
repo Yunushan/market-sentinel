@@ -1596,6 +1596,46 @@ def run_market_account(args: argparse.Namespace) -> int:
     )
 
 
+BETFAIR_ORDER_MANAGEMENT_OPERATIONS = ("cancel_orders", "update_orders", "replace_orders")
+
+
+def run_market_order_management(args: argparse.Namespace) -> int:
+    """Run a documented live order-management mutation through an adapter."""
+
+    _cfg, market_id, adapter = _market_read_context(args, "order management")
+    operation = str(args.operation or "").strip().lower()
+    payload = _json_arg(getattr(args, "json", None))
+    exchange_market_id = str(getattr(args, "exchange_market_id", "") or "").strip()
+    if exchange_market_id:
+        payload["market_id"] = exchange_market_id
+    instructions_value = getattr(args, "instructions", None)
+    if instructions_value:
+        raw = str(instructions_value)
+        if raw.startswith("@"):
+            raw = Path(raw[1:]).expanduser().read_text(encoding="utf-8")
+        parsed = json.loads(raw)
+        if not isinstance(parsed, list):
+            raise ValueError("--instructions must contain a JSON array.")
+        payload["instructions"] = parsed
+    _put_optional(payload, "customer_ref", getattr(args, "customer_ref", None))
+    if getattr(args, "market_version", None) not in (None, ""):
+        raw_version = str(args.market_version)
+        payload["market_version"] = _coerce_value(raw_version)
+    if bool(getattr(args, "async_request", False)):
+        payload["async_request"] = True
+    _put_optional(payload, "confirm_global_cancel", getattr(args, "confirm_global_cancel", None))
+    data = adapter.manage_orders(operation, **payload)
+    return _write_command_payload(
+        args,
+        {
+            "market_id": market_id,
+            "operation": operation,
+            "parameters": payload,
+            "data": data,
+        },
+    )
+
+
 def run_live_safety_show(args: argparse.Namespace) -> int:
     return _write_command_payload(args, live_safety_payload(_load_cfg(args), _registry(), args.market))
 
@@ -2596,6 +2636,31 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--to", dest="to_timestamp", default=None, help="Optional Unix timestamp bound.")
     _add_json_output_args(market_account)
     market_account.set_defaults(func=run_market_account)
+
+    market_orders = markets_sub.add_parser(
+        "manage-orders",
+        parents=[common],
+        help="Run a guarded documented live order-management mutation (currently Betfair Exchange).",
+    )
+    market_orders.add_argument("operation", choices=BETFAIR_ORDER_MANAGEMENT_OPERATIONS)
+    market_orders.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
+    market_orders.add_argument("--exchange-market-id", default="", help="Betfair exchange market id for the mutation.")
+    market_orders.add_argument(
+        "--instructions",
+        default=None,
+        help="JSON array of Betfair instructions, or @path to a JSON file.",
+    )
+    market_orders.add_argument("--customer-ref", default=None, help="Optional Betfair de-duplication reference (max 32 chars).")
+    market_orders.add_argument("--market-version", default=None, help="Optional replaceOrders market version integer or JSON object.")
+    market_orders.add_argument("--async-request", action="store_true", help="Request asynchronous replaceOrders processing.")
+    market_orders.add_argument(
+        "--confirm-global-cancel",
+        default=None,
+        help="Exact text CANCEL ALL BETS is required for a Betfair all-account cancellation.",
+    )
+    market_orders.add_argument("--json", default=None, help="Inline JSON object or @file to merge before explicit flags.")
+    _add_json_output_args(market_orders)
+    market_orders.set_defaults(func=run_market_order_management)
 
     live = subparsers.add_parser("live-safety", parents=[common], help="Inspect live safety gates or run a no-order preflight.")
     live_sub = live.add_subparsers(dest="live_command", required=True)

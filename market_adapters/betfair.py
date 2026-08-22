@@ -29,11 +29,14 @@ BETFAIR_REFERENCES = (
     "https://betfair-developer-docs.atlassian.net/wiki/spaces/1smk3cen4v3lu3yomq5qye0ni/pages/2687679/listClearedOrders+-+Roll-up+Fields+Available",
     "https://betfair-developer-docs.atlassian.net/wiki/spaces/1smk3cen4v3lu3yomq5qye0ni/pages/2687725/Accounts+API",
     "https://betfair-developer-docs.atlassian.net/wiki/spaces/1smk3cen4v3lu3yomq5qye0ni/pages/2699900/getAccountDetails",
+    "https://betfair-developer-docs.atlassian.net/wiki/spaces/1smk3cen4v3lu3yomq5qye0ni/pages/2687491/cancelOrders",
+    "https://betfair-developer-docs.atlassian.net/wiki/spaces/1smk3cen4v3lu3yomq5qye0ni/pages/2687485/updateOrders",
+    "https://betfair-developer-docs.atlassian.net/wiki/spaces/1smk3cen4v3lu3yomq5qye0ni/pages/2687487/replaceOrders",
 )
 
 
 class BetfairExchangeAdapter(MarketAdapter):
-    """Betfair Exchange read-only adapter using the official Exchange API JSON-RPC."""
+    """Betfair Exchange adapter using the official Exchange API JSON-RPC."""
 
     live_order_sides = ("BUY", "SELL", "BACK", "LAY")
     metadata = get_market_metadata("betfair_exchange")
@@ -45,6 +48,7 @@ class BetfairExchangeAdapter(MarketAdapter):
         "statement",
         "currency_rates",
     )
+    order_management_operations = ("cancel_orders", "update_orders", "replace_orders")
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -67,6 +71,8 @@ class BetfairExchangeAdapter(MarketAdapter):
                 "live_trading_supported": True,
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "account_recovery_operations": list(self.account_recovery_operations),
+                "order_management_operations": list(self.order_management_operations),
+                "order_management_enabled": self.config_bool("betfair_order_management_enabled", False),
                 "authenticated_account_endpoints": [
                     "listCurrentOrders",
                     "listClearedOrders",
@@ -75,6 +81,7 @@ class BetfairExchangeAdapter(MarketAdapter):
                     "getAccountStatement",
                     "listCurrencyRates",
                 ],
+                "order_management_endpoints": ["cancelOrders", "updateOrders", "replaceOrders"],
             }
         )
         return health
@@ -526,6 +533,95 @@ class BetfairExchangeAdapter(MarketAdapter):
         supported = ", ".join(self.account_recovery_operations)
         raise MarketConfigurationError(f"Betfair account recovery supports only: {supported}.")
 
+    def manage_orders(
+        self,
+        operation: str,
+        *,
+        market_id: str = "",
+        instructions: Any = None,
+        customer_ref: str = "",
+        market_version: Any = None,
+        async_request: bool = False,
+        confirm_global_cancel: str = "",
+    ) -> Any:
+        """Run one documented Betfair order-management mutation.
+
+        The Exchange API treats these as live mutations, so they are never
+        exposed through the read-only account route.  They require both the
+        shared live-safety gate and the Betfair-specific
+        ``betfair_order_management_enabled`` opt-in.  Requests are normalized
+        to the documented camelCase JSON-RPC schema after validating every
+        caller-controlled field.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.order_management_operations:
+            supported = ", ".join(self.order_management_operations)
+            raise MarketConfigurationError(f"Betfair order management supports only: {supported}.")
+        self.ensure_capability("live_trading")
+        if not self.config_bool("betfair_order_management_enabled", False):
+            raise MarketConfigurationError(
+                "Betfair order management is disabled by adapter config. "
+                "Set betfair_order_management_enabled=true only after reviewing cancellation risk."
+            )
+        self.ensure_live_trading_enabled("Betfair order management")
+
+        normalized_market_id = self._account_id(market_id, "market_id")
+        normalized_instructions = self._order_management_instructions(normalized, instructions)
+        if normalized in {"update_orders", "replace_orders"} and not normalized_market_id:
+            raise MarketConfigurationError(f"Betfair {normalized} requires a market_id.")
+        if normalized in {"update_orders", "replace_orders"} and not normalized_instructions:
+            raise MarketConfigurationError(f"Betfair {normalized} requires at least one instruction.")
+        if normalized == "cancel_orders" and not normalized_market_id and normalized_instructions:
+            raise MarketConfigurationError("Betfair cancel_orders requires market_id when instructions are supplied.")
+        if normalized == "cancel_orders" and not normalized_market_id:
+            if str(confirm_global_cancel or "").strip() != "CANCEL ALL BETS":
+                raise MarketConfigurationError(
+                    "Global Betfair cancellation requires confirm_global_cancel='CANCEL ALL BETS'."
+                )
+
+        normalized_customer_ref = self._customer_ref(customer_ref)
+        params: Dict[str, Any] = {}
+        if normalized_market_id:
+            params["marketId"] = normalized_market_id
+        if normalized_instructions:
+            params["instructions"] = normalized_instructions
+        if normalized_customer_ref:
+            params["customerRef"] = normalized_customer_ref
+        if normalized == "replace_orders":
+            if market_version not in (None, ""):
+                params["marketVersion"] = self._market_version(market_version)
+            if bool(async_request):
+                params["async"] = True
+        elif bool(async_request):
+            raise MarketConfigurationError(f"Betfair {normalized} does not support async=true.")
+
+        preflight = {
+            "market_id": normalized_market_id or None,
+            "operation": normalized,
+            "instruction_count": len(normalized_instructions),
+            "customer_ref": normalized_customer_ref or None,
+            "global_cancel": normalized == "cancel_orders" and not normalized_market_id,
+            "live_trading_enabled": True,
+            "confirmed": True,
+            "kill_switch": False,
+            "order_management_enabled": True,
+        }
+        endpoint = {
+            "cancel_orders": "SportsAPING/v1.0/cancelOrders",
+            "update_orders": "SportsAPING/v1.0/updateOrders",
+            "replace_orders": "SportsAPING/v1.0/replaceOrders",
+        }[normalized]
+        result = self._rpc(endpoint, params)
+        return {
+            "market_id": self.market_id,
+            "operation": normalized,
+            "live": True,
+            "preflight": preflight,
+            "request": params,
+            "response": result,
+        }
+
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
         self._validate_order(order)
@@ -699,6 +795,81 @@ class BetfairExchangeAdapter(MarketAdapter):
         if len(text) > 128 or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-" for char in text):
             raise MarketConfigurationError(f"Betfair {label} must be a short identifier.")
         return text
+
+    @staticmethod
+    def _customer_ref(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if len(text) > 32 or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-" for char in text):
+            raise MarketConfigurationError("Betfair customer_ref must be at most 32 safe identifier characters.")
+        return text
+
+    @classmethod
+    def _order_management_instructions(cls, operation: str, value: Any) -> List[Dict[str, Any]]:
+        if value in (None, ""):
+            return []
+        if not isinstance(value, list):
+            raise MarketConfigurationError("Betfair order-management instructions must be a JSON array.")
+        if len(value) > 60:
+            raise MarketConfigurationError("Betfair order-management requests support at most 60 instructions.")
+        normalized: List[Dict[str, Any]] = []
+        for index, raw in enumerate(value):
+            if not isinstance(raw, Mapping):
+                raise MarketConfigurationError(f"Betfair instruction {index + 1} must be an object.")
+            bet_id = cls._account_id(raw.get("bet_id") or raw.get("betId"), f"instruction_{index + 1}_bet_id")
+            if not bet_id:
+                raise MarketConfigurationError(f"Betfair instruction {index + 1} requires bet_id.")
+            item: Dict[str, Any] = {"betId": bet_id}
+            if operation == "cancel_orders":
+                reduction = raw.get("size_reduction", raw.get("sizeReduction"))
+                if reduction not in (None, ""):
+                    try:
+                        parsed = float(reduction)
+                    except (TypeError, ValueError) as exc:
+                        raise MarketConfigurationError(
+                            f"Betfair instruction {index + 1} size_reduction must be numeric."
+                        ) from exc
+                    if not math.isfinite(parsed) or parsed <= 0:
+                        raise MarketConfigurationError(
+                            f"Betfair instruction {index + 1} size_reduction must be positive and finite."
+                        )
+                    item["sizeReduction"] = parsed
+            elif operation == "update_orders":
+                persistence = str(
+                    raw.get("new_persistence_type", raw.get("newPersistenceType", "")) or ""
+                ).strip().upper()
+                if persistence not in {"LAPSE", "PERSIST", "MARKET_ON_CLOSE"}:
+                    raise MarketConfigurationError(
+                        f"Betfair instruction {index + 1} new_persistence_type must be LAPSE, PERSIST, or MARKET_ON_CLOSE."
+                    )
+                item["newPersistenceType"] = persistence
+            else:
+                price = raw.get("new_price", raw.get("newPrice"))
+                try:
+                    parsed_price = float(price)
+                except (TypeError, ValueError) as exc:
+                    raise MarketConfigurationError(
+                        f"Betfair instruction {index + 1} new_price must be numeric."
+                    ) from exc
+                if not math.isfinite(parsed_price) or parsed_price < 1.01 or parsed_price > 1000:
+                    raise MarketConfigurationError(
+                        f"Betfair instruction {index + 1} new_price must be between 1.01 and 1000."
+                    )
+                item["newPrice"] = parsed_price
+            normalized.append(item)
+        return normalized
+
+    @staticmethod
+    def _market_version(value: Any) -> Dict[str, int]:
+        raw = value.get("version") if isinstance(value, Mapping) else value
+        try:
+            version = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Betfair market_version must contain a positive integer version.") from exc
+        if version < 1:
+            raise MarketConfigurationError("Betfair market_version must contain a positive integer version.")
+        return {"version": version}
 
     @staticmethod
     def _account_locale(value: Any) -> str:

@@ -46,6 +46,9 @@ export interface Market {
     verified_blocker?: boolean;
     credential_requirement?: string;
     account_recovery_operations?: string[];
+    order_management_operations?: string[];
+    order_management_enabled?: boolean;
+    order_management_endpoints?: string[];
   };
   status_text: string;
   credential_env_vars: string[];
@@ -192,6 +195,15 @@ export type MarketAccountOperation =
 export interface MarketAccountPayload {
   market_id: string;
   operation: MarketAccountOperation;
+  parameters: Record<string, unknown>;
+  data: unknown;
+}
+
+export type MarketOrderManagementOperation = "cancel_orders" | "update_orders" | "replace_orders";
+
+export interface MarketOrderManagementPayload {
+  market_id: string;
+  operation: MarketOrderManagementOperation;
   parameters: Record<string, unknown>;
   data: unknown;
 }

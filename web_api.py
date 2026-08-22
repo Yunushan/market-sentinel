@@ -327,6 +327,7 @@ API_ROUTES = {
         "/api/wallets/poll",
         "/api/copy/preview",
         "/api/live-safety/preflight",
+        "/api/markets/{market_id}/orders/{operation}",
         "/api/paper/quote",
         "/api/paper/quote-limit",
         "/api/paper/preview-impact",
@@ -3758,6 +3759,46 @@ def market_account_payload(
     }
 
 
+def market_order_management_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    operation: str,
+    payload: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Run one explicitly allow-listed live order-management mutation."""
+
+    normalized_market_id = str(market_id or "").strip().lower()
+    normalized_operation = str(operation or "").strip().lower()
+    require_market_enabled(cfg, normalized_market_id, "order management")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    supported = tuple(str(value).strip().lower() for value in getattr(adapter, "order_management_operations", ()))
+    if normalized_operation not in supported:
+        raise UnsupportedFeatureError(
+            normalized_market_id,
+            "order_management",
+            f"{normalized_market_id} does not support order-management operation "
+            f"{normalized_operation or '<empty>'}. Supported operations: {', '.join(supported) or 'none'}.",
+        )
+    if not isinstance(payload, Mapping):
+        raise ValueError("Order-management payload must be a JSON object.")
+    kwargs: Dict[str, Any] = {
+        "market_id": str(payload.get("market_id") or payload.get("exchange_market_id") or "").strip(),
+        "instructions": payload.get("instructions"),
+        "customer_ref": str(payload.get("customer_ref") or payload.get("customerRef") or "").strip(),
+        "market_version": payload.get("market_version", payload.get("marketVersion")),
+        "async_request": bool_from_setting(payload.get("async_request", payload.get("async")), False),
+        "confirm_global_cancel": str(payload.get("confirm_global_cancel") or "").strip(),
+    }
+    data = adapter.manage_orders(normalized_operation, **kwargs)
+    return {
+        "market_id": normalized_market_id,
+        "operation": normalized_operation,
+        "parameters": kwargs,
+        "data": data,
+    }
+
+
 def paper_quote_payload(cfg: AppConfig, registry: AdapterRegistry, payload: Mapping[str, Any]) -> Dict[str, Any]:
     market_id = str(payload.get("market_id") or "").strip().lower()
     contract_id = str(payload.get("contract_id") or "").strip()
@@ -4593,6 +4634,20 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         try:
             payload = _read_json_body(self)
             cfg = self._load_config()
+            if method == "POST":
+                order_route = path.strip("/").split("/")
+                if len(order_route) == 5 and order_route[:2] == ["api", "markets"] and order_route[3] == "orders":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_order_management_payload(
+                            cfg,
+                            self.app_server.adapter_registry,
+                            unquote(order_route[2]),
+                            unquote(order_route[4]),
+                            payload,
+                        ),
+                    )
+                    return
             if method == "PATCH" and path == "/api/config":
                 apply_config_patch(cfg, payload)
                 self._save_config(cfg)

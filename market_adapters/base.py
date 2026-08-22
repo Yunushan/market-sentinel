@@ -32,6 +32,11 @@ class MarketAdapter:
     # Adapters opt in only when the upstream account endpoints are documented
     # and the implementation has explicit credential/safety tests.
     account_recovery_operations: tuple[str, ...] = ()
+    # Mutating order-management operations are deliberately separate from
+    # account recovery reads.  Concrete adapters must publish an explicit
+    # allow-list and enforce their own documented request schema and safety
+    # gates before sending a request.
+    order_management_operations: tuple[str, ...] = ()
 
     def __init__(
         self,
@@ -260,6 +265,12 @@ class MarketAdapter:
 
         del operation, kwargs
         raise UnsupportedFeatureError(self.market_id, "account_recovery")
+
+    def manage_orders(self, operation: str, **kwargs: Any) -> Any:
+        """Run a documented authenticated order-management mutation."""
+
+        del operation, kwargs
+        raise UnsupportedFeatureError(self.market_id, "order_management")
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")

@@ -14,6 +14,8 @@ import type {
   MarketsPayload,
   MarketAccountOperation,
   MarketAccountPayload,
+  MarketOrderManagementOperation,
+  MarketOrderManagementPayload,
   MarketCandlesPayload,
   MarketContractsPayload,
   MarketEventsPayload,
@@ -213,6 +215,17 @@ export function fetchMarketAccount(
 ): Promise<MarketAccountPayload> {
   return request<MarketAccountPayload>(
     `/api/markets/${encodeURIComponent(marketId)}/account/${encodeURIComponent(operation)}${marketReadQuery(values)}`
+  );
+}
+
+export function manageMarketOrders(
+  marketId: string,
+  operation: MarketOrderManagementOperation,
+  payload: Record<string, unknown>
+): Promise<MarketOrderManagementPayload> {
+  return request<MarketOrderManagementPayload>(
+    `/api/markets/${encodeURIComponent(marketId)}/orders/${encodeURIComponent(operation)}`,
+    { method: "POST", body: JSON.stringify(payload) }
   );
 }
 

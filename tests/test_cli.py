@@ -130,6 +130,81 @@ class MarketSentinelCliTests(unittest.TestCase):
         self.assertEqual(payload["parameters"]["event_ticker"], "BTC100K2026")
         self.assertEqual(payload["data"]["positions"][0]["symbol"], "GEMI-BTC100K26-YES")
 
+    def test_betfair_order_management_command_forwards_guarded_mutation_options(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="betfair_exchange")
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"operation": operation, "request": kwargs}
+
+        adapter = SimpleNamespace(
+            order_management_operations=("cancel_orders", "update_orders", "replace_orders"),
+            manage_orders=manage_orders,
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "cancel_orders",
+                        "--market",
+                        "betfair_exchange",
+                        "--exchange-market-id",
+                        "1.234",
+                        "--instructions",
+                        '[{"bet_id":"bet-1","size_reduction":1.25}]',
+                        "--customer-ref",
+                        "cancel-1",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(calls[0][0], "cancel_orders")
+        self.assertEqual(
+            calls[0][1],
+            {
+                "market_id": "1.234",
+                "instructions": [{"bet_id": "bet-1", "size_reduction": 1.25}],
+                "customer_ref": "cancel-1",
+            },
+        )
+        self.assertEqual(payload["parameters"]["market_id"], "1.234")
+
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "replace_orders",
+                        "--market",
+                        "betfair_exchange",
+                        "--json",
+                        '{"market_id":"1.234","instructions":[{"bet_id":"bet-1","new_price":2}],"market_version":7}',
+                        "--async-request",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls[1][0], "replace_orders")
+        self.assertEqual(calls[1][1]["market_version"], 7)
+        self.assertTrue(calls[1][1]["async_request"])
+
     def test_hyperliquid_account_command_forwards_dex_and_history_limit(self) -> None:
         cfg = SimpleNamespace(selected_market_id="hyperliquid")
         adapter = SimpleNamespace(

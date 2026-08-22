@@ -2311,6 +2311,97 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual(instruction["side"], "BACK")
         self.assertEqual(instruction["limitOrder"]["price"], "2.0")
 
+    def test_betfair_order_management_uses_guarded_official_mutation_endpoints(self) -> None:
+        adapter = BetfairExchangeAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "betfair_order_management_enabled": True,
+            }
+        )
+        responses = {
+            "cancelOrders": load_fixture("betfair_exchange", "cancel_orders_response"),
+            "updateOrders": load_fixture("betfair_exchange", "update_orders_response"),
+            "replaceOrders": load_fixture("betfair_exchange", "replace_orders_response"),
+        }
+        calls = []
+
+        def fake_request(method: str, url: str, *, json=None, headers=None, timeout=None):
+            self.assertEqual(method, "POST")
+            self.assertTrue(url.endswith("/exchange/betting/json-rpc/v1"))
+            self.assertEqual(headers["X-Application"], "betfair-app")
+            self.assertEqual(headers["X-Authentication"], "betfair-session")
+            calls.append(json)
+            for endpoint, response in responses.items():
+                if json["method"].endswith(endpoint):
+                    return FakeResponse(response)
+            raise AssertionError(f"unexpected Betfair method: {json['method']}")
+
+        adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
+        with patch.dict(
+            "os.environ",
+            {"BETFAIR_APP_KEY": "betfair-app", "BETFAIR_SESSION_TOKEN": "betfair-session"},
+        ):
+            cancelled = adapter.manage_orders(
+                "cancel_orders",
+                market_id="1.234",
+                instructions=[{"bet_id": "bet-1", "size_reduction": 1.25}],
+                customer_ref="cancel-1",
+            )
+            updated = adapter.manage_orders(
+                "update_orders",
+                market_id="1.234",
+                instructions=[{"bet_id": "bet-1", "new_persistence_type": "persist"}],
+            )
+            replaced = adapter.manage_orders(
+                "replace_orders",
+                market_id="1.234",
+                instructions=[{"bet_id": "bet-1", "new_price": 2}],
+                market_version=7,
+                async_request=True,
+            )
+
+            with self.assertRaises(MarketConfigurationError):
+                adapter.manage_orders("cancel_orders", confirm_global_cancel="cancel all bets")
+            global_cancel = adapter.manage_orders("cancel_orders", confirm_global_cancel="CANCEL ALL BETS")
+
+        self.assertEqual(cancelled["response"]["status"], "SUCCESS")
+        self.assertEqual(updated["response"]["instructionReports"][0]["betId"], "bet-1")
+        self.assertEqual(replaced["request"]["marketVersion"], {"version": 7})
+        self.assertTrue(replaced["request"]["async"])
+        self.assertEqual(global_cancel["request"], {})
+        self.assertEqual(calls[0]["method"], "SportsAPING/v1.0/cancelOrders")
+        self.assertEqual(calls[0]["params"]["instructions"], [{"betId": "bet-1", "sizeReduction": 1.25}])
+        self.assertEqual(calls[1]["method"], "SportsAPING/v1.0/updateOrders")
+        self.assertEqual(calls[1]["params"]["instructions"], [{"betId": "bet-1", "newPersistenceType": "PERSIST"}])
+        self.assertEqual(calls[2]["method"], "SportsAPING/v1.0/replaceOrders")
+        self.assertEqual(calls[2]["params"]["instructions"], [{"betId": "bet-1", "newPrice": 2.0}])
+        self.assertEqual(calls[3]["method"], "SportsAPING/v1.0/cancelOrders")
+        self.assertEqual(calls[3]["params"], {})
+
+        disabled = BetfairExchangeAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})
+        with self.assertRaises(MarketConfigurationError):
+            disabled.manage_orders("cancel_orders", market_id="1.234", instructions=[{"bet_id": "bet-1"}])
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders(
+                "update_orders",
+                market_id="1.234",
+                instructions=[{"bet_id": "bet-1", "new_persistence_type": "UNKNOWN"}],
+            )
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders(
+                "replace_orders",
+                market_id="1.234",
+                instructions=[{"bet_id": "bet-1", "new_price": 1.0}],
+            )
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders(
+                "cancel_orders",
+                market_id="1.234",
+                instructions=[{"bet_id": "bet-1"}],
+                async_request=True,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
