@@ -5220,24 +5220,25 @@ def is_loopback_host(host: str) -> bool:
 def _resolve_trusted_frontend_dir(frontend_dir: Path) -> Optional[Path]:
     """Normalize a deployment frontend path and keep it inside the bundle root."""
     try:
-        # This is the single deployment-time path boundary.  The value is
-        # normalized and checked with ``relative_to`` below before any file
-        # lookup, so it cannot escape the trusted resource root.
-        # codeql[py/path-injection]
-        configured = Path(frontend_dir).expanduser()
-        configured_root = configured.resolve()
-        default_root = Path(DEFAULT_FRONTEND_DIR).expanduser().resolve()
+        # Normalize before constructing a filesystem path and compare the
+        # canonical strings with the trusted deployment root. This follows the
+        # CodeQL containment pattern and also handles macOS /var symlinks.
+        configured_root = os.path.realpath(os.path.expanduser(os.fspath(frontend_dir)))
+        default_root = os.path.realpath(os.path.expanduser(os.fspath(DEFAULT_FRONTEND_DIR)))
         # The module-level default is a deployment resource, not request data.
         # Keep this fast path so packaged builds and test-configured defaults
         # do not need to widen the trusted-root boundary.
-        if configured_root == default_root:
-            return configured_root
-        root = configured_root
-        allowed_root = _RESOURCE_ROOT.resolve()
-        root.relative_to(allowed_root)
+        if os.path.normcase(configured_root) == os.path.normcase(default_root):
+            return Path(configured_root)
+        allowed_root = os.path.realpath(os.fspath(_RESOURCE_ROOT))
+        normalized_root = os.path.normcase(configured_root)
+        normalized_allowed_root = os.path.normcase(allowed_root)
+        if os.path.commonpath((normalized_root, normalized_allowed_root)) != normalized_allowed_root:
+            return None
+        # The commonpath check above proves this is beneath the trusted root.
+        return Path(configured_root)
     except (OSError, RuntimeError, ValueError, TypeError):
         return None
-    return root
 
 
 def run_server(
