@@ -86,6 +86,8 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIsInstance(posts.get("results"), list)
         self.assertIn("question", binary)
         self.assertIn("aggregations", binary["question"])
+        self.assertIsInstance(binary["question"]["aggregations"].get("recency_weighted", {}).get("history"), list)
+        self.assertGreaterEqual(len(binary["question"]["aggregations"]["recency_weighted"]["history"]), 1)
         self.assertIsInstance(multiple.get("questions"), list)
         self.assertEqual(numeric["question"].get("type"), "numeric")
 

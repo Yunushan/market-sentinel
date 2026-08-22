@@ -247,6 +247,7 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 ### 9) Metaculus adapter support
 - Lists authenticated Metaculus posts/questions through the official API
 - Reads accessible binary, multiple-choice, and numeric forecast values for alerts
+- Reads accessible Community Prediction aggregation history through `list_candles`; official irregular snapshots are normalized as point candles (no fabricated OHLCV or resampling)
 - Does not expose trading controls because Metaculus is a forecasting platform, not a cash market
 
 ### 10) Legacy Web3 protocol adapter support
@@ -516,7 +517,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | Frenzy Finance (`frenzy_finance`) | Implemented | Yes | Yes | Yes | No (oracle/wallet gate) | No | Required | No API key; wallet/collateral required only for future live chain flow | Jurisdiction varies |
 | XO Market (`xo_market`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | API credentials required | Region/KYC limited |
 | Manifold Markets (`manifold`) | Implemented | Yes | Yes | Yes | Guarded, off by default | Yes, simulation-first | Required | Optional API key | Not KYC limited |
-| Metaculus (`metaculus`) | Implemented | Yes | Yes | No | No | No | Required | Account/API token required | Not trading/KYC limited |
+| Metaculus (`metaculus`) | Implemented | Yes | Yes (forecast snapshots) | No | No | No | Required | Account/API token required | Not trading/KYC limited |
 | Good Judgment Open (`good_judgment_open`) | Verified blocked | No | No | No | No | No | Required | Account/export access required | Not trading/KYC limited |
 | Hypermind (`hypermind`) | Verified blocked | No | No | No | No | No | Required | Program access required | Program access limited |
 | Iowa Electronic Markets (`iowa_electronic_markets`) | Verified blocked | No | No | No | No | No | Required | IEM account required | Eligibility limited |
