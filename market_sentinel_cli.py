@@ -1631,6 +1631,12 @@ MATCHBOOK_ORDER_MANAGEMENT_OPERATIONS = (
     "edit_offer",
     "edit_offers",
 )
+MYRIAD_ORDER_MANAGEMENT_OPERATIONS = (
+    "cancel_order",
+    "batch_cancel_orders",
+    "cancel_all_orders",
+    "batch_modify_orders",
+)
 MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
     dict.fromkeys(
         BETFAIR_ORDER_MANAGEMENT_OPERATIONS
@@ -1638,6 +1644,7 @@ MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
         + POLYMARKET_ORDER_MANAGEMENT_OPERATIONS
         + GEMINI_ORDER_MANAGEMENT_OPERATIONS
         + MATCHBOOK_ORDER_MANAGEMENT_OPERATIONS
+        + MYRIAD_ORDER_MANAGEMENT_OPERATIONS
     )
 )
 
@@ -1662,10 +1669,20 @@ def run_market_order_management(args: argparse.Namespace) -> int:
         if raw.startswith("@"):
             raw = Path(raw[1:]).expanduser().read_text(encoding="utf-8")
         parsed = json.loads(raw)
-        if not isinstance(parsed, list):
-            raise ValueError("--instructions must contain a JSON array.")
+        if not isinstance(parsed, list) and not (
+            market_id == "myriad_markets" and operation in {"cancel_order", "batch_modify_orders"}
+        ):
+            raise ValueError("--instructions must contain a JSON array (or a Myriad signed-object payload).")
         if operation == "batch_cancel_orders" or (market_id == "polymarket" and operation == "cancel_orders"):
             payload["orders"] = parsed
+        elif market_id == "myriad_markets" and operation == "batch_modify_orders":
+            if not isinstance(parsed, dict):
+                raise ValueError("Myriad batch_modify_orders instructions must be a JSON object with cancel/place arrays.")
+            payload.update(parsed)
+        elif market_id == "myriad_markets" and operation == "cancel_order":
+            if not isinstance(parsed, dict):
+                raise ValueError("Myriad cancel_order instructions must be a JSON object with order and signature.")
+            payload.update(parsed)
         else:
             payload["instructions"] = parsed
     _put_optional(payload, "customer_ref", getattr(args, "customer_ref", None))
@@ -1694,6 +1711,15 @@ def run_market_order_management(args: argparse.Namespace) -> int:
         ("updated_client_order_id", "updated_client_order_id"),
         ("reduce_by", "reduce_by"),
         ("reduce_to", "reduce_to"),
+        ("order_hash", "order_hash"),
+        ("trader", "trader"),
+        ("timestamp", "timestamp"),
+        ("signature", "signature"),
+        ("signature_type", "signature_type"),
+        ("network_id", "network_id"),
+        ("allow_partial", "allow_partial"),
+        ("cancel", "cancel"),
+        ("place", "place"),
         ("subaccount", "subaccount"),
         ("exchange_index", "exchange_index"),
         ("confirm_order_management", "confirm_order_management"),
@@ -2718,7 +2744,7 @@ def build_parser() -> argparse.ArgumentParser:
     market_orders = markets_sub.add_parser(
         "manage-orders",
         parents=[common],
-        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Kalshi, Matchbook, or Polymarket).",
+        help="Run a guarded documented live order-management mutation (Betfair, Gemini, Kalshi, Matchbook, Myriad, or Polymarket).",
     )
     market_orders.add_argument("operation", choices=MARKET_ORDER_MANAGEMENT_OPERATIONS)
     market_orders.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
@@ -2748,6 +2774,18 @@ def build_parser() -> argparse.ArgumentParser:
     market_orders.add_argument("--new-odds", default=None, help="Matchbook edit_offer replacement decimal odds.")
     market_orders.add_argument("--current-stake", default=None, help="Matchbook edit_offer current remaining stake.")
     market_orders.add_argument("--new-stake", default=None, help="Matchbook edit_offer replacement remaining stake.")
+    market_orders.add_argument("--order-hash", default=None, help="Myriad order hash or safe client order id for cancel_order.")
+    market_orders.add_argument("--trader", default=None, help="Myriad trader wallet for cancel_all_orders.")
+    market_orders.add_argument("--timestamp", default=None, help="Myriad cancel-all EIP-712 timestamp.")
+    market_orders.add_argument("--signature", default=None, help="Myriad EIP-712 order/cancel signature.")
+    market_orders.add_argument("--signature-type", default=None, help="Myriad signature type: 0 (EOA) or 3 (SCW).")
+    market_orders.add_argument("--network-id", default=None, help="Myriad network id for signed order requests.")
+    market_orders.add_argument(
+        "--allow-partial",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Myriad batch mutation behavior when individual entries fail (default true).",
+    )
     market_orders.add_argument("--trade-id", default=None, help="Polymarket trade id for account fills reads.")
     market_orders.add_argument("--ticker", default=None, help="Kalshi market ticker for amend_order.")
     market_orders.add_argument("--side", choices=["bid", "ask"], default=None, help="Kalshi V2 amend side.")

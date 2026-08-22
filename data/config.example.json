@@ -319,16 +319,19 @@
       "enabled": false,
       "settings": {
         "adapter_status": "implemented",
-        "myriad_api_base_url": "https://api.myriad.markets",
+        "myriad_api_base_url": "https://api-v2.myriadprotocol.com",
         "credential_env_vars": [
-          "MYRIAD_API_KEY"
+          "MYRIAD_API_KEY",
+          "MYRIAD_API_SECRET",
+          "MYRIAD_ACCESS_TOKEN"
         ],
         "live_trading_enabled": false,
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
+        "myriad_order_management_enabled": false,
         "min_request_interval_seconds": 0.25,
-        "notes": "Public question/market discovery, outcome price reads, orderbooks, alerts, public wallet buy/sell activity, simulation-first copy intents, local paper quote payloads, and guarded signed order submission are implemented through the official Myriad API. Live trading stays disabled by default; live copy/order submission remains guarded."
+        "notes": "Public question/market discovery, outcome price reads, orderbooks, alerts, public wallet buy/sell activity, simulation-first copy intents, local paper quote payloads, guarded HMAC/JWT-authenticated signed order submission, and fixed cancel/batch-cancel/cancel-all/batch-modify mutations are implemented through the official Myriad API. Live trading and order management stay disabled by default."
       }
     },
     "kalshi": {

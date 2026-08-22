@@ -209,6 +209,13 @@ interface MarketReadForm {
   order_management_new_odds: string;
   order_management_current_stake: string;
   order_management_new_stake: string;
+  order_management_order_hash: string;
+  order_management_trader: string;
+  order_management_timestamp: string;
+  order_management_signature: string;
+  order_management_signature_type: string;
+  order_management_network_id: string;
+  order_management_allow_partial: boolean;
   order_management_ticker: string;
   order_management_side: string;
   order_management_price: string;
@@ -461,6 +468,13 @@ function emptyMarketReadForm(): MarketReadForm {
     order_management_new_odds: "",
     order_management_current_stake: "",
     order_management_new_stake: "",
+    order_management_order_hash: "",
+    order_management_trader: "",
+    order_management_timestamp: "",
+    order_management_signature: "",
+    order_management_signature_type: "",
+    order_management_network_id: "",
+    order_management_allow_partial: true,
     order_management_ticker: "",
     order_management_side: "bid",
     order_management_price: "",
@@ -789,6 +803,10 @@ export default function App() {
       patch.settings = {
         matchbook_order_management_enabled: form.get("matchbook_order_management_enabled") === "on"
       };
+    } else if (selectedMarket.market_id === "myriad_markets") {
+      patch.settings = {
+        myriad_order_management_enabled: form.get("myriad_order_management_enabled") === "on"
+      };
     }
     setBusyMarket(selectedMarket.market_id);
     setError(null);
@@ -955,24 +973,31 @@ export default function App() {
     const isPolymarket = marketId === "polymarket";
     const isGemini = marketId === "gemini_titan";
     const isMatchbook = marketId === "matchbook";
+    const isMyriad = marketId === "myriad_markets";
     let instructions: unknown = [];
     const needsInstructions =
-      (!isPolymarket && !isGemini && !isMatchbook) ||
+      (!isPolymarket && !isGemini && !isMatchbook && !isMyriad) ||
       operation === "cancel_orders" ||
       operation === "batch_cancel_orders" ||
-      (isMatchbook && (operation === "cancel_offers" || operation === "edit_offers"));
+      (isMatchbook && (operation === "cancel_offers" || operation === "edit_offers")) ||
+      (isMyriad && (operation === "cancel_order" || operation === "batch_modify_orders"));
     if (needsInstructions) {
       try {
-        instructions = JSON.parse(marketReadForm.order_management_instructions || "[]");
+        const defaultJson = isMyriad && (operation === "cancel_order" || operation === "batch_modify_orders") ? "{}" : "[]";
+        instructions = JSON.parse(marketReadForm.order_management_instructions || defaultJson);
       } catch (exc) {
         setError(exc instanceof Error ? `Instructions JSON is invalid: ${exc.message}` : "Instructions JSON is invalid.");
         return;
       }
-      if (!Array.isArray(instructions)) {
-        setError("Instructions must be a JSON array.");
+      const allowsMyriadObject = isMyriad && (operation === "cancel_order" || operation === "batch_modify_orders");
+      if (!Array.isArray(instructions) && !(allowsMyriadObject && instructions && typeof instructions === "object")) {
+        setError(allowsMyriadObject ? "Instructions must be a JSON array or object." : "Instructions must be a JSON array.");
         return;
       }
     }
+    const myriadInstructionObject = instructions && !Array.isArray(instructions) && typeof instructions === "object"
+      ? instructions as Record<string, unknown>
+      : null;
     if (isPolymarket && operation === "cancel_order" && !marketReadForm.order_management_order_id.trim()) {
       setError("A Polymarket order id is required for cancel_order.");
       return;
@@ -1017,7 +1042,27 @@ export default function App() {
       setError("Matchbook edit_offers requires an array of offer edit objects.");
       return;
     }
-    if (!isKalshi && !isPolymarket && !isGemini && (operation === "update_orders" || operation === "replace_orders") && !marketReadForm.order_management_market_id.trim()) {
+    if (isMyriad && operation === "cancel_order" && (!(marketReadForm.order_management_order_hash || marketReadForm.order_management_order_id).trim() || !myriadInstructionObject?.order || !myriadInstructionObject?.signature)) {
+      setError("Myriad cancel_order requires an order hash/client id and a signed order object with signature.");
+      return;
+    }
+    if (isMyriad && operation === "batch_cancel_orders" && !(instructions as unknown[]).length) {
+      setError("Myriad batch cancellation requires at least one signed order entry.");
+      return;
+    }
+    if (isMyriad && operation === "cancel_all_orders" &&
+      (marketReadForm.order_management_confirmation.trim() !== "CANCEL ALL MYRIAD ORDERS" ||
+        !marketReadForm.order_management_trader.trim() || !marketReadForm.order_management_timestamp.trim() ||
+        !marketReadForm.order_management_signature.trim())) {
+      setError("Myriad global cancellation requires trader, timestamp, signature, and exact confirmation: CANCEL ALL MYRIAD ORDERS.");
+      return;
+    }
+    if (isMyriad && operation === "batch_modify_orders" &&
+      (!myriadInstructionObject || (!Array.isArray(myriadInstructionObject.cancel) && !Array.isArray(myriadInstructionObject.place)))) {
+      setError("Myriad batch_modify_orders requires a JSON object with cancel and/or place arrays.");
+      return;
+    }
+    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && (operation === "update_orders" || operation === "replace_orders") && !marketReadForm.order_management_market_id.trim()) {
       setError("A Betfair exchange market id is required for update and replace operations.");
       return;
     }
@@ -1033,9 +1078,9 @@ export default function App() {
       setError("A Kalshi ticker is required for amend_order.");
       return;
     }
-    const warning = !isKalshi && !isPolymarket && !isGemini && !isMatchbook && operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()
+    const warning = !isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()
       ? "This submits a GLOBAL Betfair cancellation for the account."
-      : `This submits a live ${isKalshi ? "Kalshi" : isPolymarket ? "Polymarket" : isGemini ? "Gemini" : isMatchbook ? "Matchbook" : "Betfair"} ${operation.replaceAll("_", " ")} request.`;
+      : `This submits a live ${isKalshi ? "Kalshi" : isPolymarket ? "Polymarket" : isGemini ? "Gemini" : isMatchbook ? "Matchbook" : isMyriad ? "Myriad" : "Betfair"} ${operation.replaceAll("_", " ")} request.`;
     if (!window.confirm(`${warning} Continue only if the live-safety gates and request details are intentional.`)) {
       return;
     }
@@ -1054,6 +1099,23 @@ export default function App() {
             order_id: marketReadForm.order_management_order_id.trim() || undefined,
             orders: operation === "batch_cancel_orders" ? instructions : undefined,
             confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined
+          }
+      : isMyriad
+        ? {
+            order_hash: (marketReadForm.order_management_order_hash || marketReadForm.order_management_order_id).trim() || undefined,
+            order_id: marketReadForm.order_management_order_id.trim() || undefined,
+            instructions: operation === "cancel_order" ? myriadInstructionObject : undefined,
+            orders: operation === "batch_cancel_orders" ? instructions : undefined,
+            modify: operation === "batch_modify_orders" ? myriadInstructionObject : undefined,
+            market_id: marketReadForm.order_management_market_id.trim() || undefined,
+            trader: marketReadForm.order_management_trader.trim() || undefined,
+            timestamp: marketReadForm.order_management_timestamp.trim() || undefined,
+            signature: marketReadForm.order_management_signature.trim() || (myriadInstructionObject?.signature as string | undefined),
+            signature_type: marketReadForm.order_management_signature_type.trim() || undefined,
+            network_id: marketReadForm.order_management_network_id.trim() || undefined,
+            allow_partial: marketReadForm.order_management_allow_partial,
+            confirm_order_management: marketReadForm.order_management_operator_confirmation.trim() || undefined,
+            confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
           }
       : isMatchbook
         ? {
@@ -1078,7 +1140,7 @@ export default function App() {
           customer_ref: marketReadForm.order_management_customer_ref.trim() || undefined,
           confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
         };
-    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && marketReadForm.order_management_market_version.trim()) {
+    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && marketReadForm.order_management_market_version.trim()) {
       const version = Number(marketReadForm.order_management_market_version.trim());
       if (!Number.isInteger(version) || version < 1) {
         setError("Market version must be a positive integer.");
@@ -1086,7 +1148,7 @@ export default function App() {
       }
       payload.market_version = version;
     }
-    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && marketReadForm.order_management_async) {
+    if (!isKalshi && !isPolymarket && !isGemini && !isMatchbook && !isMyriad && marketReadForm.order_management_async) {
       payload.async_request = true;
     }
     if (isKalshi) {
@@ -2241,6 +2303,15 @@ function MarketsView({
                 />
                 <span>Enable Matchbook order management</span>
               </label>
+            ) : selectedMarket.market_id === "myriad_markets" ? (
+              <label className="check-row">
+                <input
+                  name="myriad_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Myriad order management</span>
+              </label>
             ) : null}
             <label>
               <span>Max size</span>
@@ -2585,6 +2656,8 @@ function MarketsView({
                             ? "Gemini cancellations are disabled by default and require the shared live-safety gates, Gemini-specific opt-in, authenticated Trader credentials, and exact operator confirmation."
                             : selectedMarket.market_id === "matchbook"
                               ? "Matchbook offer cancellation and edits are disabled by default and require the shared live-safety gates, Matchbook-specific opt-in, a session, and exact operator confirmation."
+                              : selectedMarket.market_id === "myriad_markets"
+                                ? "Myriad signed-order cancellation and replacement are disabled by default and require HMAC/JWT account authentication, the shared live-safety gates, a separate opt-in, and exact operator confirmation."
                               : "Betfair mutations are disabled by default and require the shared live-safety gates plus the Betfair-specific opt-in. The UI never sends a request without explicit confirmation."}
                   </p>
                 </div>
@@ -2778,6 +2851,102 @@ function MarketsView({
                         rows={3}
                         spellCheck={false}
                         placeholder='[106817811, 106817812]'
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : selectedMarket.market_id === "myriad_markets" ? (
+                  <>
+                    <label>
+                      <span>Order hash / client id</span>
+                      <input
+                        value={marketReadForm.order_management_order_hash || marketReadForm.order_management_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_order_hash: event.target.value, order_management_order_id: event.target.value })}
+                        placeholder="0x + 64 hex chars or safe client id"
+                      />
+                    </label>
+                    <label>
+                      <span>Network id</span>
+                      <input
+                        value={marketReadForm.order_management_network_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_network_id: event.target.value })}
+                        placeholder="56"
+                      />
+                    </label>
+                    <label>
+                      <span>Trader wallet (cancel-all)</span>
+                      <input
+                        value={marketReadForm.order_management_trader}
+                        onChange={(event) => onMarketReadFormChange({ order_management_trader: event.target.value })}
+                        placeholder="0x…"
+                      />
+                    </label>
+                    <label>
+                      <span>Cancel-all timestamp</span>
+                      <input
+                        value={marketReadForm.order_management_timestamp}
+                        onChange={(event) => onMarketReadFormChange({ order_management_timestamp: event.target.value })}
+                        placeholder="Unix seconds"
+                      />
+                    </label>
+                    <label>
+                      <span>Cancel-all market id</span>
+                      <input
+                        value={marketReadForm.order_management_market_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_market_id: event.target.value })}
+                        placeholder="Blank cancels all markets"
+                      />
+                    </label>
+                    <label>
+                      <span>Signature type</span>
+                      <select
+                        value={marketReadForm.order_management_signature_type}
+                        onChange={(event) => onMarketReadFormChange({ order_management_signature_type: event.target.value })}
+                      >
+                        <option value="">Default (0 / EOA)</option>
+                        <option value="0">0 (EOA)</option>
+                        <option value="3">3 (SCW)</option>
+                      </select>
+                    </label>
+                    <label className="wide-field">
+                      <span>Signed order payload JSON</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={5}
+                        spellCheck={false}
+                        placeholder='{"order":{"trader":"0x…","marketId":"42","outcomeId":0,"side":0,"amount":"1000000000000000000","price":"500000000000000000","minFillAmount":"0","nonce":"1","expiration":"0"},"signature":"0x…"}'
+                      />
+                    </label>
+                    <label>
+                      <span>Cancel-all signature</span>
+                      <input
+                        value={marketReadForm.order_management_signature}
+                        onChange={(event) => onMarketReadFormChange({ order_management_signature: event.target.value })}
+                        placeholder="0x…"
+                      />
+                    </label>
+                    <label className="check-row">
+                      <input
+                        type="checkbox"
+                        checked={marketReadForm.order_management_allow_partial}
+                        onChange={(event) => onMarketReadFormChange({ order_management_allow_partial: event.target.checked })}
+                      />
+                      <span>Allow partial batch results</span>
+                    </label>
+                    <label>
+                      <span>Global cancellation confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_confirmation: event.target.value })}
+                        placeholder="CANCEL ALL MYRIAD ORDERS"
                       />
                     </label>
                     <label className="wide-field">

@@ -1229,6 +1229,48 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(calls[1][1]["offer_id"], 404)
         self.assertEqual(calls[1][1]["new_stake"], 6)
 
+    def test_myriad_order_management_payload_forwards_signed_fields_only(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="myriad_markets",
+            display_name="Myriad",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_order", "batch_cancel_orders")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["myriad_markets"].enabled = True
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "myriad_markets",
+            "cancel_order",
+            {
+                "order_hash": "0x" + "12" * 32,
+                "trader": "0x1234567890123456789012345678901234567890",
+                "timestamp": 1719835200,
+                "signature": "0x" + "ab" * 65,
+                "network_id": 56,
+                "allow_partial": True,
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["order_hash"], "0x" + "12" * 32)
+        self.assertEqual(calls[0][1]["network_id"], 56)
+        self.assertNotIn("unexpected", calls[0][1])
+
     def test_limitless_account_payload_forwards_delegated_read_parameters(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(

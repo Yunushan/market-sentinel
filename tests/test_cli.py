@@ -130,6 +130,95 @@ class MarketSentinelCliTests(unittest.TestCase):
         self.assertEqual(payload["parameters"]["event_ticker"], "BTC100K2026")
         self.assertEqual(payload["data"]["positions"][0]["symbol"], "GEMI-BTC100K26-YES")
 
+    def test_myriad_order_management_command_forwards_signed_mutations(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="myriad_markets")
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"operation": operation, "request": kwargs}
+
+        adapter = SimpleNamespace(
+            order_management_operations=("cancel_order", "batch_cancel_orders", "cancel_all_orders", "batch_modify_orders"),
+            manage_orders=manage_orders,
+        )
+        confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+        signed = {
+            "order": {
+                "trader": "0x1234567890123456789012345678901234567890",
+                "marketId": "42",
+                "outcomeId": 0,
+                "side": 0,
+                "amount": "1000000000000000000",
+                "price": "500000000000000000",
+                "minFillAmount": "0",
+                "nonce": "1",
+                "expiration": "0",
+            },
+            "signature": "0x" + "ab" * 65,
+        }
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "cancel_order",
+                        "--market",
+                        "myriad_markets",
+                        "--order-hash",
+                        "0x" + "12" * 32,
+                        "--instructions",
+                        json.dumps(signed),
+                        "--network-id",
+                        "56",
+                        "--confirm-order-management",
+                        confirmation,
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls[0][0], "cancel_order")
+        self.assertEqual(calls[0][1]["order_hash"], "0x" + "12" * 32)
+        self.assertEqual(calls[0][1]["order"], signed["order"])
+        self.assertEqual(calls[0][1]["signature"], signed["signature"])
+        self.assertEqual(calls[0][1]["network_id"], "56")
+
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "manage-orders",
+                        "batch_cancel_orders",
+                        "--market",
+                        "myriad_markets",
+                        "--instructions",
+                        json.dumps([signed]),
+                        "--allow-partial",
+                        "--confirm-order-management",
+                        confirmation,
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(calls[1][0], "batch_cancel_orders")
+        self.assertEqual(calls[1][1]["orders"], [signed])
+        self.assertTrue(calls[1][1]["allow_partial"])
+        self.assertNotIn("instructions", calls[1][1])
+
     def test_betfair_order_management_command_forwards_guarded_mutation_options(self) -> None:
         cfg = SimpleNamespace(selected_market_id="betfair_exchange")
         calls = []

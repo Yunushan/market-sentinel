@@ -1883,7 +1883,10 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             return FakeResponse(load_fixture("myriad_markets", "order_response"))
 
         live_adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
-        with patch.dict("os.environ", {"MYRIAD_API_KEY": "myriad-key"}):
+        with patch.dict(
+            "os.environ",
+            {"MYRIAD_API_KEY": "myriad-key", "MYRIAD_API_SECRET": "myriad-secret"},
+        ):
             result = live_adapter.place_live_order(
                 PaperOrderRequest(
                     "myriad_markets",
@@ -1903,6 +1906,102 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertTrue(calls[0][1].endswith("/orders"))
         self.assertEqual(calls[0][2]["network_id"], 56)
         self.assertEqual(calls[0][3]["x-api-key"], "myriad-key")
+        self.assertIn("x-api-timestamp", calls[0][3])
+        self.assertRegex(calls[0][3]["x-api-signature"], r"^[0-9a-f]{64}$")
+
+    def test_myriad_order_management_uses_signed_fixed_cancel_and_modify_contracts(self) -> None:
+        adapter = MyriadAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "myriad_order_management_enabled": True,
+                "myriad_network_id": 56,
+            }
+        )
+        confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+        global_confirmation = "CANCEL ALL MYRIAD ORDERS"
+        signed_order = {
+            "trader": "0x1234567890123456789012345678901234567890",
+            "marketId": "42",
+            "outcomeId": 0,
+            "side": 0,
+            "amount": "1000000000000000000",
+            "price": "500000000000000000",
+            "minFillAmount": "0",
+            "nonce": "1",
+            "expiration": "0",
+        }
+        entry = {"order": signed_order, "signature": "0x" + "ab" * 65}
+        responses = {
+            "/orders/0x" + "12" * 32: {"orderHash": "0x" + "12" * 32, "status": "cancelled"},
+            "/orders/cancel-batch": {"cancelled": ["0x" + "12" * 32], "errors": []},
+            "/orders/cancel-all": {"cancelled_count": 1, "market_ids_affected": ["42"]},
+            "/orders/batch-modify": {"placed": ["0x" + "34" * 32], "cancelled": [], "errors": []},
+        }
+        calls = []
+
+        def fake_request(method: str, url: str, *, params=None, json=None, headers=None, timeout=None):
+            path = url.split("api-v2.myriadprotocol.com", 1)[-1]
+            calls.append((method, path, params, json, headers))
+            return FakeResponse(responses[path])
+
+        adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
+        with patch.dict(
+            "os.environ",
+            {"MYRIAD_API_KEY": "myriad-key", "MYRIAD_API_SECRET": "myriad-secret"},
+        ):
+            cancelled = adapter.manage_orders(
+                "cancel_order",
+                order_hash="0x" + "12" * 32,
+                instructions=entry,
+                confirm_order_management=confirmation,
+            )
+            batch = adapter.manage_orders(
+                "batch_cancel_orders",
+                orders=[entry],
+                confirm_order_management=confirmation,
+            )
+            global_cancel = adapter.manage_orders(
+                "cancel_all_orders",
+                trader=signed_order["trader"],
+                timestamp=1_719_835_200,
+                signature="0x" + "cd" * 65,
+                confirm_global_cancel=global_confirmation,
+                confirm_order_management=confirmation,
+            )
+            modified = adapter.manage_orders(
+                "batch_modify_orders",
+                modify={"cancel": [entry], "place": [{**entry, "time_in_force": "GTC"}]},
+                confirm_order_management=confirmation,
+            )
+
+        self.assertEqual(cancelled["response"]["status"], "cancelled")
+        self.assertEqual(batch["response"]["cancelled"], ["0x" + "12" * 32])
+        self.assertEqual(global_cancel["response"]["cancelled_count"], 1)
+        self.assertEqual(modified["request"]["path"], "/orders/batch-modify")
+        self.assertEqual(calls[0][0:2], ("DELETE", "/orders/0x" + "12" * 32))
+        self.assertEqual(calls[1][0:2], ("POST", "/orders/cancel-batch"))
+        self.assertEqual(calls[2][0:2], ("POST", "/orders/cancel-all"))
+        self.assertEqual(calls[3][0:2], ("POST", "/orders/batch-modify"))
+        for call in calls:
+            self.assertEqual(call[4]["x-api-key"], "myriad-key")
+            self.assertRegex(call[4]["x-api-signature"], r"^[0-9a-f]{64}$")
+        self.assertEqual(adapter.health_check()["order_management_operations"], [
+            "cancel_order", "batch_cancel_orders", "cancel_all_orders", "batch_modify_orders"
+        ])
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders("cancel_order", order_hash="../private", instructions=entry, confirm_order_management=confirmation)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders("batch_cancel_orders", orders=[entry, entry], confirm_order_management=confirmation)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders(
+                "cancel_all_orders",
+                trader=signed_order["trader"],
+                timestamp=1_719_835_200,
+                signature="0x" + "cd" * 65,
+                confirm_global_cancel="wrong",
+                confirm_order_management=confirmation,
+            )
 
     def test_myriad_public_orderbook_trades_are_normalized_and_bounded(self) -> None:
         adapter = MyriadAdapter({"myriad_network_id": 56})

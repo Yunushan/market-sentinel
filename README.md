@@ -526,7 +526,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | Nadex (`nadex`) | Implemented | Yes | Yes | Yes | No | No | Required | Optional API key | Region/KYC limited |
 | Crypto.com Predict / CDNA (`crypto_com_predict`) | Implemented | Yes | Yes | Yes | No | No | Required | Optional API key | Not KYC limited |
 | Hyperliquid (`hyperliquid`) | Implemented | Yes | Yes (HIP-4 wallet fills/candles) | Yes | Guarded, off by default | Yes (HIP-4 wallet fills; simulation-first) | Required | No API key for reads; externally signed wallet payload required for live orders | Jurisdiction varies |
-| Myriad Markets (`myriad_markets`) | Implemented | Yes | Yes (trades/candles) | Yes | Guarded, off by default | Yes, simulation-first | Required | Optional API key | Jurisdiction varies |
+| Myriad Markets (`myriad_markets`) | Implemented | Yes | Yes (trades/candles) | Yes | Guarded, off by default; signed cancel/batch-cancel/cancel-all/batch-modify also guarded | Yes, simulation-first | Required | API credentials required | Jurisdiction varies |
 | Context V2 (`context_v2`) | Implemented | Yes | Yes (activity trades/price history) | Yes | Guarded, off by default | No | Required | API credentials required | Region/KYC limited |
 | Frenzy Finance (`frenzy_finance`) | Implemented | Yes | Yes | Yes | No (oracle/wallet gate) | No | Required | No API key; wallet/collateral required only for future live chain flow | Jurisdiction varies |
 | XO Market (`xo_market`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | API credentials required | Region/KYC limited |

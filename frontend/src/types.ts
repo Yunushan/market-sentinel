@@ -213,7 +213,8 @@ export type MarketOrderManagementOperation =
   | "cancel_offers"
   | "cancel_all_offers"
   | "edit_offer"
-  | "edit_offers";
+  | "edit_offers"
+  | "batch_modify_orders";
 
 export interface MarketOrderManagementPayload {
   market_id: string;
