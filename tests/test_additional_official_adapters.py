@@ -64,6 +64,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 "accounts",
                 "snapshot",
                 "history",
+                "trades",
                 "order_response",
             )
         }
@@ -95,6 +96,9 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 self.assertEqual(params["source"], "Last")
                 self.assertFalse(params["outsideRth"])
                 return forecast_fixtures["history"]
+            if url.endswith("/iserver/account/trades"):
+                self.assertIsNone(params)
+                return forecast_fixtures["trades"]
             raise AssertionError(f"unexpected IBKR URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
@@ -109,6 +113,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             from_timestamp=1760004000,
             to_timestamp=1760007600,
         )
+        trades = adapter.list_trades(order.contract_id, limit=2, after=1760010000, before=1760012000)
         paper = adapter.place_paper_order(order)
 
         self.assertEqual(events[0].event_id, "IBKR:FF")
@@ -119,6 +124,10 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual([candle.timestamp for candle in candles], [1760004000.0, 1760007600.0])
         self.assertEqual([candle.close for candle in candles], [0.47, 0.49])
         self.assertEqual([candle.volume for candle in candles], [4.0, 5.0])
+        self.assertEqual([trade.trade_id for trade in trades], ["exec-event-buy-1"])
+        self.assertEqual([trade.side for trade in trades], ["BUY"])
+        self.assertEqual([trade.price for trade in trades], [0.48])
+        self.assertEqual([trade.size for trade in trades], [5.0])
         self.assertTrue(paper.accepted)
 
         calls = []
@@ -177,6 +186,10 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             adapter.list_candles(order.contract_id, resolution="5sec")
         with self.assertRaises(MarketConfigurationError):
             adapter.list_candles(order.contract_id, from_timestamp=1760007600, to_timestamp=1760004000)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades(order.contract_id, limit=501)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades(order.contract_id, after=1760012000, before=1760009000)
 
     def test_hyperliquid_public_hip4_fills_support_safe_simulation_copy(self) -> None:
         wallet = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"

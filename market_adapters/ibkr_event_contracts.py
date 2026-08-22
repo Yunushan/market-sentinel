@@ -22,6 +22,7 @@ from .types import (
     MarketCandle,
     MarketContract,
     MarketEvent,
+    MarketTrade,
     OrderBookLevel,
     OrderBookSnapshot,
     PaperOrderRequest,
@@ -34,6 +35,7 @@ DEFAULT_IBKR_API_BASE_URL = "https://api.ibkr.com/v1/api"
 IBKR_REFERENCES = (
     "https://www.interactivebrokers.com/campus/ibkr-api-page/event-contracts/",
     "https://www.interactivebrokers.com/docs/web-api/api-reference/trading/trading-market-data/get-md-history",
+    "https://www.interactivebrokers.com/docs/web-api/v1/endpoints/order-monitoring/trades",
     "https://www.interactivebrokers.com/campus/ibkr-api-page/cpapi-v1/",
     "https://www.interactivebrokers.com/campus/ibkr-api-page/web-api-trading/",
 )
@@ -43,6 +45,7 @@ IBKR_EVENT_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -332,6 +335,77 @@ class IBKREventContractsAdapter(MarketAdapter):
             )
         candles.sort(key=lambda item: item.timestamp)
         return candles
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Return recent executions from IBKR's documented account trade feed.
+
+        ``/iserver/account/trades`` returns the currently selected account's
+        executions for the current day and six previous days.  It has no
+        contract or timestamp query parameters, so this adapter filters the
+        response locally after validating the requested conid and bounds.
+        """
+
+        self.ensure_capability("trade_history")
+        canonical, conid = self._parse_contract_id(contract_id)
+        desired = self._trade_limit(limit)
+        before_ts = self._history_timestamp(before, "before") if before is not None else None
+        after_ts = self._history_timestamp(after, "after") if after is not None else None
+        if before_ts is not None and after_ts is not None and before_ts < after_ts:
+            raise MarketConfigurationError(f"{self.mode_name} trade history before must not precede after.")
+
+        payload = self._get("/iserver/account/trades")
+        if isinstance(payload, list):
+            rows = payload
+        elif isinstance(payload, Mapping) and isinstance(payload.get("trades"), list):
+            rows = payload["trades"]
+        elif isinstance(payload, Mapping) and isinstance(payload.get("data"), list):
+            rows = payload["data"]
+        else:
+            rows = []
+
+        trades: List[MarketTrade] = []
+        for raw in rows:
+            if not isinstance(raw, Mapping):
+                continue
+            row_conid = raw.get("conid") or raw.get("conidEx")
+            try:
+                if row_conid is None or int(str(row_conid).split(";")[0]) != conid:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            trade_id = str(raw.get("execution_id") or raw.get("executionId") or "").strip()
+            side = self._trade_side(raw.get("side"))
+            price = self._number(raw.get("price"))
+            size = self._number(raw.get("size") or raw.get("quantity"))
+            timestamp = self._trade_timestamp(raw)
+            if not trade_id or side is None or price is None or size is None or size <= 0 or timestamp is None:
+                continue
+            if after_ts is not None and timestamp < after_ts:
+                continue
+            if before_ts is not None and timestamp > before_ts:
+                continue
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    trade_id=trade_id,
+                    side=side,
+                    price=price,
+                    size=size,
+                    timestamp=timestamp,
+                    raw=dict(raw),
+                )
+            )
+            if len(trades) >= desired:
+                break
+        return trades
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -660,6 +734,40 @@ class IBKREventContractsAdapter(MarketAdapter):
         if number >= 100_000_000_000:
             number /= 1000.0
         return number
+
+    @staticmethod
+    def _trade_limit(value: Any) -> int:
+        if isinstance(value, bool):
+            raise MarketConfigurationError("IBKR trade limit must be an integer between 1 and 500.")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("IBKR trade limit must be an integer between 1 and 500.") from exc
+        if parsed < 1 or parsed > 500:
+            raise MarketConfigurationError("IBKR trade limit must be an integer between 1 and 500.")
+        return parsed
+
+    @staticmethod
+    def _trade_side(value: Any) -> Optional[str]:
+        return {"B": "BUY", "BUY": "BUY", "S": "SELL", "SELL": "SELL"}.get(str(value or "").strip().upper())
+
+    @classmethod
+    def _trade_timestamp(cls, row: Mapping[str, Any]) -> Optional[float]:
+        timestamp = cls._timestamp_seconds(row.get("trade_time_r") or row.get("tradeTimeR"))
+        if timestamp is not None:
+            return timestamp
+        text = str(row.get("trade_time") or row.get("tradeTime") or "").strip()
+        if not text:
+            return None
+        for fmt in ("%Y%m%d-%H:%M:%S", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%SZ"):
+            try:
+                parsed = datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+        return None
 
     @staticmethod
     def _candle_lookback_seconds(resolution: str) -> int:
