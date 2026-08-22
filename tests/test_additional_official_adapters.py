@@ -337,6 +337,57 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         with self.assertRaises(MarketConfigurationError):
             adapter.copy_trade_from_activity({"side": "BUY"})
 
+    def test_hyperliquid_public_hip4_candles_are_normalized_with_documented_bounds(self) -> None:
+        adapter = HyperliquidAdapter()
+        candles = load_fixture("hyperliquid", "candles")
+        requests = []
+
+        def fake_request_json(method: str, url: str, *, params=None, json_body=None, headers=None):
+            self.assertEqual(method, "POST")
+            self.assertIsNone(params)
+            self.assertEqual(headers["Content-Type"], "application/json")
+            requests.append(json_body)
+            self.assertTrue(url.endswith("/info"))
+            return candles
+
+        adapter.runtime.request_json = fake_request_json  # type: ignore[method-assign]
+        result = adapter.list_candles(
+            "outcome:1:0",
+            resolution="1h",
+            from_timestamp=1788264000,
+            to_timestamp=1788271200,
+        )
+
+        self.assertEqual(
+            requests,
+            [
+                {
+                    "type": "candleSnapshot",
+                    "req": {
+                        "coin": "#10",
+                        "interval": "1h",
+                        "startTime": 1788264000000,
+                        "endTime": 1788271200000,
+                    },
+                }
+            ],
+        )
+        self.assertEqual([candle.contract_id for candle in result], ["outcome:1:0", "outcome:1:0"])
+        self.assertEqual([candle.timestamp for candle in result], [1788264000.0, 1788267600.0])
+        self.assertAlmostEqual(result[0].open, 0.62)
+        self.assertAlmostEqual(result[0].high, 0.66)
+        self.assertAlmostEqual(result[0].low, 0.60)
+        self.assertAlmostEqual(result[0].close, 0.64)
+        self.assertAlmostEqual(result[0].volume or 0.0, 150.5)
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles("outcome:1:0", resolution="45m")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles(
+                "outcome:1:0",
+                from_timestamp=1788271200,
+                to_timestamp=1788264000,
+            )
     def test_trueo_adapter_maps_onchain_manager_pools_prices_paper_and_signed_tx(self) -> None:
         from eth_abi import encode
 

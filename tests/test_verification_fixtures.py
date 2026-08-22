@@ -334,6 +334,7 @@ class VerificationFixtureTests(unittest.TestCase):
         metadata = json.loads((FIXTURE_ROOT / "hyperliquid" / "outcome_meta.json").read_text(encoding="utf-8"))
         book = json.loads((FIXTURE_ROOT / "hyperliquid" / "l2_book.json").read_text(encoding="utf-8"))
         fills = json.loads((FIXTURE_ROOT / "hyperliquid" / "user_fills.json").read_text(encoding="utf-8"))
+        candles = json.loads((FIXTURE_ROOT / "hyperliquid" / "candles.json").read_text(encoding="utf-8"))
         exchange = json.loads((FIXTURE_ROOT / "hyperliquid" / "exchange_response.json").read_text(encoding="utf-8"))
 
         self.assertEqual(metadata["outcomes"][0].get("outcome"), 1)
@@ -342,6 +343,10 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertEqual(len(book.get("levels", [])), 2)
         self.assertEqual(fills[0].get("coin"), "#10")
         self.assertEqual(fills[1].get("coin"), "BTC")
+        self.assertIsInstance(candles, list)
+        self.assertEqual(candles[0].get("s"), "#10")
+        self.assertIn("o", candles[0])
+        self.assertIn("v", candles[0])
         self.assertEqual(exchange.get("status"), "ok")
 
     def test_trueo_fixtures_cover_onchain_manager_pool_and_signed_transaction_shapes(self) -> None:

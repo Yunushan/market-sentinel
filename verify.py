@@ -585,6 +585,7 @@ def run_fixture_check() -> None:
         fixture_root / "nadex" / "events.json",
         fixture_root / "nadex" / "contracts.json",
         fixture_root / "nadex" / "price.json",
+        fixture_root / "hyperliquid" / "candles.json",
         fixture_root / "blinq" / "market.json",
         fixture_root / "blinq" / "event.json",
         fixture_root / "blinq" / "orderbook.json",

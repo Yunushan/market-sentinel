@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+import time
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urlsplit
 
@@ -9,7 +10,16 @@ from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError
 from .identity import require_activity_identity
-from .types import MarketContract, MarketEvent, OrderBookLevel, OrderBookSnapshot, PaperOrderRequest, PaperOrderResult, PriceSnapshot
+from .types import (
+    MarketCandle,
+    MarketContract,
+    MarketEvent,
+    OrderBookLevel,
+    OrderBookSnapshot,
+    PaperOrderRequest,
+    PaperOrderResult,
+    PriceSnapshot,
+)
 
 
 DEFAULT_HYPERLIQUID_MAINNET_URL = "https://api.hyperliquid.xyz"
@@ -21,6 +31,22 @@ HYPERLIQUID_REFERENCES = (
     "https://hyperliquid.gitbook.io/Hyperliquid-docs/for-developers/api/exchange-endpoint",
 )
 OUTCOME_ID_RE = re.compile(r"^[0-9]+$")
+HYPERLIQUID_CANDLE_RESOLUTIONS = (
+    "1m",
+    "3m",
+    "5m",
+    "15m",
+    "30m",
+    "1h",
+    "2h",
+    "4h",
+    "8h",
+    "12h",
+    "1d",
+    "3d",
+    "1w",
+    "1M",
+)
 
 
 class HyperliquidAdapter(MarketAdapter):
@@ -194,6 +220,76 @@ class HyperliquidAdapter(MarketAdapter):
             raw=dict(payload) if isinstance(payload, Mapping) else {"payload": payload},
         )
 
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Return normalized HIP-4 OHLCV candles from Hyperliquid's public feed.
+
+        Hyperliquid documents ``candleSnapshot`` as a public ``info`` request,
+        with epoch-millisecond bounds and a maximum of the most recent 5,000
+        candles.  The synthetic ``#<encoding>`` coin maps directly from the
+        canonical outcome contract id used by this adapter.
+        """
+
+        outcome_id, side = self._split_contract_id(contract_id)
+        clean_resolution = str(resolution or "").strip()
+        if clean_resolution not in HYPERLIQUID_CANDLE_RESOLUTIONS:
+            allowed = ", ".join(HYPERLIQUID_CANDLE_RESOLUTIONS)
+            raise MarketConfigurationError(f"Hyperliquid candle resolution must be one of: {allowed}.")
+
+        end_ms = self._timestamp_millis(to_timestamp, "to_timestamp") if to_timestamp is not None else int(time.time() * 1000)
+        default_lookback = self._candle_lookback_millis(clean_resolution)
+        start_ms = (
+            self._timestamp_millis(from_timestamp, "from_timestamp")
+            if from_timestamp is not None
+            else max(0, end_ms - default_lookback)
+        )
+        if end_ms <= start_ms:
+            raise MarketConfigurationError("Hyperliquid candle history requires to_timestamp greater than from_timestamp.")
+
+        payload = self._info(
+            {
+                "type": "candleSnapshot",
+                "req": {
+                    "coin": self._coin(outcome_id, side),
+                    "interval": clean_resolution,
+                    "startTime": start_ms,
+                    "endTime": end_ms,
+                },
+            }
+        )
+        if not isinstance(payload, list):
+            return []
+
+        canonical = self._contract_id(outcome_id, side)
+        candles: List[MarketCandle] = []
+        for raw in payload:
+            if not isinstance(raw, Mapping):
+                continue
+            timestamp = self._timestamp_seconds(raw.get("t"))
+            values = tuple(self._candle_probability(raw.get(key)) for key in ("o", "h", "l", "c"))
+            volume = self._nonnegative_number(raw.get("v"))
+            if timestamp <= 0 or any(value is None for value in values):
+                continue
+            candles.append(
+                MarketCandle(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    timestamp=float(timestamp),
+                    open=float(values[0]),
+                    high=float(values[1]),
+                    low=float(values[2]),
+                    close=float(values[3]),
+                    volume=volume,
+                    raw=dict(raw),
+                )
+            )
+        return candles
     def list_activity(self, wallet_address: str, *, limit: int = 25) -> List[Dict[str, Any]]:
         """Return normalized public HIP-4 fills for a wallet.
 
@@ -553,3 +649,52 @@ class HyperliquidAdapter(MarketAdapter):
         except (TypeError, ValueError):
             return 0
         return timestamp // 1000 if timestamp > 10_000_000_000 else timestamp
+
+    @staticmethod
+    def _timestamp_millis(value: Any, label: str) -> int:
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Hyperliquid {label} must be a finite Unix timestamp.") from exc
+        if not math.isfinite(number) or number < 0:
+            raise MarketConfigurationError(f"Hyperliquid {label} must be a non-negative Unix timestamp.")
+        return int(number if number > 10_000_000_000 else number * 1000)
+
+    @staticmethod
+    def _candle_lookback_millis(resolution: str) -> int:
+        unit = resolution[-1]
+        try:
+            count = int(resolution[:-1])
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Hyperliquid candle resolution is invalid: {resolution!r}.") from exc
+        if unit == "m":
+            minutes = count
+        elif unit == "h":
+            minutes = count * 60
+        elif unit == "d":
+            minutes = count * 24 * 60
+        elif unit == "w":
+            minutes = count * 7 * 24 * 60
+        elif unit == "M":
+            minutes = count * 30 * 24 * 60
+        else:
+            raise MarketConfigurationError(f"Hyperliquid candle resolution is invalid: {resolution!r}.")
+        return max(minutes, 1) * 60_000 * 100
+
+    @staticmethod
+    def _candle_probability(value: Any) -> Optional[float]:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) and 0.0 <= number <= 1.0 else None
+
+    @staticmethod
+    def _nonnegative_number(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) and number >= 0 else None

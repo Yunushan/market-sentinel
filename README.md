@@ -414,7 +414,7 @@ Useful local API endpoints:
 - `GET /api/health` returns API version, route metadata, React dev/build/prod commands, build availability, and confirms the Tkinter fallback remains `run_gui.bat` or `python app.py`.
 - `PATCH /api/config` updates shared local config fields such as selected market, theme, and Tkinter UI design.
 - `GET /api/markets` returns market capabilities, health, status text, credential source diagnostics without secret values, and live-safety settings.
-- `GET /api/markets/{market_id}/trades?contract_id=...` and `GET /api/markets/{market_id}/candles?contract_id=...&resolution=1h` expose normalized history for adapters that document those feeds (currently Kalshi and Space; Polymarket trade history requires explicit operator-supplied CLOB L2 headers); unsupported adapters fail closed with a structured error.
+- `GET /api/markets/{market_id}/trades?contract_id=...` and `GET /api/markets/{market_id}/candles?contract_id=...&resolution=1h` expose normalized history for adapters that document those feeds (currently Kalshi, Hyperliquid candles, Manifold trades, and Space; Polymarket trade history requires explicit operator-supplied CLOB L2 headers); unsupported adapters fail closed with a structured error.
 - `PATCH /api/markets/{market_id}` toggles a market and persists live-safety settings such as enablement, acknowledgement, kill switch, max size, and max notional.
 - `GET /api/alerts` returns alert rows enriched with adapter-backed status and current in-memory price state.
 - `POST /api/alerts` creates a market-scoped price alert after validating the selected adapter supports alerts.
@@ -510,7 +510,7 @@ Blinq is represented by a fixture-backed read-only alias over the official Polym
 | CME Group Prediction Markets (`cme_prediction_markets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | IBKR account required | Region/KYC limited |
 | Nadex (`nadex`) | Implemented | Yes | Yes | Yes | No | No | Required | Optional API key | Region/KYC limited |
 | Crypto.com Predict / CDNA (`crypto_com_predict`) | Implemented | Yes | Yes | Yes | No | No | Required | Optional API key | Not KYC limited |
-| Hyperliquid (`hyperliquid`) | Implemented | Yes | Yes | Yes | Guarded, off by default | Yes (HIP-4 wallet fills; simulation-first) | Required | No API key for reads; externally signed wallet payload required for live orders | Jurisdiction varies |
+| Hyperliquid (`hyperliquid`) | Implemented | Yes | Yes (HIP-4 candles) | Yes | Guarded, off by default | Yes (HIP-4 wallet fills; simulation-first) | Required | No API key for reads; externally signed wallet payload required for live orders | Jurisdiction varies |
 | Myriad Markets (`myriad_markets`) | Implemented | Yes | Yes | Yes | Guarded, off by default | Yes, simulation-first | Required | Optional API key | Jurisdiction varies |
 | Context V2 (`context_v2`) | Implemented | Yes | Yes | Yes | Guarded, off by default | No | Required | API credentials required | Region/KYC limited |
 | Frenzy Finance (`frenzy_finance`) | Implemented | Yes | Yes | Yes | No (oracle/wallet gate) | No | Required | No API key; wallet/collateral required only for future live chain flow | Jurisdiction varies |
