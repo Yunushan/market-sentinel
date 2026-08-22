@@ -4174,7 +4174,7 @@ class ReactGuiServer(ThreadingHTTPServer):
         self.frontend_dir = frontend_dir
         # Static files are a deployment-time input. Build the immutable catalog
         # before serving requests so URL parsing never performs filesystem work.
-        self.static_files = ReactGuiHandler._static_file_catalog(self.frontend_dir)
+        self.static_files = ReactGuiHandler._static_file_catalog()
         self.adapter_registry = adapter_registry or build_default_registry()
         default_origins = {
             f"http://{self.bind_host}:{self.server_address[1]}",
@@ -5100,19 +5100,14 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         return static_files.get(relative_path)
 
     @staticmethod
-    def _static_file_catalog(frontend_dir: Optional[Path] = None) -> Dict[str, Path]:
-        """Return the supported static files beneath a trusted build directory."""
+    def _static_file_catalog() -> Dict[str, Path]:
+        """Return the supported static files beneath the packaged build root."""
         try:
-            configured_root = frontend_dir if frontend_dir is not None else DEFAULT_FRONTEND_DIR
-            # Deployment-time server configuration is validated by the
-            # immutable catalog before any HTTP path lookup.
-            # codeql[py/path-injection]
-            root = configured_root.resolve()
+            # This is a module-level deployment path, not request data. The
+            # immutable catalog is built before any HTTP request is handled.
+            root = DEFAULT_FRONTEND_DIR.resolve()
         except (OSError, RuntimeError, ValueError):
             return {}
-        # The root is a deployment-time directory, never a request-derived
-        # path.  The catalog is built once before any HTTP request is handled.
-        # codeql[py/path-injection]
         if not root.is_dir():
             return {}
 
@@ -5122,18 +5117,15 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             try:
                 # Candidates come only from the validated root and are
                 # confined with relative_to below.
-                # codeql[py/path-injection]
                 target = candidate.resolve()
                 target.relative_to(root)
             except (OSError, RuntimeError, ValueError):
                 return
-            # codeql[py/path-injection]
             if target.is_file():
                 catalog[relative_path] = target
 
         add_file("index.html", root / "index.html")
         try:
-            # codeql[py/path-injection]
             root_entries = tuple(root.iterdir())
         except OSError:
             return catalog
@@ -5144,7 +5136,6 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         assets_dir = root / "assets"
         try:
             asset_entries = (
-                # codeql[py/path-injection]
                 tuple(assets_dir.iterdir()) if assets_dir.is_dir() else ()
             )
         except OSError:
