@@ -249,6 +249,24 @@ class MarketAdapter:
         self.ensure_capability("paper_trading")
         raise UnsupportedFeatureError(self.market_id, "paper_trading")
 
+        raise UnsupportedFeatureError(self.market_id, "trade_history")
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Return normalized OHLCV history when an adapter documents that feed."""
+
+        raise UnsupportedFeatureError(self.market_id, "candle_history")
+
+    def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
+        self.ensure_capability("paper_trading")
+        raise UnsupportedFeatureError(self.market_id, "paper_trading")
+
     def place_live_order(self, order: PaperOrderRequest) -> Dict[str, Any]:
         self.ensure_capability("live_trading")
         raise UnsupportedFeatureError(
@@ -260,3 +278,4 @@ class MarketAdapter:
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
         self.ensure_capability("copy_trading")
         raise UnsupportedFeatureError(self.market_id, "copy_trading")
+

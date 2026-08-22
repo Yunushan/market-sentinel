@@ -213,6 +213,15 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
 
         with self.assertRaises(MarketConfigurationError):
             adapter.list_activity("not-a-wallet")
+        with patch.dict("os.environ", {"OPINION_API_KEY": "opinion-key"}):
+            with self.assertRaises(MarketConfigurationError):
+                adapter.list_candles("77:YES:0xyes", resolution="30m")
+            with self.assertRaises(MarketConfigurationError):
+                adapter.list_candles(
+                    "77:YES:0xyes",
+                    from_timestamp=1733356800,
+                    to_timestamp=1733184000,
+                )
 
     def test_seer_adapter_maps_official_search_prices_and_paper_orders(self) -> None:
         adapter = SeerAdapter()
@@ -1382,6 +1391,7 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         orderbook = load_fixture("opinion_labs", "orderbook")
         price_history = load_fixture("opinion_labs", "price_history")
         trades = load_fixture("opinion_labs", "trades")
+        price_history = load_fixture("opinion_labs", "price_history")
 
         def fake_get_json(url: str, *, params=None, headers=None):
             self.assertEqual(headers["apikey"], "opinion-key")
@@ -1703,3 +1713,4 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

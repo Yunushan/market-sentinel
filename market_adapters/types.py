@@ -61,41 +61,31 @@ class MarketEvent:
 
 
 @dataclass(frozen=True)
-class MarketContract:
+class MarketTrade:
+    """A normalized public trade from a market's documented trade feed."""
+
     market_id: str
     contract_id: str
-    event_id: str
-    title: str
-    outcome: str = ""
-    url: str = ""
-    status: str = ""
-    raw: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class PriceSnapshot:
-    market_id: str
-    contract_id: str
-    last: Optional[float] = None
-    bid: Optional[float] = None
-    ask: Optional[float] = None
-    midpoint: Optional[float] = None
-    source: str = ""
-    raw: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class OrderBookLevel:
+    trade_id: str
+    side: str
     price: float
     size: float
+    timestamp: Optional[float] = None
+    raw: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
-class OrderBookSnapshot:
+class MarketCandle:
+    """A normalized OHLCV candle from a market's documented history feed."""
+
     market_id: str
     contract_id: str
-    bids: List[OrderBookLevel] = field(default_factory=list)
-    asks: List[OrderBookLevel] = field(default_factory=list)
+    timestamp: float
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: Optional[float] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -147,3 +137,4 @@ class PaperOrderResult:
     filled_size: float = 0.0
     average_price: Optional[float] = None
     raw: Dict[str, Any] = field(default_factory=dict)
+

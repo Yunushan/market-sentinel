@@ -553,6 +553,42 @@ class WebApiTests(unittest.TestCase):
                 "live_trading_max_size": 9,
             }
         )
+        adapter.list_trades = lambda contract_id, **_kwargs: [  # type: ignore[method-assign]
+            MarketTrade("space", contract_id, "trade-1", "BUY", 0.4, 3.0, 1700000000.0)
+        ]
+        adapter.list_candles = lambda contract_id, **_kwargs: [  # type: ignore[method-assign]
+            MarketCandle("space", contract_id, 1700000000.0, 0.35, 0.42, 0.34, 0.4, 100.0)
+        ]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["space"].enabled = True
+        registry = Registry()
+        trades = market_trades_payload(cfg, registry, "space", {"contract_id": ["m:YES"], "limit": ["1"]})
+        candles = market_candles_payload(cfg, registry, "space", {"contract_id": ["m:YES"], "resolution": ["1h"]})
+
+        self.assertEqual(trades["trades"][0]["trade_id"], "trade-1")
+        self.assertEqual(trades["trades"][0]["size"], 3.0)
+        self.assertEqual(candles["candles"][0]["close"], 0.4)
+        self.assertEqual(candles["resolution"], "1h")
+
+    def test_markets_payload_includes_diagnostics_without_secret_values(self) -> None:
+        cfg = AppConfig()
+        cfg.markets["kalshi"].enabled = True
+        cfg.markets["kalshi"].settings.update(
+            {
+                "credential_env_vars": ["KALSHI_API_KEY_ID"],
+                "kalshi_api_key_id": "super-secret-key",
+                "kalshi_private_key_path": "C:/secret/private.pem",
+                "nested": {"api_token": "nested-secret-token", "public": "ok"},
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "live_trading_max_size": 9,
+            }
+        )
 
         payload = markets_payload(cfg)
 
@@ -2947,3 +2983,4 @@ class WebApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

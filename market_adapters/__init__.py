@@ -160,3 +160,4 @@ __all__ = [
     "load_json_fixture",
     "load_market_fixture",
 ]
+

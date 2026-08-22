@@ -708,3 +708,4 @@ In-app checks:
 
 ## License
 MarketSentinel is licensed under the BSD Zero Clause License (`0BSD`). See [LICENSE](LICENSE).
+

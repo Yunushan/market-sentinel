@@ -303,3 +303,4 @@ Some `No` cells may remain permanently correct. A market capability stays blocke
 - Only private mobile/web consumer endpoints are visible.
 - Automation would require scraping authenticated sessions, bypassing controls, or storing unsafe credentials.
 - Copy trading would require account activity data that the platform does not officially expose.
+

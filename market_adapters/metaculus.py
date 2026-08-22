@@ -741,3 +741,4 @@ class MetaculusAdapter(MarketAdapter):
         if question.get("closed") is True:
             return "closed"
         return str(question.get("status") or fallback or "open").lower()
+
