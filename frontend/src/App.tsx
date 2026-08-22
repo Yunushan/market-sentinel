@@ -159,6 +159,12 @@ interface MarketReadForm {
   query: string;
   event_id: string;
   contract_id: string;
+  account_ticker: string;
+  account_order_id: string;
+  account_cursor: string;
+  account_subaccount: string;
+  account_count_filter: string;
+  account_historical: boolean;
   resolution: string;
   from: string;
   to: string;
@@ -356,6 +362,12 @@ function emptyMarketReadForm(): MarketReadForm {
     query: "",
     event_id: "",
     contract_id: "",
+    account_ticker: "",
+    account_order_id: "",
+    account_cursor: "",
+    account_subaccount: "",
+    account_count_filter: "",
+    account_historical: false,
     resolution: "1h",
     from: "",
     to: "",
@@ -746,6 +758,12 @@ export default function App() {
         } else {
           const payload = await fetchMarketAccount(marketId, form.account_operation, {
             contract_id: form.contract_id.trim() || undefined,
+            ticker: form.account_ticker.trim() || undefined,
+            order_id: form.account_order_id.trim() || undefined,
+            cursor: form.account_cursor.trim() || undefined,
+            subaccount: form.account_subaccount.trim() || undefined,
+            count_filter: form.account_count_filter.trim() || undefined,
+            historical: form.account_historical,
             event_ticker: form.event_id.trim() || undefined,
             from: form.from.trim() || undefined,
             to: form.to.trim() || undefined,
@@ -1875,6 +1893,46 @@ function MarketsView({
               />
             </label>
             <label>
+              <span>Account ticker</span>
+              <input
+                value={marketReadForm.account_ticker}
+                onChange={(event) => onMarketReadFormChange({ account_ticker: event.target.value })}
+                placeholder="Kalshi ticker"
+              />
+            </label>
+            <label>
+              <span>Account order id</span>
+              <input
+                value={marketReadForm.account_order_id}
+                onChange={(event) => onMarketReadFormChange({ account_order_id: event.target.value })}
+                placeholder="Optional"
+              />
+            </label>
+            <label>
+              <span>Account cursor</span>
+              <input
+                value={marketReadForm.account_cursor}
+                onChange={(event) => onMarketReadFormChange({ account_cursor: event.target.value })}
+                placeholder="Next page cursor"
+              />
+            </label>
+            <label>
+              <span>Subaccount</span>
+              <input
+                value={marketReadForm.account_subaccount}
+                onChange={(event) => onMarketReadFormChange({ account_subaccount: event.target.value })}
+                placeholder="Kalshi 0–63"
+              />
+            </label>
+            <label>
+              <span>Position count filter</span>
+              <input
+                value={marketReadForm.account_count_filter}
+                onChange={(event) => onMarketReadFormChange({ account_count_filter: event.target.value })}
+                placeholder="position,total_traded"
+              />
+            </label>
+            <label>
               <span>Resolution</span>
               <input
                 value={marketReadForm.resolution}
@@ -1909,6 +1967,16 @@ function MarketsView({
                     <option key={operation} value={operation}>{operation.replaceAll("_", " ")}</option>
                   ))}
                 </select>
+              </label>
+            ) : null}
+            {selectedMarket.health.account_recovery_operations?.length ? (
+              <label className="check-row">
+                <input
+                  type="checkbox"
+                  checked={marketReadForm.account_historical}
+                  onChange={(event) => onMarketReadFormChange({ account_historical: event.target.checked })}
+                />
+                <span>Use historical account endpoint</span>
               </label>
             ) : null}
           </div>

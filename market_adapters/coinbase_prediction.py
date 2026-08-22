@@ -26,6 +26,9 @@ class CoinbasePredictionMarketsAdapter(KalshiAdapter):
     """
 
     metadata = get_market_metadata("coinbase_prediction_markets")
+    # Coinbase documents the Kalshi venue only for public distribution data;
+    # Coinbase account/order endpoints are not exposed through this alias.
+    account_recovery_operations = ()
 
     @property
     def api_base_url(self) -> str:

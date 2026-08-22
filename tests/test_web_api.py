@@ -614,6 +614,49 @@ class WebApiTests(unittest.TestCase):
         with self.assertRaises(UnsupportedFeatureError):
             market_account_payload(cfg, Registry(), "gemini_titan", "arbitrary", {})
 
+    def test_kalshi_account_payload_forwards_signed_read_parameters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="kalshi",
+            display_name="Kalshi",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("fills",)  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "fills": [{"fill_id": "fill-1"}],
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["kalshi"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "kalshi",
+            "fills",
+            {
+                "ticker": ["KXTEST-YES"],
+                "order_id": ["order-1"],
+                "historical": ["true"],
+                "limit": ["12"],
+                "from": ["1700000000"],
+                "to": ["1700000100"],
+                "subaccount": ["2"],
+            },
+        )
+        self.assertEqual(payload["operation"], "fills")
+        self.assertEqual(payload["parameters"]["ticker"], "KXTEST-YES")
+        self.assertEqual(payload["parameters"]["order_id"], "order-1")
+        self.assertTrue(payload["parameters"]["historical"])
+        self.assertEqual(payload["parameters"]["limit"], 12)
+        self.assertEqual(payload["parameters"]["subaccount"], 2)
+        self.assertEqual(payload["data"]["fills"][0]["fill_id"], "fill-1")
+
     def test_markets_payload_includes_diagnostics_without_secret_values(self) -> None:
         cfg = AppConfig()
         cfg.markets["kalshi"].enabled = True

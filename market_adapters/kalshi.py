@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from .base import MarketAdapter
 from .catalog import get_market_metadata
-from .errors import MarketConfigurationError
+from .errors import MarketConfigurationError, MarketHTTPError
 from .types import (
     MarketCandle,
     MarketContract,
@@ -33,6 +33,18 @@ class KalshiAdapter(MarketAdapter):
     """Kalshi adapter using the documented REST API surface."""
 
     metadata = get_market_metadata("kalshi")
+    # Private, signed portfolio reads are kept separate from public history.
+    # The explicit allow-list is also consumed by the shared CLI/API account
+    # route so arbitrary authenticated paths can never be requested.
+    account_recovery_operations = (
+        "active_orders",
+        "order_history",
+        "fills",
+        "positions",
+        "settlements",
+        "balance",
+        "queue_positions",
+    )
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -50,6 +62,7 @@ class KalshiAdapter(MarketAdapter):
                 "api_base_url": self.api_base_url,
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "credential_sources": credential_sources,
+                "account_recovery_operations": list(self.account_recovery_operations),
             }
         )
         return health
@@ -295,6 +308,193 @@ class KalshiAdapter(MarketAdapter):
                 )
             )
         return candles
+
+    def get_account_orders(
+        self,
+        *,
+        status: str = "resting",
+        ticker: str = "",
+        event_ticker: str = "",
+        limit: int = 100,
+        cursor: str = "",
+        min_timestamp: Optional[float] = None,
+        max_timestamp: Optional[float] = None,
+        subaccount: Optional[int] = None,
+        historical: bool = False,
+    ) -> Any:
+        """Read signed active or historical Kalshi orders."""
+
+        params = self._account_common_params(
+            ticker=ticker,
+            event_ticker=event_ticker,
+            limit=limit,
+            cursor=cursor,
+            min_timestamp=min_timestamp,
+            max_timestamp=max_timestamp,
+            subaccount=subaccount,
+        )
+        normalized_status = self._account_status(status)
+        if normalized_status:
+            params["status"] = normalized_status
+        path = "/historical/orders" if historical else "/portfolio/orders"
+        return self._authenticated_get(path, params=params)
+
+    def get_account_fills(
+        self,
+        *,
+        ticker: str = "",
+        order_id: str = "",
+        limit: int = 100,
+        cursor: str = "",
+        min_timestamp: Optional[float] = None,
+        max_timestamp: Optional[float] = None,
+        subaccount: Optional[int] = None,
+        historical: bool = False,
+    ) -> Any:
+        """Read signed member fills, including the optional historical feed."""
+
+        params = self._account_common_params(
+            ticker=ticker,
+            limit=limit,
+            cursor=cursor,
+            min_timestamp=min_timestamp,
+            max_timestamp=max_timestamp,
+            subaccount=subaccount,
+        )
+        normalized_order_id = self._account_text(order_id, "order_id", max_length=128)
+        if normalized_order_id:
+            params["order_id"] = normalized_order_id
+        path = "/historical/fills" if historical else "/portfolio/fills"
+        return self._authenticated_get(path, params=params)
+
+    def get_account_positions(
+        self,
+        *,
+        ticker: str = "",
+        event_ticker: str = "",
+        count_filter: str = "",
+        limit: int = 100,
+        cursor: str = "",
+        subaccount: Optional[int] = None,
+    ) -> Any:
+        """Read signed unsettled market/event positions."""
+
+        params = self._account_common_params(ticker=ticker, limit=limit, cursor=cursor, subaccount=subaccount)
+        normalized_event = self._account_text(event_ticker, "event_ticker", max_length=128)
+        if normalized_event:
+            params["event_ticker"] = normalized_event
+        normalized_filter = self._account_text(count_filter, "count_filter", max_length=64)
+        if normalized_filter:
+            values = {part.strip() for part in normalized_filter.split(",") if part.strip()}
+            if not values or not values.issubset({"position", "total_traded"}):
+                raise MarketConfigurationError("Kalshi count_filter must contain only position,total_traded.")
+            params["count_filter"] = ",".join(value for value in ("position", "total_traded") if value in values)
+        return self._authenticated_get("/portfolio/positions", params=params)
+
+    def get_account_settlements(
+        self,
+        *,
+        ticker: str = "",
+        event_ticker: str = "",
+        limit: int = 100,
+        cursor: str = "",
+        min_timestamp: Optional[float] = None,
+        max_timestamp: Optional[float] = None,
+        subaccount: Optional[int] = None,
+    ) -> Any:
+        """Read signed settled-position history."""
+
+        params = self._account_common_params(
+            ticker=ticker,
+            event_ticker=event_ticker,
+            limit=limit,
+            cursor=cursor,
+            min_timestamp=min_timestamp,
+            max_timestamp=max_timestamp,
+            subaccount=subaccount,
+        )
+        return self._authenticated_get("/portfolio/settlements", params=params)
+
+    def get_account_balance(self, *, subaccount: Optional[int] = None) -> Any:
+        """Read the signed account balance without exposing credentials."""
+
+        params: Dict[str, Any] = {}
+        if subaccount is not None:
+            params["subaccount"] = self._account_subaccount(subaccount)
+        return self._authenticated_get("/portfolio/balance", params=params)
+
+    def get_queue_positions(
+        self,
+        *,
+        ticker: str = "",
+        event_ticker: str = "",
+        subaccount: Optional[int] = None,
+    ) -> Any:
+        """Read queue positions for the account's resting orders."""
+
+        normalized_ticker = self._account_text(ticker, "ticker", max_length=128)
+        normalized_event = self._account_text(event_ticker, "event_ticker", max_length=128)
+        if not normalized_ticker and not normalized_event:
+            raise MarketConfigurationError("Kalshi queue positions require ticker or event_ticker.")
+        params: Dict[str, Any] = {}
+        if normalized_ticker:
+            params["market_tickers"] = normalized_ticker
+        if normalized_event:
+            params["event_ticker"] = normalized_event
+        if subaccount is not None:
+            params["subaccount"] = self._account_subaccount(subaccount)
+        return self._authenticated_get("/portfolio/orders/queue_positions", params=params)
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Any:
+        """Dispatch one validated, documented Kalshi portfolio read."""
+
+        normalized = str(operation or "").strip().lower()
+        common = {
+            "ticker": kwargs.get("ticker", ""),
+            "event_ticker": kwargs.get("event_ticker", ""),
+            "limit": kwargs.get("limit", 100),
+            "cursor": kwargs.get("cursor", ""),
+            "min_timestamp": kwargs.get("min_timestamp"),
+            "max_timestamp": kwargs.get("max_timestamp"),
+            "subaccount": kwargs.get("subaccount"),
+        }
+        if normalized == "active_orders":
+            return self.get_account_orders(status="resting", **common, historical=False)
+        if normalized == "order_history":
+            return self.get_account_orders(
+                status=kwargs.get("status", "executed"),
+                **common,
+                historical=bool(kwargs.get("historical", False)),
+            )
+        if normalized == "fills":
+            fills_common = {key: value for key, value in common.items() if key != "event_ticker"}
+            return self.get_account_fills(
+                **fills_common,
+                order_id=kwargs.get("order_id", ""),
+                historical=bool(kwargs.get("historical", False)),
+            )
+        if normalized == "positions":
+            positions_common = {
+                key: value
+                for key, value in common.items()
+                if key in {"ticker", "event_ticker", "limit", "cursor", "subaccount"}
+            }
+            return self.get_account_positions(
+                count_filter=kwargs.get("count_filter", ""),
+                **positions_common,
+            )
+        if normalized == "settlements":
+            return self.get_account_settlements(**common)
+        if normalized == "balance":
+            return self.get_account_balance(subaccount=kwargs.get("subaccount"))
+        if normalized == "queue_positions":
+            return self.get_queue_positions(
+                ticker=kwargs.get("ticker", ""),
+                event_ticker=kwargs.get("event_ticker", ""),
+                subaccount=kwargs.get("subaccount"),
+            )
+        supported = ", ".join(self.account_recovery_operations)
+        raise MarketConfigurationError(f"Kalshi account recovery operation must be one of: {supported}.")
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -542,6 +742,105 @@ class KalshiAdapter(MarketAdapter):
         if "exchange_index" in order.metadata:
             payload["exchange_index"] = order.metadata["exchange_index"]
         return payload
+
+    @staticmethod
+    def _account_text(value: Any, label: str, *, max_length: int = 128) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if len(text) > max_length or any(not char.isprintable() for char in text):
+            raise MarketConfigurationError(f"Kalshi {label} must be printable and at most {max_length} characters.")
+        return text
+
+    @staticmethod
+    def _account_limit(value: Any) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Kalshi account limit must be an integer between 1 and 1000.") from exc
+        if parsed < 1 or parsed > 1000:
+            raise MarketConfigurationError("Kalshi account limit must be between 1 and 1000.")
+        return parsed
+
+    @classmethod
+    def _account_common_params(
+        cls,
+        *,
+        ticker: str = "",
+        event_ticker: str = "",
+        limit: int = 100,
+        cursor: str = "",
+        min_timestamp: Optional[float] = None,
+        max_timestamp: Optional[float] = None,
+        subaccount: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {"limit": cls._account_limit(limit)}
+        normalized_ticker = cls._account_text(ticker, "ticker")
+        normalized_event = cls._account_text(event_ticker, "event_ticker")
+        normalized_cursor = cls._account_text(cursor, "cursor", max_length=2048)
+        if normalized_ticker:
+            params["ticker"] = normalized_ticker
+        if normalized_event:
+            params["event_ticker"] = normalized_event
+        if normalized_cursor:
+            params["cursor"] = normalized_cursor
+        if min_timestamp is not None:
+            params["min_ts"] = cls._history_timestamp(min_timestamp, "min_timestamp")
+        if max_timestamp is not None:
+            params["max_ts"] = cls._history_timestamp(max_timestamp, "max_timestamp")
+        if "min_ts" in params and "max_ts" in params and params["min_ts"] > params["max_ts"]:
+            raise MarketConfigurationError("Kalshi account max_timestamp must not precede min_timestamp.")
+        if subaccount is not None:
+            params["subaccount"] = cls._account_subaccount(subaccount)
+        return params
+
+    @staticmethod
+    def _account_status(value: Any) -> str:
+        status = str(value or "").strip().lower()
+        if not status:
+            return ""
+        if status not in {"resting", "canceled", "executed"}:
+            raise MarketConfigurationError("Kalshi order status must be resting, canceled, or executed.")
+        return status
+
+    @staticmethod
+    def _account_subaccount(value: Any) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Kalshi subaccount must be an integer between 0 and 63.") from exc
+        if parsed < 0 or parsed > 63:
+            raise MarketConfigurationError("Kalshi subaccount must be between 0 and 63.")
+        return parsed
+
+    def _authenticated_get(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> Any:
+        """Perform one signed GET while retaining query parameters separately.
+
+        Kalshi signs the canonical request path (not an arbitrary caller
+        supplied URL).  Query values are passed through ``requests`` only
+        after the operation and each value have been validated above.
+        """
+
+        headers = self._auth_headers("GET", path)
+        headers.update({"Accept": "application/json", "User-Agent": self.runtime.user_agent})
+        self.runtime.rate_limiter.wait()
+        try:
+            response = self.runtime.session.request(
+                "GET",
+                self._url(path),
+                params=dict(params or {}),
+                headers=headers,
+                timeout=self.runtime.timeout_seconds,
+            )
+        except Exception as exc:
+            raise MarketHTTPError(f"{self.market_id} HTTP request failed: {exc}") from exc
+        status = int(getattr(response, "status_code", 0) or 0)
+        if status >= 400:
+            raise MarketHTTPError(f"{self.market_id} HTTP {status}: {str(getattr(response, 'text', ''))[:200]}")
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
 
     def _auth_headers(self, method: str, path: str) -> Dict[str, str]:
         api_key = self.resolve_credential(

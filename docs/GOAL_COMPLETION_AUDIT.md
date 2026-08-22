@@ -32,13 +32,19 @@ unpromoted and cannot be inferred from local tests or CI configuration.
 | Release metadata, version lineage, and installed artifacts | `pyproject.toml` carries the next unreleased version and modern SPDX/license-file metadata; `MANIFEST.in` defines reproducible source contents; CI/release inspect both archives and install the exact wheel from outside the source tree. | `verify.py` rejects tag reuse, shallow/stale histories, deprecated license metadata, and missing distribution gates; `scripts/verify_python_dist_artifacts.py` checks metadata and required/forbidden archive members, then the installed-wheel smoke checks CLI startup, all 68 registry entries, and the Crypto.com adapter import before upload. |
 | CLI-only operation | `market_sentinel_cli.py` exposes market discovery, contract listing, normalized prices/orderbooks/trades/candles, explicitly allow-listed authenticated account recovery, market safety/configuration, alerts, paper including durable position-mark refresh/clear, wallet, copy, analytics, durable leaderboard scan/status/export, Live Safety report/review/decision/proposal artifacts, and server commands without Tkinter. | `tests/test_cli.py` and the full verifier cover CLI parsing, normalized market-read/account serialization, local paper marks and report artifacts, state handling, exports, recovery, and status. |
 
-### Gemini account-recovery parity
+### Account-recovery parity
 
 Gemini's documented authenticated recovery methods are also available through
 the allow-listed CLI `markets account <operation>` command and the web/API
 route `/api/markets/{market_id}/account/{operation}`. The React Markets view
 advertises these operations only when the adapter health payload publishes
 them; unsupported operations are rejected before any authenticated request.
+
+Kalshi's signed portfolio operations use the same allow-listed CLI, API, and
+React surface: active/history orders, fills, positions, settlements, balance,
+and queue positions are mapped only to documented endpoint paths. Order/fill
+history can opt into the documented historical feeds. The read-only Kalshi
+distribution aliases intentionally publish no private account operations.
 
 ## Polymarket Evidence Tiers
 

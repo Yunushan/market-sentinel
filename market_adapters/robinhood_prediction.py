@@ -26,6 +26,9 @@ class _RobinhoodKalshiDistributionAlias(KalshiAdapter):
 
     provider_name = "Robinhood Derivatives / KalshiEX"
     api_config_key = ""
+    # The alias is intentionally read-only.  Inheriting Kalshi's private
+    # portfolio methods must not make Robinhood account paths appear supported.
+    account_recovery_operations = ()
 
     @property
     def api_base_url(self) -> str:

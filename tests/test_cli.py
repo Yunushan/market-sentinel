@@ -130,6 +130,54 @@ class MarketSentinelCliTests(unittest.TestCase):
         self.assertEqual(payload["parameters"]["event_ticker"], "BTC100K2026")
         self.assertEqual(payload["data"]["positions"][0]["symbol"], "GEMI-BTC100K26-YES")
 
+    def test_kalshi_account_command_forwards_signed_read_parameters(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="kalshi")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("fills",),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+                "fills": [{"fill_id": "fill-1"}],
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "fills",
+                        "--ticker",
+                        "KXTEST-YES",
+                        "--order-id",
+                        "order-1",
+                        "--historical",
+                        "--limit",
+                        "12",
+                        "--from",
+                        "1700000000",
+                        "--to",
+                        "1700000100",
+                        "--subaccount",
+                        "2",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["operation"], "fills")
+        self.assertEqual(payload["parameters"]["ticker"], "KXTEST-YES")
+        self.assertEqual(payload["parameters"]["order_id"], "order-1")
+        self.assertTrue(payload["parameters"]["historical"])
+        self.assertEqual(payload["parameters"]["limit"], 12)
+        self.assertEqual(payload["parameters"]["subaccount"], 2)
+
     def test_polymarket_leaderboard_cli_builds_unlimited_scan_params(self) -> None:
         parser = market_sentinel_cli.build_parser()
         args = parser.parse_args(

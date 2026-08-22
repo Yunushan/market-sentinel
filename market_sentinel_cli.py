@@ -1332,6 +1332,16 @@ GEMINI_ACCOUNT_OPERATIONS = (
     "settled_positions",
     "volume_metrics",
 )
+KALSHI_ACCOUNT_OPERATIONS = (
+    "active_orders",
+    "order_history",
+    "fills",
+    "positions",
+    "settlements",
+    "balance",
+    "queue_positions",
+)
+MARKET_ACCOUNT_OPERATIONS = tuple(dict.fromkeys(GEMINI_ACCOUNT_OPERATIONS + KALSHI_ACCOUNT_OPERATIONS))
 
 
 def run_market_account(args: argparse.Namespace) -> int:
@@ -1340,55 +1350,98 @@ def run_market_account(args: argparse.Namespace) -> int:
     _cfg, market_id, adapter = _market_read_context(args, "account recovery")
     operation = str(args.operation or "").strip().lower()
     kwargs: Dict[str, Any] = {}
-    if operation in {"active_orders", "order_history"}:
-        kwargs.update(
-            {
-                "contract_id": str(args.contract or "").strip() or None,
-                "limit": _cli_clamp_int(args.limit, 50, 1, 1000),
-                "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
-            }
+    if market_id == "kalshi":
+        ticker = str(args.ticker or "").strip()
+        if not ticker and args.contract:
+            ticker = str(args.contract).split(":", 1)[0].strip()
+        subaccount = (
+            _cli_clamp_int(args.subaccount, 0, 0, 63)
+            if args.subaccount not in (None, "")
+            else None
         )
-    if operation == "order_history":
         kwargs.update(
             {
-                "status": str(args.status or "filled").strip().lower(),
-                "from_timestamp": _cli_history_float(args.from_timestamp, "from"),
-                "to_timestamp": _cli_history_float(args.to_timestamp, "to"),
-            }
-        )
-    elif operation == "positions":
-        kwargs.update(
-            {
+                "ticker": ticker,
                 "event_ticker": str(args.event_ticker or "").strip(),
-                "limit": (
-                    _cli_clamp_int(args.limit, 100, 1, 1000)
-                    if args.limit not in (None, "")
-                    else None
-                ),
-                "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
-                "sort": str(args.sort or "").strip() or None,
+                "limit": _cli_clamp_int(args.limit, 100, 1, 1000),
+                "cursor": str(args.cursor or "").strip(),
+                "min_timestamp": _cli_history_float(args.from_timestamp, "from"),
+                "max_timestamp": _cli_history_float(args.to_timestamp, "to"),
+                "subaccount": subaccount,
             }
         )
-    elif operation == "settled_positions":
-        kwargs.update(
-            {
+        if operation == "order_history":
+            kwargs.update(
+                {
+                    "status": str(args.status or "executed").strip().lower(),
+                    "historical": bool(args.historical),
+                }
+            )
+        elif operation == "fills":
+            kwargs.update(
+                {
+                    "order_id": str(args.order_id or "").strip(),
+                    "historical": bool(args.historical),
+                }
+            )
+        elif operation == "positions":
+            kwargs["count_filter"] = str(args.count_filter or "").strip()
+        elif operation == "queue_positions":
+            kwargs = {
+                "ticker": ticker,
                 "event_ticker": str(args.event_ticker or "").strip(),
-                "limit": _cli_clamp_int(args.limit, 1000, 1, 1000),
-                "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
-                "sort": str(args.sort or "-date").strip(),
-                "search": str(args.search or "").strip(),
-                "category": str(args.category or "").strip(),
-                "with_cash_outs": bool(args.with_cash_outs),
+                "subaccount": subaccount,
             }
-        )
-    elif operation == "volume_metrics":
-        kwargs.update(
-            {
-                "event_ticker": str(args.event_ticker or "").strip(),
-                "start_timestamp": _cli_history_float(args.from_timestamp, "from"),
-                "end_timestamp": _cli_history_float(args.to_timestamp, "to"),
-            }
-        )
+    else:
+        if operation in {"active_orders", "order_history"}:
+            kwargs.update(
+                {
+                    "contract_id": str(args.contract or "").strip() or None,
+                    "limit": _cli_clamp_int(args.limit, 50, 1, 1000),
+                    "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
+                }
+            )
+        if operation == "order_history":
+            kwargs.update(
+                {
+                    "status": str(args.status or "filled").strip().lower(),
+                    "from_timestamp": _cli_history_float(args.from_timestamp, "from"),
+                    "to_timestamp": _cli_history_float(args.to_timestamp, "to"),
+                }
+            )
+        elif operation == "positions":
+            kwargs.update(
+                {
+                    "event_ticker": str(args.event_ticker or "").strip(),
+                    "limit": (
+                        _cli_clamp_int(args.limit, 100, 1, 1000)
+                        if args.limit not in (None, "")
+                        else None
+                    ),
+                    "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
+                    "sort": str(args.sort or "").strip() or None,
+                }
+            )
+        elif operation == "settled_positions":
+            kwargs.update(
+                {
+                    "event_ticker": str(args.event_ticker or "").strip(),
+                    "limit": _cli_clamp_int(args.limit, 1000, 1, 1000),
+                    "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
+                    "sort": str(args.sort or "-date").strip(),
+                    "search": str(args.search or "").strip(),
+                    "category": str(args.category or "").strip(),
+                    "with_cash_outs": bool(args.with_cash_outs),
+                }
+            )
+        elif operation == "volume_metrics":
+            kwargs.update(
+                {
+                    "event_ticker": str(args.event_ticker or "").strip(),
+                    "start_timestamp": _cli_history_float(args.from_timestamp, "from"),
+                    "end_timestamp": _cli_history_float(args.to_timestamp, "to"),
+                }
+            )
     data = adapter.account_recovery(operation, **kwargs)
     return _write_command_payload(
         args,
@@ -2352,15 +2405,21 @@ def build_parser() -> argparse.ArgumentParser:
     market_account = markets_sub.add_parser(
         "account",
         parents=[common],
-        help="Read an explicitly documented authenticated account feed (Gemini currently).",
+        help="Read an explicitly documented authenticated account feed (Gemini or Kalshi).",
     )
-    market_account.add_argument("operation", choices=GEMINI_ACCOUNT_OPERATIONS)
+    market_account.add_argument("operation", choices=MARKET_ACCOUNT_OPERATIONS)
     market_account.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
     market_account.add_argument("--contract", default=None, help="Optional canonical contract id for order feeds.")
+    market_account.add_argument("--ticker", default=None, help="Kalshi market ticker for account reads.")
+    market_account.add_argument("--order-id", default=None, help="Optional Kalshi order id for fill reads.")
     market_account.add_argument("--event-ticker", default=None, help="Optional event ticker for position/volume feeds.")
-    market_account.add_argument("--status", choices=["filled", "cancelled"], default="filled")
+    market_account.add_argument("--status", default="", help="Documented account order status (venue-specific).")
     market_account.add_argument("--limit", default=None, help="Optional page size (operation-specific).")
     market_account.add_argument("--offset", default="0", help="Optional page offset.")
+    market_account.add_argument("--cursor", default="", help="Cursor returned by a previous account read.")
+    market_account.add_argument("--subaccount", default=None, help="Optional Kalshi subaccount number (0-63).")
+    market_account.add_argument("--count-filter", default="", help="Kalshi positions filter: position,total_traded.")
+    market_account.add_argument("--historical", action="store_true", help="Use the venue's documented historical endpoint.")
     market_account.add_argument("--sort", default=None, help="Documented position sort value.")
     market_account.add_argument("--search", default="", help="Settled-position search text.")
     market_account.add_argument("--category", default="", help="Settled-position category.")

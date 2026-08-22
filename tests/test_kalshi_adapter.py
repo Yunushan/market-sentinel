@@ -142,6 +142,92 @@ class KalshiAdapterTests(unittest.TestCase):
         self.assertEqual((no[0].open, no[0].high, no[0].low, no[0].close), (0.6, 0.61, 0.55, 0.58))
         self.assertEqual(yes[0].volume, 125.0)
 
+    def test_authenticated_account_reads_use_allow_listed_signed_endpoints(self) -> None:
+        adapter = KalshiAdapter()
+        fixtures = {
+            "/portfolio/orders": load_fixture("account_orders"),
+            "/historical/orders": load_fixture("account_orders"),
+            "/portfolio/fills": load_fixture("account_fills"),
+            "/historical/fills": load_fixture("account_fills"),
+            "/portfolio/positions": load_fixture("account_positions"),
+            "/portfolio/settlements": load_fixture("account_settlements"),
+            "/portfolio/balance": load_fixture("account_balance"),
+            "/portfolio/orders/queue_positions": load_fixture("account_queue_positions"),
+        }
+        calls = []
+
+        class Response:
+            status_code = 200
+            text = ""
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            def json(self):
+                return self.payload
+
+        adapter._auth_headers = lambda method, path: {  # type: ignore[method-assign]
+            "KALSHI-ACCESS-KEY": "test-key",
+            "KALSHI-ACCESS-SIGNATURE": "test-signature",
+            "KALSHI-ACCESS-TIMESTAMP": "123",
+        }
+
+        def fake_request(method, url, *, params=None, headers=None, timeout=None):
+            path = url.split("/trade-api/v2", 1)[-1]
+            calls.append((method, path, dict(params or {}), dict(headers or {})))
+            return Response(fixtures[path])
+
+        adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
+
+        active = adapter.account_recovery(
+            "active_orders",
+            ticker="KXFED-26MAY-TARGET-425",
+            limit=10,
+            cursor="next",
+            subaccount=0,
+        )
+        fills = adapter.account_recovery(
+            "fills",
+            ticker="KXFED-26MAY-TARGET-425",
+            order_id="order-kalshi-1",
+            historical=True,
+            min_timestamp=1777630000,
+            max_timestamp=1777640000,
+        )
+        positions = adapter.account_recovery(
+            "positions",
+            event_ticker="KXFED-26MAY",
+            count_filter="position,total_traded",
+        )
+        settlements = adapter.account_recovery("settlements", event_ticker="KXFED-26MAY")
+        balance = adapter.account_recovery("balance", subaccount=0)
+        queue = adapter.account_recovery("queue_positions", ticker="KXFED-26MAY-TARGET-425")
+
+        self.assertEqual(active["orders"][0]["order_id"], "order-kalshi-1")
+        self.assertEqual(fills["fills"][0]["fill_id"], "fill-kalshi-1")
+        self.assertEqual(positions["market_positions"][0]["position_fp"], "2.00")
+        self.assertEqual(settlements["settlements"][0]["market_result"], "yes")
+        self.assertEqual(balance["balance"], 123.45)
+        self.assertEqual(queue["queue_positions"][0]["queue_position_fp"], "4.00")
+        self.assertEqual(calls[0][1], "/portfolio/orders")
+        self.assertEqual(calls[0][2]["status"], "resting")
+        self.assertEqual(calls[1][1], "/historical/fills")
+        self.assertEqual(calls[1][2]["order_id"], "order-kalshi-1")
+        self.assertEqual(calls[2][2]["count_filter"], "position,total_traded")
+        self.assertTrue(all(call[3]["KALSHI-ACCESS-SIGNATURE"] == "test-signature" for call in calls))
+
+    def test_account_reads_fail_closed_on_invalid_parameters_or_operations(self) -> None:
+        adapter = KalshiAdapter()
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("order_history", status="deleted")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("positions", count_filter="position,unexpected")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("queue_positions")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("arbitrary")
+
     def test_history_validation_rejects_invalid_ranges(self) -> None:
         adapter = self.make_adapter()
 
