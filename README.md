@@ -257,7 +257,7 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 
 ### 11) Additional official adapter support
 - Reads Gemini Prediction Markets events/contracts and orderbooks through official endpoints
-- Reads Myriad, Opinion, Predict.fun, XO, and Betfair market data through their documented APIs
+- Reads Myriad, Opinion, Predict.fun, XO, Betfair, and Limitless market data through their documented APIs; Limitless historical YES prices are normalized as flat candles with complementary NO prices
 - Opinion also has an optional official CLOB SDK path for guarded BNB-chain limit/market orders; all live trading stays off by default and requires explicit opt-in plus documented credentials or pre-signed order payloads
 
 ## Install & Run

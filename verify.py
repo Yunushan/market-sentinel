@@ -539,6 +539,7 @@ def run_fixture_check() -> None:
         fixture_root / "limitless_exchange" / "active.json",
         fixture_root / "limitless_exchange" / "market.json",
         fixture_root / "limitless_exchange" / "orderbook.json",
+        fixture_root / "limitless_exchange" / "historical_price.json",
         fixture_root / "sx_bet" / "active_markets.json",
         fixture_root / "sx_bet" / "market_find.json",
         fixture_root / "sx_bet" / "orders.json",

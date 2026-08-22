@@ -31,6 +31,7 @@ class LimitlessAdapterTests(unittest.TestCase):
         active = load_fixture("active")
         market = load_fixture("market")
         orderbook = load_fixture("orderbook")
+        historical_price = load_fixture("historical_price")
 
         def fake_get_json(url: str, *, params=None, headers=None):
             if url.endswith("/markets/active"):
@@ -39,6 +40,8 @@ class LimitlessAdapterTests(unittest.TestCase):
                 return market
             if url.endswith("/markets/doge-above-021652-sep-1-1200-utc/orderbook"):
                 return orderbook
+            if url.endswith("/markets/doge-above-021652-sep-1-1200-utc/historical-price"):
+                return historical_price
             raise AssertionError(f"unexpected Limitless URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
@@ -97,6 +100,32 @@ class LimitlessAdapterTests(unittest.TestCase):
         self.assertEqual(price.bid, 0.42)
         self.assertEqual(price.ask, 0.44)
         self.assertAlmostEqual(price.midpoint or 0, 0.43)
+
+
+    def test_historical_price_maps_yes_and_no_candles_and_applies_bounds(self) -> None:
+        adapter = self.make_adapter()
+
+        yes = adapter.list_candles(
+            "doge-above-021652-sep-1-1200-utc:YES",
+            resolution="1h",
+            from_timestamp=1736943000,
+            to_timestamp=1736944300,
+        )
+        no = adapter.list_candles("doge-above-021652-sep-1-1200-utc:NO", resolution="all")
+
+        self.assertEqual([round(c.close, 2) for c in yes], [0.75, 0.72])
+        self.assertEqual([c.timestamp for c in yes], [1736944200.0, 1736943300.0])
+        self.assertEqual([round(c.close, 2) for c in no], [0.25, 0.28, 0.3])
+        self.assertIsNone(yes[0].volume)
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles("doge-above-021652-sep-1-1200-utc:YES", resolution="15m")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_candles(
+                "doge-above-021652-sep-1-1200-utc:YES",
+                from_timestamp=1736944300,
+                to_timestamp=1736943000,
+            )
 
     def test_paper_order_builds_delegated_order_shape_without_live_post(self) -> None:
         adapter = self.make_adapter()

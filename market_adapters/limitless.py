@@ -13,6 +13,7 @@ from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
 from .types import (
+    MarketCandle,
     MarketContract,
     MarketEvent,
     OrderBookLevel,
@@ -26,6 +27,7 @@ from .types import (
 DEFAULT_LIMITLESS_BASE_URL = "https://api.limitless.exchange"
 DEFAULT_LIMITLESS_WS_URL = "wss://ws.limitless.exchange"
 LIMITLESS_WS_NAMESPACE = "/markets"
+LIMITLESS_HISTORY_INTERVALS = ("5m", "1h", "6h", "1d", "1w", "1m", "all")
 LIMITLESS_REFERENCES = (
     "https://docs.limitless.exchange/api-reference/markets/browse-active",
     "https://docs.limitless.exchange/developers/sdk/python/markets",
@@ -142,6 +144,86 @@ class LimitlessAdapter(MarketAdapter):
             source="limitless_orderbook",
             raw=orderbook.raw,
         )
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1d",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Return Limitless's documented historical YES-price series.
+
+        Limitless returns one price point per timestamp (newest first), not
+        OHLCV bars. The shared candle model therefore repeats each point
+        across OHLC and leaves volume unset. The endpoint only exposes YES
+        prices; NO candles are derived as the complementary probability.
+        resolution is the documented lookback preset, while optional bounds
+        are applied locally because the API does not accept custom
+        start/end parameters.
+        """
+
+        self.ensure_capability("price_reading")
+        slug, outcome = self._split_contract_id(contract_id)
+        interval = str(resolution or "").strip().lower()
+        if interval not in LIMITLESS_HISTORY_INTERVALS:
+            allowed = ", ".join(LIMITLESS_HISTORY_INTERVALS)
+            raise MarketConfigurationError(f"Limitless historical-price interval must be one of: {allowed}.")
+
+        start = self._history_timestamp_seconds(from_timestamp, "from_timestamp") if from_timestamp is not None else None
+        end = self._history_timestamp_seconds(to_timestamp, "to_timestamp") if to_timestamp is not None else None
+        if start is not None and end is not None and end <= start:
+            raise MarketConfigurationError("Limitless historical price requires to_timestamp greater than from_timestamp.")
+
+        payload = self.runtime.get_json(
+            self._url(f"/markets/{slug}/historical-price"),
+            params={"interval": interval},
+        )
+        series: Optional[Mapping[str, Any]] = payload if isinstance(payload, Mapping) else None
+        if series is None and isinstance(payload, list):
+            matching = [
+                item
+                for item in payload
+                if isinstance(item, Mapping)
+                and str(item.get("slug") or item.get("marketSlug") or "").strip() == slug
+            ]
+            if len(matching) == 1:
+                series = matching[0]
+            elif len(payload) == 1 and isinstance(payload[0], Mapping):
+                series = payload[0]
+        if series is None:
+            return []
+
+        prices = series.get("prices")
+        if not isinstance(prices, list):
+            return []
+        canonical = self._contract_id(slug, outcome)
+        candles: List[MarketCandle] = []
+        for row in prices:
+            if not isinstance(row, Mapping):
+                continue
+            timestamp = self._history_timestamp_seconds(row.get("timestamp"), "timestamp")
+            if timestamp is None or (start is not None and timestamp < start) or (end is not None and timestamp > end):
+                continue
+            price = self._safe_probability(row.get("price"))
+            if price is None:
+                continue
+            if outcome == "NO":
+                price = round(1.0 - price, 10)
+            candles.append(
+                MarketCandle(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    timestamp=timestamp,
+                    open=price,
+                    high=price,
+                    low=price,
+                    close=price,
+                    raw=dict(row),
+                )
+            )
+        return candles
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -572,6 +654,20 @@ class LimitlessAdapter(MarketAdapter):
         if number < 0.0 or number > 1.0:
             return None
         return number
+
+    @staticmethod
+    def _history_timestamp_seconds(value: Any, label: str) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Limitless {label} must be a finite Unix timestamp.") from exc
+        if not math.isfinite(timestamp) or timestamp < 0:
+            raise MarketConfigurationError(f"Limitless {label} must be a finite Unix timestamp.")
+        if timestamp >= 100_000_000_000:
+            timestamp /= 1000.0
+        return timestamp
 
     @staticmethod
     def _limit_probability(value: Any) -> float:
