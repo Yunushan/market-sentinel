@@ -1342,6 +1342,7 @@ KALSHI_ACCOUNT_OPERATIONS = (
     "queue_positions",
 )
 LIMITLESS_ACCOUNT_OPERATIONS = ("positions", "account_history", "user_orders")
+XMARKET_ACCOUNT_OPERATIONS = ("positions", "user_orders", "market_orders")
 OPINION_ACCOUNT_OPERATIONS = ("order_history", "order_detail", "positions")
 OPINION_ORDER_MANAGEMENT_OPERATIONS = (
     "cancel_order",
@@ -1377,6 +1378,7 @@ MARKET_ACCOUNT_OPERATIONS = tuple(
         GEMINI_ACCOUNT_OPERATIONS
         + KALSHI_ACCOUNT_OPERATIONS
         + LIMITLESS_ACCOUNT_OPERATIONS
+        + XMARKET_ACCOUNT_OPERATIONS
         + OPINION_ACCOUNT_OPERATIONS
         + BETFAIR_ACCOUNT_OPERATIONS
         + MATCHBOOK_ACCOUNT_OPERATIONS
@@ -1398,6 +1400,17 @@ def run_market_account(args: argparse.Namespace) -> int:
         }
         if operation == "user_orders":
             kwargs["market_slug"] = str(getattr(args, "market_slug", "") or "").strip()
+    elif market_id == "xmarket":
+        market_id_filter = str(getattr(args, "account_market_id", "") or "").strip()
+        if not market_id_filter and args.contract:
+            market_id_filter = str(args.contract).split(":", 1)[0].strip()
+        kwargs = {
+            "status": str(getattr(args, "status", "") or "").strip().lower() or None,
+            "page": _cli_clamp_int(getattr(args, "page", "1"), 1, 1, 10000),
+            "limit": _cli_clamp_int(getattr(args, "limit", None), 50, 1, 1000),
+        }
+        if operation == "market_orders":
+            kwargs["market_id"] = market_id_filter
     elif market_id == "kalshi":
         ticker = str(args.ticker or "").strip()
         if not ticker and args.contract:

@@ -1507,6 +1507,9 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         markets = load_fixture("xmarket", "markets")
         market = load_fixture("xmarket", "market")
         orderbook = load_fixture("xmarket", "orderbook")
+        positions = load_fixture("xmarket", "positions")
+        user_orders = load_fixture("xmarket", "user_orders")
+        market_orders = load_fixture("xmarket", "market_orders")
 
         def fake_get_json(url: str, *, params=None, headers=None):
             self.assertEqual(headers["x-api-key"], "xmarket-key")
@@ -1516,6 +1519,15 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 return market
             if url.endswith("/orderbook/outcome-yes"):
                 return orderbook
+            if url.endswith("/positions"):
+                self.assertIn(params, ({"status": "open", "page": 1, "pageSize": 50}, {"status": "closed", "page": 2, "pageSize": 25}))
+                return positions
+            if url.endswith("/openapi/v1/order/my-orders"):
+                self.assertEqual(params, {"status": "all", "page": 1, "pageSize": 50})
+                return user_orders
+            if url.endswith("/openapi/v1/order/market/market-1"):
+                self.assertEqual(params, {"status": "open", "page": 2, "pageSize": 25})
+                return market_orders
             raise AssertionError(f"unexpected Xmarket URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
@@ -1527,6 +1539,15 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             book = adapter.get_orderbook("market-1:outcome-yes")
             price = adapter.get_price("market-1:outcome-yes")
             paper = adapter.place_paper_order(order)
+            position_rows = adapter.account_recovery("positions")
+            order_rows = adapter.account_recovery("user_orders")
+            market_order_rows = adapter.account_recovery(
+                "market_orders",
+                market_id="market-1",
+                status="open",
+                page=2,
+                limit=25,
+            )
             with self.assertRaises(MarketConfigurationError):
                 adapter.place_live_order(order)
 
@@ -1536,6 +1557,14 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual([level.price for level in book.asks], [0.45, 0.47])
         self.assertAlmostEqual(price.midpoint or 0.0, 0.44)
         self.assertTrue(paper.accepted)
+        self.assertEqual(position_rows["items"][0]["id"], "position-1")
+        self.assertEqual(order_rows["items"][0]["id"], "xorder-1")
+        self.assertEqual(market_order_rows["items"][0]["marketId"], "market-1")
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("market_orders", market_id="../private")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.account_recovery("positions", status="unknown")
 
         live_adapter = XMarketAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})
         calls = []

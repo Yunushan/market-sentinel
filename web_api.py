@@ -3562,6 +3562,18 @@ def market_account_payload(
             if not raw_market_slug:
                 raw_market_slug = _query_value(query_params, "contract_id").split(":", 1)[0]
             kwargs["market_slug"] = raw_market_slug
+    elif normalized_market_id == "xmarket":
+        raw_contract = _query_value(query_params, "contract_id")
+        market_id_filter = _query_value(query_params, "market_id")
+        if not market_id_filter and raw_contract:
+            market_id_filter = raw_contract.split(":", 1)[0].strip()
+        kwargs = {
+            "status": _query_value(query_params, "status") or None,
+            "page": _clamp_int(_query_value(query_params, "page", "1"), 1, 1, 10000),
+            "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 1000),
+        }
+        if normalized_operation == "market_orders":
+            kwargs["market_id"] = market_id_filter
     elif normalized_market_id == "kalshi":
         raw_contract = _query_value(query_params, "contract_id")
         ticker = _query_value(query_params, "ticker") or raw_contract.split(":", 1)[0]
@@ -3733,7 +3745,7 @@ def market_account_payload(
                 "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
             }
         )
-    if normalized_market_id not in {"kalshi", "limitless_exchange", "opinion_labs"} and normalized_operation == "order_history":
+    if normalized_market_id not in {"kalshi", "limitless_exchange", "opinion_labs", "xmarket"} and normalized_operation == "order_history":
         kwargs.update(
             {
                 "status": _query_value(query_params, "status", "filled").lower(),
@@ -3741,7 +3753,7 @@ def market_account_payload(
                 "to_timestamp": _query_float(query_params, "to"),
             }
         )
-    elif normalized_market_id not in {"kalshi", "limitless_exchange", "opinion_labs"} and normalized_operation == "positions":
+    elif normalized_market_id not in {"kalshi", "limitless_exchange", "opinion_labs", "xmarket"} and normalized_operation == "positions":
         raw_limit = _query_value(query_params, "limit")
         kwargs.update(
             {

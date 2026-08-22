@@ -1392,6 +1392,46 @@ class WebApiTests(unittest.TestCase):
         )
         self.assertEqual(payload["data"]["orders"][0]["order_id"], "order-1")
 
+    def test_xmarket_account_payload_forwards_bounded_market_order_parameters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="xmarket",
+            display_name="Xmarket",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("positions", "user_orders", "market_orders")  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "items": [{"id": "xorder-1"}],
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["xmarket"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "xmarket",
+            "market_orders",
+            {
+                "market_id": ["market-1"],
+                "status": ["open"],
+                "page": ["2"],
+                "limit": ["25"],
+                "unexpected": ["ignored"],
+            },
+        )
+        self.assertEqual(payload["operation"], "market_orders")
+        self.assertEqual(
+            payload["parameters"],
+            {"status": "open", "page": 2, "limit": 25, "market_id": "market-1"},
+        )
+        self.assertEqual(payload["data"]["items"][0]["id"], "xorder-1")
+
     def test_markets_payload_includes_diagnostics_without_secret_values(self) -> None:
         cfg = AppConfig()
         cfg.markets["kalshi"].enabled = True

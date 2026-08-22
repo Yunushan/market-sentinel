@@ -1058,6 +1058,51 @@ class MarketSentinelCliTests(unittest.TestCase):
         )
         self.assertEqual(payload["data"]["orders"][0]["order_id"], "order-1")
 
+    def test_xmarket_account_command_forwards_bounded_market_order_parameters(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="xmarket")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("positions", "user_orders", "market_orders"),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+                "items": [{"id": "xorder-1"}],
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "market_orders",
+                        "--market",
+                        "xmarket",
+                        "--account-market-id",
+                        "market-1",
+                        "--status",
+                        "open",
+                        "--page",
+                        "2",
+                        "--limit",
+                        "25",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["operation"], "market_orders")
+        self.assertEqual(
+            payload["parameters"],
+            {"status": "open", "page": 2, "limit": 25, "market_id": "market-1"},
+        )
+        self.assertEqual(payload["data"]["items"][0]["id"], "xorder-1")
+
     def test_polymarket_leaderboard_cli_builds_unlimited_scan_params(self) -> None:
         parser = market_sentinel_cli.build_parser()
         args = parser.parse_args(

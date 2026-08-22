@@ -2483,7 +2483,7 @@ function MarketsView({
               <input
                 value={marketReadForm.account_market_id}
                 onChange={(event) => onMarketReadFormChange({ account_market_id: event.target.value })}
-                placeholder="Opinion numeric / Betfair market id"
+                placeholder="Opinion / Betfair / Xmarket market id"
               />
             </label>
             <label>

@@ -46,6 +46,7 @@ export interface Market {
     verified_blocker?: boolean;
     credential_requirement?: string;
     account_recovery_operations?: string[];
+    authenticated_account_endpoints?: string[];
     order_management_operations?: string[];
     order_management_enabled?: boolean;
     order_management_endpoints?: string[];
@@ -183,6 +184,7 @@ export type MarketAccountOperation =
   | "volume_metrics"
   | "account_history"
   | "user_orders"
+  | "market_orders"
   | "cleared_orders"
   | "settled_bets"
   | "current_bets"

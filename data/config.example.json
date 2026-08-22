@@ -715,7 +715,7 @@
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.6,
-        "notes": "Market discovery, outcome listing, orderbooks, prices, local paper orders, and guarded API-key order submission are implemented through the official Xmarket API. Live trading stays disabled by default."
+        "notes": "Market discovery, outcome listing, orderbooks, prices, local paper orders, guarded API-key order submission, and authenticated positions/order reads are implemented through the official Xmarket API. Live trading stays disabled by default."
       }
     },
     "trueo": {
