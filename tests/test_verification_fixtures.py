@@ -129,6 +129,7 @@ class VerificationFixtureTests(unittest.TestCase):
         market_find = json.loads((FIXTURE_ROOT / "sx_bet" / "market_find.json").read_text(encoding="utf-8"))
         orders = json.loads((FIXTURE_ROOT / "sx_bet" / "orders.json").read_text(encoding="utf-8"))
         best_odds = json.loads((FIXTURE_ROOT / "sx_bet" / "best_odds.json").read_text(encoding="utf-8"))
+        public_trades = json.loads((FIXTURE_ROOT / "sx_bet" / "public_trades.json").read_text(encoding="utf-8"))
 
         self.assertIsInstance(active.get("data", {}).get("markets"), list)
         self.assertIn("marketHash", active["data"]["markets"][0])
@@ -136,6 +137,8 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIsInstance(orders.get("data"), list)
         self.assertIn("percentageOdds", orders["data"][0])
         self.assertIsInstance(best_odds.get("data", {}).get("bestOdds"), list)
+        self.assertIsInstance(public_trades.get("data", {}).get("trades"), list)
+        self.assertIn("weightedAverageOdds", public_trades["data"]["trades"][0])
 
     def test_azuro_fixtures_cover_core_payload_shapes(self) -> None:
         games = json.loads((FIXTURE_ROOT / "azuro" / "games_by_filters.json").read_text(encoding="utf-8"))

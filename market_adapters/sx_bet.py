@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import secrets
 import time
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -12,6 +13,7 @@ from .errors import MarketConfigurationError, UnsupportedFeatureError
 from .types import (
     MarketContract,
     MarketEvent,
+    MarketTrade,
     OrderBookLevel,
     OrderBookSnapshot,
     PaperOrderRequest,
@@ -33,6 +35,7 @@ SX_BET_REFERENCES = (
     "https://docs.sx.bet/api-reference/get-markets-find",
     "https://docs.sx.bet/api-reference/get-orders",
     "https://docs.sx.bet/api-reference/get-best-odds",
+    "https://docs.sx.bet/api-reference/get-trades-v3-public",
     "https://docs.sx.bet/api-reference/post-new-order",
     "https://docs.sx.bet/api-reference/api-key",
     "https://docs.sx.bet/api-reference/centrifugo-order-book-updates",
@@ -125,6 +128,83 @@ class SxBetAdapter(MarketAdapter):
             source="sx_bet_orderbook",
             raw=orderbook.raw,
         )
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Return recent public SX Bet trades for one market outcome.
+
+        SX Bet's public tape supports market/outcome selection and cursor
+        pagination, but does not expose timestamp query parameters.  The
+        shared history bounds are therefore validated and applied locally to
+        the returned page.
+        """
+
+        self.ensure_capability("trade_history")
+        market_hash, outcome = self._split_contract_id(contract_id)
+        try:
+            desired = int(limit)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("SX Bet trade history limit must be an integer between 1 and 100.") from exc
+        if desired < 1 or desired > 100:
+            raise MarketConfigurationError("SX Bet trade history limit must be between 1 and 100.")
+
+        before_ts = self._history_timestamp(before, "before") if before is not None else None
+        after_ts = self._history_timestamp(after, "after") if after is not None else None
+        if before_ts is not None and after_ts is not None and before_ts < after_ts:
+            raise MarketConfigurationError("SX Bet trade history requires before to be at or after after.")
+
+        payload = self.runtime.get_json(
+            self._url("/trades-v3/public"),
+            params={"marketHash": market_hash, "perPage": desired},
+        )
+        data = payload.get("data") if isinstance(payload, Mapping) else None
+        rows = data.get("trades") if isinstance(data, Mapping) else []
+        if not isinstance(rows, list):
+            return []
+
+        canonical = self._contract_id(market_hash, outcome)
+        desired_is_one = outcome == "ONE"
+        trades: List[MarketTrade] = []
+        for raw in rows:
+            if not isinstance(raw, Mapping):
+                continue
+            if str(raw.get("marketHash") or "").strip().lower() != market_hash.lower():
+                continue
+            is_outcome_one = self._boolean(raw.get("isBettingOutcomeOne"))
+            if is_outcome_one is None or is_outcome_one != desired_is_one:
+                continue
+            trade_id = str(raw.get("tradeId") or raw.get("id") or "").strip()
+            price = self._scaled_probability(raw.get("weightedAverageOdds"))
+            stake = self._safe_float(raw.get("totalStake"))
+            if not trade_id or price is None or stake is None or stake <= 0:
+                continue
+            timestamp = self._timestamp_seconds(raw.get("betTime") or raw.get("createdAt"))
+            if timestamp is not None:
+                if after_ts is not None and timestamp < after_ts:
+                    continue
+                if before_ts is not None and timestamp > before_ts:
+                    continue
+            trades.append(
+                MarketTrade(
+                    market_id=self.market_id,
+                    contract_id=canonical,
+                    trade_id=trade_id,
+                    side="BUY",
+                    price=price,
+                    size=self._from_base_units(stake),
+                    timestamp=timestamp,
+                    raw=dict(raw),
+                )
+            )
+            if len(trades) >= desired:
+                break
+        return trades
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -501,6 +581,51 @@ class SxBetAdapter(MarketAdapter):
 
     def _from_base_units(self, value: float) -> float:
         return float(value) / float(10**self.base_token_decimals)
+
+    @staticmethod
+    def _history_timestamp(value: Any, label: str) -> float:
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"SX Bet {label} timestamp must be numeric epoch seconds.") from exc
+        if not math.isfinite(timestamp) or timestamp < 0:
+            raise MarketConfigurationError(f"SX Bet {label} timestamp must be a finite nonnegative epoch second.")
+        return timestamp
+
+    @staticmethod
+    def _timestamp_seconds(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        if isinstance(value, (int, float)):
+            number = float(value)
+            return number if math.isfinite(number) and number >= 0 else None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                number = float(text)
+            except ValueError:
+                return None
+            return number if math.isfinite(number) and number >= 0 else None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+
+    @staticmethod
+    def _boolean(value: Any) -> Optional[bool]:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and value in (0, 1):
+            return bool(value)
+        text = str(value or "").strip().lower()
+        if text in {"true", "1", "yes"}:
+            return True
+        if text in {"false", "0", "no"}:
+            return False
+        return None
 
     def _to_base_units(self, value: Any) -> int:
         amount = Decimal(str(value))

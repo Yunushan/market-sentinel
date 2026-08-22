@@ -184,6 +184,7 @@ SX_BET_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
