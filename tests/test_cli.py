@@ -1832,6 +1832,20 @@ class MarketSentinelCliTests(unittest.TestCase):
         for command in ("doctor", "config", "markets", "alerts", "wallets", "copy", "paper", "dependencies", "serve"):
             self.assertIn(command, help_text)
 
+    def test_serve_forwards_frontend_directory_as_keyword(self) -> None:
+        config_path = Path("custom-config.json")
+        frontend_dir = Path("custom-frontend")
+        args = SimpleNamespace(host="127.0.0.1", port=8766, config=config_path, frontend_dir=frontend_dir)
+        with patch("market_sentinel_cli.run_server") as run_server:
+            self.assertEqual(market_sentinel_cli.run_serve(args), 0)
+
+        run_server.assert_called_once_with(
+            "127.0.0.1",
+            8766,
+            config_path,
+            frontend_dir=frontend_dir,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

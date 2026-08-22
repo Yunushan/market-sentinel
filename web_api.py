@@ -4166,15 +4166,21 @@ class ReactGuiServer(ThreadingHTTPServer):
         token = str(api_token or "").strip()
         if not is_loopback and not token:
             raise ValueError("A non-loopback React GUI bind requires a non-empty API token.")
+        trusted_frontend_dir = _resolve_trusted_frontend_dir(frontend_dir)
+        if trusted_frontend_dir is None:
+            raise ValueError(
+                "The frontend directory must resolve beneath the deployment resource root. "
+                f"Allowed root: {_RESOURCE_ROOT}"
+            )
         super().__init__(server_address, request_handler_class)
         self.bind_host = bind_host
         self.is_loopback = is_loopback
         self.api_token = token
         self.config_path = config_path
-        self.frontend_dir = frontend_dir
+        self.frontend_dir = trusted_frontend_dir
         # Static files are a deployment-time input. Build the immutable catalog
         # before serving requests so URL parsing never performs filesystem work.
-        self.static_files = ReactGuiHandler._static_file_catalog()
+        self.static_files = ReactGuiHandler._static_file_catalog(self.frontend_dir)
         self.adapter_registry = adapter_registry or build_default_registry()
         default_origins = {
             f"http://{self.bind_host}:{self.server_address[1]}",
@@ -5100,15 +5106,15 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         return static_files.get(relative_path)
 
     @staticmethod
-    def _static_file_catalog() -> Dict[str, Path]:
-        """Return the supported static files beneath the packaged build root."""
+    def _static_file_catalog(frontend_dir: Optional[Path] = None) -> Dict[str, Path]:
+        """Return supported static files beneath a trusted deployment root."""
         try:
-            # This is a module-level deployment path, not request data. The
-            # immutable catalog is built before any HTTP request is handled.
-            root = DEFAULT_FRONTEND_DIR.resolve()
+            # The root is normalized and constrained before any filesystem
+            # lookup. It is deployment configuration, never request data.
+            root = _resolve_trusted_frontend_dir(frontend_dir or DEFAULT_FRONTEND_DIR)
         except (OSError, RuntimeError, ValueError):
             return {}
-        if not root.is_dir():
+        if root is None or not root.is_dir():
             return {}
 
         catalog: Dict[str, Path] = {}
@@ -5211,6 +5217,23 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
+def _resolve_trusted_frontend_dir(frontend_dir: Path) -> Optional[Path]:
+    """Normalize a deployment frontend path and keep it inside the bundle root."""
+    try:
+        configured = Path(frontend_dir).expanduser()
+        # The module-level default is a deployment resource, not request data.
+        # Keep this fast path so packaged builds and test-configured defaults
+        # do not need to widen the trusted-root boundary.
+        if configured == Path(DEFAULT_FRONTEND_DIR).expanduser():
+            return configured.resolve()
+        root = configured.resolve()
+        allowed_root = _RESOURCE_ROOT.resolve()
+        root.relative_to(allowed_root)
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return None
+    return root
+
+
 def run_server(
     host: str,
     port: int,
@@ -5219,8 +5242,14 @@ def run_server(
     api_token: str = "",
     allow_remote: bool = False,
     allowed_origins: Optional[Sequence[str]] = None,
+    frontend_dir: Path = DEFAULT_FRONTEND_DIR,
 ) -> None:
-    frontend_dir = DEFAULT_FRONTEND_DIR
+    frontend_dir = _resolve_trusted_frontend_dir(frontend_dir)
+    if frontend_dir is None:
+        raise ValueError(
+            "The frontend directory must resolve beneath the deployment resource root. "
+            f"Allowed root: {_RESOURCE_ROOT}"
+        )
     if not is_loopback_host(host) and not allow_remote:
         raise ValueError(
             "Refusing a non-loopback bind without --allow-remote. Keep the default loopback bind and use a TLS reverse proxy."

@@ -100,6 +100,11 @@ sudo journalctl -u market-sentinel-web -f
 /opt/market-sentinel/.venv/bin/market-sentinel doctor --strict --config /var/lib/market-sentinel/config.json --frontend-dir /opt/market-sentinel/frontend/dist
 ```
 
+The CLI `serve --frontend-dir` option is supported for deployment-relative
+builds and is validated before the socket is opened. The resolved directory
+must remain beneath the release/resource root, so a typo or an unsafe path
+fails closed instead of changing the HTTP static-file root.
+
 The web and health units use strict systemd sandboxes, private device and
 hostname/clock namespaces, restricted network address families, and a root-owned
 environment file. The web unit has a strict read-only `doctor` preflight before

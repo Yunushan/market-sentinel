@@ -366,12 +366,14 @@ class WebApiTests(unittest.TestCase):
     def test_server_uses_bounded_connection_and_shutdown_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            server = ReactGuiServer(
-                ("127.0.0.1", 0),
-                ReactGuiHandler,
-                config_path=root / "config.json",
-                frontend_dir=root / "dist",
-            )
+            frontend_dir = root / "dist"
+            with patch("web_api.DEFAULT_FRONTEND_DIR", frontend_dir):
+                server = ReactGuiServer(
+                    ("127.0.0.1", 0),
+                    ReactGuiHandler,
+                    config_path=root / "config.json",
+                    frontend_dir=frontend_dir,
+                )
             try:
                 self.assertTrue(server.allow_reuse_address)
                 self.assertTrue(server.daemon_threads)
@@ -379,6 +381,34 @@ class WebApiTests(unittest.TestCase):
                 self.assertEqual(server.request_queue_size, 32)
             finally:
                 server.server_close()
+
+    def test_custom_frontend_directory_is_confined_to_deployment_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            deployment_root = Path(tmpdir)
+            frontend_dir = deployment_root / "frontend" / "dist"
+            frontend_dir.mkdir(parents=True)
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            with patch("web_api._RESOURCE_ROOT", deployment_root):
+                server = ReactGuiServer(
+                    ("127.0.0.1", 0),
+                    ReactGuiHandler,
+                    config_path=deployment_root / "config.json",
+                    frontend_dir=frontend_dir,
+                )
+                try:
+                    self.assertEqual(server.frontend_dir, frontend_dir.resolve())
+                    self.assertEqual(server.static_files["index.html"], (frontend_dir / "index.html").resolve())
+                finally:
+                    server.server_close()
+
+            outside_dir = Path(tmpdir).parent / f"{Path(tmpdir).name}-outside"
+            with self.assertRaisesRegex(ValueError, "deployment resource root"):
+                ReactGuiServer(
+                    ("127.0.0.1", 0),
+                    ReactGuiHandler,
+                    config_path=deployment_root / "config.json",
+                    frontend_dir=outside_dir,
+                )
 
     def test_configured_allowed_origins_merges_cli_and_environment_values(self) -> None:
         with patch.dict(

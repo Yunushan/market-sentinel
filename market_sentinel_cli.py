@@ -2481,7 +2481,12 @@ def run_polymarket_live_snapshots_export(args: argparse.Namespace) -> int:
 
 
 def run_serve(args: argparse.Namespace) -> int:
-    run_server(args.host, int(args.port), _config_path(args), Path(args.frontend_dir).expanduser())
+    run_server(
+        args.host,
+        int(args.port),
+        _config_path(args),
+        frontend_dir=Path(args.frontend_dir).expanduser(),
+    )
     return 0
 
 
