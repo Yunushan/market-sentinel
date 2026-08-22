@@ -1597,6 +1597,10 @@ def run_market_account(args: argparse.Namespace) -> int:
 
 
 BETFAIR_ORDER_MANAGEMENT_OPERATIONS = ("cancel_orders", "update_orders", "replace_orders")
+KALSHI_ORDER_MANAGEMENT_OPERATIONS = ("cancel_order", "batch_cancel_orders", "amend_order", "decrease_order")
+MARKET_ORDER_MANAGEMENT_OPERATIONS = tuple(
+    dict.fromkeys(BETFAIR_ORDER_MANAGEMENT_OPERATIONS + KALSHI_ORDER_MANAGEMENT_OPERATIONS)
+)
 
 
 def run_market_order_management(args: argparse.Namespace) -> int:
@@ -1616,7 +1620,10 @@ def run_market_order_management(args: argparse.Namespace) -> int:
         parsed = json.loads(raw)
         if not isinstance(parsed, list):
             raise ValueError("--instructions must contain a JSON array.")
-        payload["instructions"] = parsed
+        if operation == "batch_cancel_orders":
+            payload["orders"] = parsed
+        else:
+            payload["instructions"] = parsed
     _put_optional(payload, "customer_ref", getattr(args, "customer_ref", None))
     if getattr(args, "market_version", None) not in (None, ""):
         raw_version = str(args.market_version)
@@ -1624,6 +1631,21 @@ def run_market_order_management(args: argparse.Namespace) -> int:
     if bool(getattr(args, "async_request", False)):
         payload["async_request"] = True
     _put_optional(payload, "confirm_global_cancel", getattr(args, "confirm_global_cancel", None))
+    for key, argument in (
+        ("order_id", "order_id"),
+        ("ticker", "ticker"),
+        ("side", "side"),
+        ("price", "price"),
+        ("count", "count"),
+        ("client_order_id", "client_order_id"),
+        ("updated_client_order_id", "updated_client_order_id"),
+        ("reduce_by", "reduce_by"),
+        ("reduce_to", "reduce_to"),
+        ("subaccount", "subaccount"),
+        ("exchange_index", "exchange_index"),
+        ("confirm_order_management", "confirm_order_management"),
+    ):
+        _put_optional(payload, key, getattr(args, argument, None))
     data = adapter.manage_orders(operation, **payload)
     return _write_command_payload(
         args,
@@ -2640,9 +2662,9 @@ def build_parser() -> argparse.ArgumentParser:
     market_orders = markets_sub.add_parser(
         "manage-orders",
         parents=[common],
-        help="Run a guarded documented live order-management mutation (currently Betfair Exchange).",
+        help="Run a guarded documented live order-management mutation (Betfair Exchange or Kalshi).",
     )
-    market_orders.add_argument("operation", choices=BETFAIR_ORDER_MANAGEMENT_OPERATIONS)
+    market_orders.add_argument("operation", choices=MARKET_ORDER_MANAGEMENT_OPERATIONS)
     market_orders.add_argument("--market", default=None, help="Market id; defaults to the selected config market.")
     market_orders.add_argument("--exchange-market-id", default="", help="Betfair exchange market id for the mutation.")
     market_orders.add_argument(
@@ -2657,6 +2679,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--confirm-global-cancel",
         default=None,
         help="Exact text CANCEL ALL BETS is required for a Betfair all-account cancellation.",
+    )
+    market_orders.add_argument("--order-id", default=None, help="Kalshi order identifier for single-order mutations.")
+    market_orders.add_argument("--ticker", default=None, help="Kalshi market ticker for amend_order.")
+    market_orders.add_argument("--side", choices=["bid", "ask"], default=None, help="Kalshi V2 amend side.")
+    market_orders.add_argument("--price", default=None, help="Kalshi V2 amend price in probability dollars.")
+    market_orders.add_argument("--count", default=None, help="Kalshi V2 amend total contract count.")
+    market_orders.add_argument("--client-order-id", default=None, help="Optional Kalshi original client order id.")
+    market_orders.add_argument("--updated-client-order-id", default=None, help="Optional Kalshi amended client order id.")
+    market_orders.add_argument("--reduce-by", default=None, help="Kalshi decrease amount.")
+    market_orders.add_argument("--reduce-to", default=None, help="Kalshi target remaining count; use exactly one reduction flag.")
+    market_orders.add_argument("--subaccount", default=None, help="Kalshi subaccount number (0-63).")
+    market_orders.add_argument("--exchange-index", default=None, help="Kalshi exchange shard; only 0 is supported.")
+    market_orders.add_argument(
+        "--confirm-order-management",
+        default=None,
+        help="Exact Kalshi text I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS is required for mutations.",
     )
     market_orders.add_argument("--json", default=None, help="Inline JSON object or @file to merge before explicit flags.")
     _add_json_output_args(market_orders)

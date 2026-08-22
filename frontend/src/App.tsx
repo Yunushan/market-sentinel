@@ -199,6 +199,18 @@ interface MarketReadForm {
   order_management_market_version: string;
   order_management_async: boolean;
   order_management_confirmation: string;
+  order_management_order_id: string;
+  order_management_ticker: string;
+  order_management_side: string;
+  order_management_price: string;
+  order_management_count: string;
+  order_management_client_order_id: string;
+  order_management_updated_client_order_id: string;
+  order_management_reduce_by: string;
+  order_management_reduce_to: string;
+  order_management_subaccount: string;
+  order_management_exchange_index: string;
+  order_management_operator_confirmation: string;
 }
 
 interface MarketReadState {
@@ -429,7 +441,19 @@ function emptyMarketReadForm(): MarketReadForm {
     order_management_customer_ref: "",
     order_management_market_version: "",
     order_management_async: false,
-    order_management_confirmation: ""
+    order_management_confirmation: "",
+    order_management_order_id: "",
+    order_management_ticker: "",
+    order_management_side: "bid",
+    order_management_price: "",
+    order_management_count: "",
+    order_management_client_order_id: "",
+    order_management_updated_client_order_id: "",
+    order_management_reduce_by: "",
+    order_management_reduce_to: "",
+    order_management_subaccount: "",
+    order_management_exchange_index: "",
+    order_management_operator_confirmation: ""
   };
 }
 
@@ -731,6 +755,10 @@ export default function App() {
       patch.settings = {
         betfair_order_management_enabled: form.get("betfair_order_management_enabled") === "on"
       };
+    } else if (selectedMarket.market_id === "kalshi") {
+      patch.settings = {
+        kalshi_order_management_enabled: form.get("kalshi_order_management_enabled") === "on"
+      };
     }
     setBusyMarket(selectedMarket.market_id);
     setError(null);
@@ -758,9 +786,11 @@ export default function App() {
       setMarketRead(emptyMarketReadState());
       const nextMarket = markets?.markets.find((market) => market.market_id === marketId);
       const accountOperations = nextMarket?.health.account_recovery_operations ?? [];
+      const orderOperations = nextMarket?.health.order_management_operations ?? [];
       setMarketReadForm({
         ...emptyMarketReadForm(),
         account_operation: accountOperations[0] as MarketAccountOperation ?? "active_orders",
+        order_management_operation: (orderOperations[0] as MarketOrderManagementOperation) ?? "cancel_orders",
       });
       setMarketReadMessage("");
       setLivePreflight(null);
@@ -890,10 +920,6 @@ export default function App() {
       setError(`${selectedMarket.display_name} does not advertise ${operation.replaceAll("_", " ")}.`);
       return;
     }
-    if ((operation === "update_orders" || operation === "replace_orders") && !marketReadForm.order_management_market_id.trim()) {
-      setError("A Betfair exchange market id is required for update and replace operations.");
-      return;
-    }
     let instructions: unknown;
     try {
       instructions = JSON.parse(marketReadForm.order_management_instructions || "[]");
@@ -905,19 +931,38 @@ export default function App() {
       setError("Instructions must be a JSON array.");
       return;
     }
-    const warning = operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()
+    const isKalshi = marketId === "kalshi";
+    if (!isKalshi && (operation === "update_orders" || operation === "replace_orders") && !marketReadForm.order_management_market_id.trim()) {
+      setError("A Betfair exchange market id is required for update and replace operations.");
+      return;
+    }
+    if (isKalshi && operation === "batch_cancel_orders" && !instructions.length) {
+      setError("Kalshi batch cancellation requires at least one order object.");
+      return;
+    }
+    if (isKalshi && operation !== "batch_cancel_orders" && !marketReadForm.order_management_order_id.trim()) {
+      setError("A Kalshi order id is required for this mutation.");
+      return;
+    }
+    if (isKalshi && operation === "amend_order" && !marketReadForm.order_management_ticker.trim()) {
+      setError("A Kalshi ticker is required for amend_order.");
+      return;
+    }
+    const warning = !isKalshi && operation === "cancel_orders" && !marketReadForm.order_management_market_id.trim()
       ? "This submits a GLOBAL Betfair cancellation for the account."
-      : `This submits a live Betfair ${operation.replaceAll("_", " ")} request.`;
+      : `This submits a live ${isKalshi ? "Kalshi" : "Betfair"} ${operation.replaceAll("_", " ")} request.`;
     if (!window.confirm(`${warning} Continue only if the live-safety gates and request details are intentional.`)) {
       return;
     }
-    const payload: Record<string, unknown> = {
-      market_id: marketReadForm.order_management_market_id.trim() || undefined,
-      instructions,
-      customer_ref: marketReadForm.order_management_customer_ref.trim() || undefined,
-      confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
-    };
-    if (marketReadForm.order_management_market_version.trim()) {
+    const payload: Record<string, unknown> = isKalshi
+      ? { instructions }
+      : {
+          market_id: marketReadForm.order_management_market_id.trim() || undefined,
+          instructions,
+          customer_ref: marketReadForm.order_management_customer_ref.trim() || undefined,
+          confirm_global_cancel: marketReadForm.order_management_confirmation.trim() || undefined
+        };
+    if (!isKalshi && marketReadForm.order_management_market_version.trim()) {
       const version = Number(marketReadForm.order_management_market_version.trim());
       if (!Number.isInteger(version) || version < 1) {
         setError("Market version must be a positive integer.");
@@ -925,8 +970,36 @@ export default function App() {
       }
       payload.market_version = version;
     }
-    if (marketReadForm.order_management_async) {
+    if (!isKalshi && marketReadForm.order_management_async) {
       payload.async_request = true;
+    }
+    if (isKalshi) {
+      if (operation === "batch_cancel_orders") {
+        payload.orders = instructions;
+      }
+      const optionalText: Array<[string, string]> = [
+        ["order_id", marketReadForm.order_management_order_id],
+        ["ticker", marketReadForm.order_management_ticker],
+        ["side", marketReadForm.order_management_side],
+        ["price", marketReadForm.order_management_price],
+        ["count", marketReadForm.order_management_count],
+        ["client_order_id", marketReadForm.order_management_client_order_id],
+        ["updated_client_order_id", marketReadForm.order_management_updated_client_order_id],
+        ["reduce_by", marketReadForm.order_management_reduce_by],
+        ["reduce_to", marketReadForm.order_management_reduce_to],
+        ["confirm_order_management", marketReadForm.order_management_operator_confirmation]
+      ];
+      optionalText.forEach(([key, value]) => {
+        if (value.trim()) {
+          payload[key] = value.trim();
+        }
+      });
+      if (marketReadForm.order_management_subaccount.trim()) {
+        payload.subaccount = Number(marketReadForm.order_management_subaccount.trim());
+      }
+      if (marketReadForm.order_management_exchange_index.trim()) {
+        payload.exchange_index = Number(marketReadForm.order_management_exchange_index.trim());
+      }
     }
     setMarketReadBusy("order_management");
     setMarketReadMessage("");
@@ -2016,6 +2089,15 @@ function MarketsView({
                 />
                 <span>Enable Betfair order management</span>
               </label>
+            ) : selectedMarket.market_id === "kalshi" ? (
+              <label className="check-row">
+                <input
+                  name="kalshi_order_management_enabled"
+                  type="checkbox"
+                  defaultChecked={selectedMarket.health.order_management_enabled === true}
+                />
+                <span>Enable Kalshi order management</span>
+              </label>
             ) : null}
             <label>
               <span>Max size</span>
@@ -2344,8 +2426,9 @@ function MarketsView({
                 <div>
                   <h4>Guarded live order management</h4>
                   <p>
-                    Betfair mutations are disabled by default and still require the shared live-safety gates plus the
-                    Betfair-specific opt-in. The UI never sends a request without an explicit confirmation.
+                    {selectedMarket.market_id === "kalshi"
+                      ? "Kalshi mutations are disabled by default and require the shared live-safety gates, Kalshi-specific opt-in, and exact operator confirmation."
+                      : "Betfair mutations are disabled by default and require the shared live-safety gates plus the Betfair-specific opt-in. The UI never sends a request without explicit confirmation."}
                   </p>
                 </div>
                 <StatusPill tone={selectedMarket.health.order_management_enabled ? "warn" : "neutral"}>
@@ -2364,55 +2447,170 @@ function MarketsView({
                     ))}
                   </select>
                 </label>
-                <label>
-                  <span>Exchange market id</span>
-                  <input
-                    value={marketReadForm.order_management_market_id}
-                    onChange={(event) => onMarketReadFormChange({ order_management_market_id: event.target.value })}
-                    placeholder="1.234 (blank = global cancel only)"
-                  />
-                </label>
-                <label>
-                  <span>Customer reference</span>
-                  <input
-                    value={marketReadForm.order_management_customer_ref}
-                    onChange={(event) => onMarketReadFormChange({ order_management_customer_ref: event.target.value })}
-                    placeholder="Optional, max 32 safe chars"
-                  />
-                </label>
-                <label>
-                  <span>Market version (replace)</span>
-                  <input
-                    value={marketReadForm.order_management_market_version}
-                    onChange={(event) => onMarketReadFormChange({ order_management_market_version: event.target.value })}
-                    placeholder="Optional positive integer"
-                  />
-                </label>
-                <label className="wide-field">
-                  <span>Instructions JSON (max 60)</span>
-                  <textarea
-                    value={marketReadForm.order_management_instructions}
-                    onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
-                    rows={3}
-                    spellCheck={false}
-                  />
-                </label>
-                <label>
-                  <span>Global-cancel confirmation</span>
-                  <input
-                    value={marketReadForm.order_management_confirmation}
-                    onChange={(event) => onMarketReadFormChange({ order_management_confirmation: event.target.value })}
-                    placeholder="Type CANCEL ALL BETS"
-                  />
-                </label>
-                <label className="check-row">
-                  <input
-                    type="checkbox"
-                    checked={marketReadForm.order_management_async}
-                    onChange={(event) => onMarketReadFormChange({ order_management_async: event.target.checked })}
-                  />
-                  <span>Async replace request</span>
-                </label>
+                {selectedMarket.market_id === "kalshi" ? (
+                  <>
+                    <label>
+                      <span>Order id</span>
+                      <input
+                        value={marketReadForm.order_management_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_order_id: event.target.value })}
+                        placeholder="Required except batch cancel"
+                      />
+                    </label>
+                    <label>
+                      <span>Kalshi ticker</span>
+                      <input
+                        value={marketReadForm.order_management_ticker}
+                        onChange={(event) => onMarketReadFormChange({ order_management_ticker: event.target.value })}
+                        placeholder="For amend_order"
+                      />
+                    </label>
+                    <label>
+                      <span>Side</span>
+                      <select
+                        value={marketReadForm.order_management_side}
+                        onChange={(event) => onMarketReadFormChange({ order_management_side: event.target.value })}
+                      >
+                        <option value="bid">bid</option>
+                        <option value="ask">ask</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Price</span>
+                      <input
+                        value={marketReadForm.order_management_price}
+                        onChange={(event) => onMarketReadFormChange({ order_management_price: event.target.value })}
+                        placeholder="0.01–0.99"
+                      />
+                    </label>
+                    <label>
+                      <span>Count</span>
+                      <input
+                        value={marketReadForm.order_management_count}
+                        onChange={(event) => onMarketReadFormChange({ order_management_count: event.target.value })}
+                        placeholder="Amend total count"
+                      />
+                    </label>
+                    <label>
+                      <span>Subaccount</span>
+                      <input
+                        value={marketReadForm.order_management_subaccount}
+                        onChange={(event) => onMarketReadFormChange({ order_management_subaccount: event.target.value })}
+                        placeholder="0–63"
+                      />
+                    </label>
+                    <label>
+                      <span>Exchange index</span>
+                      <input
+                        value={marketReadForm.order_management_exchange_index}
+                        onChange={(event) => onMarketReadFormChange({ order_management_exchange_index: event.target.value })}
+                        placeholder="0 only"
+                      />
+                    </label>
+                    <label>
+                      <span>Reduce by</span>
+                      <input
+                        value={marketReadForm.order_management_reduce_by}
+                        onChange={(event) => onMarketReadFormChange({ order_management_reduce_by: event.target.value })}
+                        placeholder="Decrease only"
+                      />
+                    </label>
+                    <label>
+                      <span>Reduce to</span>
+                      <input
+                        value={marketReadForm.order_management_reduce_to}
+                        onChange={(event) => onMarketReadFormChange({ order_management_reduce_to: event.target.value })}
+                        placeholder="Decrease only"
+                      />
+                    </label>
+                    <label>
+                      <span>Original client id</span>
+                      <input
+                        value={marketReadForm.order_management_client_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_client_order_id: event.target.value })}
+                        placeholder="Optional"
+                      />
+                    </label>
+                    <label>
+                      <span>Updated client id</span>
+                      <input
+                        value={marketReadForm.order_management_updated_client_order_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_updated_client_order_id: event.target.value })}
+                        placeholder="Optional amend id"
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Batch orders JSON</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={3}
+                        spellCheck={false}
+                        placeholder='[{"order_id":"order-id","subaccount":0}]'
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Operator confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_operator_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_operator_confirmation: event.target.value })}
+                        placeholder="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+                      />
+                    </label>
+                  </>
+                ) : (
+                  <>
+                    <label>
+                      <span>Exchange market id</span>
+                      <input
+                        value={marketReadForm.order_management_market_id}
+                        onChange={(event) => onMarketReadFormChange({ order_management_market_id: event.target.value })}
+                        placeholder="1.234 (blank = global cancel only)"
+                      />
+                    </label>
+                    <label>
+                      <span>Customer reference</span>
+                      <input
+                        value={marketReadForm.order_management_customer_ref}
+                        onChange={(event) => onMarketReadFormChange({ order_management_customer_ref: event.target.value })}
+                        placeholder="Optional, max 32 safe chars"
+                      />
+                    </label>
+                    <label>
+                      <span>Market version (replace)</span>
+                      <input
+                        value={marketReadForm.order_management_market_version}
+                        onChange={(event) => onMarketReadFormChange({ order_management_market_version: event.target.value })}
+                        placeholder="Optional positive integer"
+                      />
+                    </label>
+                    <label className="wide-field">
+                      <span>Instructions JSON (max 60)</span>
+                      <textarea
+                        value={marketReadForm.order_management_instructions}
+                        onChange={(event) => onMarketReadFormChange({ order_management_instructions: event.target.value })}
+                        rows={3}
+                        spellCheck={false}
+                      />
+                    </label>
+                    <label>
+                      <span>Global-cancel confirmation</span>
+                      <input
+                        value={marketReadForm.order_management_confirmation}
+                        onChange={(event) => onMarketReadFormChange({ order_management_confirmation: event.target.value })}
+                        placeholder="Type CANCEL ALL BETS"
+                      />
+                    </label>
+                    <label className="check-row">
+                      <input
+                        type="checkbox"
+                        checked={marketReadForm.order_management_async}
+                        onChange={(event) => onMarketReadFormChange({ order_management_async: event.target.checked })}
+                      />
+                      <span>Async replace request</span>
+                    </label>
+                  </>
+                )}
               </div>
               <div className="button-row compact">
                 <button

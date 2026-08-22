@@ -336,6 +336,7 @@
         "adapter_status": "implemented",
         "kalshi_api_base_url": "https://external-api.kalshi.com/trade-api/v2",
         "kalshi_market_status": "open",
+        "kalshi_order_management_enabled": false,
         "credential_env_vars": [
           "KALSHI_API_KEY_ID",
           "KALSHI_PRIVATE_KEY_PATH",
@@ -346,7 +347,7 @@
         "live_trading_confirmed": false,
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
-        "notes": "Read-only market data and paper trading are implemented through official Kalshi REST endpoints. Live trading stays disabled by default and requires API key ID plus RSA private key material from environment variables or an external file."
+        "notes": "Official market/event discovery, prices/orderbooks, public trades, candles, signed account recovery, guarded live order placement, and guarded V2 cancel/batch-cancel/amend/decrease mutations are supported. Order management requires kalshi_order_management_enabled plus live_trading_enabled, live_trading_confirmed, and exact operator confirmation; live trading stays disabled by default and requires API key ID plus RSA private key material from environment variables or an external file."
       }
     },
     "limitless_exchange": {

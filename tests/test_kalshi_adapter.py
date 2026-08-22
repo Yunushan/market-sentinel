@@ -364,6 +364,128 @@ class KalshiAdapterTests(unittest.TestCase):
         self.assertTrue(headers["KALSHI-ACCESS-SIGNATURE"])
         self.assertTrue(headers["KALSHI-ACCESS-TIMESTAMP"].isdigit())
 
+    def test_order_management_uses_guarded_v2_mutation_endpoints(self) -> None:
+        adapter = KalshiAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "kalshi_order_management_enabled": True,
+            }
+        )
+        adapter._auth_headers = lambda method, path: {  # type: ignore[method-assign]
+            "KALSHI-ACCESS-KEY": "test-key",
+            "KALSHI-ACCESS-SIGNATURE": "test-signature",
+            "KALSHI-ACCESS-TIMESTAMP": "123",
+        }
+        fixtures = {
+            "DELETE /portfolio/events/orders/order-kalshi-1": load_fixture("cancel_order_response"),
+            "DELETE /portfolio/events/orders/batched": load_fixture("batch_cancel_orders_response"),
+            "POST /portfolio/events/orders/order-kalshi-1/amend": load_fixture("amend_order_response"),
+            "POST /portfolio/events/orders/order-kalshi-1/decrease": load_fixture("decrease_order_response"),
+        }
+        calls = []
+
+        class Response:
+            status_code = 200
+            text = ""
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            def json(self):
+                return self.payload
+
+        def fake_request(method, url, *, params=None, json=None, headers=None, timeout=None):
+            path = url.split("/trade-api/v2", 1)[-1]
+            calls.append((method, path, dict(params or {}), json, dict(headers or {})))
+            return Response(fixtures[f"{method} {path}"])
+
+        adapter.runtime.session.request = fake_request  # type: ignore[method-assign]
+        confirmation = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+
+        cancelled = adapter.manage_orders(
+            "cancel_order",
+            order_id="order-kalshi-1",
+            subaccount=0,
+            exchange_index=0,
+            confirm_order_management=confirmation,
+        )
+        batch = adapter.manage_orders(
+            "batch_cancel_orders",
+            orders=[{"order_id": "order-kalshi-1"}, {"order_id": "order-kalshi-2", "subaccount": 1}],
+            confirm_order_management=confirmation,
+        )
+        amended = adapter.manage_orders(
+            "amend_order",
+            order_id="order-kalshi-1",
+            ticker="KXFED-26MAY-TARGET-425",
+            side="bid",
+            price=0.44,
+            count=8,
+            client_order_id="client-kalshi-1",
+            updated_client_order_id="client-kalshi-1-updated",
+            confirm_order_management=confirmation,
+        )
+        decreased = adapter.manage_orders(
+            "decrease_order",
+            order_id="order-kalshi-1",
+            reduce_by=5,
+            confirm_order_management=confirmation,
+        )
+
+        self.assertEqual(cancelled["response"]["order_id"], "order-kalshi-1")
+        self.assertEqual(batch["response"]["orders"][1]["order_id"], "order-kalshi-2")
+        self.assertEqual(amended["response"]["client_order_id"], "client-kalshi-1-updated")
+        self.assertEqual(decreased["response"]["remaining_count"], "5.00")
+        self.assertEqual(calls[0][0:3], ("DELETE", "/portfolio/events/orders/order-kalshi-1", {"subaccount": 0, "exchange_index": 0}))
+        self.assertEqual(calls[1][0:3], ("DELETE", "/portfolio/events/orders/batched", {}))
+        self.assertEqual(
+            calls[1][3],
+            {"orders": [{"order_id": "order-kalshi-1"}, {"order_id": "order-kalshi-2", "subaccount": 1}]},
+        )
+        self.assertEqual(calls[2][0:3], ("POST", "/portfolio/events/orders/order-kalshi-1/amend", {}))
+        self.assertEqual(
+            calls[2][3],
+            {
+                "ticker": "KXFED-26MAY-TARGET-425",
+                "side": "bid",
+                "price": "0.4400",
+                "count": "8.00",
+                "client_order_id": "client-kalshi-1",
+                "updated_client_order_id": "client-kalshi-1-updated",
+            },
+        )
+        self.assertEqual(calls[3][3], {"reduce_by": "5.00"})
+
+    def test_order_management_requires_opt_in_confirmation_and_strict_shapes(self) -> None:
+        disabled = KalshiAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})
+        with self.assertRaises(MarketConfigurationError):
+            disabled.manage_orders("cancel_order", order_id="order-1", confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS")
+
+        adapter = KalshiAdapter(
+            {
+                "live_trading_enabled": True,
+                "live_trading_confirmed": True,
+                "kalshi_order_management_enabled": True,
+            }
+        )
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders("cancel_order", order_id="order-1", confirm_order_management="wrong")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders(
+                "batch_cancel_orders",
+                orders=[{"order_id": "order-1"}] * 51,
+                confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            )
+        with self.assertRaises(MarketConfigurationError):
+            adapter.manage_orders(
+                "decrease_order",
+                order_id="order-1",
+                reduce_by=1,
+                reduce_to=0,
+                confirm_order_management="I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

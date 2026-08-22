@@ -27,6 +27,14 @@ from .types import (
 
 DEFAULT_KALSHI_BASE_URL = "https://external-api.kalshi.com/trade-api/v2"
 KALSHI_ORDER_PATH = "/portfolio/events/orders"
+KALSHI_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
+KALSHI_ORDER_MANAGEMENT_MAX_BATCH = 50
+KALSHI_ORDER_MANAGEMENT_REFERENCES = (
+    "https://docs.kalshi.com/api-reference/orders/cancel-order-v2",
+    "https://docs.kalshi.com/api-reference/orders/batch-cancel-orders-v2",
+    "https://docs.kalshi.com/api-reference/orders/amend-order-v2",
+    "https://docs.kalshi.com/api-reference/orders/decrease-order-v2",
+)
 
 
 class KalshiAdapter(MarketAdapter):
@@ -44,6 +52,12 @@ class KalshiAdapter(MarketAdapter):
         "settlements",
         "balance",
         "queue_positions",
+    )
+    order_management_operations = (
+        "cancel_order",
+        "batch_cancel_orders",
+        "amend_order",
+        "decrease_order",
     )
 
     def health_check(self) -> Dict[str, Any]:
@@ -63,6 +77,9 @@ class KalshiAdapter(MarketAdapter):
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "credential_sources": credential_sources,
                 "account_recovery_operations": list(self.account_recovery_operations),
+                "order_management_operations": list(self.order_management_operations),
+                "order_management_enabled": self.config_bool("kalshi_order_management_enabled", False),
+                "order_management_endpoints": list(KALSHI_ORDER_MANAGEMENT_REFERENCES),
             }
         )
         return health
@@ -539,6 +556,122 @@ class KalshiAdapter(MarketAdapter):
             "response": response,
         }
 
+    def manage_orders(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
+        """Run a guarded Kalshi V2 order-management mutation.
+
+        Kalshi's event-market mutations use signed REST requests.  The
+        adapter signs only the fixed, documented paths below; callers cannot
+        provide an arbitrary URL or method.  A separate opt-in and exact
+        confirmation are required in addition to the shared live-trading
+        acknowledgement so account recovery and order placement settings
+        cannot accidentally arm destructive mutations.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.order_management_operations:
+            supported = ", ".join(self.order_management_operations)
+            raise MarketConfigurationError(
+                f"Kalshi order-management operation must be one of: {supported}."
+            )
+        self.ensure_capability("live_trading")
+        if not self.config_bool("kalshi_order_management_enabled", False):
+            raise MarketConfigurationError(
+                "Kalshi order management is disabled by adapter config. "
+                "Set kalshi_order_management_enabled=true only after reviewing live-order controls."
+            )
+        self.ensure_live_trading_enabled("order management")
+        if str(kwargs.get("confirm_order_management") or "").strip() != KALSHI_ORDER_MANAGEMENT_CONFIRMATION:
+            raise MarketConfigurationError(
+                "Kalshi order management requires exact confirmation text "
+                f"{KALSHI_ORDER_MANAGEMENT_CONFIRMATION}."
+            )
+        if bool(kwargs.get("async_request")):
+            raise MarketConfigurationError("Kalshi order-management requests are synchronous.")
+
+        default_subaccount = self._order_management_subaccount(kwargs.get("subaccount"))
+        default_exchange_index = self._order_management_exchange_index(kwargs.get("exchange_index"))
+        request_body: Optional[Dict[str, Any]] = None
+        request_params: Dict[str, Any] = {}
+
+        if normalized == "cancel_order":
+            order_id = self._order_management_id(kwargs.get("order_id"), label="order_id")
+            path = f"/portfolio/events/orders/{order_id}"
+            if default_subaccount is not None:
+                request_params["subaccount"] = default_subaccount
+            if default_exchange_index is not None:
+                request_params["exchange_index"] = default_exchange_index
+            response = self._authenticated_request("DELETE", path, params=request_params)
+        elif normalized == "batch_cancel_orders":
+            orders = self._batch_cancel_payload(
+                kwargs.get("orders"),
+                default_subaccount=default_subaccount,
+                default_exchange_index=default_exchange_index,
+            )
+            request_body = {"orders": orders}
+            response = self._authenticated_request(
+                "DELETE", "/portfolio/events/orders/batched", json_body=request_body
+            )
+        elif normalized == "amend_order":
+            order_id = self._order_management_id(kwargs.get("order_id"), label="order_id")
+            ticker = self._order_management_ticker(kwargs.get("ticker") or kwargs.get("market_id"))
+            side = self._order_management_side(kwargs.get("side"))
+            price = self._order_management_price(kwargs.get("price"))
+            count = self._order_management_count(kwargs.get("count"), label="count")
+            request_body = {
+                "ticker": ticker,
+                "side": side,
+                "price": self._fixed_decimal(price, places=4),
+                "count": self._fixed_decimal(count),
+            }
+            for key in ("client_order_id", "updated_client_order_id"):
+                value = self._order_management_optional_id(kwargs.get(key), label=key)
+                if value:
+                    request_body[key] = value
+            if default_exchange_index is not None:
+                request_body["exchange_index"] = default_exchange_index
+            if default_subaccount is not None:
+                request_params["subaccount"] = default_subaccount
+            response = self._authenticated_request(
+                "POST", f"/portfolio/events/orders/{order_id}/amend", params=request_params, json_body=request_body
+            )
+        else:
+            order_id = self._order_management_id(kwargs.get("order_id"), label="order_id")
+            reduce_by = self._order_management_reduction(kwargs.get("reduce_by"), label="reduce_by")
+            reduce_to = self._order_management_reduction(kwargs.get("reduce_to"), label="reduce_to", allow_zero=True)
+            if (reduce_by is None) == (reduce_to is None):
+                raise MarketConfigurationError("Kalshi decrease_order requires exactly one of reduce_by or reduce_to.")
+            request_body = {
+                ("reduce_by" if reduce_by is not None else "reduce_to"): self._fixed_decimal(
+                    reduce_by if reduce_by is not None else reduce_to
+                )
+            }
+            if default_exchange_index is not None:
+                request_body["exchange_index"] = default_exchange_index
+            if default_subaccount is not None:
+                request_params["subaccount"] = default_subaccount
+            response = self._authenticated_request(
+                "POST", f"/portfolio/events/orders/{order_id}/decrease", params=request_params, json_body=request_body
+            )
+
+        return {
+            "market_id": self.market_id,
+            "operation": normalized,
+            "live": True,
+            "preflight": {
+                "market_id": self.market_id,
+                "display_name": self.display_name,
+                "feature": "order management",
+                "operation": normalized,
+                "live_trading_enabled": True,
+                "order_management_enabled": True,
+                "confirmed": True,
+                "requires_credentials": True,
+                "references": list(KALSHI_ORDER_MANAGEMENT_REFERENCES),
+            },
+            "request": {"params": request_params, "body": request_body},
+            "response": response,
+        }
+
     def _fetch_markets(
         self,
         *,
@@ -813,6 +946,112 @@ class KalshiAdapter(MarketAdapter):
             raise MarketConfigurationError("Kalshi subaccount must be between 0 and 63.")
         return parsed
 
+    @classmethod
+    def _order_management_id(cls, value: Any, *, label: str) -> str:
+        text = str(value or "").strip()
+        if not text or len(text) > 128 or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:" for char in text):
+            raise MarketConfigurationError(f"Kalshi {label} must be a safe non-empty identifier (max 128 characters).")
+        return text
+
+    @classmethod
+    def _order_management_optional_id(cls, value: Any, *, label: str) -> str:
+        if value in (None, ""):
+            return ""
+        return cls._order_management_id(value, label=label)
+
+    @classmethod
+    def _order_management_ticker(cls, value: Any) -> str:
+        text = str(value or "").strip().upper()
+        if not text or len(text) > 128 or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_." for char in text):
+            raise MarketConfigurationError("Kalshi ticker must be a safe non-empty identifier (max 128 characters).")
+        return text
+
+    @staticmethod
+    def _order_management_side(value: Any) -> str:
+        side = str(value or "").strip().lower()
+        if side not in {"bid", "ask"}:
+            raise MarketConfigurationError("Kalshi order-management side must be bid or ask.")
+        return side
+
+    @classmethod
+    def _order_management_price(cls, value: Any) -> float:
+        parsed = cls._safe_probability(value)
+        if parsed is None or not 0.0 < parsed < 1.0:
+            raise MarketConfigurationError("Kalshi order-management price must be between 0 and 1.")
+        return parsed
+
+    @staticmethod
+    def _order_management_count(value: Any, *, label: str = "count") -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Kalshi {label} must be numeric and positive.") from exc
+        if not math.isfinite(parsed) or parsed <= 0:
+            raise MarketConfigurationError(f"Kalshi {label} must be numeric and positive.")
+        return parsed
+
+    @staticmethod
+    def _order_management_reduction(value: Any, *, label: str, allow_zero: bool = False) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError(f"Kalshi {label} must be numeric.") from exc
+        if not math.isfinite(parsed) or (parsed < 0 if allow_zero else parsed <= 0):
+            qualifier = "non-negative" if allow_zero else "positive"
+            raise MarketConfigurationError(f"Kalshi {label} must be finite and {qualifier}.")
+        return parsed
+
+    @classmethod
+    def _order_management_subaccount(cls, value: Any) -> Optional[int]:
+        if value in (None, ""):
+            return None
+        return cls._account_subaccount(value)
+
+    @staticmethod
+    def _order_management_exchange_index(value: Any) -> Optional[int]:
+        if value in (None, ""):
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Kalshi exchange_index must be integer 0.") from exc
+        if parsed != 0:
+            raise MarketConfigurationError("Kalshi exchange_index must be 0; other shards are not supported by the API.")
+        return parsed
+
+    @classmethod
+    def _batch_cancel_payload(
+        cls,
+        value: Any,
+        *,
+        default_subaccount: Optional[int],
+        default_exchange_index: Optional[int],
+    ) -> List[Dict[str, Any]]:
+        if not isinstance(value, list) or not value:
+            raise MarketConfigurationError("Kalshi batch_cancel_orders requires a non-empty orders array.")
+        if len(value) > KALSHI_ORDER_MANAGEMENT_MAX_BATCH:
+            raise MarketConfigurationError(
+                f"Kalshi batch_cancel_orders supports at most {KALSHI_ORDER_MANAGEMENT_MAX_BATCH} orders per request."
+            )
+        normalized: List[Dict[str, Any]] = []
+        for index, item in enumerate(value):
+            if not isinstance(item, Mapping):
+                raise MarketConfigurationError(f"Kalshi cancellation item {index} must be an object.")
+            order_id = cls._order_management_id(item.get("order_id"), label=f"orders[{index}].order_id")
+            subaccount = cls._order_management_subaccount(item.get("subaccount", default_subaccount))
+            exchange_index = cls._order_management_exchange_index(
+                item.get("exchange_index", default_exchange_index)
+            )
+            entry: Dict[str, Any] = {"order_id": order_id}
+            if subaccount is not None:
+                entry["subaccount"] = subaccount
+            if exchange_index is not None:
+                entry["exchange_index"] = exchange_index
+            normalized.append(entry)
+        return normalized
+
     def _authenticated_get(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> Any:
         """Perform one signed GET while retaining query parameters separately.
 
@@ -841,6 +1080,45 @@ class KalshiAdapter(MarketAdapter):
             return response.json()
         except ValueError as exc:
             raise MarketHTTPError(f"{self.market_id} response was not valid JSON.") from exc
+
+    def _authenticated_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Optional[Mapping[str, Any]] = None,
+        json_body: Optional[Mapping[str, Any]] = None,
+    ) -> Any:
+        """Perform one signed mutation against a fixed Kalshi API path."""
+
+        normalized_method = str(method or "").strip().upper()
+        if normalized_method not in {"POST", "DELETE"}:
+            raise MarketConfigurationError("Kalshi order-management method is not supported.")
+        headers = self._auth_headers(normalized_method, path)
+        headers.update({"Accept": "application/json", "User-Agent": self.runtime.user_agent})
+        if json_body is not None:
+            headers["Content-Type"] = "application/json"
+        self.runtime.rate_limiter.wait()
+        try:
+            response = self.runtime.session.request(
+                normalized_method,
+                self._url(path),
+                params=dict(params or {}),
+                json=dict(json_body) if json_body is not None else None,
+                headers=headers,
+                timeout=self.runtime.timeout_seconds,
+            )
+        except Exception as exc:
+            raise MarketHTTPError(f"{self.market_id} HTTP request failed: {exc}") from exc
+        status = int(getattr(response, "status_code", 0) or 0)
+        if status >= 400:
+            raise MarketHTTPError(f"{self.market_id} HTTP {status}: {str(getattr(response, 'text', ''))[:200]}")
+        if status == 204:
+            return {}
+        try:
+            return response.json()
+        except ValueError:
+            return {}
 
     def _auth_headers(self, method: str, path: str) -> Dict[str, str]:
         api_key = self.resolve_credential(

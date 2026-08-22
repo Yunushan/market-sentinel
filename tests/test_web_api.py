@@ -923,6 +923,52 @@ class WebApiTests(unittest.TestCase):
         with self.assertRaises(UnsupportedFeatureError):
             market_order_management_payload(cfg, Registry(), "betfair_exchange", "place_orders", {})
 
+    def test_kalshi_order_management_payload_forwards_documented_fields_only(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="kalshi",
+            display_name="Kalshi",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_order", "batch_cancel_orders", "amend_order", "decrease_order")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["kalshi"].enabled = True
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "kalshi",
+            "amend_order",
+            {
+                "order_id": "order-1",
+                "ticker": "KXTEST-1",
+                "side": "bid",
+                "price": "0.44",
+                "count": "5",
+                "subaccount": 1,
+                "exchange_index": 0,
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["operation"], "amend_order")
+        self.assertEqual(payload["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["order_id"], "order-1")
+        self.assertEqual(calls[0][1]["ticker"], "KXTEST-1")
+        self.assertEqual(calls[0][1]["confirm_order_management"], "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS")
+        self.assertNotIn("unexpected", calls[0][1])
+
     def test_matchbook_account_payload_forwards_report_and_offer_filters(self) -> None:
         adapter = MarketAdapter({})
         adapter.metadata = MarketMetadata(

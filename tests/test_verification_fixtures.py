@@ -55,6 +55,10 @@ class VerificationFixtureTests(unittest.TestCase):
         account_settlements = json.loads((FIXTURE_ROOT / "kalshi" / "account_settlements.json").read_text(encoding="utf-8"))
         account_balance = json.loads((FIXTURE_ROOT / "kalshi" / "account_balance.json").read_text(encoding="utf-8"))
         account_queue = json.loads((FIXTURE_ROOT / "kalshi" / "account_queue_positions.json").read_text(encoding="utf-8"))
+        cancel_order = json.loads((FIXTURE_ROOT / "kalshi" / "cancel_order_response.json").read_text(encoding="utf-8"))
+        batch_cancel = json.loads((FIXTURE_ROOT / "kalshi" / "batch_cancel_orders_response.json").read_text(encoding="utf-8"))
+        amend_order = json.loads((FIXTURE_ROOT / "kalshi" / "amend_order_response.json").read_text(encoding="utf-8"))
+        decrease_order = json.loads((FIXTURE_ROOT / "kalshi" / "decrease_order_response.json").read_text(encoding="utf-8"))
 
         self.assertIsInstance(markets.get("markets"), list)
         self.assertGreaterEqual(len(markets["markets"]), 1)
@@ -78,6 +82,10 @@ class VerificationFixtureTests(unittest.TestCase):
         self.assertIn("balance", account_balance)
         self.assertIsInstance(account_queue.get("queue_positions"), list)
         self.assertIn("market_ticker", account_queue["queue_positions"][0])
+        self.assertEqual(cancel_order.get("order_id"), "order-kalshi-1")
+        self.assertIsInstance(batch_cancel.get("orders"), list)
+        self.assertEqual(amend_order.get("client_order_id"), "client-kalshi-1-updated")
+        self.assertIn("remaining_count", decrease_order)
 
     def test_manifold_fixtures_cover_core_payload_shapes(self) -> None:
         search = json.loads((FIXTURE_ROOT / "manifold" / "search_markets.json").read_text(encoding="utf-8"))

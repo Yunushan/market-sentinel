@@ -3790,6 +3790,23 @@ def market_order_management_payload(
         "async_request": bool_from_setting(payload.get("async_request", payload.get("async")), False),
         "confirm_global_cancel": str(payload.get("confirm_global_cancel") or "").strip(),
     }
+    for key in (
+        "order_id",
+        "ticker",
+        "side",
+        "price",
+        "count",
+        "client_order_id",
+        "updated_client_order_id",
+        "reduce_by",
+        "reduce_to",
+        "subaccount",
+        "exchange_index",
+        "orders",
+        "confirm_order_management",
+    ):
+        if key in payload:
+            kwargs[key] = payload.get(key)
     data = adapter.manage_orders(normalized_operation, **kwargs)
     return {
         "market_id": normalized_market_id,

@@ -199,7 +199,14 @@ export interface MarketAccountPayload {
   data: unknown;
 }
 
-export type MarketOrderManagementOperation = "cancel_orders" | "update_orders" | "replace_orders";
+export type MarketOrderManagementOperation =
+  | "cancel_orders"
+  | "update_orders"
+  | "replace_orders"
+  | "cancel_order"
+  | "batch_cancel_orders"
+  | "amend_order"
+  | "decrease_order";
 
 export interface MarketOrderManagementPayload {
   market_id: string;
