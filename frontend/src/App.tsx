@@ -164,6 +164,7 @@ interface MarketReadForm {
   contract_id: string;
   account_ticker: string;
   account_order_id: string;
+  account_trade_id: string;
   account_cursor: string;
   account_dex: string;
   account_market_id: string;
@@ -407,6 +408,7 @@ function emptyMarketReadForm(): MarketReadForm {
     contract_id: "",
     account_ticker: "",
     account_order_id: "",
+    account_trade_id: "",
     account_cursor: "",
     account_dex: "",
     account_market_id: "",
@@ -871,6 +873,7 @@ export default function App() {
             contract_id: form.contract_id.trim() || undefined,
             ticker: form.account_ticker.trim() || undefined,
             order_id: form.account_order_id.trim() || undefined,
+            trade_id: form.account_trade_id.trim() || undefined,
             cursor: form.account_cursor.trim() || undefined,
             dex: form.account_dex.trim() || undefined,
             market_id: form.account_market_id.trim() || undefined,
@@ -2200,6 +2203,14 @@ function MarketsView({
                 value={marketReadForm.account_order_id}
                 onChange={(event) => onMarketReadFormChange({ account_order_id: event.target.value })}
                 placeholder="Optional"
+              />
+            </label>
+            <label>
+              <span>Polymarket trade id</span>
+              <input
+                value={marketReadForm.account_trade_id}
+                onChange={(event) => onMarketReadFormChange({ account_trade_id: event.target.value })}
+                placeholder="Optional fill id"
               />
             </label>
             <label>
