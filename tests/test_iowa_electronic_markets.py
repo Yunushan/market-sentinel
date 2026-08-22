@@ -47,6 +47,7 @@ class IowaElectronicMarketsAdapterTests(unittest.TestCase):
         ])
         self.assertEqual(len(candles), 2)
         self.assertEqual([candle.close for candle in candles], [0.2, 0.2])
+        self.assertEqual([candle.open for candle in candles], [0.2, 0.2])
         self.assertEqual([candle.volume for candle in candles], [1.675, 0.0])
         self.assertEqual(price.last, 0.2)
         self.assertTrue(paper.accepted)
