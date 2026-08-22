@@ -1343,7 +1343,7 @@ KALSHI_ACCOUNT_OPERATIONS = (
 )
 LIMITLESS_ACCOUNT_OPERATIONS = ("positions", "account_history", "user_orders")
 OPINION_ACCOUNT_OPERATIONS = ("order_history", "order_detail", "positions")
-BETFAIR_ACCOUNT_OPERATIONS = ("cleared_orders",)
+BETFAIR_ACCOUNT_OPERATIONS = ("active_orders", "cleared_orders", "funds", "account")
 MATCHBOOK_ACCOUNT_OPERATIONS = (
     "settled_bets",
     "current_bets",
@@ -1439,7 +1439,11 @@ def run_market_account(args: argparse.Namespace) -> int:
             if operation == "order_history":
                 kwargs["status"] = str(args.status or "").strip()
     elif market_id == "betfair_exchange":
-        if operation == "cleared_orders":
+        if operation == "funds":
+            kwargs = {"wallet": str(getattr(args, "wallet", "") or "").strip()}
+        elif operation == "account":
+            kwargs = {}
+        elif operation in {"active_orders", "cleared_orders"}:
             market_id_filter = str(getattr(args, "account_market_id", "") or "").strip()
             runner_id = str(getattr(args, "runner_id", "") or "").strip()
             if not market_id_filter and args.contract:
@@ -1447,20 +1451,34 @@ def run_market_account(args: argparse.Namespace) -> int:
                 market_id_filter = parts[0].strip()
                 if len(parts) == 2 and not runner_id:
                     runner_id = parts[1].strip()
-            kwargs = {
-                "bet_status": str(args.status or "SETTLED").strip(),
-                "market_id": market_id_filter,
-                "event_type_id": str(getattr(args, "event_type_id", "") or "").strip(),
-                "event_id": str(getattr(args, "account_event_id", "") or "").strip(),
-                "runner_id": runner_id,
-                "bet_id": str(getattr(args, "bet_id", "") or "").strip(),
-                "group_by": str(getattr(args, "group_by", "BET") or "BET").strip(),
-                "include_item_description": bool(getattr(args, "include_item_description", False)),
-                "limit": _cli_clamp_int(args.limit, 100, 1, 1000),
-                "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
-                "from_timestamp": _cli_history_float(args.from_timestamp, "from"),
-                "to_timestamp": _cli_history_float(args.to_timestamp, "to"),
-            }
+            if operation == "active_orders":
+                kwargs = {
+                    "market_id": market_id_filter,
+                    "contract_id": str(args.contract or "").strip(),
+                    "status": str(args.status or "").strip(),
+                    "order_by": str(getattr(args, "order_by", "BY_MATCH_TIME") or "BY_MATCH_TIME").strip(),
+                    "sort_dir": str(getattr(args, "sort_dir", "EARLIEST_TO_LATEST") or "EARLIEST_TO_LATEST").strip(),
+                    "include_item_description": bool(getattr(args, "include_item_description", False)),
+                    "limit": _cli_clamp_int(args.limit, 100, 1, 1000),
+                    "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
+                    "from_timestamp": _cli_history_float(args.from_timestamp, "from"),
+                    "to_timestamp": _cli_history_float(args.to_timestamp, "to"),
+                }
+            else:
+                kwargs = {
+                    "bet_status": str(args.status or "SETTLED").strip(),
+                    "market_id": market_id_filter,
+                    "event_type_id": str(getattr(args, "event_type_id", "") or "").strip(),
+                    "event_id": str(getattr(args, "account_event_id", "") or "").strip(),
+                    "runner_id": runner_id,
+                    "bet_id": str(getattr(args, "bet_id", "") or "").strip(),
+                    "group_by": str(getattr(args, "group_by", "BET") or "BET").strip(),
+                    "include_item_description": bool(getattr(args, "include_item_description", False)),
+                    "limit": _cli_clamp_int(args.limit, 100, 1, 1000),
+                    "offset": _cli_clamp_int(args.offset, 0, 0, 100000),
+                    "from_timestamp": _cli_history_float(args.from_timestamp, "from"),
+                    "to_timestamp": _cli_history_float(args.to_timestamp, "to"),
+                }
     elif market_id == "matchbook":
         if operation in {"balance", "account"}:
             kwargs = {}
@@ -2536,6 +2554,9 @@ def build_parser() -> argparse.ArgumentParser:
     market_account.add_argument("--bet-id", default="", help="Betfair bet id filter.")
     market_account.add_argument("--group-by", default="BET", help="Betfair cleared-order roll-up.")
     market_account.add_argument("--include-item-description", action="store_true")
+    market_account.add_argument("--wallet", default="", help="Betfair account wallet (for funds reads).")
+    market_account.add_argument("--order-by", default="BY_MATCH_TIME", help="Betfair current-order sort field.")
+    market_account.add_argument("--sort-dir", default="EARLIEST_TO_LATEST", help="Betfair current-order sort direction.")
     market_account.add_argument("--event-ticker", default=None, help="Optional event ticker for position/volume feeds.")
     market_account.add_argument("--status", default="", help="Documented account order status (venue-specific).")
     market_account.add_argument("--limit", default=None, help="Optional page size (operation-specific).")

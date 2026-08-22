@@ -222,7 +222,7 @@ class MarketSentinelCliTests(unittest.TestCase):
     def test_betfair_account_command_forwards_cleared_order_filters(self) -> None:
         cfg = SimpleNamespace(selected_market_id="betfair_exchange")
         adapter = SimpleNamespace(
-            account_recovery_operations=("cleared_orders",),
+            account_recovery_operations=("active_orders", "cleared_orders", "funds", "account"),
             account_recovery=lambda operation, **kwargs: {
                 "operation": operation,
                 "parameters": kwargs,
@@ -268,6 +268,66 @@ class MarketSentinelCliTests(unittest.TestCase):
         self.assertEqual(parameters["offset"], 2)
         self.assertEqual(parameters["from_timestamp"], 1780308000.0)
         self.assertEqual(parameters["to_timestamp"], 1780394400.0)
+
+    def test_betfair_account_command_forwards_active_order_and_funds_options(self) -> None:
+        cfg = SimpleNamespace(selected_market_id="betfair_exchange")
+        adapter = SimpleNamespace(
+            account_recovery_operations=("active_orders", "cleared_orders", "funds", "account"),
+            account_recovery=lambda operation, **kwargs: {
+                "operation": operation,
+                "parameters": kwargs,
+            },
+        )
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    [
+                        "markets",
+                        "account",
+                        "active_orders",
+                        "--market",
+                        "betfair_exchange",
+                        "--contract",
+                        "1.234:101",
+                        "--status",
+                        "EXECUTABLE",
+                        "--order-by",
+                        "BY_PLACE_TIME",
+                        "--sort-dir",
+                        "LATEST_TO_EARLIEST",
+                        "--limit",
+                        "8",
+                        "--offset",
+                        "3",
+                        "--compact",
+                    ]
+                ),
+                0,
+            )
+        active = json.loads(stdout.getvalue())["parameters"]
+        self.assertEqual(active["market_id"], "1.234")
+        self.assertEqual(active["contract_id"], "1.234:101")
+        self.assertEqual(active["order_by"], "BY_PLACE_TIME")
+        self.assertEqual(active["sort_dir"], "LATEST_TO_EARLIEST")
+
+        stdout = io.StringIO()
+        with patch("market_sentinel_cli._load_cfg", return_value=cfg), patch(
+            "market_sentinel_cli._registry", return_value=SimpleNamespace()
+        ), patch("market_sentinel_cli.adapter_for_market", return_value=adapter), patch(
+            "market_sentinel_cli.require_market_enabled"
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(
+                market_sentinel_cli.main(
+                    ["markets", "account", "funds", "--market", "betfair_exchange", "--wallet", "UK", "--compact"]
+                ),
+                0,
+            )
+        self.assertEqual(json.loads(stdout.getvalue())["parameters"], {"wallet": "UK"})
 
     def test_matchbook_account_command_forwards_report_and_offer_filters(self) -> None:
         cfg = SimpleNamespace(selected_market_id="matchbook")

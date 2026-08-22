@@ -2156,6 +2156,8 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         market_book = load_fixture("betfair_exchange", "market_book")["result"]
         current_orders = load_fixture("betfair_exchange", "current_orders")["result"]
         cleared_orders = load_fixture("betfair_exchange", "cleared_orders")["result"]
+        account_funds = load_fixture("betfair_exchange", "account_funds")["result"]
+        account_details = load_fixture("betfair_exchange", "account_details")["result"]
         place_response = load_fixture("betfair_exchange", "place_order_response")
 
         def fake_request(method: str, url: str, *, json=None, headers=None, timeout=None):
@@ -2173,6 +2175,14 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 self.assertEqual(json["params"]["marketIds"], ["1.234"])
                 self.assertEqual(json["params"]["betStatus"], "SETTLED")
                 return FakeResponse({"jsonrpc": "2.0", "result": cleared_orders, "id": 1})
+            if json["method"].endswith("getAccountFunds"):
+                self.assertTrue(url.endswith("/exchange/account/json-rpc/v1"))
+                self.assertEqual(json["params"]["wallet"], "UK")
+                return FakeResponse({"jsonrpc": "2.0", "result": account_funds, "id": 1})
+            if json["method"].endswith("getAccountDetails"):
+                self.assertTrue(url.endswith("/exchange/account/json-rpc/v1"))
+                self.assertEqual(json["params"], {})
+                return FakeResponse({"jsonrpc": "2.0", "result": account_details, "id": 1})
             if json["method"].endswith("placeOrders"):
                 return FakeResponse({"jsonrpc": "2.0", "result": place_response, "id": 1})
             raise AssertionError(f"unexpected Betfair method: {json['method']}")
@@ -2188,6 +2198,13 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
             book = adapter.get_orderbook("1.234:101")
             price = adapter.get_price("1.234:101")
             trades = adapter.list_trades("1.234:101", limit=2, after=1780344000, before=1780344200)
+            active = adapter.account_recovery(
+                "active_orders",
+                contract_id="1.234:101",
+                status="EXECUTION_COMPLETE",
+                limit=10,
+                offset=1,
+            )
             settled = adapter.account_recovery(
                 "cleared_orders",
                 market_id="1.234",
@@ -2196,6 +2213,8 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 from_timestamp=1780308000,
                 to_timestamp=1780394400,
             )
+            funds = adapter.account_recovery("funds", wallet="UK")
+            details = adapter.account_recovery("account")
             paper = adapter.place_paper_order(PaperOrderRequest("betfair_exchange", "1.234:101", "BACK", 10, 0.5))
             with self.assertRaises(MarketConfigurationError):
                 adapter.place_live_order(PaperOrderRequest("betfair_exchange", "1.234:101", "BACK", 10, 0.5))
@@ -2210,8 +2229,11 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
         self.assertEqual([trade.price for trade in trades], [0.5])
         self.assertEqual([trade.size for trade in trades], [4.0])
         self.assertEqual([trade.timestamp for trade in trades], [1780344003.0])
+        self.assertEqual([row["betId"] for row in active["currentOrders"]], ["bet_matched_101"])
         self.assertEqual(set(settled), {"clearedOrders", "moreAvailable"})
         self.assertEqual(settled["clearedOrders"][0]["betId"], "bet-1")
+        self.assertEqual(funds["availableToBetBalance"], 125.5)
+        self.assertEqual(details["currencyCode"], "GBP")
         self.assertTrue(paper.accepted)
 
         with patch.dict(
@@ -2226,6 +2248,10 @@ class AdditionalOfficialAdapterTests(unittest.TestCase):
                 adapter.account_recovery("cleared_orders", bet_status="OPEN")
             with self.assertRaises(MarketConfigurationError):
                 adapter.account_recovery("cleared_orders", market_id="../outside")
+            with self.assertRaises(MarketConfigurationError):
+                adapter.account_recovery("active_orders", status="OPEN")
+            with self.assertRaises(MarketConfigurationError):
+                adapter.account_recovery("funds", wallet="UK-1")
 
         live_adapter = BetfairExchangeAdapter({"live_trading_enabled": True, "live_trading_confirmed": True})
         calls = []

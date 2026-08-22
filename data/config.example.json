@@ -53,6 +53,7 @@
       "settings": {
         "adapter_status": "implemented",
         "betfair_api_base_url": "https://api.betfair.com/exchange/betting/json-rpc/v1",
+        "betfair_account_api_base_url": "https://api.betfair.com/exchange/account/json-rpc/v1",
         "credential_env_vars": [
           "BETFAIR_APP_KEY",
           "BETFAIR_SESSION_TOKEN"
@@ -62,7 +63,7 @@
         "live_trading_kill_switch": false,
         "live_trading_max_notional": 25.0,
         "min_request_interval_seconds": 0.25,
-        "notes": "Authenticated market discovery, runner listing, best-offer orderbooks, implied-probability prices, local paper orders, and guarded placeOrders support are implemented through the official Betfair Exchange API. Live betting stays disabled by default; copy trading remains unsupported."
+        "notes": "Authenticated market discovery, runner listing, best-offer orderbooks, implied-probability prices, current/cleared account orders, funds/account reads, local paper orders, and guarded placeOrders support are implemented through Betfair's official Exchange and Accounts APIs. Live betting stays disabled by default; copy trading remains unsupported."
       }
     },
     "betmgm": {

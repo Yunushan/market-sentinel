@@ -744,7 +744,7 @@ class WebApiTests(unittest.TestCase):
             display_name="Betfair Exchange",
             capabilities=MarketCapabilities(credentials_required=True),
         )
-        adapter.account_recovery_operations = ("cleared_orders",)  # type: ignore[attr-defined]
+        adapter.account_recovery_operations = ("active_orders", "cleared_orders", "funds", "account")  # type: ignore[attr-defined]
         adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
             "operation": operation,
             "parameters": kwargs,
@@ -788,6 +788,39 @@ class WebApiTests(unittest.TestCase):
                 "to_timestamp": None,
             },
         )
+        active = market_account_payload(
+            cfg,
+            Registry(),
+            "betfair_exchange",
+            "active_orders",
+            {
+                "contract_id": ["1.234:101"],
+                "status": ["EXECUTABLE"],
+                "order_by": ["BY_PLACE_TIME"],
+                "sort_dir": ["LATEST_TO_EARLIEST"],
+                "limit": ["8"],
+                "offset": ["3"],
+            },
+        )
+        self.assertEqual(
+            active["parameters"],
+            {
+                "market_id": "1.234",
+                "contract_id": "1.234:101",
+                "status": "EXECUTABLE",
+                "order_by": "BY_PLACE_TIME",
+                "sort_dir": "LATEST_TO_EARLIEST",
+                "include_item_description": False,
+                "limit": 8,
+                "offset": 3,
+                "from_timestamp": None,
+                "to_timestamp": None,
+            },
+        )
+        funds = market_account_payload(cfg, Registry(), "betfair_exchange", "funds", {"wallet": ["UK"]})
+        self.assertEqual(funds["parameters"], {"wallet": "UK"})
+        account = market_account_payload(cfg, Registry(), "betfair_exchange", "account", {})
+        self.assertEqual(account["parameters"], {})
 
     def test_matchbook_account_payload_forwards_report_and_offer_filters(self) -> None:
         adapter = MarketAdapter({})

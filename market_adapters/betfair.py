@@ -20,12 +20,15 @@ from .types import (
 
 
 DEFAULT_BETFAIR_RPC_URL = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+DEFAULT_BETFAIR_ACCOUNT_RPC_URL = "https://api.betfair.com/exchange/account/json-rpc/v1"
 BETFAIR_REFERENCES = (
     "https://developer.betfair.com/",
     "https://support.developer.betfair.com/hc/en-us/categories/360000245252-Exchange-API",
     "https://support.developer.betfair.com/hc/en-us/articles/115003864651-How-do-I-get-started",
     "https://support.developer.betfair.com/hc/en-us/articles/360016170431-How-do-I-place-bets-on-handicap-markets",
     "https://betfair-developer-docs.atlassian.net/wiki/spaces/1smk3cen4v3lu3yomq5qye0ni/pages/2687679/listClearedOrders+-+Roll-up+Fields+Available",
+    "https://betfair-developer-docs.atlassian.net/wiki/spaces/1smk3cen4v3lu3yomq5qye0ni/pages/2687725/Accounts+API",
+    "https://betfair-developer-docs.atlassian.net/wiki/spaces/1smk3cen4v3lu3yomq5qye0ni/pages/2699900/getAccountDetails",
 )
 
 
@@ -34,7 +37,7 @@ class BetfairExchangeAdapter(MarketAdapter):
 
     live_order_sides = ("BUY", "SELL", "BACK", "LAY")
     metadata = get_market_metadata("betfair_exchange")
-    account_recovery_operations = ("cleared_orders",)
+    account_recovery_operations = ("active_orders", "cleared_orders", "funds", "account")
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -51,12 +54,18 @@ class BetfairExchangeAdapter(MarketAdapter):
         health.update(
             {
                 "api_base_url": self.api_base_url,
+                "account_api_base_url": self.account_api_base_url,
                 "references": list(BETFAIR_REFERENCES),
                 "credential_sources": credential_sources,
                 "live_trading_supported": True,
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "account_recovery_operations": list(self.account_recovery_operations),
-                "authenticated_account_endpoints": ["listClearedOrders"],
+                "authenticated_account_endpoints": [
+                    "listCurrentOrders",
+                    "listClearedOrders",
+                    "getAccountFunds",
+                    "getAccountDetails",
+                ],
             }
         )
         return health
@@ -65,6 +74,11 @@ class BetfairExchangeAdapter(MarketAdapter):
     def api_base_url(self) -> str:
         configured = self.config.get("betfair_api_base_url") or self.config.get("api_base_url")
         return str(configured or DEFAULT_BETFAIR_RPC_URL).rstrip("/")
+
+    @property
+    def account_api_base_url(self) -> str:
+        configured = self.config.get("betfair_account_api_base_url")
+        return str(configured or DEFAULT_BETFAIR_ACCOUNT_RPC_URL).rstrip("/")
 
     def list_events(self, query: str = "", limit: int = 50) -> List[MarketEvent]:
         self.ensure_capability("event_listing")
@@ -292,8 +306,132 @@ class BetfairExchangeAdapter(MarketAdapter):
             params["settledDateRange"] = date_range
         return self._rpc("SportsAPING/v1.0/listClearedOrders", params)
 
+    def list_current_orders(
+        self,
+        *,
+        market_id: str = "",
+        contract_id: str = "",
+        status: str = "",
+        order_by: str = "BY_MATCH_TIME",
+        sort_dir: str = "EARLIEST_TO_LATEST",
+        include_item_description: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> Any:
+        """Read current Betfair orders through the documented betting API.
+
+        The upstream ``listCurrentOrders`` operation returns both executable
+        and matched orders.  Market/runner/status filters are validated and
+        applied locally so the raw response remains lossless while callers
+        cannot inject arbitrary RPC parameters.
+        """
+
+        market_filter = self._account_id(market_id, "market_id")
+        selection_filter = ""
+        if contract_id:
+            contract_market, selection_filter = self._split_contract_id(contract_id)
+            if market_filter and market_filter != contract_market:
+                raise MarketConfigurationError("Betfair current-order market_id and contract_id do not match.")
+            market_filter = contract_market
+        normalized_status = str(status or "").strip().upper()
+        if normalized_status and normalized_status not in {
+            "EXECUTABLE",
+            "EXECUTION_COMPLETE",
+            "EXECUTION_FAILED",
+            "EXPIRED",
+            "CANCELLED",
+            "LAPSED",
+        }:
+            raise MarketConfigurationError(
+                "Betfair current-order status must be EXECUTABLE, EXECUTION_COMPLETE, EXECUTION_FAILED, "
+                "EXPIRED, CANCELLED, or LAPSED."
+            )
+        normalized_order_by = str(order_by or "BY_MATCH_TIME").strip().upper()
+        if normalized_order_by not in {"BY_BET", "BY_MARKET", "BY_MATCH_TIME", "BY_PLACE_TIME"}:
+            raise MarketConfigurationError(
+                "Betfair current-order order_by must be BY_BET, BY_MARKET, BY_MATCH_TIME, or BY_PLACE_TIME."
+            )
+        normalized_sort_dir = str(sort_dir or "EARLIEST_TO_LATEST").strip().upper()
+        if normalized_sort_dir not in {"EARLIEST_TO_LATEST", "LATEST_TO_EARLIEST"}:
+            raise MarketConfigurationError(
+                "Betfair current-order sort_dir must be EARLIEST_TO_LATEST or LATEST_TO_EARLIEST."
+            )
+        count = self._account_limit(limit)
+        start = self._account_offset(offset)
+        after_ts = self._history_timestamp(from_timestamp, "from") if from_timestamp is not None else None
+        before_ts = self._history_timestamp(to_timestamp, "to") if to_timestamp is not None else None
+        if after_ts is not None and before_ts is not None and before_ts < after_ts:
+            raise MarketConfigurationError("Betfair current-order history requires to at or after from.")
+        params: Dict[str, Any] = {
+            "orderProjection": "ALL",
+            "orderBy": normalized_order_by,
+            "sortDir": normalized_sort_dir,
+            "includeItemDescription": bool(include_item_description),
+            "fromRecord": start,
+            "recordCount": count,
+        }
+        if market_filter:
+            params["marketIds"] = [market_filter]
+        if after_ts is not None or before_ts is not None:
+            date_range: Dict[str, str] = {}
+            if after_ts is not None:
+                date_range["from"] = self._timestamp_iso(after_ts)
+            if before_ts is not None:
+                date_range["to"] = self._timestamp_iso(before_ts)
+            params["dateRange"] = date_range
+        payload = self._rpc("SportsAPING/v1.0/listCurrentOrders", params)
+        if not isinstance(payload, Mapping):
+            return payload
+        rows = payload.get("currentOrders")
+        if not isinstance(rows, list):
+            return payload
+        filtered: List[Dict[str, Any]] = []
+        for raw in rows:
+            if not isinstance(raw, Mapping):
+                continue
+            if market_filter and str(raw.get("marketId") or "").strip() != market_filter:
+                continue
+            if selection_filter and str(raw.get("selectionId") or "").strip() != selection_filter:
+                continue
+            if normalized_status and str(raw.get("status") or "").strip().upper() != normalized_status:
+                continue
+            filtered.append(dict(raw))
+        return {**dict(payload), "currentOrders": filtered}
+
+    def get_account_funds(self, *, wallet: str = "") -> Any:
+        """Read available-to-bet funds through Betfair's documented account API."""
+
+        normalized_wallet = str(wallet or "").strip().upper()
+        if normalized_wallet and (
+            len(normalized_wallet) > 32
+            or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ_" for char in normalized_wallet)
+        ):
+            raise MarketConfigurationError("Betfair wallet must contain only letters and underscores.")
+        params = {"wallet": normalized_wallet} if normalized_wallet else {}
+        return self._account_rpc("AccountAPING/v1.0/getAccountFunds", params)
+
+    def get_account_details(self) -> Any:
+        """Read account profile/discount/points details through Betfair's account API."""
+
+        return self._account_rpc("AccountAPING/v1.0/getAccountDetails", {})
+
     def account_recovery(self, operation: str, **kwargs: Any) -> Any:
         normalized = str(operation or "").strip().lower()
+        if normalized == "active_orders":
+            return self.list_current_orders(
+                market_id=kwargs.get("market_id", ""),
+                contract_id=kwargs.get("contract_id", ""),
+                status=kwargs.get("status", ""),
+                order_by=kwargs.get("order_by", "BY_MATCH_TIME"),
+                sort_dir=kwargs.get("sort_dir", "EARLIEST_TO_LATEST"),
+                include_item_description=bool(kwargs.get("include_item_description", False)),
+                limit=kwargs.get("limit", 100),
+                offset=kwargs.get("offset", 0),
+                from_timestamp=kwargs.get("from_timestamp"),
+                to_timestamp=kwargs.get("to_timestamp"),
+            )
         if normalized == "cleared_orders":
             return self.list_cleared_orders(
                 bet_status=kwargs.get("bet_status", "SETTLED"),
@@ -309,7 +447,12 @@ class BetfairExchangeAdapter(MarketAdapter):
                 from_timestamp=kwargs.get("from_timestamp"),
                 to_timestamp=kwargs.get("to_timestamp"),
             )
-        raise MarketConfigurationError("Betfair account recovery supports only cleared_orders.")
+        if normalized == "funds":
+            return self.get_account_funds(wallet=kwargs.get("wallet", ""))
+        if normalized == "account":
+            return self.get_account_details()
+        supported = ", ".join(self.account_recovery_operations)
+        raise MarketConfigurationError(f"Betfair account recovery supports only: {supported}.")
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")
@@ -376,13 +519,19 @@ class BetfairExchangeAdapter(MarketAdapter):
         return markets[0]
 
     def _rpc(self, method: str, params: Mapping[str, Any]) -> Any:
+        return self._request_rpc(self.api_base_url, method, params)
+
+    def _account_rpc(self, method: str, params: Mapping[str, Any]) -> Any:
+        return self._request_rpc(self.account_api_base_url, method, params)
+
+    def _request_rpc(self, base_url: str, method: str, params: Mapping[str, Any]) -> Any:
         headers = self._headers(required=True)
         body = {"jsonrpc": "2.0", "method": method, "params": dict(params), "id": 1}
         self.runtime.rate_limiter.wait()
         try:
             response = self.runtime.session.request(
                 "POST",
-                self.api_base_url,
+                base_url,
                 json=body,
                 headers=headers,
                 timeout=self.runtime.timeout_seconds,
