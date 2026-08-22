@@ -6,6 +6,8 @@ export interface MarketCapabilities {
   event_listing: boolean;
   price_reading: boolean;
   orderbook_reading: boolean;
+  trade_history: boolean;
+  candle_history: boolean;
   alerts: boolean;
   paper_trading: boolean;
   live_trading: boolean;
@@ -43,6 +45,11 @@ export interface Market {
     runtime?: Record<string, unknown>;
     verified_blocker?: boolean;
     credential_requirement?: string;
+    account_recovery_operations?: string[];
+    authenticated_account_endpoints?: string[];
+    order_management_operations?: string[];
+    order_management_enabled?: boolean;
+    order_management_endpoints?: string[];
   };
   status_text: string;
   credential_env_vars: string[];
@@ -61,6 +68,161 @@ export interface MarketsPayload {
     enabled: number;
     implemented: number;
   };
+}
+
+export interface MarketEvent {
+  market_id: string;
+  event_id: string;
+  title: string;
+  url: string;
+  status: string;
+}
+
+export interface MarketContract {
+  market_id: string;
+  contract_id: string;
+  event_id: string;
+  title: string;
+  outcome: string;
+  url: string;
+  status: string;
+}
+
+export interface MarketPriceSnapshot {
+  market_id: string;
+  contract_id: string;
+  last: number | null;
+  bid: number | null;
+  ask: number | null;
+  midpoint: number | null;
+  source: string;
+}
+
+export interface MarketOrderbook {
+  market_id: string;
+  contract_id: string;
+  bids: Array<{ price: number; size: number }>;
+  asks: Array<{ price: number; size: number }>;
+  best_bid: number | null;
+  best_ask: number | null;
+}
+
+export interface MarketTrade {
+  market_id: string;
+  contract_id: string;
+  trade_id: string;
+  side: string;
+  price: number;
+  size: number;
+  timestamp: number | null;
+}
+
+export interface MarketCandle {
+  market_id: string;
+  contract_id: string;
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number | null;
+}
+
+export interface MarketEventsPayload {
+  market_id: string;
+  query: string;
+  limit: number;
+  events: MarketEvent[];
+}
+
+export interface MarketContractsPayload {
+  market_id: string;
+  event_id: string;
+  contracts: MarketContract[];
+}
+
+export interface MarketPricePayload {
+  market_id: string;
+  contract_id: string;
+  price: MarketPriceSnapshot | null;
+}
+
+export interface MarketOrderbookPayload {
+  market_id: string;
+  contract_id: string;
+  orderbook: MarketOrderbook | null;
+}
+
+export interface MarketTradesPayload {
+  market_id: string;
+  contract_id: string;
+  limit: number;
+  before: number | null;
+  after: number | null;
+  trades: MarketTrade[];
+}
+
+export interface MarketCandlesPayload {
+  market_id: string;
+  contract_id: string;
+  resolution: string;
+  from: number | null;
+  to: number | null;
+  candles: MarketCandle[];
+}
+
+export type MarketAccountOperation =
+  | "active_orders"
+  | "order_history"
+  | "order_detail"
+  | "fills"
+  | "positions"
+  | "settlements"
+  | "balance"
+  | "queue_positions"
+  | "settled_positions"
+  | "volume_metrics"
+  | "account_history"
+  | "user_orders"
+  | "market_orders"
+  | "cleared_orders"
+  | "settled_bets"
+  | "current_bets"
+  | "current_offers"
+  | "account"
+  | "portfolio"
+  | "subaccounts"
+  | "spot_balances";
+
+export interface MarketAccountPayload {
+  market_id: string;
+  operation: MarketAccountOperation;
+  parameters: Record<string, unknown>;
+  data: unknown;
+}
+
+export type MarketOrderManagementOperation =
+  | "cancel_orders"
+  | "cancel_all_orders"
+  | "cancel_market_orders"
+  | "update_orders"
+  | "replace_orders"
+  | "cancel_order"
+  | "batch_cancel_orders"
+  | "amend_order"
+  | "decrease_order"
+  | "cancel_offer"
+  | "cancel_offers"
+  | "cancel_all_offers"
+  | "edit_offer"
+  | "edit_offers"
+  | "batch_modify_orders";
+
+export interface MarketOrderManagementPayload {
+  market_id: string;
+  operation: MarketOrderManagementOperation;
+  parameters: Record<string, unknown>;
+  data: unknown;
 }
 
 export type AlertDirection = "above" | "below";
@@ -531,6 +693,8 @@ export interface CopyPayload {
   simulation_first: boolean;
   copy_trading_supported: boolean;
   adapter: string;
+  market_id?: string;
+  activity_identity_hint?: string;
   live_gate: {
     market_enabled: boolean;
     live_trading_enabled: boolean;

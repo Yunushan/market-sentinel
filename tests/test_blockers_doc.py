@@ -23,7 +23,9 @@ REQUIRED_COLUMNS = (
     "Reference",
 )
 IMPLEMENTED_MARKETS = {
+    "betmgm",
     "polymarket",
+    "blinq",
     "kalshi",
     "predictit",
     "manifold",
@@ -32,7 +34,9 @@ IMPLEMENTED_MARKETS = {
     "sx_bet",
     "azuro",
     "augur",
+    "reality_eth_markets",
     "omen",
+    "gnosis_prediction_markets",
     "zeitgeist",
     "myriad_markets",
     "xo_market",
@@ -41,7 +45,39 @@ IMPLEMENTED_MARKETS = {
     "predict_fun",
     "betfair_exchange",
     "crypto_com_predict",
+    "draftkings_predictions",
+    "fanatics_markets",
+    "fanduel_predicts",
+    "coinbase_prediction_markets",
+    "robinhood_prediction_markets",
+    "kalshi_via_robinhood",
+    "context_v2",
+    "smarkets",
+    "thales_market",
+    "metadao",
+    "seer",
+    "hyperliquid",
+    "trueo",
+    "zeitgeist_sdk_markets",
+    "zeitgeist_prediction_pools",
+    "ibkr_forecasttrader",
+    "forecastex",
+    "cme_prediction_markets",
+    "dflow",
     "xmarket",
+    "probable",
+    "matchbook",
+    "drift_bet",
+    "frenzy_finance",
+    "space",
+    "hedgehog_markets",
+    "prophet_exchange",
+    "prdt_finance",
+    "zetarium_world",
+    "lamas_finance",
+    "nadex",
+    "iowa_electronic_markets",
+    "scicast",
 }
 VERIFIED_BLOCKED_MARKETS = set(VERIFIED_BLOCKERS)
 
@@ -89,9 +125,10 @@ class BlockersDocTests(unittest.TestCase):
     def test_article35_reaudit_records_candidate_decisions(self) -> None:
         text = BLOCKERS.read_text(encoding="utf-8")
 
-        self.assertIn("No verified-blocked market was promoted", text)
+        self.assertIn("Frenzy Finance", text)
+        self.assertIn("BetIntent", text)
         self.assertIn("`context_v2`", text)
-        self.assertIn("sunset", text)
+        self.assertIn("current API reference", text)
         self.assertIn("`hyperliquid`", text)
         self.assertIn("outcomeMeta", text)
         self.assertIn("`thales_market`", text)

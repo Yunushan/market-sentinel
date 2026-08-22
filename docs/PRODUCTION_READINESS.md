@@ -34,18 +34,25 @@ check does not receive local test or security points.
 | --- | ---: | ---: | --- |
 | Architecture and scope | 18 | 18 | None beyond the repository contract |
 | Tests and correctness | 18 | 18 | None |
-| Security and safety | 17 | 17 | None in the reviewed repository-settings snapshot |
-| CI/CD and release | 17 | 16 | A current published `v1.0.11` release and artifact manifest |
+| Security and safety | 17 | 16 | Reviewed repository-settings JSON evidence |
+| CI/CD and release | 17 | 14 | Reviewed release-environment, release-history, and release JSON evidence |
 | Operations and recovery | 15 | 12 | Reviewed real-host deployment evidence for `v1.0.11` |
-| Platform evidence | 10 | 10 | None for the reviewed hosted matrix |
+| Platform evidence | 10 | 5 | Reviewed platform CI and platform JSON evidence |
 | Live acceptance | 5 | 0 | Reachable public endpoints, credentialed read evidence, and approved funded audit |
 
-The latest full audit is **91/100 (not ready)**. Local verification passed all
-543 tests (7 intentionally skipped), Ruff, the frontend build, and the frontend
-live smoke. The public-only Polymarket probe was retried and failed because the
-official API connections were reset from the audit network; no live evidence was
-invented to compensate for that failure. The score therefore reflects repository
-and reviewed GitHub evidence, not a production certification.
+The latest local audit on 2026-08-22 is **83/100 (not ready)**. Local
+verification passed all 684 tests (7 intentionally skipped), Ruff, the adapter
+catalog (68 markets, 55 implemented and 13 explicitly blocked), 192 offline
+fixtures, documentation, workflow, secret-hygiene, and packaging checks; branch
+coverage was 76% overall. The BetMGM partner Sports API is covered by a
+fixture-backed read-only/paper adapter; live and copy trading remain explicitly
+unsupported because no official order/account surface is available. The no-credential
+public-only Polymarket probe was attempted twice and failed because the
+external Gamma, Data, CLOB, and Bridge endpoints reset the connection from
+this environment; credentialed and funded checks remain blocked. No live
+evidence is invented to compensate for that gap. The score therefore reflects
+repeatable repository proof plus explicitly supplied evidence, not a
+production certification.
 
 The scorer never treats a workflow matrix as proof that a runner completed.
 It also does not promote Polymarket credentialed or funded tiers from a local

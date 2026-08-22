@@ -103,6 +103,39 @@ class MetaculusAdapterTests(unittest.TestCase):
         self.assertEqual(value.last, 1250)
         self.assertEqual(yes.source, "metaculus_api")
 
+    def test_list_candles_maps_official_forecast_history_for_all_question_types(self) -> None:
+        adapter = self.make_adapter()
+
+        with patch.dict("os.environ", {"METACULUS_API_TOKEN": "unit-test-token"}):
+            binary_yes = adapter.list_candles("1001:501:YES", resolution="forecast")
+            binary_no = adapter.list_candles("1001:501:NO", from_timestamp=1704153600)
+            multiple_beta = adapter.list_candles("1002:601:CHOICE:beta")
+            numeric = adapter.list_candles("1003:701:VALUE", to_timestamp=1704153600)
+
+        self.assertEqual([c.close for c in binary_yes], [0.4, 0.64])
+        self.assertEqual([c.close for c in binary_no], [0.36])
+        self.assertEqual([c.close for c in multiple_beta], [0.4, 0.75])
+        self.assertEqual([c.close for c in numeric], [1000.0, 1250.0])
+        self.assertEqual([c.open for c in binary_yes], [c.close for c in binary_yes])
+        self.assertTrue(all(c.volume is None for c in binary_yes))
+        self.assertEqual(binary_yes[0].raw["aggregation_method"], "recency_weighted")
+
+    def test_list_candles_rejects_unsupported_resampling_and_inaccessible_history(self) -> None:
+        adapter = self.make_adapter()
+        with patch.dict("os.environ", {"METACULUS_API_TOKEN": "unit-test-token"}):
+            with self.assertRaises(MarketConfigurationError):
+                adapter.list_candles("1001:501:YES", resolution="5m")
+
+        no_history = MetaculusAdapter()
+        no_history.runtime.get_json = lambda url, *, params=None, headers=None: {
+            "id": 9001,
+            "question": {"id": 901, "type": "binary", "aggregations": {}},
+        }  # type: ignore[method-assign]
+        with patch.dict("os.environ", {"METACULUS_API_TOKEN": "unit-test-token"}):
+            with self.assertRaises(MarketConfigurationError) as ctx:
+                no_history.list_candles("9001:901:YES")
+        self.assertIn("history", str(ctx.exception))
+
     def test_unavailable_community_prediction_is_clear(self) -> None:
         adapter = MetaculusAdapter()
         post = {
@@ -158,3 +191,4 @@ class MetaculusAdapterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

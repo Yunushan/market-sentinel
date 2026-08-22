@@ -6,9 +6,11 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from .base import MarketAdapter
 from .catalog import get_market_metadata
 from .errors import MarketConfigurationError, MarketHTTPError, UnsupportedFeatureError
+from .identity import require_activity_identity
 from .types import (
     MarketContract,
     MarketEvent,
+    MarketTrade,
     PaperOrderRequest,
     PaperOrderResult,
     PriceSnapshot,
@@ -34,6 +36,8 @@ class ManifoldAdapter(MarketAdapter):
                     [{"name": credential.name, "source": credential.source}] if credential else []
                 ),
                 "orderbook_supported": False,
+                "activity_feed_supported": True,
+                "copy_trading_supported": bool(self.capabilities.copy_trading),
             }
         )
         return health
@@ -75,6 +79,168 @@ class ManifoldAdapter(MarketAdapter):
             midpoint=price,
             source="manifold_probability",
             raw=data if isinstance(data, dict) else {},
+        )
+
+    def list_activity(self, identity: str, *, limit: int = 25) -> List[Dict[str, Any]]:
+        """Return normalized public Manifold bets for ``manifold:<username>``.
+
+        The public ``/v0/bets`` endpoint contains executed and pending limit
+        bets together. Only filled, non-cancelled, non-redemption bets are
+        exposed to the copy workflow; malformed rows are ignored rather than
+        turned into an unsafe order intent.
+        """
+
+        self.ensure_capability("copy_trading")
+        normalized = require_activity_identity(self.market_id, identity)
+        username = normalized.split(":", 1)[1]
+        desired = max(1, min(int(limit or 25), 1000))
+        payload = self._get("/bets", params={"username": username, "limit": desired})
+        rows = self._activity_rows(payload)
+        activities: List[Dict[str, Any]] = []
+        for bet in rows:
+            if bet.get("isRedemption") is True or bet.get("isCancelled") is True:
+                continue
+            if bet.get("isFilled") is False:
+                continue
+            try:
+                activities.append(self._activity_from_bet(normalized, bet))
+            except MarketConfigurationError:
+                continue
+        return activities
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Return normalized public Manifold fills for one contract.
+
+        Manifold's documented ``GET /v0/bets`` endpoint returns executed bets
+        (and open limit bets) rather than a separate trade resource.  A bet
+        may contain multiple ``fills``; each fill is emitted as its own
+        normalized trade so partial limit-order executions are not collapsed
+        into one misleading event.  ``before`` and ``after`` are interpreted
+        as Unix timestamps by the shared history API and sent as the
+        endpoint's documented millisecond ``beforeTime``/``afterTime``
+        filters.
+        """
+
+        market_id, outcome, answer_id = self._split_contract_id(contract_id)
+        params: Dict[str, Any] = {
+            "contractId": market_id,
+            "limit": self._history_limit(limit),
+        }
+        if before is not None:
+            params["beforeTime"] = self._history_timestamp_millis(before, "before")
+        if after is not None:
+            params["afterTime"] = self._history_timestamp_millis(after, "after")
+
+        payload = self._get("/bets", params=params)
+        rows = self._activity_rows(payload)
+        canonical = self._contract_id(market_id, outcome, answer_id)
+        trades: List[MarketTrade] = []
+        for bet in rows:
+            if bet.get("isCancelled") is True or bet.get("isRedemption") is True:
+                continue
+            row_market_id = str(bet.get("contractId") or bet.get("contract_id") or "").strip()
+            if row_market_id != market_id:
+                continue
+            row_answer_id = str(bet.get("answerId") or bet.get("answer_id") or "").strip() or None
+            if row_answer_id != answer_id:
+                continue
+            if answer_id is None and str(bet.get("outcome") or "").strip().upper() != outcome:
+                continue
+
+            raw_fills = bet.get("fills")
+            fills = [fill for fill in raw_fills if isinstance(fill, Mapping)] if isinstance(raw_fills, list) else []
+            if not fills:
+                # Normal bets have no fills array; their amount/shares pair
+                # represents one executed fill.  Do not treat an unfilled
+                # limit order as a trade.
+                if bet.get("isFilled") is False:
+                    continue
+                fills = [bet]
+
+            bet_id = str(bet.get("id") or bet.get("betId") or "").strip()
+            if not bet_id:
+                continue
+            bet_amount = self._finite_number(bet.get("amount"))
+            for index, fill in enumerate(fills):
+                amount = self._finite_number(fill.get("amount"))
+                shares = self._finite_number(fill.get("shares"))
+                if amount is None and fill is bet:
+                    amount = bet_amount
+                if shares is None and fill is bet:
+                    shares = self._finite_number(bet.get("shares"))
+                if shares is None or not self._is_positive_number(abs(shares)):
+                    continue
+
+                sign_source = bet_amount if bet_amount not in (None, 0.0) else amount
+                side = "SELL" if sign_source is not None and sign_source < 0 else "BUY"
+                price = self._safe_probability(fill.get("price"))
+                if price is None and amount is not None and shares != 0:
+                    price = self._safe_probability(abs(amount) / abs(shares))
+                if price is None:
+                    price = self._safe_probability(bet.get("limitProb"))
+                if price is None:
+                    price = self._safe_probability(bet.get("probAfter") if side == "BUY" else bet.get("probBefore"))
+                if price is None:
+                    continue
+
+                fill_id = bet_id if len(fills) == 1 else f"{bet_id}:{index}"
+                timestamp = self._timestamp_seconds(
+                    fill.get("timestamp")
+                    or fill.get("createdTime")
+                    or bet.get("createdTime")
+                    or bet.get("createdAt")
+                )
+                raw = dict(bet)
+                if fill is not bet:
+                    raw["fill"] = dict(fill)
+                trades.append(
+                    MarketTrade(
+                        market_id=self.market_id,
+                        contract_id=canonical,
+                        trade_id=fill_id,
+                        side=side,
+                        price=price,
+                        size=abs(shares),
+                        timestamp=timestamp,
+                        raw=raw,
+                    )
+                )
+        return trades
+
+    def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
+        """Build a guarded paper order from a normalized Manifold bet."""
+
+        self.ensure_capability("copy_trading")
+        contract_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
+        if not contract_id:
+            raise MarketConfigurationError("Manifold activity has no contract id.")
+        side = str(activity.get("side") or "").strip().upper()
+        if side not in {"BUY", "SELL"}:
+            raise MarketConfigurationError("Manifold activity side must be BUY or SELL.")
+        size = self._required_positive_number(activity.get("size"), "Manifold activity size")
+        raw_price = activity.get("price")
+        limit_price = None if raw_price in (None, "") else self._safe_probability(raw_price)
+        if raw_price not in (None, "") and limit_price is None:
+            raise MarketConfigurationError("Manifold activity reference probability must be between 0 and 1.")
+        metadata: Dict[str, Any] = {"activity": dict(activity), "source": "manifold_bet_feed"}
+        if side == "SELL":
+            metadata["shares"] = activity.get("shares") or size
+        return self.place_paper_order(
+            PaperOrderRequest(
+                market_id=self.market_id,
+                contract_id=contract_id,
+                side=side,
+                size=size,
+                limit_price=limit_price,
+                metadata=metadata,
+            )
         )
 
     def get_orderbook(self, contract_id: str):
@@ -142,6 +308,91 @@ class ManifoldAdapter(MarketAdapter):
 
     def _get(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> Any:
         return self.runtime.get_json(self._url(path), params=params)
+
+    @staticmethod
+    def _activity_rows(data: Any) -> List[Mapping[str, Any]]:
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, Mapping)]
+        if isinstance(data, Mapping):
+            for key in ("bets", "data", "results"):
+                value = data.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, Mapping)]
+        return []
+
+    def _activity_from_bet(self, identity: str, bet: Mapping[str, Any]) -> Dict[str, Any]:
+        market_id = str(bet.get("contractId") or bet.get("contract_id") or "").strip()
+        if not market_id:
+            raise MarketConfigurationError("Manifold bet response omitted contractId.")
+        answer_id = str(bet.get("answerId") or bet.get("answer_id") or "").strip() or None
+        if answer_id:
+            contract_id = self._contract_id(market_id, "ANSWER", answer_id)
+            outcome = str(bet.get("outcome") or answer_id).strip()
+        else:
+            outcome = str(bet.get("outcome") or "").strip().upper()
+            if outcome not in {"YES", "NO"}:
+                raise MarketConfigurationError("Manifold binary bet outcome must be YES or NO.")
+            contract_id = self._contract_id(market_id, outcome)
+
+        amount = self._finite_number(bet.get("amount"))
+        shares = self._finite_number(bet.get("shares"))
+        if amount is None and shares is None:
+            raise MarketConfigurationError("Manifold bet response omitted amount and shares.")
+        side = "SELL" if ((amount is not None and amount < 0) or (amount is None and shares is not None and shares < 0)) else "BUY"
+        if side == "BUY":
+            size = abs(amount if amount is not None else shares or 0.0)
+        else:
+            size = abs(shares if shares is not None else amount or 0.0)
+        if not self._is_positive_number(size):
+            raise MarketConfigurationError("Manifold bet size must be positive.")
+
+        limit_probability = self._safe_probability(bet.get("limitProb"))
+        if limit_probability is None:
+            limit_probability = self._safe_probability(
+                bet.get("probAfter") if side == "BUY" else bet.get("probBefore")
+            )
+        bet_id = str(bet.get("id") or bet.get("betId") or "").strip()
+        if not bet_id:
+            raise MarketConfigurationError("Manifold bet response omitted a stable id.")
+        timestamp = self._timestamp_seconds(bet.get("createdTime") or bet.get("createdAt") or bet.get("timestamp"))
+        username = identity.split(":", 1)[1]
+        return {
+            "type": "TRADE",
+            "proxyWallet": identity,
+            "wallet": identity,
+            "asset": contract_id,
+            "contract_id": contract_id,
+            "marketId": market_id,
+            "side": side,
+            "size": size,
+            "amount": abs(amount) if amount is not None else None,
+            "shares": abs(shares) if shares is not None else None,
+            "price": limit_probability,
+            "timestamp": timestamp,
+            "transactionHash": f"manifold-bet:{bet_id}",
+            "activity_id": bet_id,
+            "slug": str(bet.get("contractSlug") or bet.get("slug") or market_id),
+            "outcome": str(bet.get("outcome") or outcome),
+            "pseudonym": str(bet.get("userUsername") or bet.get("username") or username),
+            "raw": dict(bet),
+        }
+
+    @staticmethod
+    def _history_limit(value: Any) -> int:
+        try:
+            limit = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Manifold trade limit must be an integer.") from exc
+        return max(1, min(limit, 1000))
+
+    @staticmethod
+    def _history_timestamp_millis(value: Any, label: str) -> int:
+        number = ManifoldAdapter._finite_number(value)
+        if number is None or number <= 0:
+            raise MarketConfigurationError(f"Manifold trade {label} timestamp must be positive.")
+        if number < 100_000_000_000:
+            number *= 1000.0
+        return int(number)
 
     def _url(self, path: str) -> str:
         clean_path = "/" + str(path or "").strip("/")
@@ -341,6 +592,30 @@ class ManifoldAdapter(MarketAdapter):
         return number
 
     @staticmethod
+    def _finite_number(value: Any) -> Optional[float]:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+
+    @staticmethod
+    def _required_positive_number(value: Any, label: str) -> float:
+        number = ManifoldAdapter._finite_number(value)
+        if number is None or number <= 0:
+            raise MarketConfigurationError(f"{label} must be positive.")
+        return number
+
+    @staticmethod
+    def _timestamp_seconds(value: Any) -> int:
+        number = ManifoldAdapter._finite_number(value)
+        if number is None or number <= 0:
+            return 0
+        if number > 100_000_000_000:
+            number /= 1000.0
+        return int(number)
+
+    @staticmethod
     def _limit_probability(value: Any) -> float:
         probability = ManifoldAdapter._safe_probability(value)
         if probability is None or probability < 0.01 or probability > 0.99:
@@ -357,3 +632,4 @@ class ManifoldAdapter(MarketAdapter):
         except (TypeError, ValueError):
             return False
         return math.isfinite(number) and number > 0
+

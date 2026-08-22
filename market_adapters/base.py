@@ -7,10 +7,12 @@ from .errors import MarketConfigurationError, UnsupportedFeatureError
 from .runtime import AdapterRuntime, ResolvedCredential
 from .types import (
     MarketCapabilities,
+    MarketCandle,
     MarketContract,
     MarketEvent,
     MarketMetadata,
     OrderBookSnapshot,
+    MarketTrade,
     PaperOrderRequest,
     PaperOrderResult,
     PriceSnapshot,
@@ -26,6 +28,15 @@ class MarketAdapter:
 
     metadata = MarketMetadata(market_id="base", display_name="Base")
     live_order_sides = ("BUY", "SELL")
+    # Account recovery is deliberately separate from public trade history.
+    # Adapters opt in only when the upstream account endpoints are documented
+    # and the implementation has explicit credential/safety tests.
+    account_recovery_operations: tuple[str, ...] = ()
+    # Mutating order-management operations are deliberately separate from
+    # account recovery reads.  Concrete adapters must publish an explicit
+    # allow-list and enforce their own documented request schema and safety
+    # gates before sending a request.
+    order_management_operations: tuple[str, ...] = ()
 
     def __init__(
         self,
@@ -216,6 +227,50 @@ class MarketAdapter:
     def get_orderbook(self, contract_id: str) -> OrderBookSnapshot:
         self.ensure_capability("orderbook_reading")
         raise UnsupportedFeatureError(self.market_id, "orderbook_reading")
+
+    def list_trades(
+        self,
+        contract_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[float] = None,
+        after: Optional[float] = None,
+    ) -> List[MarketTrade]:
+        """Return normalized public trades when an adapter documents that feed."""
+
+        self.ensure_capability("trade_history")
+        raise UnsupportedFeatureError(self.market_id, "trade_history")
+
+    def list_candles(
+        self,
+        contract_id: str,
+        *,
+        resolution: str = "1h",
+        from_timestamp: Optional[float] = None,
+        to_timestamp: Optional[float] = None,
+    ) -> List[MarketCandle]:
+        """Return normalized OHLCV history when an adapter documents that feed."""
+
+        self.ensure_capability("candle_history")
+        raise UnsupportedFeatureError(self.market_id, "candle_history")
+
+    def account_recovery(self, operation: str, **kwargs: Any) -> Any:
+        """Read a documented authenticated account surface, when supported.
+
+        This is intentionally not part of the public market-data capability
+        flags: account payloads are private, credentialed, and vary by venue.
+        Concrete adapters must publish an explicit operation allow-list and
+        validate each operation's parameters before making a request.
+        """
+
+        del operation, kwargs
+        raise UnsupportedFeatureError(self.market_id, "account_recovery")
+
+    def manage_orders(self, operation: str, **kwargs: Any) -> Any:
+        """Run a documented authenticated order-management mutation."""
+
+        del operation, kwargs
+        raise UnsupportedFeatureError(self.market_id, "order_management")
 
     def place_paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
         self.ensure_capability("paper_trading")

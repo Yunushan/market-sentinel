@@ -33,13 +33,18 @@ from market_adapters import build_default_registry
 from market_adapters.registry import AdapterRegistry
 from market_adapters.catalog import MARKET_CATALOG, MARKET_IDS
 from market_adapters.errors import UnsupportedFeatureError
+from market_adapters.identity import activity_identity_hint, normalize_activity_identity
 from market_adapters.types import (
     MarketCapabilities,
+    MarketCandle,
+    MarketContract,
+    MarketEvent,
     MarketMetadata,
     OrderBookSnapshot,
     PaperOrderRequest,
     PaperOrderResult,
     PriceSnapshot,
+    MarketTrade,
 )
 from polymarket import data_api, gamma
 from polymarket.analytics_cache import (
@@ -107,11 +112,12 @@ from polymarket.ws_user import build_user_subscription
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_FRONTEND_DIR = (
-    Path(sys.executable).resolve().parent / "frontend" / "dist"
-    if getattr(sys, "frozen", False)
-    else PROJECT_ROOT / "frontend" / "dist"
-)
+# PyInstaller's onedir layout keeps the bundled Python modules below the
+# release root and places ``frontend/dist`` beside the executable.  Derive the
+# release root from this module rather than from ``sys.executable`` so a
+# deployment cannot turn the static-file root into attacker-controlled input.
+_RESOURCE_ROOT = PROJECT_ROOT.parent if getattr(sys, "frozen", False) else PROJECT_ROOT
+DEFAULT_FRONTEND_DIR = _RESOURCE_ROOT / "frontend" / "dist"
 PROJECT_NAME = "market-sentinel"
 HASHED_FRONTEND_ASSET_RE = re.compile(r"-[A-Za-z0-9_-]{8,}\.[^.]+$")
 STATIC_FRONTEND_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -264,6 +270,13 @@ API_ROUTES = {
         "/api/state",
         "/api/config",
         "/api/markets",
+        "/api/markets/{market_id}/events",
+        "/api/markets/{market_id}/contracts",
+        "/api/markets/{market_id}/price",
+        "/api/markets/{market_id}/orderbook",
+        "/api/markets/{market_id}/trades",
+        "/api/markets/{market_id}/candles",
+        "/api/markets/{market_id}/account/{operation}",
         "/api/alerts",
         "/api/wallets",
         "/api/copy",
@@ -314,6 +327,7 @@ API_ROUTES = {
         "/api/wallets/poll",
         "/api/copy/preview",
         "/api/live-safety/preflight",
+        "/api/markets/{market_id}/orders/{operation}",
         "/api/paper/quote",
         "/api/paper/quote-limit",
         "/api/paper/preview-impact",
@@ -1351,6 +1365,21 @@ def require_polymarket_selected(cfg: AppConfig, feature: str) -> None:
     if str(cfg.selected_market_id or "").strip().lower() != "polymarket":
         raise ValueError(f"{feature} is only available when the selected market is polymarket.")
     require_market_enabled(cfg, "polymarket", feature)
+
+
+def require_selected_market(cfg: AppConfig, feature: str) -> str:
+    """Require an enabled selected market and return its normalized id.
+
+    Wallet tracking and simulation-first copy workflows are market-scoped now;
+    Polymarket analytics remains intentionally protected by
+    ``require_polymarket_selected`` above.
+    """
+
+    market_id = str(cfg.selected_market_id or "").strip().lower()
+    if not market_id:
+        raise ValueError(f"{feature} requires a selected market.")
+    require_market_enabled(cfg, market_id, feature)
+    return market_id
 
 
 def wallet_payload(wallet: WalletWatch) -> Dict[str, Any]:
@@ -2760,10 +2789,17 @@ def find_wallet(cfg: AppConfig, wallet_id: str) -> WalletWatch:
     raise ValueError(f"Unknown wallet id: {normalized}")
 
 
-def wallet_from_payload(payload: Mapping[str, Any], existing: Optional[WalletWatch] = None) -> WalletWatch:
+def wallet_from_payload(
+    payload: Mapping[str, Any],
+    existing: Optional[WalletWatch] = None,
+    *,
+    market_id: str = "polymarket",
+) -> WalletWatch:
     raw_wallet = str(payload.get("wallet") if "wallet" in payload else (existing.wallet if existing else "")).strip()
-    wallet = normalize_wallet(raw_wallet)
+    wallet = normalize_activity_identity(market_id, raw_wallet)
     if not wallet:
+        if str(market_id or "").strip().lower() == "manifold":
+            raise ValueError("wallet must use the safe manifold:<username> activity identity format.")
         raise ValueError("wallet must be a valid 0x wallet/proxyWallet address.")
     display_name = str(
         payload.get("display_name") if "display_name" in payload else (existing.display_name if existing else "")
@@ -2784,8 +2820,8 @@ def wallet_from_payload(payload: Mapping[str, Any], existing: Optional[WalletWat
 
 
 def add_wallet_watch(cfg: AppConfig, payload: Mapping[str, Any]) -> WalletWatch:
-    require_polymarket_selected(cfg, "Wallet tracking")
-    wallet = wallet_from_payload(payload)
+    market_id = require_selected_market(cfg, "Wallet tracking")
+    wallet = wallet_from_payload(payload, market_id=market_id)
     if any(item.wallet == wallet.wallet for item in cfg.wallets):
         raise ValueError("This wallet is already being tracked.")
     cfg.wallets.append(wallet)
@@ -2793,8 +2829,9 @@ def add_wallet_watch(cfg: AppConfig, payload: Mapping[str, Any]) -> WalletWatch:
 
 
 def update_wallet_watch(cfg: AppConfig, wallet_id: str, payload: Mapping[str, Any]) -> WalletWatch:
+    market_id = require_selected_market(cfg, "Wallet tracking")
     wallet = find_wallet(cfg, wallet_id)
-    wallet_from_payload(payload, existing=wallet)
+    wallet_from_payload(payload, existing=wallet, market_id=market_id)
     duplicates = [item for item in cfg.wallets if item.wallet == wallet.wallet and item.id != wallet.id]
     if duplicates:
         raise ValueError("This wallet is already being tracked.")
@@ -2812,7 +2849,8 @@ def copy_payload(
     registry: Optional[AdapterRegistry] = None,
 ) -> Dict[str, Any]:
     registry = registry or build_default_registry()
-    market_cfg = cfg.markets.get("polymarket")
+    market_id = str(cfg.selected_market_id or "").strip().lower() or "polymarket"
+    market_cfg = cfg.markets.get(market_id)
     settings = market_cfg.settings if market_cfg else {}
     status = "simulation"
     if not cfg.copytrading.enabled:
@@ -2830,12 +2868,12 @@ def copy_payload(
         "max_notional": _safe_float(settings.get("live_trading_max_notional"), None),
     }
     try:
-        adapter = adapter_for_market(cfg, "polymarket", registry)
+        adapter = adapter_for_market(cfg, market_id, registry)
         capability = adapter.capabilities.copy_trading
         adapter_name = adapter.display_name
     except Exception:
         capability = False
-        adapter_name = "polymarket"
+        adapter_name = market_id
     followed_wallets = cfg.copytrading.normalized_follow_wallets()
     tracked_wallets = {wallet.wallet for wallet in cfg.wallets}
     return {
@@ -2848,11 +2886,18 @@ def copy_payload(
         "simulation_first": not cfg.copytrading.live,
         "copy_trading_supported": bool(capability),
         "adapter": adapter_name,
+        "market_id": market_id,
+        "activity_identity_hint": activity_identity_hint(market_id),
         "live_gate": live_gate,
     }
 
 
-def _wallets_from_copy_payload(payload: Mapping[str, Any], existing: CopyTradeSettings) -> List[str]:
+def _wallets_from_copy_payload(
+    payload: Mapping[str, Any],
+    existing: CopyTradeSettings,
+    *,
+    market_id: str = "polymarket",
+) -> List[str]:
     raw_values: List[Any] = []
     if "follow_wallets" in payload:
         raw = payload.get("follow_wallets")
@@ -2872,16 +2917,23 @@ def _wallets_from_copy_payload(payload: Mapping[str, Any], existing: CopyTradeSe
         raw_wallet = str(raw or "").strip().lower()
         if not raw_wallet:
             continue
-        normalized = normalize_wallet(raw_wallet)
+        normalized = normalize_activity_identity(market_id, raw_wallet)
         if not normalized:
+            if str(market_id or "").strip().lower() == "manifold":
+                raise ValueError("follow_wallets must contain only safe manifold:<username> activity identities.")
             raise ValueError("follow_wallets must contain only valid 0x wallet/proxyWallet addresses.")
         if normalized not in wallets:
             wallets.append(normalized)
     return wallets
 
 
-def copy_settings_from_payload(payload: Mapping[str, Any], existing: CopyTradeSettings) -> CopyTradeSettings:
-    follow_wallets = _wallets_from_copy_payload(payload, existing)
+def copy_settings_from_payload(
+    payload: Mapping[str, Any],
+    existing: CopyTradeSettings,
+    *,
+    market_id: str = "polymarket",
+) -> CopyTradeSettings:
+    follow_wallets = _wallets_from_copy_payload(payload, existing, market_id=market_id)
     percentage_keys = ("copy_percentage", "scale_percent", "percentage")
     percentage_value = next((payload[key] for key in percentage_keys if key in payload), None)
     if percentage_value is not None:
@@ -2922,8 +2974,8 @@ def copy_settings_from_payload(payload: Mapping[str, Any], existing: CopyTradeSe
 
 
 def apply_copy_settings_patch(cfg: AppConfig, payload: Mapping[str, Any]) -> CopyTradeSettings:
-    require_polymarket_selected(cfg, "Copy trading settings")
-    cfg.copytrading = copy_settings_from_payload(payload, cfg.copytrading)
+    market_id = require_selected_market(cfg, "Copy trading settings")
+    cfg.copytrading = copy_settings_from_payload(payload, cfg.copytrading, market_id=market_id)
     return cfg.copytrading
 
 
@@ -2986,11 +3038,16 @@ def copy_trade_preview_from_activity(
     activity: Mapping[str, Any],
     conflict_state: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    if str(cfg.selected_market_id or "").strip().lower() != "polymarket":
-        return {"status": "skipped", "reason": "selected market is not polymarket"}
+    market_id = require_selected_market(cfg, "Copy trading preview")
     settings = cfg.copytrading
     if not settings.enabled:
         return {"status": "skipped", "reason": "copy trading disabled"}
+    adapter = adapter_for_market(cfg, market_id, registry)
+    if not adapter.capabilities.copy_trading:
+        return {
+            "status": "skipped",
+            "reason": f"{adapter.display_name} does not expose an official account-activity copy feed",
+        }
     followed_wallets = settings.normalized_follow_wallets()
     if not followed_wallets:
         return {"status": "skipped", "reason": "follow wallet is not set"}
@@ -3001,13 +3058,12 @@ def copy_trade_preview_from_activity(
         return {"status": "skipped", "reason": "activity side is not BUY or SELL"}
     if side == "SELL" and not settings.allow_sells:
         return {"status": "skipped", "reason": "SELL copying disabled"}
-    token_id = str(activity.get("asset") or "").strip()
+    token_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
     if not token_id:
         return {"status": "skipped", "reason": "activity has no asset token"}
     raw_size = _safe_float(activity.get("size"), 0.0) or 0.0
     raw_price = _safe_float(activity.get("price"), None)
     size = max(0.0, raw_size * float(settings.scale))
-    adapter = adapter_for_market(cfg, "polymarket", registry)
     best_bid = best_ask = None
     try:
         orderbook = adapter.get_orderbook(token_id)
@@ -3024,7 +3080,15 @@ def copy_trade_preview_from_activity(
         limit_price = max(0.0, float(reference_price if reference_price is not None else 0.01) - slippage)
     max_usdc = max(0.01, float(settings.max_usdc_per_trade))
     capped = False
-    if limit_price > 0:
+    # Manifold and Myriad BUY activity sizes are collateral budgets, while
+    # SELL activity sizes are shares. Do not divide a BUY budget by
+    # probability a second time.
+    buy_budget_activity = market_id in {"manifold", "myriad_markets"} and side == "BUY"
+    if buy_budget_activity:
+        if size > max_usdc:
+            size = max_usdc
+            capped = True
+    elif limit_price > 0:
         max_shares = max_usdc / limit_price
         if size > max_shares:
             size = max_shares
@@ -3034,14 +3098,22 @@ def copy_trade_preview_from_activity(
     conflict_reason = copy_trade_conflict_reason(settings, activity, conflict_state)
     if conflict_reason:
         return {"status": "skipped", "reason": conflict_reason, "conflict_guard": True}
+    order_metadata: Dict[str, Any] = {
+        "source": "copy_trading",
+        "tif": "FOK",
+        "activity_key": activity_key(activity),
+    }
+    if market_id in {"manifold", "myriad_markets"} and side == "SELL":
+        order_metadata["shares"] = activity.get("shares") or size
     order = PaperOrderRequest(
-        market_id="polymarket",
+        market_id=market_id,
         contract_id=token_id,
         side=side,
         size=size,
         limit_price=limit_price,
-        metadata={"source": "copy_trading", "tif": "FOK", "activity_key": activity_key(activity)},
+        metadata=order_metadata,
     )
+    approx_notional = order.size if buy_budget_activity else order.size * float(order.limit_price or 0.0)
     result: Dict[str, Any] = {
         "status": "live_preflight" if settings.live else "simulation",
         "live": bool(settings.live),
@@ -3052,7 +3124,7 @@ def copy_trade_preview_from_activity(
             "side": order.side,
             "size": order.size,
             "limit_price": order.limit_price,
-            "approx_notional": order.size * float(order.limit_price or 0.0),
+            "approx_notional": approx_notional,
         },
         "pricing": {
             "raw_price": raw_price,
@@ -3081,11 +3153,11 @@ def copy_trade_preview_from_activity(
 
 
 def copy_preview_payload(cfg: AppConfig, registry: AdapterRegistry, payload: Mapping[str, Any]) -> Dict[str, Any]:
-    require_polymarket_selected(cfg, "Copy trading preview")
+    require_selected_market(cfg, "Copy trading preview")
     default_wallets = cfg.copytrading.normalized_follow_wallets()
     activity = {
         "proxyWallet": payload.get("proxyWallet") or payload.get("proxy_wallet") or (default_wallets[0] if default_wallets else ""),
-        "asset": payload.get("asset") or payload.get("token_id") or "",
+        "asset": payload.get("asset") or payload.get("contract_id") or payload.get("token_id") or "",
         "side": payload.get("side") or "BUY",
         "size": payload.get("size") if "size" in payload else 0,
         "price": payload.get("price") if "price" in payload else None,
@@ -3104,7 +3176,13 @@ def poll_wallet_activity(
     *,
     limit: int = 25,
 ) -> Dict[str, Any]:
-    require_polymarket_selected(cfg, "Wallet polling")
+    market_id = require_selected_market(cfg, "Wallet polling")
+    adapter = adapter_for_market(cfg, market_id, registry)
+    activity_loader = getattr(adapter, "list_activity", None)
+    if not callable(activity_loader) and market_id != "polymarket":
+        raise ValueError(
+            f"{adapter.display_name} does not expose an official wallet activity feed for tracking."
+        )
     emitted: List[Dict[str, Any]] = []
     problems: List[str] = []
     copy_conflicts: Dict[str, Dict[str, Any]] = {}
@@ -3112,18 +3190,23 @@ def poll_wallet_activity(
         if not wallet.enabled:
             continue
         try:
-            items = data_api.get_activity(wallet.wallet, limit=limit, types=["TRADE"])
+            if callable(activity_loader):
+                items = activity_loader(wallet.wallet, limit=limit)
+            else:
+                items = data_api.get_activity(wallet.wallet, limit=limit, types=["TRADE"])
         except Exception as exc:
             problems.append(f"{wallet.wallet}: {exc}")
             continue
         seen_keys = set(wallet.seen_activity_keys or [])
         new_items: List[Tuple[str, Mapping[str, Any]]] = []
-        for item in reversed(items):
+        for item in reversed(items or []):
+            if not isinstance(item, Mapping):
+                continue
             key = activity_key(item)
             if key in seen_keys:
                 continue
             timestamp = int(item.get("timestamp") or 0)
-            tx = str(item.get("transactionHash") or "")
+            tx = str(item.get("transactionHash") or item.get("transaction_hash") or "")
             if timestamp > (wallet.last_seen_ts or 0):
                 new_items.append((key, item))
                 seen_keys.add(key)
@@ -3134,7 +3217,7 @@ def poll_wallet_activity(
             if wallet.only_market_slug and str(item.get("slug") or "") != wallet.only_market_slug:
                 continue
             wallet.last_seen_ts = max(wallet.last_seen_ts or 0, int(item.get("timestamp") or 0))
-            wallet.last_seen_tx = str(item.get("transactionHash") or wallet.last_seen_tx or "")
+            wallet.last_seen_tx = str(item.get("transactionHash") or item.get("transaction_hash") or wallet.last_seen_tx or "")
             wallet.seen_activity_keys.append(key)
             if len(wallet.seen_activity_keys) > 200:
                 wallet.seen_activity_keys = wallet.seen_activity_keys[-200:]
@@ -3230,6 +3313,32 @@ def format_paper_order_impact(impact: Mapping[str, Any]) -> str:
     return "; ".join(parts)
 
 
+def serialize_market_event(event: MarketEvent) -> Dict[str, Any]:
+    """Return the stable, non-raw event schema shared by API and clients."""
+
+    return {
+        "market_id": event.market_id,
+        "event_id": event.event_id,
+        "title": event.title,
+        "url": event.url,
+        "status": event.status,
+    }
+
+
+def serialize_market_contract(contract: MarketContract) -> Dict[str, Any]:
+    """Return the stable, non-raw contract schema shared by API and clients."""
+
+    return {
+        "market_id": contract.market_id,
+        "contract_id": contract.contract_id,
+        "event_id": contract.event_id,
+        "title": contract.title,
+        "outcome": contract.outcome,
+        "url": contract.url,
+        "status": contract.status,
+    }
+
+
 def serialize_price_snapshot(snapshot: Optional[PriceSnapshot]) -> Optional[Dict[str, Any]]:
     if snapshot is None:
         return None
@@ -3257,6 +3366,537 @@ def serialize_orderbook(orderbook: Optional[OrderBookSnapshot]) -> Optional[Dict
         "asks": [{"price": level.price, "size": level.size} for level in orderbook.asks],
         "best_bid": orderbook.bids[0].price if orderbook.bids else None,
         "best_ask": orderbook.asks[0].price if orderbook.asks else None,
+    }
+
+
+def serialize_market_trade(trade: MarketTrade) -> Dict[str, Any]:
+    return {
+        "market_id": trade.market_id,
+        "contract_id": trade.contract_id,
+        "trade_id": trade.trade_id,
+        "side": trade.side,
+        "price": trade.price,
+        "size": trade.size,
+        "timestamp": trade.timestamp,
+    }
+
+
+def serialize_market_candle(candle: MarketCandle) -> Dict[str, Any]:
+    return {
+        "market_id": candle.market_id,
+        "contract_id": candle.contract_id,
+        "timestamp": candle.timestamp,
+        "open": candle.open,
+        "high": candle.high,
+        "low": candle.low,
+        "close": candle.close,
+        "volume": candle.volume,
+    }
+
+
+def market_events_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    query_params: Mapping[str, List[str]],
+) -> Dict[str, Any]:
+    normalized_market_id = str(market_id or "").strip().lower()
+    require_market_enabled(cfg, normalized_market_id, "event listing")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    query = _query_value(query_params, "query", "")
+    limit = _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 1000)
+    events = adapter.list_events(query, limit=limit)
+    return {
+        "market_id": normalized_market_id,
+        "query": query,
+        "limit": limit,
+        "events": [serialize_market_event(event) for event in events],
+    }
+
+
+def market_contracts_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    query_params: Mapping[str, List[str]],
+) -> Dict[str, Any]:
+    normalized_market_id = str(market_id or "").strip().lower()
+    event_id = _query_value(query_params, "event_id")
+    if not event_id:
+        raise ValueError("event_id is required.")
+    require_market_enabled(cfg, normalized_market_id, "contract listing")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    contracts = adapter.list_contracts(event_id)
+    return {
+        "market_id": normalized_market_id,
+        "event_id": event_id,
+        "contracts": [serialize_market_contract(contract) for contract in contracts],
+    }
+
+
+def market_price_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    query_params: Mapping[str, List[str]],
+) -> Dict[str, Any]:
+    normalized_market_id = str(market_id or "").strip().lower()
+    contract_id = _query_value(query_params, "contract_id")
+    if not contract_id:
+        raise ValueError("contract_id is required.")
+    require_market_enabled(cfg, normalized_market_id, "price reading")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    return {
+        "market_id": normalized_market_id,
+        "contract_id": contract_id,
+        "price": serialize_price_snapshot(adapter.get_price(contract_id)),
+    }
+
+
+def market_orderbook_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    query_params: Mapping[str, List[str]],
+) -> Dict[str, Any]:
+    normalized_market_id = str(market_id or "").strip().lower()
+    contract_id = _query_value(query_params, "contract_id")
+    if not contract_id:
+        raise ValueError("contract_id is required.")
+    require_market_enabled(cfg, normalized_market_id, "orderbook reading")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    return {
+        "market_id": normalized_market_id,
+        "contract_id": contract_id,
+        "orderbook": serialize_orderbook(adapter.get_orderbook(contract_id)),
+    }
+
+
+def market_trades_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    query_params: Mapping[str, List[str]],
+) -> Dict[str, Any]:
+    normalized_market_id = str(market_id or "").strip().lower()
+    contract_id = _query_value(query_params, "contract_id")
+    if not contract_id:
+        raise ValueError("contract_id is required.")
+    require_market_enabled(cfg, normalized_market_id, "trade history")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    limit = _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 500)
+    before = _query_float(query_params, "before")
+    after = _query_float(query_params, "after")
+    trades = adapter.list_trades(contract_id, limit=limit, before=before, after=after)
+    return {
+        "market_id": normalized_market_id,
+        "contract_id": contract_id,
+        "limit": limit,
+        "before": before,
+        "after": after,
+        "trades": [serialize_market_trade(trade) for trade in trades],
+    }
+
+
+def market_candles_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    query_params: Mapping[str, List[str]],
+) -> Dict[str, Any]:
+    normalized_market_id = str(market_id or "").strip().lower()
+    contract_id = _query_value(query_params, "contract_id")
+    if not contract_id:
+        raise ValueError("contract_id is required.")
+    require_market_enabled(cfg, normalized_market_id, "candle history")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    resolution = _query_value(query_params, "resolution", "1h")
+    candles = adapter.list_candles(
+        contract_id,
+        resolution=resolution,
+        from_timestamp=_query_float(query_params, "from"),
+        to_timestamp=_query_float(query_params, "to"),
+    )
+    return {
+        "market_id": normalized_market_id,
+        "contract_id": contract_id,
+        "resolution": resolution,
+        "from": _query_float(query_params, "from"),
+        "to": _query_float(query_params, "to"),
+        "candles": [serialize_market_candle(candle) for candle in candles],
+    }
+
+
+def market_account_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    operation: str,
+    query_params: Mapping[str, List[str]],
+) -> Dict[str, Any]:
+    """Read one explicitly documented authenticated account operation.
+
+    Account recovery is not treated as public market-data history.  The
+    adapter must publish an operation allow-list; arbitrary authenticated
+    paths are never accepted by this route.
+    """
+
+    normalized_market_id = str(market_id or "").strip().lower()
+    normalized_operation = str(operation or "").strip().lower()
+    require_market_enabled(cfg, normalized_market_id, "account recovery")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    supported = tuple(str(value).strip().lower() for value in getattr(adapter, "account_recovery_operations", ()))
+    if normalized_operation not in supported:
+        raise UnsupportedFeatureError(
+            normalized_market_id,
+            "account_recovery",
+            f"{normalized_market_id} does not support account operation {normalized_operation or '<empty>'}. "
+            f"Supported operations: {', '.join(supported) or 'none'}.",
+        )
+
+    kwargs: Dict[str, Any] = {}
+    if normalized_market_id == "limitless_exchange":
+        kwargs = {"on_behalf_of": _query_value(query_params, "on_behalf_of") or None}
+        if normalized_operation == "user_orders":
+            raw_market_slug = _query_value(query_params, "market_slug")
+            if not raw_market_slug:
+                raw_market_slug = _query_value(query_params, "contract_id").split(":", 1)[0]
+            kwargs["market_slug"] = raw_market_slug
+    elif normalized_market_id == "xmarket":
+        raw_contract = _query_value(query_params, "contract_id")
+        market_id_filter = _query_value(query_params, "market_id")
+        if not market_id_filter and raw_contract:
+            market_id_filter = raw_contract.split(":", 1)[0].strip()
+        kwargs = {
+            "status": _query_value(query_params, "status") or None,
+            "page": _clamp_int(_query_value(query_params, "page", "1"), 1, 1, 10000),
+            "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 1000),
+        }
+        if normalized_operation == "market_orders":
+            kwargs["market_id"] = market_id_filter
+    elif normalized_market_id == "smarkets":
+        kwargs = {
+            "status": _query_value(query_params, "status"),
+            "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 1000),
+        }
+    elif normalized_market_id == "probable":
+        kwargs = {
+            "page": _clamp_int(_query_value(query_params, "page", "1"), 1, 1, 10000),
+            "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 50),
+            "event_id": _query_value(query_params, "event_id"),
+            "token_ids": query_params.get("token_ids") or query_params.get("token_id") or [],
+        }
+        if normalized_operation == "order":
+            kwargs = {
+                "order_id": _query_value(query_params, "order_id"),
+                "token_id": _query_value(query_params, "token_id"),
+                "client_order_id": _query_value(query_params, "client_order_id"),
+            }
+    elif normalized_market_id == "kalshi":
+        raw_contract = _query_value(query_params, "contract_id")
+        ticker = _query_value(query_params, "ticker") or raw_contract.split(":", 1)[0]
+        raw_subaccount = _query_value(query_params, "subaccount")
+        subaccount = _clamp_int(raw_subaccount, 0, 0, 63) if raw_subaccount else None
+        kwargs.update(
+            {
+                "ticker": ticker,
+                "event_ticker": _query_value(query_params, "event_ticker"),
+                "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 1000),
+                "cursor": _query_value(query_params, "cursor"),
+                "min_timestamp": _query_float(query_params, "from"),
+                "max_timestamp": _query_float(query_params, "to"),
+                "subaccount": subaccount,
+            }
+        )
+        if normalized_operation == "order_history":
+            kwargs.update(
+                {
+                    "status": _query_value(query_params, "status", "executed").lower(),
+                    "historical": _query_bool(query_params, "historical", False),
+                }
+            )
+        elif normalized_operation == "fills":
+            kwargs.update(
+                {
+                    "order_id": _query_value(query_params, "order_id"),
+                    "historical": _query_bool(query_params, "historical", False),
+                }
+            )
+        elif normalized_operation == "positions":
+            kwargs["count_filter"] = _query_value(query_params, "count_filter")
+        elif normalized_operation == "queue_positions":
+            kwargs = {
+                "ticker": ticker,
+                "event_ticker": _query_value(query_params, "event_ticker"),
+                "subaccount": subaccount,
+            }
+        elif normalized_operation == "balance":
+            kwargs = {"subaccount": subaccount}
+    elif normalized_market_id == "polymarket":
+        raw_contract = _query_value(query_params, "contract_id")
+        kwargs = {
+            "market_id": _query_value(query_params, "market_id"),
+            "contract_id": raw_contract,
+            "next_cursor": _query_value(query_params, "cursor"),
+        }
+        if normalized_operation == "order_detail":
+            kwargs = {"order_id": _query_value(query_params, "order_id")}
+        elif normalized_operation == "fills":
+            kwargs.update(
+                {
+                    "trade_id": _query_value(query_params, "trade_id"),
+                    "before": _query_float(query_params, "before")
+                    if _query_value(query_params, "before") is not None
+                    else _query_float(query_params, "to"),
+                    "after": _query_float(query_params, "after")
+                    if _query_value(query_params, "after") is not None
+                    else _query_float(query_params, "from"),
+                    "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 500),
+                }
+            )
+    elif normalized_market_id == "hyperliquid":
+        if normalized_operation in {"active_orders", "positions"}:
+            kwargs["dex"] = _query_value(query_params, "dex") or ""
+        elif normalized_operation == "order_history":
+            kwargs["limit"] = _clamp_int(_query_value(query_params, "limit", "2000"), 2000, 1, 2000)
+    elif normalized_market_id == "opinion_labs":
+        if normalized_operation == "order_detail":
+            kwargs = {"order_id": _query_value(query_params, "order_id")}
+        else:
+            kwargs = {
+                "page": _clamp_int(_query_value(query_params, "page", "1"), 1, 1, 10000),
+                "limit": _clamp_int(_query_value(query_params, "limit", "10"), 10, 1, 20),
+                "market_id": _query_value(query_params, "market_id"),
+                "chain_id": _query_value(query_params, "chain_id"),
+            }
+            if normalized_operation == "order_history":
+                kwargs["status"] = _query_value(query_params, "status")
+    elif normalized_market_id == "matchbook":
+        if normalized_operation in {"balance", "account"}:
+            kwargs = {}
+        elif normalized_operation in {"settled_bets", "current_bets"}:
+            kwargs = {
+                "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+                "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 1000),
+                "sport_id": _query_value(query_params, "sport_id"),
+                "event_id": _query_value(query_params, "event_id"),
+                "market_id": _query_value(query_params, "market_id"),
+                "odds_type": _query_value(query_params, "odds_type", "DECIMAL"),
+                "from_timestamp": _query_float(query_params, "from"),
+                "to_timestamp": _query_float(query_params, "to"),
+            }
+        elif normalized_operation == "current_offers":
+            raw_interval = _query_value(query_params, "interval")
+            kwargs = {
+                "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+                "limit": _clamp_int(_query_value(query_params, "limit", "20"), 20, 1, 1000),
+                "sport_id": _query_value(query_params, "sport_id"),
+                "event_id": _query_value(query_params, "event_id"),
+                "market_id": _query_value(query_params, "market_id"),
+                "runner_id": _query_value(query_params, "runner_id"),
+                "side": _query_value(query_params, "side"),
+                "status": _query_value(query_params, "offer_status"),
+                "interval": _clamp_int(raw_interval, 0, 0, 2147483647) if raw_interval else None,
+                "include_edits": _query_bool(query_params, "include_edits", False),
+                "cancellation_reason": _query_value(query_params, "cancellation_reason"),
+                "aggregation_type": _query_value(query_params, "aggregation_type", "none"),
+                "odds_type": _query_value(query_params, "odds_type", "DECIMAL"),
+            }
+    elif normalized_market_id == "betfair_exchange":
+        if normalized_operation in {"funds", "account"}:
+            if normalized_operation == "funds":
+                kwargs = {"wallet": _query_value(query_params, "wallet")}
+        elif normalized_operation == "statement":
+            kwargs = {
+                "locale": _query_value(query_params, "locale", "en"),
+                "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 1000),
+                "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+                "include_item": not _query_bool(query_params, "exclude_item", False),
+                "wallet": _query_value(query_params, "wallet"),
+                "from_timestamp": _query_float(query_params, "from"),
+                "to_timestamp": _query_float(query_params, "to"),
+            }
+        elif normalized_operation == "currency_rates":
+            kwargs = {"from_currency": _query_value(query_params, "from_currency")}
+        elif normalized_operation in {"active_orders", "cleared_orders"}:
+            market_id_filter = _query_value(query_params, "market_id")
+            runner_id = _query_value(query_params, "runner_id")
+            raw_contract = _query_value(query_params, "contract_id")
+            if not market_id_filter and raw_contract:
+                parts = raw_contract.split(":", 1)
+                market_id_filter = parts[0].strip()
+                if len(parts) == 2 and not runner_id:
+                    runner_id = parts[1].strip()
+            if normalized_operation == "active_orders":
+                kwargs = {
+                    "market_id": market_id_filter,
+                    "contract_id": raw_contract,
+                    "status": _query_value(query_params, "status"),
+                    "order_by": _query_value(query_params, "order_by", "BY_MATCH_TIME"),
+                    "sort_dir": _query_value(query_params, "sort_dir", "EARLIEST_TO_LATEST"),
+                    "include_item_description": _query_bool(query_params, "include_item_description", False),
+                    "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 1000),
+                    "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+                    "from_timestamp": _query_float(query_params, "from"),
+                    "to_timestamp": _query_float(query_params, "to"),
+                }
+            else:
+                kwargs = {
+                    "bet_status": _query_value(query_params, "status", "SETTLED"),
+                    "market_id": market_id_filter,
+                    "event_type_id": _query_value(query_params, "event_type_id"),
+                    "event_id": _query_value(query_params, "event_id"),
+                    "runner_id": runner_id,
+                    "bet_id": _query_value(query_params, "bet_id"),
+                    "group_by": _query_value(query_params, "group_by", "BET"),
+                    "include_item_description": _query_bool(query_params, "include_item_description", False),
+                    "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 1000),
+                    "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+                    "from_timestamp": _query_float(query_params, "from"),
+                    "to_timestamp": _query_float(query_params, "to"),
+                }
+    elif normalized_operation in {"active_orders", "order_history"}:
+        kwargs.update(
+            {
+                "contract_id": _query_value(query_params, "contract_id") or None,
+                "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 1000),
+                "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+            }
+        )
+    if normalized_market_id not in {"kalshi", "limitless_exchange", "opinion_labs", "xmarket", "smarkets"} and normalized_operation == "order_history":
+        kwargs.update(
+            {
+                "status": _query_value(query_params, "status", "filled").lower(),
+                "from_timestamp": _query_float(query_params, "from"),
+                "to_timestamp": _query_float(query_params, "to"),
+            }
+        )
+    elif normalized_market_id not in {"kalshi", "limitless_exchange", "opinion_labs", "xmarket"} and normalized_operation == "positions":
+        raw_limit = _query_value(query_params, "limit")
+        kwargs.update(
+            {
+                "event_ticker": _query_value(query_params, "event_ticker"),
+                "limit": _clamp_int(raw_limit, 100, 1, 1000) if raw_limit else None,
+                "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+                "sort": _query_value(query_params, "sort") or None,
+            }
+        )
+    elif normalized_market_id not in {"kalshi", "limitless_exchange", "opinion_labs"} and normalized_operation == "settled_positions":
+        kwargs.update(
+            {
+                "event_ticker": _query_value(query_params, "event_ticker"),
+                "limit": _clamp_int(_query_value(query_params, "limit", "1000"), 1000, 1, 1000),
+                "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+                "sort": _query_value(query_params, "sort", "-date"),
+                "search": _query_value(query_params, "search"),
+                "category": _query_value(query_params, "category"),
+                "with_cash_outs": _query_bool(query_params, "with_cash_outs", False),
+            }
+        )
+    elif normalized_market_id not in {"kalshi", "limitless_exchange", "opinion_labs"} and normalized_operation == "volume_metrics":
+        kwargs.update(
+            {
+                "event_ticker": _query_value(query_params, "event_ticker"),
+                "start_timestamp": _query_float(query_params, "from"),
+                "end_timestamp": _query_float(query_params, "to"),
+            }
+        )
+
+    data = adapter.account_recovery(normalized_operation, **kwargs)
+    return {
+        "market_id": normalized_market_id,
+        "operation": normalized_operation,
+        "parameters": kwargs,
+        "data": data,
+    }
+
+
+def market_order_management_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    operation: str,
+    payload: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Run one explicitly allow-listed live order-management mutation."""
+
+    normalized_market_id = str(market_id or "").strip().lower()
+    normalized_operation = str(operation or "").strip().lower()
+    require_market_enabled(cfg, normalized_market_id, "order management")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    supported = tuple(str(value).strip().lower() for value in getattr(adapter, "order_management_operations", ()))
+    if normalized_operation not in supported:
+        raise UnsupportedFeatureError(
+            normalized_market_id,
+            "order_management",
+            f"{normalized_market_id} does not support order-management operation "
+            f"{normalized_operation or '<empty>'}. Supported operations: {', '.join(supported) or 'none'}.",
+        )
+    if not isinstance(payload, Mapping):
+        raise ValueError("Order-management payload must be a JSON object.")
+    kwargs: Dict[str, Any] = {
+        "market_id": str(payload.get("market_id") or payload.get("exchange_market_id") or "").strip(),
+        "instructions": payload.get("instructions"),
+        "customer_ref": str(payload.get("customer_ref") or payload.get("customerRef") or "").strip(),
+        "market_version": payload.get("market_version", payload.get("marketVersion")),
+        "async_request": bool_from_setting(payload.get("async_request", payload.get("async")), False),
+        "confirm_global_cancel": str(payload.get("confirm_global_cancel") or "").strip(),
+    }
+    market_slug = str(payload.get("market_slug") or payload.get("marketSlug") or "").strip()
+    if market_slug:
+        kwargs["market_slug"] = market_slug
+    if normalized_market_id == "polymarket":
+        kwargs.update(
+            {
+                "contract_id": str(payload.get("contract_id") or "").strip(),
+                "asset_id": str(payload.get("asset_id") or "").strip(),
+            }
+        )
+    for key in (
+        "order_id",
+        "order_ids",
+        "token_id",
+        "token_ids",
+        "event_id",
+        "offer_id",
+        "offer_ids",
+        "event_ids",
+        "market_ids",
+        "runner_ids",
+        "current_odds",
+        "new_odds",
+        "current_stake",
+        "new_stake",
+        "ticker",
+        "side",
+        "price",
+        "count",
+        "client_order_id",
+        "updated_client_order_id",
+        "reduce_by",
+        "reduce_to",
+        "order_hash",
+        "trader",
+        "timestamp",
+        "signature",
+        "signature_type",
+        "network_id",
+        "allow_partial",
+        "cancel",
+        "place",
+        "subaccount",
+        "exchange_index",
+        "orders",
+        "confirm_order_management",
+    ):
+        if key in payload:
+            kwargs[key] = payload.get(key)
+    data = adapter.manage_orders(normalized_operation, **kwargs)
+    return {
+        "market_id": normalized_market_id,
+        "operation": normalized_operation,
+        "parameters": kwargs,
+        "data": data,
     }
 
 
@@ -3543,15 +4183,21 @@ class ReactGuiServer(ThreadingHTTPServer):
         token = str(api_token or "").strip()
         if not is_loopback and not token:
             raise ValueError("A non-loopback React GUI bind requires a non-empty API token.")
+        trusted_frontend_dir = _resolve_trusted_frontend_dir(frontend_dir)
+        if trusted_frontend_dir is None:
+            raise ValueError(
+                "The frontend directory must resolve beneath the deployment resource root. "
+                f"Allowed root: {_RESOURCE_ROOT}"
+            )
         super().__init__(server_address, request_handler_class)
         self.bind_host = bind_host
         self.is_loopback = is_loopback
         self.api_token = token
         self.config_path = config_path
-        self.frontend_dir = frontend_dir
+        self.frontend_dir = trusted_frontend_dir
         # Static files are a deployment-time input. Build the immutable catalog
         # before serving requests so URL parsing never performs filesystem work.
-        self.static_files = ReactGuiHandler._static_file_catalog()
+        self.static_files = ReactGuiHandler._static_file_catalog(self.frontend_dir)
         self.adapter_registry = adapter_registry or build_default_registry()
         default_origins = {
             f"http://{self.bind_host}:{self.server_address[1]}",
@@ -3752,6 +4398,59 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/markets":
                 self._send_json(HTTPStatus.OK, markets_payload(cfg, self.app_server.adapter_registry))
+                return
+            market_route = path.strip("/").split("/")
+            if len(market_route) == 4 and market_route[:2] == ["api", "markets"]:
+                market_id = unquote(market_route[2])
+                if market_route[3] == "events":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_events_payload(cfg, self.app_server.adapter_registry, market_id, query_params),
+                    )
+                    return
+                if market_route[3] == "contracts":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_contracts_payload(cfg, self.app_server.adapter_registry, market_id, query_params),
+                    )
+                    return
+                if market_route[3] == "price":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_price_payload(cfg, self.app_server.adapter_registry, market_id, query_params),
+                    )
+                    return
+                if market_route[3] == "orderbook":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_orderbook_payload(cfg, self.app_server.adapter_registry, market_id, query_params),
+                    )
+                    return
+                if market_route[3] == "trades":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_trades_payload(cfg, self.app_server.adapter_registry, market_id, query_params),
+                    )
+                    return
+                if market_route[3] == "candles":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_candles_payload(cfg, self.app_server.adapter_registry, market_id, query_params),
+                    )
+                    return
+            if len(market_route) == 5 and market_route[:2] == ["api", "markets"] and market_route[3] == "account":
+                market_id = unquote(market_route[2])
+                operation = unquote(market_route[4])
+                self._send_json(
+                    HTTPStatus.OK,
+                    market_account_payload(
+                        cfg,
+                        self.app_server.adapter_registry,
+                        market_id,
+                        operation,
+                        query_params,
+                    ),
+                )
                 return
             if path == "/api/alerts":
                 self._send_json(HTTPStatus.OK, alerts_payload(cfg, self.app_server.adapter_registry, self.app_server.alert_price_state))
@@ -4042,6 +4741,20 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         try:
             payload = _read_json_body(self)
             cfg = self._load_config()
+            if method == "POST":
+                order_route = path.strip("/").split("/")
+                if len(order_route) == 5 and order_route[:2] == ["api", "markets"] and order_route[3] == "orders":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_order_management_payload(
+                            cfg,
+                            self.app_server.adapter_registry,
+                            unquote(order_route[2]),
+                            unquote(order_route[4]),
+                            payload,
+                        ),
+                    )
+                    return
             if method == "PATCH" and path == "/api/config":
                 apply_config_patch(cfg, payload)
                 self._save_config(cfg)
@@ -4410,43 +5123,67 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         return static_files.get(relative_path)
 
     @staticmethod
-    def _static_file_catalog() -> Dict[str, Path]:
-        """Return the supported static files beneath a trusted build directory."""
+    def _static_file_catalog(frontend_dir: Optional[Path] = None) -> Dict[str, Path]:
+        """Return supported static files beneath a trusted deployment root."""
         try:
-            root = DEFAULT_FRONTEND_DIR.resolve()
-        except (OSError, RuntimeError, ValueError):
+            configured = frontend_dir if frontend_dir is not None else DEFAULT_FRONTEND_DIR
+            normalized_root = os.path.normcase(
+                os.path.realpath(os.path.expanduser(os.fspath(configured)))
+            )
+            normalized_default = os.path.normcase(
+                os.path.realpath(os.path.expanduser(os.fspath(DEFAULT_FRONTEND_DIR)))
+            )
+            normalized_allowed = os.path.normcase(os.path.realpath(os.fspath(_RESOURCE_ROOT)))
+            allowed_prefix = normalized_allowed.rstrip(os.sep) + os.sep
+            if normalized_root != normalized_default and not normalized_root.startswith(allowed_prefix):
+                return {}
+            # The canonical root is normalized and constrained immediately
+            # above, before any filesystem lookup.
+            root = Path(normalized_root)
+        except (OSError, RuntimeError, ValueError, TypeError):
             return {}
         if not root.is_dir():
             return {}
 
         catalog: Dict[str, Path] = {}
+        try:
+            index_target = (root / "index.html").resolve()
+            index_target.relative_to(root)
+            if index_target.is_file():
+                catalog["index.html"] = index_target
+        except (OSError, RuntimeError, ValueError):
+            pass
 
-        def add_file(relative_path: str, candidate: Path) -> None:
-            try:
-                target = candidate.resolve()
-                target.relative_to(root)
-            except (OSError, RuntimeError, ValueError):
-                return
-            if target.is_file():
-                catalog[relative_path] = target
-
-        add_file("index.html", root / "index.html")
         try:
             root_entries = tuple(root.iterdir())
         except OSError:
             return catalog
         for candidate in root_entries:
             if candidate.name != "index.html" and STATIC_FRONTEND_FILENAME_RE.fullmatch(candidate.name):
-                add_file(candidate.name, candidate)
+                try:
+                    target = candidate.resolve()
+                    target.relative_to(root)
+                    if target.is_file():
+                        catalog[candidate.name] = target
+                except (OSError, RuntimeError, ValueError):
+                    continue
 
         assets_dir = root / "assets"
         try:
-            asset_entries = tuple(assets_dir.iterdir()) if assets_dir.is_dir() else ()
+            asset_entries = (
+                tuple(assets_dir.iterdir()) if assets_dir.is_dir() else ()
+            )
         except OSError:
             return catalog
         for candidate in asset_entries:
             if STATIC_FRONTEND_FILENAME_RE.fullmatch(candidate.name):
-                add_file(f"assets/{candidate.name}", candidate)
+                try:
+                    target = candidate.resolve()
+                    target.relative_to(root)
+                    if target.is_file():
+                        catalog[f"assets/{candidate.name}"] = target
+                except (OSError, RuntimeError, ValueError):
+                    continue
         return catalog
 
     def _send_json(self, status: int, payload: Dict[str, Any], *, retry_after_seconds: Optional[int] = None) -> None:
@@ -4515,6 +5252,30 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
+def _resolve_trusted_frontend_dir(frontend_dir: Path) -> Optional[Path]:
+    """Normalize a deployment frontend path and keep it inside the bundle root."""
+    try:
+        # Normalize before constructing a filesystem path and compare the
+        # canonical strings with the trusted deployment root. This follows the
+        # CodeQL containment pattern and also handles macOS /var symlinks.
+        configured_root = os.path.realpath(os.path.expanduser(os.fspath(frontend_dir)))
+        default_root = os.path.realpath(os.path.expanduser(os.fspath(DEFAULT_FRONTEND_DIR)))
+        # The module-level default is a deployment resource, not request data.
+        # Keep this fast path so packaged builds and test-configured defaults
+        # do not need to widen the trusted-root boundary.
+        if os.path.normcase(configured_root) == os.path.normcase(default_root):
+            return Path(configured_root)
+        allowed_root = os.path.realpath(os.fspath(_RESOURCE_ROOT))
+        normalized_root = os.path.normcase(configured_root)
+        normalized_allowed_root = os.path.normcase(allowed_root)
+        if os.path.commonpath((normalized_root, normalized_allowed_root)) != normalized_allowed_root:
+            return None
+        # The commonpath check above proves this is beneath the trusted root.
+        return Path(configured_root)
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return None
+
+
 def run_server(
     host: str,
     port: int,
@@ -4523,8 +5284,14 @@ def run_server(
     api_token: str = "",
     allow_remote: bool = False,
     allowed_origins: Optional[Sequence[str]] = None,
+    frontend_dir: Path = DEFAULT_FRONTEND_DIR,
 ) -> None:
-    frontend_dir = DEFAULT_FRONTEND_DIR
+    frontend_dir = _resolve_trusted_frontend_dir(frontend_dir)
+    if frontend_dir is None:
+        raise ValueError(
+            "The frontend directory must resolve beneath the deployment resource root. "
+            f"Allowed root: {_RESOURCE_ROOT}"
+        )
     if not is_loopback_host(host) and not allow_remote:
         raise ValueError(
             "Refusing a non-loopback bind without --allow-remote. Keep the default loopback bind and use a TLS reverse proxy."
@@ -4541,9 +5308,9 @@ def run_server(
     )
     print(f"React GUI API listening on http://{host}:{port}")
     if (frontend_dir / "index.html").exists():
-        print(f"Serving built React GUI from {frontend_dir}")
+        print("Serving built React GUI from the configured frontend directory")
     else:
-        print(f"React build not found at {frontend_dir}")
+        print("React build not found in the configured frontend directory")
         print(f"Build it with `{REACT_BUILD_COMMAND}`, or run `{REACT_DEV_COMMAND}` for Vite.")
     print(f"Tkinter GUI is unchanged: run `{PYTHON_GUI_SCRIPT}` or `{PYTHON_GUI_COMMAND}`.")
     try:

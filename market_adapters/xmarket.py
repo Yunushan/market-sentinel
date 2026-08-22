@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .base import MarketAdapter
@@ -24,13 +25,19 @@ XMARKET_REFERENCES = (
     "https://docs.xmarket.app/developers/markets",
     "https://docs.xmarket.app/developers/orderbook",
     "https://docs.xmarket.app/developers/orders",
+    "https://docs.xmarket.app/developers/positions",
 )
+
+XMARKET_ACCOUNT_OPERATIONS = ("positions", "user_orders", "market_orders")
+XMARKET_ACCOUNT_STATUSES = ("all", "open", "partially_filled", "filled", "cancelled", "expired")
+XMARKET_POSITION_STATUSES = ("open", "closed", "settled")
 
 
 class XMarketAdapter(MarketAdapter):
     """Xmarket adapter for documented market-data and guarded order endpoints."""
 
     metadata = get_market_metadata("xmarket")
+    account_recovery_operations = XMARKET_ACCOUNT_OPERATIONS
 
     def health_check(self) -> Dict[str, Any]:
         health = super().health_check()
@@ -39,6 +46,12 @@ class XMarketAdapter(MarketAdapter):
             {
                 "api_base_url": self.api_base_url,
                 "authenticated_api_base_url": self.authenticated_api_base_url,
+                "account_recovery_operations": list(self.account_recovery_operations),
+                "authenticated_account_endpoints": [
+                    "GET /positions",
+                    "GET /order/my-orders",
+                    "GET /order/market/:marketId",
+                ],
                 "references": list(XMARKET_REFERENCES),
                 "live_trading_enabled": self.config_bool("live_trading_enabled", False),
                 "credential_sources": ([{"name": credential.name, "source": credential.source}] if credential else []),
@@ -148,6 +161,50 @@ class XMarketAdapter(MarketAdapter):
             "response": response,
         }
 
+    def account_recovery(self, operation: str, **kwargs: Any) -> Any:
+        """Read Xmarket's documented API-key account surfaces.
+
+        The public ``/api/v1`` surface exposes positions while the documented
+        order reads live under ``/openapi/v1``. Each operation is explicitly
+        allow-listed and path-bearing market identifiers are validated before
+        a request is issued.
+        """
+
+        normalized = str(operation or "").strip().lower()
+        if normalized not in self.account_recovery_operations:
+            supported = ", ".join(self.account_recovery_operations)
+            raise MarketConfigurationError(f"Xmarket account operation must be one of: {supported}.")
+
+        page = self._account_page(kwargs.get("page"))
+        page_size = self._account_page_size(kwargs.get("page_size", kwargs.get("limit")))
+        if normalized == "positions":
+            status = self._account_status(
+                kwargs.get("status"),
+                default="open",
+                allowed=XMARKET_POSITION_STATUSES,
+                label="position status",
+            )
+            return self._get(
+                "/positions",
+                params={"status": status, "page": page, "pageSize": page_size},
+            )
+
+        status = self._account_status(
+            kwargs.get("status"),
+            default="all" if normalized == "user_orders" else "open",
+            allowed=XMARKET_ACCOUNT_STATUSES,
+            label="order status",
+        )
+        params = {"status": status, "page": page, "pageSize": page_size}
+        if normalized == "user_orders":
+            return self._get_authenticated("/order/my-orders", params=params)
+
+        market_id = self._safe_path_segment(
+            kwargs.get("market_id") or kwargs.get("marketId"),
+            "Xmarket account market id",
+        )
+        return self._get_authenticated(f"/order/market/{market_id}", params=params)
+
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
         raise UnsupportedFeatureError(
             self.market_id,
@@ -156,9 +213,7 @@ class XMarketAdapter(MarketAdapter):
         )
 
     def _get_market(self, market_id: str) -> Mapping[str, Any]:
-        clean = str(market_id or "").strip()
-        if not clean:
-            raise MarketConfigurationError("Xmarket market id cannot be empty.")
+        clean = self._safe_path_segment(market_id, "Xmarket market id")
         payload = self._get(f"/markets/{clean}")
         if isinstance(payload, Mapping):
             data = payload.get("data")
@@ -169,6 +224,13 @@ class XMarketAdapter(MarketAdapter):
 
     def _get(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> Any:
         return self.runtime.get_json(self._url(self.api_base_url, path), params=params, headers=self._headers())
+
+    def _get_authenticated(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> Any:
+        return self.runtime.get_json(
+            self._url(self.authenticated_api_base_url, path),
+            params=params,
+            headers=self._headers(),
+        )
 
     def _post(self, path: str, payload: Mapping[str, Any]) -> Any:
         return self.runtime.request_json(
@@ -353,7 +415,48 @@ class XMarketAdapter(MarketAdapter):
         market_id, separator, outcome_id = str(contract_id or "").partition(":")
         if not separator or not market_id.strip() or not outcome_id.strip():
             raise MarketConfigurationError("Xmarket contract id must be MARKET_ID:OUTCOME_ID.")
-        return market_id.strip(), outcome_id.strip()
+        return (
+            XMarketAdapter._safe_path_segment(market_id, "Xmarket market id"),
+            XMarketAdapter._safe_path_segment(outcome_id, "Xmarket outcome id"),
+        )
+
+    @staticmethod
+    def _safe_path_segment(value: Any, label: str) -> str:
+        normalized = str(value or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,199}", normalized):
+            raise MarketConfigurationError(f"{label} must be a short path-safe identifier.")
+        return normalized
+
+    @staticmethod
+    def _account_page(value: Any) -> int:
+        if value in (None, ""):
+            return 1
+        try:
+            page = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Xmarket account page must be an integer.") from exc
+        if page < 1 or page > 10000:
+            raise MarketConfigurationError("Xmarket account page must be between 1 and 10000.")
+        return page
+
+    @staticmethod
+    def _account_page_size(value: Any) -> int:
+        if value in (None, ""):
+            return 50
+        try:
+            page_size = int(value)
+        except (TypeError, ValueError) as exc:
+            raise MarketConfigurationError("Xmarket account page size must be an integer.") from exc
+        if page_size < 1 or page_size > 1000:
+            raise MarketConfigurationError("Xmarket account page size must be between 1 and 1000.")
+        return page_size
+
+    @staticmethod
+    def _account_status(value: Any, *, default: str, allowed: Tuple[str, ...], label: str) -> str:
+        status = str(value or default).strip().lower()
+        if status not in allowed:
+            raise MarketConfigurationError(f"Xmarket {label} must be one of: {', '.join(allowed)}.")
+        return status
 
     @staticmethod
     def _market_url(market_id: str) -> str:

@@ -12,6 +12,16 @@ import type {
   LivePreflightPayload,
   LiveSafetyPayload,
   MarketsPayload,
+  MarketAccountOperation,
+  MarketAccountPayload,
+  MarketOrderManagementOperation,
+  MarketOrderManagementPayload,
+  MarketCandlesPayload,
+  MarketContractsPayload,
+  MarketEventsPayload,
+  MarketOrderbookPayload,
+  MarketPricePayload,
+  MarketTradesPayload,
   PaperFormFillPayload,
   PaperImpactPayload,
   PaperOrderForm,
@@ -137,6 +147,86 @@ export function fetchConfig(): Promise<ConfigPayload> {
 
 export function fetchMarkets(): Promise<MarketsPayload> {
   return request<MarketsPayload>("/api/markets");
+}
+
+function marketReadQuery(values: Record<string, string | number | boolean | undefined>): string {
+  const params = new URLSearchParams();
+  Object.entries(values).forEach(([key, value]) => {
+    if (value !== undefined && String(value).trim() !== "") {
+      params.set(key, String(value));
+    }
+  });
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
+export function fetchMarketEvents(marketId: string, query = "", limit = 50): Promise<MarketEventsPayload> {
+  return request<MarketEventsPayload>(
+    `/api/markets/${encodeURIComponent(marketId)}/events${marketReadQuery({ query, limit })}`
+  );
+}
+
+export function fetchMarketContracts(marketId: string, eventId: string): Promise<MarketContractsPayload> {
+  return request<MarketContractsPayload>(
+    `/api/markets/${encodeURIComponent(marketId)}/contracts${marketReadQuery({ event_id: eventId })}`
+  );
+}
+
+export function fetchMarketPrice(marketId: string, contractId: string): Promise<MarketPricePayload> {
+  return request<MarketPricePayload>(
+    `/api/markets/${encodeURIComponent(marketId)}/price${marketReadQuery({ contract_id: contractId })}`
+  );
+}
+
+export function fetchMarketOrderbook(marketId: string, contractId: string): Promise<MarketOrderbookPayload> {
+  return request<MarketOrderbookPayload>(
+    `/api/markets/${encodeURIComponent(marketId)}/orderbook${marketReadQuery({ contract_id: contractId })}`
+  );
+}
+
+export function fetchMarketTrades(
+  marketId: string,
+  contractId: string,
+  limit = 50,
+  before = "",
+  after = ""
+): Promise<MarketTradesPayload> {
+  return request<MarketTradesPayload>(
+    `/api/markets/${encodeURIComponent(marketId)}/trades${marketReadQuery({ contract_id: contractId, limit, before, after })}`
+  );
+}
+
+export function fetchMarketCandles(
+  marketId: string,
+  contractId: string,
+  resolution = "1h",
+  from = "",
+  to = ""
+): Promise<MarketCandlesPayload> {
+  return request<MarketCandlesPayload>(
+    `/api/markets/${encodeURIComponent(marketId)}/candles${marketReadQuery({ contract_id: contractId, resolution, from, to })}`
+  );
+}
+
+export function fetchMarketAccount(
+  marketId: string,
+  operation: MarketAccountOperation,
+  values: Record<string, string | number | boolean | undefined> = {}
+): Promise<MarketAccountPayload> {
+  return request<MarketAccountPayload>(
+    `/api/markets/${encodeURIComponent(marketId)}/account/${encodeURIComponent(operation)}${marketReadQuery(values)}`
+  );
+}
+
+export function manageMarketOrders(
+  marketId: string,
+  operation: MarketOrderManagementOperation,
+  payload: Record<string, unknown>
+): Promise<MarketOrderManagementPayload> {
+  return request<MarketOrderManagementPayload>(
+    `/api/markets/${encodeURIComponent(marketId)}/orders/${encodeURIComponent(operation)}`,
+    { method: "POST", body: JSON.stringify(payload) }
+  );
 }
 
 export function fetchAlerts(): Promise<AlertsPayload> {

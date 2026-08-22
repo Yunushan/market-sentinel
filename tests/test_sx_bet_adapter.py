@@ -24,6 +24,7 @@ class SxBetAdapterTests(unittest.TestCase):
         market_find = load_fixture("market_find")
         orders = load_fixture("orders")
         best_odds = load_fixture("best_odds")
+        public_trades = load_fixture("public_trades")
 
         def fake_get_json(url: str, *, params=None, headers=None):
             if url.endswith("/markets/active"):
@@ -36,6 +37,9 @@ class SxBetAdapterTests(unittest.TestCase):
                 return orders
             if url.endswith("/orders/odds/best"):
                 return best_odds
+            if url.endswith("/trades-v3/public"):
+                self.assertEqual((params or {}).get("marketHash"), MARKET_HASH)
+                return public_trades
             raise AssertionError(f"unexpected SX Bet URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
@@ -50,6 +54,7 @@ class SxBetAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.capabilities.event_listing)
         self.assertTrue(adapter.capabilities.price_reading)
         self.assertTrue(adapter.capabilities.orderbook_reading)
+        self.assertTrue(adapter.capabilities.trade_history)
         self.assertTrue(adapter.capabilities.alerts)
         self.assertTrue(adapter.capabilities.paper_trading)
         self.assertTrue(adapter.capabilities.live_trading)
@@ -95,6 +100,28 @@ class SxBetAdapterTests(unittest.TestCase):
         self.assertEqual(price.bid, 0.4)
         self.assertEqual(price.ask, 0.45)
         self.assertAlmostEqual(price.midpoint or 0, 0.425)
+
+    def test_list_trades_normalizes_public_trade_tape_and_filters_outcome(self) -> None:
+        adapter = self.make_adapter()
+
+        trades = adapter.list_trades(
+            f"{MARKET_HASH}:ONE",
+            limit=5,
+            after=1780344000,
+            before=1780344050,
+        )
+
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0].trade_id, "0xtrade-one")
+        self.assertEqual(trades[0].side, "BUY")
+        self.assertAlmostEqual(trades[0].price, 0.4)
+        self.assertAlmostEqual(trades[0].size, 2.5)
+        self.assertEqual(trades[0].timestamp, 1780344003.0)
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades(f"{MARKET_HASH}:ONE", limit=101)
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_trades(f"{MARKET_HASH}:ONE", after=10, before=9)
 
     def test_paper_order_builds_unsigned_order_payload(self) -> None:
         adapter = self.make_adapter()

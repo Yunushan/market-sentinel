@@ -24,6 +24,7 @@ class ManifoldAdapterTests(unittest.TestCase):
         market_multi = load_fixture("market_multi")
         prob_binary = load_fixture("prob_binary")
         prob_multi = load_fixture("prob_multi")
+        bets_activity = load_fixture("bets_activity")
 
         def fake_get_json(url: str, *, params=None, headers=None):
             if url.endswith("/search-markets"):
@@ -36,6 +37,8 @@ class ManifoldAdapterTests(unittest.TestCase):
                 return prob_binary
             if url.endswith("/market/mf-multi-1/prob"):
                 return prob_multi
+            if url.endswith("/bets"):
+                return bets_activity
             raise AssertionError(f"unexpected Manifold URL: {url}")
 
         adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
@@ -52,8 +55,9 @@ class ManifoldAdapterTests(unittest.TestCase):
         self.assertFalse(adapter.capabilities.orderbook_reading)
         self.assertTrue(adapter.capabilities.paper_trading)
         self.assertTrue(adapter.capabilities.live_trading)
-        self.assertFalse(adapter.capabilities.copy_trading)
+        self.assertTrue(adapter.capabilities.copy_trading)
         self.assertIn("api.manifold.markets", health["api_base_url"])
+        self.assertTrue(health["activity_feed_supported"])
 
     def test_list_events_uses_search_endpoint_and_maps_markets(self) -> None:
         adapter = self.make_adapter()
@@ -96,6 +100,84 @@ class ManifoldAdapterTests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.market_id, "manifold")
         self.assertEqual(ctx.exception.feature, "orderbook_reading")
+
+    def test_public_bet_activity_is_normalized_for_copy_simulation(self) -> None:
+        adapter = self.make_adapter()
+
+        activity = adapter.list_activity("manifold:ForecastUser", limit=10)
+
+        self.assertEqual(len(activity), 3)
+        self.assertEqual(activity[0]["proxyWallet"], "manifold:forecastuser")
+        self.assertEqual(activity[0]["side"], "BUY")
+        self.assertAlmostEqual(activity[0]["size"], 12.5)
+        self.assertEqual(activity[0]["asset"], "mf-binary-1:YES")
+        self.assertEqual(activity[1]["side"], "SELL")
+        self.assertAlmostEqual(activity[1]["size"], 6.25)
+        self.assertEqual(activity[1]["shares"], 6.25)
+        self.assertEqual(activity[2]["asset"], "mf-multi-1:ANSWER:answer-a")
+        self.assertEqual(activity[2]["price"], 0.35)
+        self.assertEqual(activity[0]["timestamp"], 1760000010)
+        self.assertTrue(activity[0]["transactionHash"].startswith("manifold-bet:"))
+
+    def test_public_trade_history_normalizes_fills_and_documented_time_filters(self) -> None:
+        adapter = ManifoldAdapter()
+        trades_fixture = load_fixture("bets_trades")
+        calls = []
+
+        def fake_get_json(url: str, *, params=None, headers=None):
+            calls.append((url, params))
+            if url.endswith("/bets"):
+                return trades_fixture
+            raise AssertionError(f"unexpected Manifold URL: {url}")
+
+        adapter.runtime.get_json = fake_get_json  # type: ignore[method-assign]
+
+        trades = adapter.list_trades(
+            "mf-binary-1:YES",
+            limit=2000,
+            before=1760000030,
+            after=1760000000,
+        )
+
+        self.assertEqual(len(trades), 2)
+        self.assertEqual([trade.trade_id for trade in trades], ["trade-bet-1:0", "trade-bet-1:1"])
+        self.assertEqual([trade.side for trade in trades], ["BUY", "BUY"])
+        self.assertAlmostEqual(trades[0].price, 0.6, places=6)
+        self.assertAlmostEqual(trades[1].size, 6.6666666667, places=6)
+        self.assertEqual(trades[0].timestamp, 1760000015)
+        self.assertEqual(trades[0].contract_id, "mf-binary-1:YES")
+        self.assertEqual(
+            calls[0][1],
+            {
+                "contractId": "mf-binary-1",
+                "limit": 1000,
+                "beforeTime": 1760000030000,
+                "afterTime": 1760000000000,
+            },
+        )
+
+        multi_trades = adapter.list_trades("mf-multi-1:ANSWER:answer-a")
+        self.assertEqual(len(multi_trades), 1)
+        self.assertEqual(multi_trades[0].contract_id, "mf-multi-1:ANSWER:answer-a")
+        self.assertAlmostEqual(multi_trades[0].price, 0.6)
+
+    def test_activity_requires_prefixed_safe_manifold_identity(self) -> None:
+        adapter = self.make_adapter()
+
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_activity("ForecastUser")
+        with self.assertRaises(MarketConfigurationError):
+            adapter.list_activity("manifold:../etc/passwd")
+
+    def test_copy_trade_from_activity_builds_manifold_sell_paper_intent(self) -> None:
+        adapter = self.make_adapter()
+        activity = adapter.list_activity("manifold:forecastuser")[1]
+
+        result = adapter.copy_trade_from_activity(activity)
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.raw["endpoint"], "/market/mf-binary-1/sell")
+        self.assertEqual(result.raw["request"], {"shares": 6.25, "outcome": "NO"})
 
     def test_paper_order_builds_documented_dry_run_payload(self) -> None:
         adapter = self.make_adapter()
@@ -231,3 +313,4 @@ class ManifoldAdapterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

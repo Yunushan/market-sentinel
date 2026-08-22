@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, Tuple
 
-from .expanded_catalog import EXPANDED_MARKET_CATALOG
+from .expanded_catalog import EXPANDED_MARKET_CATALOG, ROBINHOOD_PREDICTION_CAPABILITIES
 from .types import MarketCapabilities, MarketMetadata
 
 
@@ -11,6 +11,8 @@ POLYMARKET_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -26,6 +28,8 @@ KALSHI_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -41,10 +45,11 @@ MANIFOLD_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=False,
+    trade_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    copy_trading=True,
     api_required=True,
     credentials_required=True,
     kyc_required=False,
@@ -56,6 +61,7 @@ METACULUS_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=False,
+    candle_history=True,
     alerts=True,
     paper_trading=False,
     live_trading=False,
@@ -81,6 +87,21 @@ PREDICTIT_CAPABILITIES = MarketCapabilities(
     region_limited=True,
 )
 
+BETMGM_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    alerts=True,
+    paper_trading=True,
+    live_trading=False,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=True,
+    kyc_required=True,
+    region_limited=True,
+)
+
 CRYPTO_COM_PREDICT_CAPABILITIES = MarketCapabilities(
     market_discovery=True,
     event_listing=True,
@@ -96,11 +117,58 @@ CRYPTO_COM_PREDICT_CAPABILITIES = MarketCapabilities(
     region_limited=False,
 )
 
+DRAFTKINGS_PREDICTIONS_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    alerts=True,
+    paper_trading=True,
+    live_trading=False,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=True,
+    region_limited=True,
+)
+
+FANATICS_MARKETS_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    alerts=True,
+    paper_trading=True,
+    live_trading=False,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=True,
+    region_limited=True,
+)
+
+NADEX_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    alerts=True,
+    paper_trading=True,
+    live_trading=False,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=True,
+    region_limited=True,
+)
+
 LIMITLESS_CAPABILITIES = MarketCapabilities(
     market_discovery=True,
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -116,6 +184,7 @@ SX_BET_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -163,7 +232,7 @@ OMEN_CAPABILITIES = MarketCapabilities(
     orderbook_reading=False,
     alerts=True,
     paper_trading=True,
-    live_trading=False,
+    live_trading=True,
     copy_trading=False,
     api_required=True,
     credentials_required=True,
@@ -178,7 +247,9 @@ ZEITGEIST_CAPABILITIES = MarketCapabilities(
     orderbook_reading=False,
     alerts=True,
     paper_trading=True,
-    live_trading=False,
+    # Guarded forwarding of an operator-reviewed, externally signed
+    # HybridRouter Substrate extrinsic; signing and settlement remain external.
+    live_trading=True,
     copy_trading=False,
     api_required=True,
     credentials_required=False,
@@ -191,6 +262,8 @@ GEMINI_PREDICTION_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -206,10 +279,15 @@ MYRIAD_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
-    copy_trading=False,
+    # The documented public /users/:address/events feed supports
+    # simulation-first wallet activity copy. Live execution remains guarded
+    # behind the signed Myriad order path.
+    copy_trading=True,
     api_required=True,
     credentials_required=False,
     kyc_required=False,
@@ -221,10 +299,15 @@ OPINION_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
+    candle_history=True,
     alerts=True,
     paper_trading=True,
-    live_trading=False,
-    copy_trading=False,
+    live_trading=True,
+    # Live execution is guarded by the optional official Opinion CLOB SDK,
+    # explicit live-order gates, and BNB-chain credentials. Copy intents remain
+    # simulation-first and never submit orders automatically.
+    copy_trading=True,
     api_required=True,
     credentials_required=True,
     kyc_required=False,
@@ -266,6 +349,7 @@ BETFAIR_CAPABILITIES = MarketCapabilities(
     event_listing=True,
     price_reading=True,
     orderbook_reading=True,
+    trade_history=True,
     alerts=True,
     paper_trading=True,
     live_trading=True,
@@ -273,6 +357,159 @@ BETFAIR_CAPABILITIES = MarketCapabilities(
     api_required=True,
     credentials_required=True,
     kyc_required=True,
+    region_limited=True,
+)
+
+HYPERLIQUID_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=True,
+    trade_history=True,
+    candle_history=True,
+    alerts=True,
+    paper_trading=True,
+    live_trading=True,
+    # The documented userFills endpoint exposes public HIP-4 wallet activity;
+    # copy remains simulation-first and live submission still needs a signed
+    # HyperCore payload.
+    copy_trading=True,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=False,
+    region_limited=True,
+)
+
+IBKR_EVENT_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=True,
+    trade_history=True,
+    candle_history=True,
+    alerts=True,
+    paper_trading=True,
+    live_trading=True,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=True,
+    kyc_required=True,
+    region_limited=True,
+)
+
+CONTEXT_V2_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=True,
+    trade_history=True,
+    candle_history=True,
+    alerts=True,
+    paper_trading=True,
+    live_trading=True,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=True,
+    kyc_required=True,
+    region_limited=True,
+)
+
+THALES_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    alerts=True,
+    paper_trading=True,
+    live_trading=True,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=False,
+    region_limited=True,
+)
+
+SMARKETS_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=True,
+    alerts=True,
+    paper_trading=True,
+    live_trading=True,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=True,
+    kyc_required=True,
+    region_limited=True,
+)
+
+DRIFT_BET_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    alerts=True,
+    paper_trading=True,
+    # The public Drift BET data API is read-only.  Live execution still
+    # requires a wallet-signed Drift/Solana transaction and collateral flow
+    # that this adapter deliberately does not submit.
+    live_trading=False,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=False,
+    region_limited=True,
+)
+
+IEM_CAPABILITIES = MarketCapabilities(
+    # IEM's documented surface is an explicit inventory of official
+    # historical price files; it does not publish dynamic discovery or a
+    # current quote/order API.
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    candle_history=True,
+    alerts=True,
+    paper_trading=True,
+    live_trading=False,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=False,
+    region_limited=False,
+)
+
+FRENZY_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    alerts=True,
+    paper_trading=True,
+    # Frenzy live bets require an oracle-signed BetAck in addition to a
+    # wallet signature; this adapter only emits a paper EIP-712 intent.
+    live_trading=False,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=False,
+    region_limited=True,
+)
+
+HEDGEHOG_CAPABILITIES = MarketCapabilities(
+    market_discovery=True,
+    event_listing=True,
+    price_reading=True,
+    orderbook_reading=False,
+    alerts=True,
+    paper_trading=True,
+    live_trading=True,
+    copy_trading=False,
+    api_required=True,
+    credentials_required=False,
+    kyc_required=False,
     region_limited=True,
 )
 
@@ -305,30 +542,77 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="robinhood_prediction_markets",
         display_name="Robinhood Prediction Markets",
         homepage_url="https://robinhood.com",
+        description=(
+            "Read-only Robinhood Prediction Markets alias over the official Kalshi venue market-data API. "
+            "It supports discovery, contracts, prices, orderbooks, history, alerts, and local paper orders; "
+            "Robinhood account execution and copy trading are not automated."
+        ),
+        capabilities=ROBINHOOD_PREDICTION_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="fanatics_markets",
         display_name="Fanatics Markets",
-        homepage_url="https://www.fanatics.com",
+        homepage_url="https://fanaticsmarkets.com",
+        description=(
+            "Read-only Fanatics Markets/CDNA alias using the official Crypto.com Predictions API for "
+            "event discovery, contracts, prices, alerts, and local dry-run orders; Fanatics order APIs "
+            "are not published and live/copy trading remain unsupported."
+        ),
+        capabilities=FANATICS_MARKETS_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="draftkings_predictions",
         display_name="DraftKings Predictions",
         homepage_url="https://www.draftkings.com",
+        description=(
+            "Read-only DraftKings Predictions/CDNA alias using the official Crypto.com Predictions API for "
+            "event discovery, contracts, prices, alerts, and local dry-run orders; CME-listed contracts "
+            "remain available through cme_prediction_markets. DraftKings account execution and copy trading "
+            "are not automated."
+        ),
+        capabilities=DRAFTKINGS_PREDICTIONS_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="ibkr_forecasttrader",
         display_name="Interactive Brokers ForecastTrader / IBKR Prediction Markets",
         homepage_url="https://www.interactivebrokers.com",
+        description=(
+            "Official IBKR Client Portal Web API event-contract adapter for ForecastTrader/ForecastEx "
+            "discovery, conids, top-of-book prices, alerts, paper orders, and guarded live orders."
+        ),
+        capabilities=IBKR_EVENT_CAPABILITIES,
     ),
-    MarketMetadata(market_id="forecastex", display_name="ForecastEx", homepage_url="https://www.forecastex.com"),
+    MarketMetadata(
+        market_id="forecastex",
+        display_name="ForecastEx",
+        homepage_url="https://www.forecastex.com",
+        description=(
+            "Official ForecastEx event-contract adapter routed through the IBKR Client Portal Web API "
+            "for discovery, conids, top-of-book prices, alerts, paper orders, and guarded live orders."
+        ),
+        capabilities=IBKR_EVENT_CAPABILITIES,
+    ),
     MarketMetadata(
         market_id="cme_prediction_markets",
         display_name="CME Group Prediction Markets",
         homepage_url="https://www.cmegroup.com",
-        description="Verified blocked: CME event-contract support requires licensed data entitlements and a documented broker/order route.",
+        description=(
+            "Official CME event-contract adapter routed through the IBKR Client Portal Web API for "
+            "product discovery, event conids, top-of-book prices, alerts, paper orders, and guarded orders."
+        ),
+        capabilities=IBKR_EVENT_CAPABILITIES,
     ),
-    MarketMetadata(market_id="nadex", display_name="Nadex", homepage_url="https://www.nadex.com"),
+    MarketMetadata(
+        market_id="nadex",
+        display_name="Nadex",
+        homepage_url="https://www.nadex.com",
+        description=(
+            "Read-only Nadex/CDNA prediction-event alias backed by the official Crypto.com Predictions "
+            "Market Data API for event discovery, contracts, prices, alerts, and local dry-run orders. "
+            "Nadex account trading, DCM/FIX depth, knock-out products, and copy trading remain unsupported."
+        ),
+        capabilities=NADEX_CAPABILITIES,
+    ),
     MarketMetadata(
         market_id="crypto_com_predict",
         display_name="Crypto.com Predict / CDNA",
@@ -343,22 +627,42 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="hyperliquid",
         display_name="Hyperliquid",
         homepage_url="https://hyperliquid.xyz",
-        description="Verified blocked: outcome docs exist, but production-safe outcome metadata, fixtures, and wallet/order safeguards are not implemented.",
+        description=(
+            "Official Hyperliquid HIP-4 outcome-market adapter for outcome discovery, prices, "
+            "orderbooks, paper orders, and guarded externally signed orders."
+        ),
+        capabilities=HYPERLIQUID_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="myriad_markets",
         display_name="Myriad Markets",
         homepage_url="https://myriad.markets",
-        description="Official Myriad Protocol API adapter for public question/market discovery, outcome prices, orderbooks, dry-run quote payloads, and guarded signed order submission.",
+        description=(
+            "Official Myriad Protocol API adapter for public question/market discovery, outcome prices, orderbooks, "
+            "public wallet-event activity, simulation-first copy intents, dry-run quote payloads, and guarded signed order submission."
+        ),
         capabilities=MYRIAD_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="context_v2",
         display_name="Context V2",
         homepage_url="https://context.markets",
-        description="Verified blocked: Context Markets is sunset, so historical SDK/API docs are not a supported production target.",
+        description=(
+            "Official Context Markets v2 API adapter for market discovery, outcome prices, orderbooks, "
+            "market activity trades, binary price history, paper orders, and guarded wallet-signed order submission."
+        ),
+        capabilities=CONTEXT_V2_CAPABILITIES,
     ),
-    MarketMetadata(market_id="frenzy_finance", display_name="Frenzy Finance", homepage_url="https://frenzy.finance"),
+    MarketMetadata(
+        market_id="frenzy_finance",
+        display_name="Frenzy Finance",
+        homepage_url="https://frenzy.finance",
+        description=(
+            "Official Base contract adapter for configured price-range grid specs, settlement history, and "
+            "dry-run BetIntent previews; live execution requires an oracle acknowledgement and wallet signing."
+        ),
+        capabilities=FRENZY_CAPABILITIES,
+    ),
     MarketMetadata(
         market_id="xo_market",
         display_name="XO Market",
@@ -370,7 +674,10 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="manifold",
         display_name="Manifold Markets",
         homepage_url="https://manifold.markets",
-        description="Official Manifold REST API adapter for market discovery, probabilities, dry-run orders, and guarded MANA betting.",
+        description=(
+            "Official Manifold REST API adapter for market discovery, probabilities, public user-bet activity, "
+            "simulation-first copy intents, dry-run orders, and guarded MANA betting."
+        ),
         capabilities=MANIFOLD_CAPABILITIES,
     ),
     MarketMetadata(
@@ -396,20 +703,28 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="iowa_electronic_markets",
         display_name="Iowa Electronic Markets",
         homepage_url="https://iem.uiowa.edu",
-        description="Verified blocked: public quote/history pages exist, but no stable documented API is published.",
+        description=(
+            "Official historical price-file adapter with explicit archive inventory, daily candles, latest "
+            "archived prices, alerts, and dry-run orders; current quote/order APIs remain unsupported."
+        ),
+        capabilities=IEM_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="infer",
         display_name="INFER / INFER-pub",
         homepage_url="https://www.infer-pub.com",
-        description="Verified blocked: RFI public pages exist, but no public documented API/export contract is published.",
+        description="Verified blocked: INFER/RFI is now a permanent read-only archive with no supported API/export contract.",
     ),
     MarketMetadata(market_id="fact_machine", display_name="Fact Machine", homepage_url="https://factmachine.io"),
     MarketMetadata(
         market_id="opinion_labs",
         display_name="Opinion Labs",
         homepage_url="https://opinion.trade",
-        description="Official Opinion OpenAPI adapter for authenticated read-only market data, orderbooks, prices, and dry-run orders.",
+        description=(
+            "Official Opinion OpenAPI adapter for authenticated market data, orderbooks, prices, "
+            "filled wallet-trade activity, and simulation-first copy intents; guarded live limit/market "
+            "orders use the optional official CLOB SDK and remain disabled by default."
+        ),
         capabilities=OPINION_CAPABILITIES,
     ),
     MarketMetadata(
@@ -426,22 +741,54 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         description="Legacy Augur v2 read-only market/outcome adapter using the documented subgraph schema with a user-configured GraphQL endpoint.",
         capabilities=AUGUR_CAPABILITIES,
     ),
-    MarketMetadata(market_id="betmgm", display_name="BetMGM", homepage_url="https://www.betmgm.com"),
+    MarketMetadata(
+        market_id="betmgm",
+        display_name="BetMGM",
+        homepage_url="https://www.betmgm.com",
+        description=(
+            "Official BetMGM partner Sports API adapter for fixture, market, option, and implied-price reads, "
+            "alerts, and local paper orders; the partner API publishes no supported order or account-activity endpoint."
+        ),
+        capabilities=BETMGM_CAPABILITIES,
+    ),
     MarketMetadata(market_id="prizepicks", display_name="PrizePicks", homepage_url="https://www.prizepicks.com"),
     MarketMetadata(market_id="underdog_sports", display_name="Underdog Sports", homepage_url="https://underdogfantasy.com"),
-    MarketMetadata(market_id="drift_bet", display_name="Drift BET", homepage_url="https://www.drift.trade"),
+    MarketMetadata(
+        market_id="drift_bet",
+        display_name="Drift BET",
+        homepage_url="https://www.drift.trade",
+        description=(
+            "Official Drift Data API adapter for explicitly configured BET market symbols, prediction prices, "
+            "alerts, and dry-run orders; binary orderbooks, wallet-signed live orders, and copy trading remain disabled."
+        ),
+        capabilities=DRIFT_BET_CAPABILITIES,
+    ),
     MarketMetadata(
         market_id="thales_market",
         display_name="Thales Market",
         homepage_url="https://thalesmarket.io",
-        description="Verified blocked: Thales API/contract docs exist, but chain-specific AMM, collateral, wallet, and fixture coverage is required.",
+        description=(
+            "Official Thales Markets REST adapter for public AMM market discovery, positional prices, "
+            "quote-backed paper orders, and alerts; live wallet transactions remain explicitly disabled."
+        ),
+        capabilities=THALES_CAPABILITIES,
     ),
-    MarketMetadata(market_id="hedgehog_markets", display_name="Hedgehog Markets", homepage_url="https://hedgehog.markets"),
+    MarketMetadata(
+        market_id="hedgehog_markets",
+        display_name="Hedgehog Markets",
+        homepage_url="https://hedgehog.markets",
+        description=(
+            "Official Hedgehog HPL Parimutuel/Eclipse adapter for on-chain MarketV1 discovery, pooled outcome "
+            "prices, alerts, and dry-run DepositV1 intents; CLOB depth, wallet-signed live execution, and copy "
+            "trading remain disabled."
+        ),
+        capabilities=HEDGEHOG_CAPABILITIES,
+    ),
     MarketMetadata(
         market_id="omen",
         display_name="Omen",
         homepage_url="https://omen.eth.limo",
-        description="Legacy Omen/Gnosis FixedProductMarketMaker subgraph adapter for read-only markets, AMM marginal prices, alerts, and paper orders.",
+        description="Legacy Omen/Gnosis FixedProductMarketMaker subgraph adapter for AMM markets, marginal prices, alerts, paper orders, and guarded externally signed live transactions.",
         capabilities=OMEN_CAPABILITIES,
     ),
     MarketMetadata(
@@ -483,13 +830,18 @@ MARKET_CATALOG: Tuple[MarketMetadata, ...] = (
         market_id="smarkets",
         display_name="Smarkets",
         homepage_url="https://smarkets.com",
-        description="Verified blocked: API access requires Smarkets account approval and written permission for platform data redistribution.",
+        description=(
+            "Official Smarkets v3 REST adapter for event/market/contract discovery, quote orderbooks, "
+            "paper orders, authenticated order/account reads, and guarded session-authenticated order "
+            "submission/cancellation."
+        ),
+        capabilities=SMARKETS_CAPABILITIES,
     ),
     MarketMetadata(
         market_id="betfair_exchange",
         display_name="Betfair Exchange",
         homepage_url="https://www.betfair.com/exchange",
-        description="Official Betfair Exchange API adapter for authenticated market discovery, best-offer orderbooks, prices, dry-run orders, and guarded placeOrders support.",
+        description="Official Betfair Exchange API adapter for authenticated market discovery, best-offer orderbooks, matched-order history, prices, dry-run orders, and guarded placeOrders support.",
         capabilities=BETFAIR_CAPABILITIES,
     ),
     MarketMetadata(market_id="probo", display_name="Probo", homepage_url="https://probo.in"),
