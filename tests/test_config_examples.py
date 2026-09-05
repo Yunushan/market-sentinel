@@ -4,8 +4,11 @@ import json
 import unittest
 from pathlib import Path
 
+from core.config_security import assert_no_persisted_secrets
 from core.models import AppConfig
 from market_adapters import MARKET_IDS
+from market_adapters.catalog import MARKET_CATALOG
+from market_adapters.registry import VERIFIED_BLOCKERS
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -41,8 +44,18 @@ class ConfigExampleTests(unittest.TestCase):
             settings = market_cfg.get("settings") or {}
             self.assertFalse(settings.get("live_trading_enabled"), market_id)
 
+    def test_config_example_status_matches_registry_capabilities(self) -> None:
+        data = json.loads(CONFIG_EXAMPLE.read_text(encoding="utf-8"))
+
+        for market in MARKET_CATALOG:
+            settings = data["markets"][market.market_id].get("settings") or {}
+            expected = "verified_blocked" if market.market_id in VERIFIED_BLOCKERS else "implemented"
+            self.assertEqual(settings.get("adapter_status"), expected, market.market_id)
+
     def test_config_example_does_not_store_direct_secret_fields(self) -> None:
         data = json.loads(CONFIG_EXAMPLE.read_text(encoding="utf-8"))
+
+        assert_no_persisted_secrets(data)
 
         for market_id, market_cfg in data["markets"].items():
             settings = market_cfg.get("settings") or {}

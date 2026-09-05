@@ -6,6 +6,11 @@ from email.parser import BytesParser
 from pathlib import Path
 from zipfile import ZipFile
 
+try:
+    from scripts.release_version import normalize_release_version
+except ModuleNotFoundError:  # Direct execution adds scripts/, rather than the repository root, to sys.path.
+    from release_version import normalize_release_version
+
 
 REQUIRED_WHEEL_MEMBERS = {
     "market_sentinel_cli.py",
@@ -18,6 +23,7 @@ REQUIRED_SDIST_MEMBERS = {
     ".github/actionlint.yaml",
     ".github/workflows/ci.yml",
     ".github/workflows/release.yml",
+    ".github/workflows/deployment-evidence.yml",
     "CONTRIBUTING.md",
     "LICENSE",
     "MANIFEST.in",
@@ -36,25 +42,36 @@ REQUIRED_SDIST_MEMBERS = {
     "frontend/package.json",
     "frontend/src/App.tsx",
     "requirements.lock",
+    "requirements-bootstrap.lock",
     "requirements-live.lock",
+    "requirements-security.lock",
     "requirements-test.lock",
     "requirements-build.lock",
     "requirements.txt",
+    "requirements-bootstrap.txt",
+    "requirements-build.txt",
     "requirements-live.txt",
+    "requirements-security.txt",
     "requirements-test.txt",
     "scripts/verify_dependency_lock.py",
     "scripts/collect_platform_evidence.py",
     "scripts/run_platform_evidence.py",
     "scripts/review_platform_evidence.py",
+    "scripts/review_deployment_evidence.py",
+    "scripts/generate_deployment_evidence.py",
     "scripts/backup_state.py",
     "scripts/verify_polymarket_live.py",
     "scripts/restore_state_backup.py",
     "scripts/verify_production_deployment.py",
     "scripts/verify_release_provenance.py",
     "scripts/verify_release_assets.py",
+    "scripts/release_version.py",
     "tests/fixtures/crypto_com_predict/events.json",
     "tests/fixtures/crypto_com_predict/contracts.json",
     "tests/fixtures/crypto_com_predict/price.json",
+    "tests/fixtures/hypermind/outcomes.txt",
+    "tests/fixtures/hypermind/prices.csv",
+    "tests/fixtures/iowa_electronic_markets/powell_price_data.txt",
     "tests/test_crypto_com_predict_adapter.py",
 }
 
@@ -74,6 +91,13 @@ def _single_artifact(dist_dir: Path, pattern: str, label: str) -> Path:
     return matches[0]
 
 
+def _canonical_version(value: str) -> str:
+    try:
+        return normalize_release_version(str(value))
+    except ValueError as exc:
+        raise SystemExit(f"Unsupported expected release version {value!r}: {exc}") from exc
+
+
 def _missing(required: set[str], actual: set[str]) -> list[str]:
     return sorted(required - actual)
 
@@ -85,6 +109,7 @@ def _verify_license_text(text: str, label: str) -> None:
 
 
 def verify_wheel(path: Path, expected_version: str) -> None:
+    expected_version = _canonical_version(expected_version)
     dist_info = f"market_sentinel-{expected_version}.dist-info"
     metadata_name = f"{dist_info}/METADATA"
     entry_points_name = f"{dist_info}/entry_points.txt"
@@ -125,11 +150,11 @@ def verify_wheel(path: Path, expected_version: str) -> None:
         live_dependency_entries = [
             value
             for value in metadata.get_all("Requires-Dist", [])
-            if value.lower().startswith("py-clob-client")
+            if value.lower().startswith("py-clob-client-v2")
         ]
         if len(live_dependency_entries) != 1 or 'extra == "live"' not in live_dependency_entries[0]:
             raise SystemExit(
-                f"Wheel {path.name} must expose py-clob-client only through the live extra."
+                f"Wheel {path.name} must expose py-clob-client-v2 only through the live extra."
             )
         _verify_license_text(archive.read(license_name).decode("utf-8"), f"Wheel {path.name} LICENSE")
         if "market-sentinel = market_sentinel_cli:main" not in archive.read(entry_points_name).decode("utf-8"):
@@ -137,6 +162,7 @@ def verify_wheel(path: Path, expected_version: str) -> None:
 
 
 def verify_sdist(path: Path, expected_version: str) -> None:
+    expected_version = _canonical_version(expected_version)
     prefix = f"market_sentinel-{expected_version}/"
     with tarfile.open(path, "r:gz") as archive:
         names = {name.replace("\\", "/") for name in archive.getnames()}
@@ -176,7 +202,7 @@ def main() -> None:
     dist_dir = args.dist_dir.resolve()
     if not dist_dir.is_dir():
         raise SystemExit(f"Distribution directory does not exist: {dist_dir}")
-    version = str(args.expected_version or "").strip()
+    version = _canonical_version(str(args.expected_version or "").strip())
     wheel = _single_artifact(dist_dir, f"market_sentinel-{version}-*.whl", "wheel")
     sdist = _single_artifact(dist_dir, f"market_sentinel-{version}.tar.gz", "source distribution")
     verify_wheel(wheel, version)

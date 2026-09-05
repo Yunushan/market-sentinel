@@ -41,6 +41,20 @@ Jobs:
 
 The workflow uses read-only repository permissions by default and cancels stale runs on the same ref.
 
+Manual dispatch of the protected `main` branch also runs
+`Public Polymarket live / GitHub-hosted`; feature-branch dispatches skip this
+trust-sensitive job. It rejects credential-bearing environment variables, exercises only the four
+reviewed public-read endpoints, validates the resulting report offline, checks
+that the checkout stayed clean at the exact requested revision, and creates a
+GitHub build-provenance attestation for the report before uploading it as a
+short-retention artifact. The readiness scorer accepts the downloaded report
+only after independently verifying its bytes, attestation identity, workflow
+run, hosted Ubuntu job, successful required steps, source revision, and
+freshness, and requires both workflow and source ref to be `refs/heads/main`.
+This evidence establishes public endpoint reachability from that
+runner at that time; it is not deployment, credentialed-account, or funded-order
+evidence.
+
 ### Security
 
 Workflow: `.github/workflows/security.yml`
@@ -81,8 +95,39 @@ Release jobs:
 - Generate `SHA256SUMS.txt` and an SPDX 2.3 software bill of materials.
 - Create GitHub build-provenance attestations for every release asset.
 - Publish or update a GitHub Release using the built-in `GITHUB_TOKEN`.
+- After a stable release is remotely inventoried, downloaded, and byte-compared,
+  generate, attest, and upload a distinct canonical `release-evidence.json`
+  artifact bound to the exact repository, commit, tag, run, attempt, release
+  history, and asset names/sizes/SHA-256 values.
 
-The publish job targets the `release` environment. Treat this as the release environment for production publishing, and configure protection rules for it in GitHub if releases should require manual approval.
+The publish job targets the protected `release` environment when
+`REQUIRE_WINDOWS_CODE_SIGNING=true`. When that variable is explicitly false,
+the workflow targets the unprotected `release-unsigned` environment so a
+tag-triggered testing/development release is not rejected by a protected
+branch deployment rule or an unavailable self-review. Configure protection
+rules on the release environment (`release`) for production publishing; unsigned releases remain
+explicitly non-production-trusted.
+
+Release reruns are fail-closed. An updatable existing release is returned to draft state before its assets change; a new release starts as a draft. After the verified local files are uploaded, the workflow enumerates every remote asset page, removes only numeric asset IDs belonging to that exact release whose names are absent locally, checks the exact remote names and metadata, downloads every asset, and compares the bytes with the attested local files. The requested draft or published state is applied only after those checks pass. If immutable releases are enabled, GitHub rejects modification of a published release instead of allowing a partial rerun.
+
+For a non-draft, non-prerelease publication, the pinned `ubuntu-24.04`
+publish job then queries the final release, asset inventory, complete bounded
+release history, and its own run identity. `scripts/generate_release_evidence.py`
+fails unless they match the exact verified local bytes and trusted workflow
+coordinates. Only then does the workflow attest and upload
+`release-evidence.json` as
+`release-evidence-<sha>-<run-id>-<attempt>`. This evidence file is not itself a
+release asset, avoiding a checksum/inventory cycle. See
+`docs/PRODUCTION_READINESS.md` for the independent live-state checks performed
+before the readiness scorer awards either release point.
+
+If generation, attestation, or upload of that post-publication evidence fails,
+the workflow runs a compensating cleanup that returns the prepared release to
+draft state and verifies the transition. If GitHub refuses that transition,
+the cleanup also fails loudly and the release requires immediate operator
+reconciliation. The report records a fresh `generated_at` collection time
+independently of the release's original `published_at`, so an unchanged current
+release can be re-evaluated without pretending it was newly published.
 
 See `docs/PLATFORM_SUPPORT.md` for the platform support tiers and the gates required before any additional OS or mobile platform is advertised as fully supported.
 
@@ -174,7 +219,7 @@ The portable zip contains:
 - bundled `frontend/dist` React assets
 - `README.md`, `README_WINDOWS.txt`, `LICENSE`, `.env.example`, and `data/config.example.json`
 
-The MSI installs the same payload under Program Files, creates Start Menu shortcuts for the Tkinter and React launchers, and supports normal Windows uninstall/upgrade behavior through MSI product metadata. Protected releases fail closed unless the `release` environment has `REQUIRE_WINDOWS_CODE_SIGNING=true`, `WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64`, and `WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD`. Before downloading build inputs or running WiX/PyInstaller, the release job verifies that the secret is a password-protected PFX with a private key and that the timestamp endpoint is HTTPS. This catches missing or malformed release configuration without building unsigned assets. `scripts/sign_windows_release.py` signs and verifies every EXE/MSI using an RFC 3161 timestamp URL; certificates are decoded only into a temporary file on the Windows runner.
+The MSI installs the same payload under Program Files, creates Start Menu shortcuts for the Tkinter and React launchers, and supports normal Windows uninstall/upgrade behavior through MSI product metadata. Set `REQUIRE_WINDOWS_CODE_SIGNING=true` for production releases; the `release` environment must then provide `WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64` and `WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD`. Before downloading build inputs or running WiX/PyInstaller, the release job verifies that the secret is a password-protected PFX with a private key and that the timestamp endpoint is HTTPS. `scripts/sign_windows_release.py` signs and verifies every EXE/MSI using an RFC 3161 timestamp URL; certificates are decoded only into a temporary file on the Windows runner. If `REQUIRE_WINDOWS_CODE_SIGNING` is explicitly false or absent, the workflow still builds and verifies the portable ZIP/MSI contents, but publishes them as intentionally unsigned testing/development artifacts and labels that status in the release notes. Unsigned Windows artifacts are not production-trusted.
 
 The Windows launchers use `data/config.json` when the package folder is writable, which keeps the portable zip self-contained. If the app is installed under a protected folder such as Program Files, the launchers set `PREDICTION_MARKET_CONFIG_PATH` to `%APPDATA%\market-sentinel\data\config.json` so normal users can save settings without administrator privileges.
 
@@ -191,7 +236,9 @@ Recommended GitHub settings:
 
 The release workflow uses the built-in `GITHUB_TOKEN` with `contents: write`,
 `attestations: write`, and `id-token: write` only on the protected publish job.
-Windows code-signing credentials are required separately before distributing an
+Windows code-signing credentials are required before distributing a production
 installer publicly. Set `REQUIRE_WINDOWS_CODE_SIGNING=true` and the protected
-code-signing secrets in the `release` environment. See `docs/REPOSITORY_SETTINGS.md` and
+code-signing secrets in the `release` environment. For an explicitly unsigned
+testing/development release, set the variable to `false`; the workflow labels
+the resulting Windows artifacts as unsigned. See `docs/REPOSITORY_SETTINGS.md` and
 `docs/PRODUCTION_OPERATIONS.md` for the mandatory repository and deployment controls.
