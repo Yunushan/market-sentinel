@@ -4,8 +4,10 @@ import importlib.metadata as importlib_metadata
 import json
 import io
 import os
+import socket
 import threading
 import tempfile
+import time
 import unittest
 import zipfile
 from http import HTTPStatus
@@ -14,23 +16,43 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, WalletWatch
-from core.storage import ConfigLoadError, load_config, save_config
+from core.models import (
+    AppConfig,
+    CopyTradeSettings,
+    PaperTradeRecord,
+    PriceAlert,
+    WalletWatch,
+)
+from core.storage import ConfigConflictError, ConfigLoadError, load_config, save_config
 from market_adapters.base import MarketAdapter
 from market_adapters.types import (
     MarketCapabilities,
+    MarketCandle,
+    MarketContract,
+    MarketEvent,
     MarketMetadata,
     OrderBookLevel,
     OrderBookSnapshot,
     PaperOrderRequest,
     PaperOrderResult,
     PriceSnapshot,
+    MarketTrade,
 )
+from market_adapters.errors import MarketConfigurationError, UnsupportedFeatureError
+from market_adapters.outbound import OUTBOUND_ENDPOINT_SETTING_KEYS, OUTBOUND_POLICY_SETTING_KEYS
 from polymarket.analytics_cache import POLYMARKET_MDD_AUDIT_KIND, store_analytics_artifact
 from polymarket.gamma import ProfileResult
 from polymarket.http_client import PolymarketRateLimitError
+from polymarket.live_reports import (
+    LiveValidationStoreDurabilityError,
+    live_validation_coverage_promotion_proposal,
+)
 from polymarket.mdd import MDD_METHOD_MARK_REPLAY, MDD_METHOD_V2
 from web_api import (
+    HTTP_CONNECTION_TIMEOUT_SECONDS,
+    MAX_HTTP_RESPONSE_BYTES,
+    MAX_HTTP_WORKERS,
+    activity_key,
     _fetch_polymarket_leaderboard_scan_rows,
     _read_json_body,
     add_wallet_watch,
@@ -53,6 +75,17 @@ from web_api import (
     live_preflight_payload,
     live_safety_payload,
     markets_payload,
+    market_candles_payload,
+    market_account_payload,
+    market_position_intent_payload,
+    market_order_management_payload,
+    market_contracts_payload,
+    market_events_payload,
+    market_orderbook_payload,
+    market_price_payload,
+    market_trades_payload,
+    market_support_payload,
+    main as web_api_main,
     paper_payload,
     paper_order_impact,
     paper_order_from_payload,
@@ -89,6 +122,7 @@ from web_api import (
     _safe_http_header_value,
     static_cache_control,
     run_server,
+    sanitize_settings,
     submit_paper_order,
     update_wallet_watch,
     wallets_payload,
@@ -193,6 +227,80 @@ class FakePolymarketAdapter(MarketAdapter):
         )
 
 
+class FakeOpinionCopyAdapter(FakePolymarketAdapter):
+    metadata = MarketMetadata(
+        market_id="opinion_labs",
+        display_name="Opinion Labs",
+        capabilities=MarketCapabilities(
+            price_reading=True,
+            alerts=True,
+            orderbook_reading=True,
+            paper_trading=True,
+            copy_trading=True,
+        ),
+    )
+
+    def list_activity(self, wallet: str, *, limit: int = 25) -> list[dict]:
+        return [
+            {
+                "transactionHash": "opinion-tx-1",
+                "timestamp": 101,
+                "proxyWallet": wallet,
+                "asset": "77:YES:0xyes",
+                "side": "BUY",
+                "price": "0.44",
+                "size": "10",
+                "slug": "77",
+                "outcome": "Yes",
+            }
+        ][:limit]
+
+
+class FakeMyriadCopyAdapter(FakePolymarketAdapter):
+    metadata = MarketMetadata(
+        market_id="myriad_markets",
+        display_name="Myriad Markets",
+        capabilities=MarketCapabilities(
+            price_reading=True,
+            alerts=True,
+            orderbook_reading=True,
+            paper_trading=True,
+            copy_trading=True,
+        ),
+    )
+
+    def list_activity(self, wallet: str, *, limit: int = 25) -> list[dict]:
+        return [
+            {
+                "transactionHash": "myriad-tx-1",
+                "timestamp": 201,
+                "proxyWallet": wallet,
+                "asset": "501:1",
+                "side": "BUY",
+                "price": 0.61,
+                "size": 12.2,
+                "value": 12.2,
+                "shares": 20.0,
+                "slug": "btc-above-100k-2026",
+                "outcome": "Yes",
+            }
+        ][:limit]
+
+
+class FakeAzuroCopyAdapter(FakePolymarketAdapter):
+    metadata = MarketMetadata(
+        market_id="azuro",
+        display_name="Azuro",
+        capabilities=MarketCapabilities(
+            price_reading=True,
+            alerts=True,
+            paper_trading=True,
+            live_trading=True,
+            copy_trading=True,
+        ),
+    )
+
+
 class FakeRegistry:
     def __init__(self, adapter: MarketAdapter) -> None:
         self.adapter = adapter
@@ -209,8 +317,14 @@ class SecretFailRegistry:
 
 
 class FakeBodyHandler:
-    def __init__(self, body: bytes, content_length: str | None = None) -> None:
+    def __init__(
+        self,
+        body: bytes,
+        content_length: str | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.headers = {"Content-Length": content_length if content_length is not None else str(len(body))}
+        self.headers.update(headers or {})
         self.rfile = io.BytesIO(body)
 
 
@@ -223,7 +337,16 @@ class WebApiTests(unittest.TestCase):
             archive.writestr("positions.csv", positions_csv)
         return buffer.getvalue()
 
-    def _serve_api(self, config_path: Path, frontend_dir: Path, *, api_token: str = ""):
+    def _serve_api(
+        self,
+        config_path: Path,
+        frontend_dir: Path,
+        *,
+        api_token: str = "",
+        max_http_workers: int = MAX_HTTP_WORKERS,
+        max_mutation_workers: int | None = None,
+        mutation_lock_timeout_seconds: float = 5.0,
+    ):
         with patch("web_api.DEFAULT_FRONTEND_DIR", frontend_dir):
             server = ReactGuiServer(
                 ("127.0.0.1", 0),
@@ -232,6 +355,9 @@ class WebApiTests(unittest.TestCase):
                 frontend_dir=frontend_dir,
                 adapter_registry=FakeRegistry(FakePaperAdapter()),
                 api_token=api_token,
+                max_http_workers=max_http_workers,
+                max_mutation_workers=max_mutation_workers,
+                mutation_lock_timeout_seconds=mutation_lock_timeout_seconds,
             )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -249,6 +375,20 @@ class WebApiTests(unittest.TestCase):
     ) -> tuple[int, dict]:
         data = raw
         request_headers = dict(headers or {})
+        route_parts = path.strip("/").split("/")
+        durable_mutation = method == "POST" and (
+            path in {"/api/alerts", "/api/wallets", "/api/paper/orders"}
+            or (
+                len(route_parts) == 5
+                and route_parts[:2] == ["api", "markets"]
+                and route_parts[3] == "orders"
+            )
+        )
+        if durable_mutation:
+            request_headers.setdefault(
+                "Idempotency-Key",
+                f"test-{threading.get_ident()}-{time.time_ns()}",
+            )
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
             request_headers.setdefault("Content-Type", "application/json")
@@ -280,6 +420,13 @@ class WebApiTests(unittest.TestCase):
             finally:
                 exc.close()
 
+    def test_activity_key_prefers_transaction_and_activity_ids(self) -> None:
+        self.assertEqual(activity_key({"transactionHash": "0xABC"}), "tx:0xabc")
+        self.assertEqual(
+            activity_key({"activity_id": "Context:0xabc:0x1"}),
+            "activity-id:context:0xabc:0x1",
+        )
+
     def test_loopback_detection_and_remote_server_token_gate(self) -> None:
         self.assertTrue(is_loopback_host("127.0.0.1"))
         self.assertTrue(is_loopback_host("::1"))
@@ -293,19 +440,1074 @@ class WebApiTests(unittest.TestCase):
     def test_server_uses_bounded_connection_and_shutdown_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            server = ReactGuiServer(
-                ("127.0.0.1", 0),
-                ReactGuiHandler,
-                config_path=root / "config.json",
-                frontend_dir=root / "dist",
-            )
+            frontend_dir = root / "dist"
+            with patch("web_api.DEFAULT_FRONTEND_DIR", frontend_dir):
+                server = ReactGuiServer(
+                    ("127.0.0.1", 0),
+                    ReactGuiHandler,
+                    config_path=root / "config.json",
+                    frontend_dir=frontend_dir,
+                )
             try:
                 self.assertTrue(server.allow_reuse_address)
                 self.assertTrue(server.daemon_threads)
                 self.assertFalse(server.block_on_close)
                 self.assertEqual(server.request_queue_size, 32)
+                self.assertEqual(server.max_http_workers, MAX_HTTP_WORKERS)
             finally:
                 server.server_close()
+
+    def test_server_rejects_connections_promptly_at_worker_limit_and_recovers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            server, thread, base_url = self._serve_api(
+                root / "config.json",
+                frontend_dir,
+                max_http_workers=2,
+            )
+            occupied: list[socket.socket] = []
+            try:
+                host, port = server.server_address
+                for _ in range(2):
+                    connection = socket.create_connection((host, port), timeout=2)
+                    connection.sendall(b"GET /api/health HTTP/1.1\r\nHost: localhost\r\n")
+                    occupied.append(connection)
+
+                deadline = time.monotonic() + 3
+                while "market_sentinel_http_requests_in_flight 2" not in server.http_metrics.prometheus_text():
+                    if time.monotonic() >= deadline:
+                        self.fail("HTTP workers did not reach the configured limit")
+                    time.sleep(0.01)
+
+                overloaded = socket.create_connection((host, port), timeout=2)
+                try:
+                    overloaded.settimeout(2)
+                    response = b""
+                    while True:
+                        chunk = overloaded.recv(4096)
+                        if not chunk:
+                            break
+                        response += chunk
+                finally:
+                    overloaded.close()
+
+                headers, body = response.split(b"\r\n\r\n", 1)
+                self.assertIn(b"HTTP/1.1 503 Service Unavailable", headers)
+                self.assertIn(b"Retry-After: 1", headers)
+                self.assertEqual(json.loads(body.decode("utf-8"))["error"]["code"], "server_overloaded")
+                self.assertIn("market_sentinel_http_overload_rejections_total 1", server.http_metrics.prometheus_text())
+
+                for connection in occupied:
+                    connection.close()
+                occupied.clear()
+                deadline = time.monotonic() + 3
+                while "market_sentinel_http_requests_in_flight 0" not in server.http_metrics.prometheus_text():
+                    if time.monotonic() >= deadline:
+                        self.fail("HTTP worker slots were not released")
+                    time.sleep(0.01)
+
+                status, payload = self._request_json(base_url, "/api/health")
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(payload["status"], "ok")
+                self.assertEqual(payload["observability"]["max_http_workers"], 2)
+            finally:
+                for connection in occupied:
+                    connection.close()
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertIn("market_sentinel_http_requests_in_flight 0", server.http_metrics.prometheus_text())
+
+    def test_authenticated_mutations_are_serialized_and_preserve_both_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.json"
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            save_config(AppConfig(), config_path)
+            server, server_thread, base_url = self._serve_api(config_path, frontend_dir)
+            first_entered = threading.Event()
+            release_first = threading.Event()
+            second_entered = threading.Event()
+            apply_count = 0
+            apply_count_lock = threading.Lock()
+            results: list[tuple[int, dict]] = []
+
+            def blocking_apply(cfg: AppConfig, payload: dict) -> AppConfig:
+                nonlocal apply_count
+                with apply_count_lock:
+                    apply_count += 1
+                    current = apply_count
+                if current == 1:
+                    first_entered.set()
+                    if not release_first.wait(timeout=5):
+                        raise RuntimeError("timed out waiting to release first mutation")
+                else:
+                    second_entered.set()
+                return apply_config_patch(cfg, payload)
+
+            def mutate(payload: dict) -> None:
+                results.append(self._request_json(base_url, "/api/config", method="PATCH", payload=payload))
+
+            first = threading.Thread(target=mutate, args=({"theme": "dark"},), daemon=True)
+            second = threading.Thread(target=mutate, args=({"selected_market_id": "kalshi"},), daemon=True)
+            try:
+                with patch("web_api.apply_config_patch", side_effect=blocking_apply):
+                    first.start()
+                    self.assertTrue(first_entered.wait(timeout=2))
+                    second.start()
+                    self.assertFalse(second_entered.wait(timeout=0.2))
+                    release_first.set()
+                    first.join(timeout=5)
+                    second.join(timeout=5)
+            finally:
+                release_first.set()
+                first.join(timeout=5)
+                second.join(timeout=5)
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(sorted(status for status, _payload in results), [HTTPStatus.OK, HTTPStatus.OK])
+            stored = load_config(config_path)
+            self.assertEqual(stored.theme, "dark")
+            self.assertEqual(stored.selected_market_id, "kalshi")
+
+    def test_mutation_admission_reserves_health_capacity_and_rejects_excess_callers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.json"
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            save_config(AppConfig(), config_path)
+            server, server_thread, base_url = self._serve_api(
+                config_path,
+                frontend_dir,
+                api_token="test-token",
+                max_http_workers=4,
+                max_mutation_workers=3,
+            )
+            first_entered = threading.Event()
+            release_first = threading.Event()
+            apply_count = 0
+            apply_count_lock = threading.Lock()
+            results: list[tuple[int, dict]] = []
+            auth = {"Authorization": "Bearer test-token"}
+
+            def blocking_apply(cfg: AppConfig, payload: dict) -> AppConfig:
+                nonlocal apply_count
+                with apply_count_lock:
+                    apply_count += 1
+                    current = apply_count
+                if current == 1:
+                    first_entered.set()
+                    if not release_first.wait(timeout=5):
+                        raise RuntimeError("timed out waiting to release first mutation")
+                return apply_config_patch(cfg, payload)
+
+            def mutate(payload: dict) -> None:
+                results.append(
+                    self._request_json(
+                        base_url,
+                        "/api/config",
+                        method="PATCH",
+                        payload=payload,
+                        headers=auth,
+                    )
+                )
+
+            callers = [
+                threading.Thread(target=mutate, args=({"theme": "dark"},), daemon=True),
+                threading.Thread(target=mutate, args=({"selected_market_id": "kalshi"},), daemon=True),
+                threading.Thread(target=mutate, args=({"ui_design": "classic"},), daemon=True),
+            ]
+            try:
+                with patch("web_api.apply_config_patch", side_effect=blocking_apply):
+                    callers[0].start()
+                    self.assertTrue(first_entered.wait(timeout=2))
+                    callers[1].start()
+                    callers[2].start()
+                    deadline = time.monotonic() + 3
+                    while server.http_metrics.snapshot()["mutations_in_flight"] != 3:
+                        if time.monotonic() >= deadline:
+                            self.fail("mutation callers did not saturate the bounded admission slots")
+                        time.sleep(0.01)
+
+                    health_status, health = self._request_json(
+                        base_url,
+                        "/api/health",
+                        headers=auth,
+                    )
+                    self.assertEqual(health_status, HTTPStatus.OK)
+                    self.assertEqual(health["status"], "ok")
+                    self.assertFalse(health["readiness"]["ready"])
+                    self.assertTrue(health["readiness"]["admission"]["mutation_saturated"])
+                    self.assertEqual(health["readiness"]["admission"]["reserved_read_workers"], 1)
+
+                    # Receiving the health response does not guarantee that its
+                    # handler thread has already returned its reserved HTTP
+                    # worker. Wait for that teardown before opening the request
+                    # intended to exercise the mutation-admission gate; without
+                    # this synchronization a slow runner can legitimately hit
+                    # the global worker limit first.
+                    deadline = time.monotonic() + 3
+                    while server.http_metrics.snapshot()["requests_in_flight"] != 3:
+                        if time.monotonic() >= deadline:
+                            self.fail("health request did not release its reserved HTTP worker")
+                        time.sleep(0.01)
+
+                    rejected_status, rejected = self._request_json(
+                        base_url,
+                        "/api/config",
+                        method="PATCH",
+                        payload={"theme": "light"},
+                        headers=auth,
+                    )
+                    self.assertEqual(rejected_status, HTTPStatus.SERVICE_UNAVAILABLE)
+                    self.assertEqual(rejected["error"]["code"], "mutation_admission_saturated")
+                    release_first.set()
+                    for caller in callers:
+                        caller.join(timeout=5)
+            finally:
+                release_first.set()
+                for caller in callers:
+                    caller.join(timeout=5)
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+
+            self.assertTrue(all(not caller.is_alive() for caller in callers))
+            self.assertEqual(sorted(status for status, _payload in results), [HTTPStatus.OK] * 3)
+            metrics = server.http_metrics.prometheus_text()
+            self.assertIn("market_sentinel_http_mutation_admission_rejections_total 1", metrics)
+            self.assertIn("market_sentinel_http_mutations_in_flight 0", metrics)
+            self.assertIn("market_sentinel_http_mutations_active 0", metrics)
+            self.assertIn("market_sentinel_http_worker_limit 4", metrics)
+            self.assertIn("market_sentinel_http_mutation_admission_limit 3", metrics)
+            self.assertIn("market_sentinel_http_reserved_read_workers 1", metrics)
+
+    def test_mutation_lock_wait_is_timed_and_health_remains_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.json"
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            save_config(AppConfig(), config_path)
+            server, server_thread, base_url = self._serve_api(
+                config_path,
+                frontend_dir,
+                max_http_workers=3,
+                max_mutation_workers=2,
+                mutation_lock_timeout_seconds=0.15,
+            )
+            first_entered = threading.Event()
+            release_first = threading.Event()
+            results: list[tuple[int, dict]] = []
+
+            def blocking_apply(cfg: AppConfig, payload: dict) -> AppConfig:
+                first_entered.set()
+                if not release_first.wait(timeout=5):
+                    raise RuntimeError("timed out waiting to release first mutation")
+                return apply_config_patch(cfg, payload)
+
+            first = threading.Thread(
+                target=lambda: results.append(
+                    self._request_json(
+                        base_url,
+                        "/api/config",
+                        method="PATCH",
+                        payload={"theme": "dark"},
+                    )
+                ),
+                daemon=True,
+            )
+            try:
+                with patch("web_api.apply_config_patch", side_effect=blocking_apply):
+                    first.start()
+                    self.assertTrue(first_entered.wait(timeout=2))
+                    started_at = time.monotonic()
+                    busy_status, busy = self._request_json(
+                        base_url,
+                        "/api/config",
+                        method="PATCH",
+                        payload={"theme": "light"},
+                    )
+                    elapsed = time.monotonic() - started_at
+                    self.assertEqual(busy_status, HTTPStatus.SERVICE_UNAVAILABLE)
+                    self.assertEqual(busy["error"]["code"], "mutation_busy")
+                    self.assertLess(elapsed, 1.0)
+                    health_status, health = self._request_json(base_url, "/api/health")
+                    self.assertEqual(health_status, HTTPStatus.OK)
+                    self.assertEqual(health["status"], "ok")
+                    release_first.set()
+                    first.join(timeout=5)
+            finally:
+                release_first.set()
+                first.join(timeout=5)
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+
+            self.assertFalse(first.is_alive())
+            self.assertEqual([status for status, _payload in results], [HTTPStatus.OK])
+            self.assertIn(
+                "market_sentinel_http_mutation_lock_timeouts_total 1",
+                server.http_metrics.prometheus_text(),
+            )
+
+    def test_health_reports_corrupt_config_without_losing_liveness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.json"
+            config_path.write_text("{not-json", encoding="utf-8")
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            server, server_thread, base_url = self._serve_api(config_path, frontend_dir)
+            try:
+                status, payload = self._request_json(base_url, "/api/health")
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+
+        self.assertEqual(status, HTTPStatus.OK)
+        self.assertEqual(payload["status"], "ok")
+        self.assertFalse(payload["ready"])
+        self.assertEqual(payload["readiness"]["status"], "degraded")
+        config_store = next(
+            row
+            for row in payload["readiness"]["storage"]["stores"]
+            if row["name"] == "configuration"
+        )
+        self.assertFalse(config_store["readable"])
+        self.assertIn("ConfigLoadError", config_store["read_status"])
+
+    def test_health_rejects_malformed_store_shapes_without_mutating_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            store_payloads = {
+                "analytics.json": b"{}",
+                "reports.json": b'{"version":1,"reports":[]}',
+                "decisions.json": b'{"version":999,"decisions":{}}',
+                "snapshots.json": b'{"version":1}',
+            }
+            for filename, content in store_payloads.items():
+                (root / filename).write_bytes(content)
+            environment = {
+                "POLYMARKET_ANALYTICS_CACHE_PATH": str(root / "analytics.json"),
+                "POLYMARKET_LIVE_VALIDATION_REPORTS_PATH": str(root / "reports.json"),
+                "POLYMARKET_LIVE_VALIDATION_DECISIONS_PATH": str(root / "decisions.json"),
+                "POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_PATH": str(root / "snapshots.json"),
+            }
+            with patch.dict(os.environ, environment, clear=False):
+                server, server_thread, base_url = self._serve_api(root / "config.json", frontend_dir)
+                try:
+                    status, payload = self._request_json(base_url, "/api/health")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    server_thread.join(timeout=5)
+
+            self.assertEqual(status, HTTPStatus.OK)
+            self.assertEqual(payload["status"], "ok")
+            self.assertFalse(payload["ready"])
+            stores = {
+                row["name"]: row
+                for row in payload["readiness"]["storage"]["stores"]
+            }
+            self.assertEqual(stores["analytics_cache"]["read_status"], "schema_version_missing")
+            self.assertEqual(
+                stores["live_validation_reports"]["read_status"],
+                "collection_not_object:reports",
+            )
+            self.assertEqual(
+                stores["live_validation_decisions"]["read_status"],
+                "schema_version_mismatch",
+            )
+            self.assertEqual(
+                stores["live_validation_promotion_snapshots"]["read_status"],
+                "collection_missing:snapshots",
+            )
+            self.assertTrue(all(not row["schema_valid"] for name, row in stores.items() if name != "configuration"))
+            for filename, content in store_payloads.items():
+                self.assertEqual((root / filename).read_bytes(), content)
+            self.assertFalse(any(path.name.startswith("analytics.json.corrupt-") for path in root.iterdir()))
+
+    def test_health_reports_local_store_backup_and_polling_freshness_without_network(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            backup_dir = root / "backups"
+            backup_dir.mkdir()
+            archive = backup_dir / "market-sentinel-state.tar.gz"
+            manifest = backup_dir / "market-sentinel-state.tar.gz.manifest.json"
+            archive.write_bytes(b"archive")
+            manifest.write_text("{}", encoding="utf-8")
+            environment = {
+                "POLYMARKET_ANALYTICS_CACHE_PATH": str(root / "analytics.json"),
+                "POLYMARKET_LIVE_VALIDATION_REPORTS_PATH": str(root / "reports.json"),
+                "POLYMARKET_LIVE_VALIDATION_DECISIONS_PATH": str(root / "decisions.json"),
+                "POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_PATH": str(root / "snapshots.json"),
+                "MARKET_SENTINEL_BACKUP_DIRECTORY": str(backup_dir),
+            }
+            with patch.dict(os.environ, environment, clear=False):
+                server, server_thread, base_url = self._serve_api(root / "config.json", frontend_dir)
+                try:
+                    status, payload = self._request_json(base_url, "/api/health")
+                    server.wallet_polling["last_polled_at"] = time.time() - 1_000
+                    stale_status, stale_payload = self._request_json(base_url, "/api/health")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    server_thread.join(timeout=5)
+
+        self.assertEqual(status, HTTPStatus.OK)
+        self.assertTrue(payload["ready"])
+        self.assertTrue(payload["readiness"]["storage"]["ready"])
+        self.assertTrue(payload["readiness"]["frontend"]["ready"])
+        backup = payload["readiness"]["freshness"]["backup"]
+        self.assertEqual(backup["status"], "recent_metadata")
+        self.assertFalse(backup["authoritative"])
+        self.assertFalse(backup["integrity_verified"])
+        self.assertEqual(stale_status, HTTPStatus.OK)
+        self.assertEqual(
+            stale_payload["readiness"]["freshness"]["wallet_polling"]["status"],
+            "stale",
+        )
+
+    def test_live_evidence_routes_forward_validated_idempotency_keys_without_echoing_them(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            server, server_thread, base_url = self._serve_api(root / "config.json", frontend_dir)
+            key = "retry-key/2026-08-26:001"
+            routes = (
+                (
+                    "/api/polymarket/live-validation/reports",
+                    "web_api.polymarket_live_validation_report_store_payload",
+                ),
+                (
+                    "/api/polymarket/live-validation/decisions",
+                    "web_api.polymarket_live_validation_decision_store_payload",
+                ),
+                (
+                    "/api/polymarket/live-validation/promotion-proposal/snapshots",
+                    "web_api.polymarket_live_validation_promotion_proposal_snapshot_store_payload",
+                ),
+            )
+            try:
+                for route, helper_name in routes:
+                    with self.subTest(route=route), patch(
+                        helper_name,
+                        return_value={"stored": {"idempotency_key_hash": "a" * 64}},
+                    ) as helper:
+                        status, response = self._request_json(
+                            base_url,
+                            route,
+                            method="POST",
+                            payload={"idempotency_key": key},
+                            headers={"Idempotency-Key": key},
+                        )
+                        self.assertEqual(status, HTTPStatus.OK)
+                        self.assertEqual(helper.call_args.kwargs["idempotency_key"], key)
+                        self.assertNotIn(key, json.dumps(response))
+
+                mismatch_status, mismatch = self._request_json(
+                    base_url,
+                    "/api/polymarket/live-validation/reports",
+                    method="POST",
+                    payload={"idempotency_key": "body-key"},
+                    headers={"Idempotency-Key": "header-key"},
+                )
+                self.assertEqual(mismatch_status, HTTPStatus.BAD_REQUEST)
+                self.assertEqual(mismatch["error"]["code"], "validation_error")
+                self.assertNotIn("body-key", json.dumps(mismatch))
+                self.assertNotIn("header-key", json.dumps(mismatch))
+
+                for invalid_key in (" leading-space", "trailing-space ", "interior space", "non-ascii-é"):
+                    invalid_status, invalid = self._request_json(
+                        base_url,
+                        "/api/polymarket/live-validation/reports",
+                        method="POST",
+                        payload={"idempotency_key": invalid_key},
+                    )
+                    self.assertEqual(invalid_status, HTTPStatus.BAD_REQUEST)
+                    self.assertEqual(invalid["error"]["code"], "validation_error")
+                    self.assertNotIn(invalid_key, json.dumps(invalid))
+
+                for route, _helper_name in routes:
+                    required_status, required = self._request_json(
+                        base_url,
+                        route,
+                        method="POST",
+                        payload={},
+                    )
+                    self.assertEqual(required_status, HTTPStatus.BAD_REQUEST)
+                    self.assertEqual(required["error"]["code"], "validation_error")
+                    self.assertIn("required", required["error"]["message"])
+
+                unsupported_status, unsupported = self._request_json(
+                    base_url,
+                    "/api/config",
+                    method="PATCH",
+                    payload={"theme": "dark"},
+                    headers={"Idempotency-Key": key},
+                )
+                self.assertEqual(unsupported_status, HTTPStatus.BAD_REQUEST)
+                self.assertEqual(unsupported["error"]["code"], "validation_error")
+                self.assertIn("not supported", unsupported["error"]["message"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+
+    def test_live_evidence_durability_uncertainty_requires_same_key_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            server, server_thread, base_url = self._serve_api(root / "config.json", frontend_dir)
+            key = "durability-reconcile-1"
+            uncertain = LiveValidationStoreDurabilityError(root / "reports.json", "f" * 64)
+            reconciled = {
+                "stored": {"key": "report-1", "stored": False, "idempotent_replay": True},
+                "counts": {"entries": 1},
+            }
+            try:
+                with patch(
+                    "web_api.polymarket_live_validation_report_store_payload",
+                    side_effect=[uncertain, reconciled],
+                ) as helper:
+                    first_status, first = self._request_json(
+                        base_url,
+                        "/api/polymarket/live-validation/reports",
+                        method="POST",
+                        payload={},
+                        headers={"Idempotency-Key": key},
+                    )
+                    second_status, second = self._request_json(
+                        base_url,
+                        "/api/polymarket/live-validation/reports",
+                        method="POST",
+                        payload={},
+                        headers={"Idempotency-Key": key},
+                    )
+
+                self.assertEqual(first_status, HTTPStatus.SERVICE_UNAVAILABLE)
+                self.assertEqual(first["error"]["code"], "live_validation_store_durability_uncertain")
+                self.assertTrue(first["error"]["details"]["committed"])
+                self.assertTrue(first["error"]["details"]["retryable"])
+                self.assertNotIn(key, json.dumps(first))
+                self.assertNotIn("f" * 64, json.dumps(first))
+                self.assertEqual(second_status, HTTPStatus.OK)
+                self.assertTrue(second["stored"]["idempotent_replay"])
+                self.assertEqual(
+                    [call.kwargs["idempotency_key"] for call in helper.call_args_list],
+                    [key, key],
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+
+    def test_durable_create_routes_require_header_and_wallet_replays_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            config_path = root / "config.json"
+            server, server_thread, base_url = self._serve_api(config_path, frontend_dir)
+            try:
+                for route in ("/api/alerts", "/api/wallets", "/api/paper/orders"):
+                    with self.subTest(route=route):
+                        status, response = self._request_json(
+                            base_url,
+                            route,
+                            method="POST",
+                            payload={},
+                            headers={"Idempotency-Key": ""},
+                        )
+                        self.assertEqual(status, HTTPStatus.BAD_REQUEST)
+                        self.assertIn("Idempotency-Key header is required", response["error"]["message"])
+
+                key = "wallet-create-replay-1"
+                request = {"wallet": WALLET, "display_name": "Primary"}
+                first_status, first = self._request_json(
+                    base_url,
+                    "/api/wallets",
+                    method="POST",
+                    payload=request,
+                    headers={"Idempotency-Key": key},
+                )
+                replay_status, replay = self._request_json(
+                    base_url,
+                    "/api/wallets",
+                    method="POST",
+                    payload={"display_name": "Primary", "wallet": WALLET},
+                    headers={"Idempotency-Key": key},
+                )
+                conflict_status, conflict = self._request_json(
+                    base_url,
+                    "/api/wallets",
+                    method="POST",
+                    payload={"wallet": WALLET_2, "display_name": "Different"},
+                    headers={"Idempotency-Key": key},
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+
+            stored = load_config(config_path)
+            raw_config = config_path.read_text(encoding="utf-8")
+
+        self.assertEqual(first_status, HTTPStatus.OK)
+        self.assertEqual(replay_status, HTTPStatus.OK)
+        self.assertEqual(first, replay)
+        self.assertEqual(conflict_status, HTTPStatus.CONFLICT)
+        self.assertEqual(conflict["error"]["code"], "idempotency_conflict")
+        self.assertEqual(len(stored.wallets), 1)
+        self.assertEqual(len(stored.mutation_journal), 1)
+        self.assertEqual(stored.mutation_journal[0].state, "completed")
+        self.assertNotIn(key, raw_config)
+
+    def test_paper_order_replay_records_only_one_trade(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            config_path = root / "config.json"
+            cfg = AppConfig()
+            cfg.selected_market_id = "kalshi"
+            cfg.markets["kalshi"].enabled = True
+            save_config(cfg, config_path)
+            server, server_thread, base_url = self._serve_api(config_path, frontend_dir)
+            request = {
+                "market_id": "kalshi",
+                "contract_id": "KX-IDEMPOTENT:YES",
+                "side": "BUY",
+                "size": 2,
+                "limit_price": 0.4,
+            }
+            try:
+                first_status, first = self._request_json(
+                    base_url,
+                    "/api/paper/orders",
+                    method="POST",
+                    payload=request,
+                    headers={"Idempotency-Key": "paper-order-replay-1"},
+                )
+                replay_status, replay = self._request_json(
+                    base_url,
+                    "/api/paper/orders",
+                    method="POST",
+                    payload=request,
+                    headers={"Idempotency-Key": "paper-order-replay-1"},
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+            stored = load_config(config_path)
+
+        self.assertEqual(first_status, HTTPStatus.OK)
+        self.assertEqual(replay_status, HTTPStatus.OK)
+        self.assertEqual(first, replay)
+        self.assertEqual(len(stored.paper_trades), 1)
+        self.assertEqual(len(stored.mutation_journal), 1)
+
+    def test_oversized_paper_response_keeps_route_shape_and_bounded_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            config_path = root / "config.json"
+            cfg = AppConfig()
+            cfg.selected_market_id = "kalshi"
+            cfg.markets["kalshi"].enabled = True
+            save_config(cfg, config_path)
+            server, server_thread, base_url = self._serve_api(config_path, frontend_dir)
+            request = {
+                "market_id": "kalshi",
+                "contract_id": "KX-OVERSIZED:YES",
+                "side": "BUY",
+                "size": 2,
+                "limit_price": 0.4,
+            }
+            oversized_paper = {
+                "summary": {},
+                "positions": [],
+                "history": [{"note": "x" * 4_000} for _ in range(100)],
+                "counts": {"history": 100, "accepted": 100, "rejected": 0},
+            }
+            try:
+                with patch("web_api.paper_payload", return_value=oversized_paper):
+                    first_status, first = self._request_json(
+                        base_url,
+                        "/api/paper/orders",
+                        method="POST",
+                        payload=request,
+                        headers={"Idempotency-Key": "paper-oversized-replay-1"},
+                    )
+                    replay_status, replay = self._request_json(
+                        base_url,
+                        "/api/paper/orders",
+                        method="POST",
+                        payload=request,
+                        headers={"Idempotency-Key": "paper-oversized-replay-1"},
+                    )
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+            stored = load_config(config_path)
+
+        self.assertEqual(first_status, HTTPStatus.OK)
+        self.assertEqual(replay_status, HTTPStatus.OK)
+        self.assertGreater(len(json.dumps(first).encode("utf-8")), 256 * 1024)
+        self.assertEqual(first["result"]["message"], "accepted")
+        self.assertIn("paper", first)
+        self.assertEqual(replay["result"]["message"], "accepted")
+        self.assertIn("paper", replay)
+        self.assertLess(len(replay["paper"]["history"]), len(first["paper"]["history"]))
+        self.assertLessEqual(
+            len(json.dumps(replay, ensure_ascii=False, separators=(",", ":")).encode("utf-8")),
+            256 * 1024,
+        )
+        self.assertEqual(stored.mutation_journal[0].state, "completed")
+        self.assertIn("paper", stored.mutation_journal[0].response)
+        self.assertIn("result", stored.mutation_journal[0].response)
+
+    def test_live_order_management_replays_success_and_conflicts_on_body_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            config_path = root / "config.json"
+            cfg = AppConfig()
+            cfg.markets["kalshi"].enabled = True
+            save_config(cfg, config_path)
+            server, server_thread, base_url = self._serve_api(config_path, frontend_dir)
+            adapter = server.adapter_registry.adapter
+            adapter.order_management_operations = ("cancel_order",)  # type: ignore[attr-defined]
+            calls: list[tuple[str, dict]] = []
+
+            def manage_orders(operation, **kwargs):
+                calls.append((operation, kwargs))
+                return {"status": "cancelled", "order_id": kwargs.get("order_id")}
+
+            adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+            try:
+                first_status, first = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/cancel_order",
+                    method="POST",
+                    payload={"order_id": "order-1"},
+                    headers={"Idempotency-Key": "live-cancel-1"},
+                )
+                replay_status, replay = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/cancel_order",
+                    method="POST",
+                    payload={"order_id": "order-1"},
+                    headers={"Idempotency-Key": "live-cancel-1"},
+                )
+                conflict_status, conflict = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/cancel_order",
+                    method="POST",
+                    payload={"order_id": "order-2"},
+                    headers={"Idempotency-Key": "live-cancel-1"},
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+            stored = load_config(config_path)
+
+        self.assertEqual(first_status, HTTPStatus.OK)
+        self.assertEqual(replay_status, HTTPStatus.OK)
+        self.assertEqual(first, replay)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(conflict_status, HTTPStatus.CONFLICT)
+        self.assertEqual(conflict["error"]["code"], "idempotency_conflict")
+        self.assertEqual(stored.mutation_journal[0].state, "completed")
+
+    def test_pre_dispatch_live_validation_is_rejected_and_replays_without_reconciliation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            config_path = root / "config.json"
+            cfg = AppConfig()
+            cfg.markets["kalshi"].enabled = True
+            save_config(cfg, config_path)
+            server, server_thread, base_url = self._serve_api(config_path, frontend_dir)
+            adapter = server.adapter_registry.adapter
+            adapter.order_management_operations = ("cancel_order",)  # type: ignore[attr-defined]
+            calls = 0
+
+            def invalid_manage(_operation, **_kwargs):
+                nonlocal calls
+                calls += 1
+                raise MarketConfigurationError("cancel_order requires a configured confirmation")
+
+            adapter.manage_orders = invalid_manage  # type: ignore[method-assign]
+            request = {"order_id": "order-invalid"}
+            headers = {"Idempotency-Key": "live-pre-dispatch-invalid-1"}
+            try:
+                first_status, first = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/cancel_order",
+                    method="POST",
+                    payload=request,
+                    headers=headers,
+                )
+                replay_status, replay = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/cancel_order",
+                    method="POST",
+                    payload=request,
+                    headers=headers,
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+            stored = load_config(config_path)
+
+        self.assertEqual(first_status, HTTPStatus.BAD_REQUEST)
+        self.assertEqual(first["error"]["code"], "validation_error")
+        self.assertEqual(replay_status, HTTPStatus.BAD_REQUEST)
+        self.assertEqual(replay, first)
+        self.assertEqual(calls, 1)
+        self.assertEqual(len(stored.mutation_journal), 1)
+        self.assertEqual(stored.mutation_journal[0].state, "rejected")
+        self.assertEqual(
+            stored.mutation_journal[0].outcome_code,
+            "pre_dispatch_validation_failed",
+        )
+
+    def test_plain_value_error_from_live_adapter_remains_ambiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            config_path = root / "config.json"
+            cfg = AppConfig()
+            cfg.markets["kalshi"].enabled = True
+            save_config(cfg, config_path)
+            server, server_thread, base_url = self._serve_api(config_path, frontend_dir)
+            adapter = server.adapter_registry.adapter
+            adapter.order_management_operations = ("cancel_order",)  # type: ignore[attr-defined]
+
+            def uncertain_manage(_operation, **_kwargs):
+                # A generic client/parser error does not prove that the
+                # request stopped before the venue transport boundary.
+                raise ValueError("response parser failed after dispatch")
+
+            adapter.manage_orders = uncertain_manage  # type: ignore[method-assign]
+            request = {"order_id": "order-uncertain"}
+            headers = {"Idempotency-Key": "live-value-error-ambiguous-1"}
+            try:
+                first_status, first = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/cancel_order",
+                    method="POST",
+                    payload=request,
+                    headers=headers,
+                )
+                replay_status, replay = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/cancel_order",
+                    method="POST",
+                    payload=request,
+                    headers=headers,
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+            stored = load_config(config_path)
+
+        self.assertEqual(first_status, HTTPStatus.SERVICE_UNAVAILABLE)
+        self.assertEqual(first["error"]["code"], "live_mutation_outcome_ambiguous")
+        self.assertEqual(replay_status, HTTPStatus.SERVICE_UNAVAILABLE)
+        self.assertEqual(replay["error"]["code"], "live_mutation_reconciliation_required")
+        self.assertEqual(stored.mutation_journal[0].state, "ambiguous")
+        self.assertEqual(stored.mutation_journal[0].outcome_code, "live_dispatch_outcome_unknown")
+
+    def test_ambiguous_live_order_requires_reconciliation_before_one_authorized_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            config_path = root / "config.json"
+            cfg = AppConfig()
+            cfg.markets["kalshi"].enabled = True
+            save_config(cfg, config_path)
+            server, server_thread, base_url = self._serve_api(config_path, frontend_dir)
+            adapter = server.adapter_registry.adapter
+            adapter.order_management_operations = ("cancel_order", "decrease_order")  # type: ignore[attr-defined]
+            calls = 0
+
+            def ambiguous_manage(_operation, **_kwargs):
+                nonlocal calls
+                calls += 1
+                raise TimeoutError("response lost after transmission")
+
+            adapter.manage_orders = ambiguous_manage  # type: ignore[method-assign]
+            request = {"order_id": "order-ambiguous"}
+            headers = {"Idempotency-Key": "live-ambiguous-1"}
+            try:
+                first_status, first = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/cancel_order",
+                    method="POST",
+                    payload=request,
+                    headers=headers,
+                )
+                replay_status, replay = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/cancel_order",
+                    method="POST",
+                    payload=request,
+                    headers=headers,
+                )
+                mutation_id = first["error"]["details"]["mutation_id"]
+                reconcile_status, reconciled = self._request_json(
+                    base_url,
+                    "/api/mutations/reconcile",
+                    method="POST",
+                    payload={
+                        "mutation_id": mutation_id,
+                        "resolution": "confirmed_not_dispatched",
+                        "confirm_reconciliation": "I_VERIFIED_VENUE_ORDER_HISTORY",
+                    },
+                )
+
+                def successful_manage(operation, **kwargs):
+                    nonlocal calls
+                    calls += 1
+                    return {"status": "cancelled", "operation": operation, "order_id": kwargs.get("order_id")}
+
+                adapter.manage_orders = successful_manage  # type: ignore[method-assign]
+                retry_status, retry = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/cancel_order",
+                    method="POST",
+                    payload=request,
+                    headers=headers,
+                )
+
+                reduce_status, reduce_response = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi/orders/decrease_order",
+                    method="POST",
+                    payload={"order_id": "order-2", "reduce_by": 1},
+                    headers={"Idempotency-Key": "kalshi-reduce-by-rejected"},
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+            stored = load_config(config_path)
+
+        self.assertEqual(first_status, HTTPStatus.SERVICE_UNAVAILABLE)
+        self.assertEqual(first["error"]["code"], "live_mutation_outcome_ambiguous")
+        self.assertEqual(replay_status, HTTPStatus.SERVICE_UNAVAILABLE)
+        self.assertEqual(replay["error"]["code"], "live_mutation_reconciliation_required")
+        self.assertEqual(calls, 2)
+        self.assertEqual(reconcile_status, HTTPStatus.OK)
+        self.assertEqual(reconciled["reconciled"]["state"], "retryable")
+        self.assertEqual(retry_status, HTTPStatus.OK)
+        self.assertEqual(retry["data"]["status"], "cancelled")
+        self.assertEqual(reduce_status, HTTPStatus.BAD_REQUEST)
+        self.assertIn("reduce_by is disabled", reduce_response["error"]["message"])
+        self.assertEqual(stored.mutation_journal[0].state, "completed")
+        self.assertEqual(len(stored.mutation_journal), 1)
+
+    def test_server_drain_rejects_new_mutations_without_disabling_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            server, server_thread, base_url = self._serve_api(root / "config.json", frontend_dir)
+            try:
+                self.assertTrue(server.begin_drain())
+                self.assertFalse(server.begin_drain())
+                status, response = self._request_json(
+                    base_url,
+                    "/api/wallets",
+                    method="POST",
+                    payload={"wallet": WALLET},
+                    headers={"Idempotency-Key": "drain-wallet-1"},
+                )
+                health_status, health = self._request_json(base_url, "/api/health")
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+
+        self.assertEqual(status, HTTPStatus.SERVICE_UNAVAILABLE)
+        self.assertEqual(response["error"]["code"], "server_draining")
+        self.assertEqual(health_status, HTTPStatus.OK)
+        self.assertTrue(health["readiness"]["admission"]["draining"])
+        self.assertFalse(health["ready"])
+
+    def test_custom_frontend_directory_is_confined_to_deployment_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            deployment_root = Path(tmpdir)
+            frontend_dir = deployment_root / "frontend" / "dist"
+            frontend_dir.mkdir(parents=True)
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            with patch("web_api._RESOURCE_ROOT", deployment_root):
+                server = ReactGuiServer(
+                    ("127.0.0.1", 0),
+                    ReactGuiHandler,
+                    config_path=deployment_root / "config.json",
+                    frontend_dir=frontend_dir,
+                )
+                try:
+                    self.assertEqual(server.frontend_dir, frontend_dir.resolve())
+                    self.assertEqual(server.static_files["index.html"], (frontend_dir / "index.html").resolve())
+                finally:
+                    server.server_close()
+
+            outside_dir = Path(tmpdir).parent / f"{Path(tmpdir).name}-outside"
+            with self.assertRaisesRegex(ValueError, "deployment resource root"):
+                ReactGuiServer(
+                    ("127.0.0.1", 0),
+                    ReactGuiHandler,
+                    config_path=deployment_root / "config.json",
+                    frontend_dir=outside_dir,
+                )
 
     def test_configured_allowed_origins_merges_cli_and_environment_values(self) -> None:
         with patch.dict(
@@ -328,6 +1530,28 @@ class WebApiTests(unittest.TestCase):
 
             with self.assertRaises(ConfigLoadError):
                 run_server("127.0.0.1", 0, config_path)
+
+    def test_web_cli_forwards_configured_frontend_directory(self) -> None:
+        frontend_dir = Path("deployment") / "frontend" / "dist"
+        with patch(
+            "sys.argv",
+            [
+                "web_api.py",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "9876",
+                "--config",
+                "state.json",
+                "--frontend-dir",
+                str(frontend_dir),
+            ],
+        ), patch("web_api.run_server") as server:
+            web_api_main()
+
+        server.assert_called_once()
+        self.assertEqual(server.call_args.args, ("127.0.0.1", 9876, Path("state.json")))
+        self.assertEqual(server.call_args.kwargs["frontend_dir"], frontend_dir)
 
     def test_dynamic_http_header_values_cannot_inject_response_headers(self) -> None:
         injected = 'report.csv\r\nSet-Cookie: compromised=true\n'
@@ -383,6 +1607,7 @@ class WebApiTests(unittest.TestCase):
                 self.assertEqual(headers.get("Access-Control-Allow-Origin"), "http://127.0.0.1:5173")
                 self.assertNotEqual(headers.get("Access-Control-Allow-Origin"), "*")
                 self.assertEqual(headers.get("Access-Control-Expose-Headers"), "X-Request-ID")
+                self.assertIn("Idempotency-Key", headers.get("Access-Control-Allow-Headers", ""))
 
                 status, headers, body = self._request_raw(
                     base_url,
@@ -445,6 +1670,1798 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["selected_market_id"], "kalshi")
         self.assertGreaterEqual(payload["counts"]["total"], 1)
         self.assertGreaterEqual(payload["counts"]["implemented"], 1)
+        self.assertEqual(len(payload["support_matrix"]), payload["counts"]["total"])
+        self.assertEqual(payload["support_summary"]["total_markets"], payload["counts"]["total"])
+        self.assertEqual(payload["support_summary"]["implementation"]["implemented"], 57)
+        self.assertEqual(payload["support_summary"]["operations"]["copy_trading"]["guarded"], 26)
+        self.assertEqual(kalshi["support"]["operations"]["paper_trading"]["status"], "supported")
+        self.assertEqual(kalshi["support"]["operations"]["live_trading"]["status"], "guarded")
+
+        support = market_support_payload(cfg, market_id="kalshi")
+        self.assertEqual(support["market"]["market_id"], "kalshi")
+        self.assertEqual(support["markets"], [support["market"]])
+        self.assertEqual(support["support_summary"], payload["support_summary"])
+
+    def test_market_history_payloads_serialize_normalized_records(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="space",
+            display_name="Space",
+            capabilities=MarketCapabilities(
+                event_listing=True,
+                price_reading=True,
+                orderbook_reading=True,
+                trade_history=True,
+                candle_history=True,
+            ),
+        )
+        adapter.list_events = lambda query, limit: [  # type: ignore[method-assign]
+            MarketEvent("space", "event-1", query or "event", status="open", raw={"secret": "redact"})
+        ]
+        adapter.list_contracts = lambda event_id: [  # type: ignore[method-assign]
+            MarketContract("space", "m:YES", event_id, "Yes", outcome="Yes", raw={"secret": "redact"})
+        ]
+        adapter.get_price = lambda contract_id: PriceSnapshot(  # type: ignore[method-assign]
+            "space", contract_id, last=0.4, bid=0.39, ask=0.41, source="fixture", raw={"secret": "redact"}
+        )
+        adapter.get_orderbook = lambda contract_id: OrderBookSnapshot(  # type: ignore[method-assign]
+            "space",
+            contract_id,
+            bids=[OrderBookLevel(0.39, 4.0)],
+            asks=[OrderBookLevel(0.41, 3.0)],
+            raw={"secret": "redact"},
+        )
+        adapter.list_trades = lambda contract_id, **_kwargs: [  # type: ignore[method-assign]
+            MarketTrade("space", contract_id, "trade-1", "BUY", 0.4, 3.0, 1700000000.0)
+        ]
+        adapter.list_candles = lambda contract_id, **_kwargs: [  # type: ignore[method-assign]
+            MarketCandle("space", contract_id, 1700000000.0, 0.35, 0.42, 0.34, 0.4, 100.0)
+        ]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["space"].enabled = True
+        registry = Registry()
+        events = market_events_payload(cfg, registry, "space", {"query": ["launch"], "limit": ["1"]})
+        contracts = market_contracts_payload(cfg, registry, "space", {"event_id": ["event-1"]})
+        price = market_price_payload(cfg, registry, "space", {"contract_id": ["m:YES"]})
+        orderbook = market_orderbook_payload(cfg, registry, "space", {"contract_id": ["m:YES"]})
+        trades = market_trades_payload(cfg, registry, "space", {"contract_id": ["m:YES"], "limit": ["1"]})
+        candles = market_candles_payload(cfg, registry, "space", {"contract_id": ["m:YES"], "resolution": ["1h"]})
+
+        self.assertEqual(events["events"][0]["title"], "launch")
+        self.assertNotIn("raw", events["events"][0])
+        self.assertEqual(contracts["contracts"][0]["outcome"], "Yes")
+        self.assertNotIn("raw", contracts["contracts"][0])
+        self.assertEqual(price["price"]["midpoint"], 0.4)
+        self.assertNotIn("raw", price["price"])
+        self.assertEqual(orderbook["orderbook"]["best_ask"], 0.41)
+        self.assertNotIn("raw", orderbook["orderbook"])
+        self.assertEqual(trades["trades"][0]["trade_id"], "trade-1")
+        self.assertEqual(trades["trades"][0]["size"], 3.0)
+        self.assertEqual(candles["candles"][0]["close"], 0.4)
+        self.assertEqual(candles["resolution"], "1h")
+
+    def test_market_account_payload_requires_explicit_operation_allow_list(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="gemini_titan",
+            display_name="Gemini Titan",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("positions",)  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "positions": [{"symbol": "GEMI-BTC100K26-YES"}],
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["gemini_titan"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "gemini_titan",
+            "positions",
+            {"event_ticker": ["BTC100K2026"], "limit": ["10"]},
+        )
+        self.assertEqual(payload["operation"], "positions")
+        self.assertEqual(payload["parameters"]["event_ticker"], "BTC100K2026")
+        self.assertEqual(payload["data"]["positions"][0]["symbol"], "GEMI-BTC100K26-YES")
+        with self.assertRaises(UnsupportedFeatureError):
+            market_account_payload(cfg, Registry(), "gemini_titan", "arbitrary", {})
+
+    def test_metaculus_account_payload_forwards_forecast_recovery_filters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="metaculus",
+            display_name="Metaculus",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("forecast_posts",)  # type: ignore[attr-defined]
+        calls = []
+
+        def account_recovery(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"results": [{"id": 1101}]}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["metaculus"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "metaculus",
+            "forecast_posts",
+            {
+                "forecaster_id": ["123"],
+                "limit": ["10"],
+                "offset": ["20"],
+                "with_cp": ["true"],
+                "include_cp_history": ["true"],
+                "include_descriptions": ["true"],
+            },
+        )
+        self.assertEqual(payload["data"]["results"][0]["id"], 1101)
+        self.assertEqual(
+            calls,
+            [("forecast_posts", {
+                "forecaster_id": "123",
+                "limit": 10,
+                "offset": 20,
+                "with_cp": True,
+                "include_cp_history": True,
+                "include_descriptions": True,
+            })],
+        )
+
+    def test_good_judgment_open_account_payload_forwards_documented_filters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="good_judgment_open",
+            display_name="Good Judgment Open",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("me", "prediction_sets", "scores")  # type: ignore[attr-defined]
+        calls = []
+
+        def account_recovery(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"scores": [{"id": 1001}]}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["good_judgment_open"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "good_judgment_open",
+            "scores",
+            {
+                "page": ["2"],
+                "membership_id": ["902"],
+                "score_type": ["question"],
+                "scoreable_id": ["1201"],
+                "predictor_type": ["user"],
+                "include_daily_scores": ["true"],
+                "created_after": ["2026-01-01T00:00:00Z"],
+            },
+        )
+        self.assertEqual(payload["data"]["scores"][0]["id"], 1001)
+        self.assertEqual(
+            calls,
+            [("scores", {
+                "page": 2,
+                "membership_id": "902",
+                "question_id": None,
+                "filter": None,
+                "created_before": None,
+                "created_after": "2026-01-01T00:00:00Z",
+                "updated_before": None,
+                "updated_after": None,
+                "score_type": "question",
+                "scoreable_id": "1201",
+                "predictor_type": "user",
+                "include_daily_scores": True,
+            })],
+        )
+
+    def test_market_position_intent_payload_forwards_allowlisted_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="myriad_markets",
+            display_name="Myriad",
+            capabilities=MarketCapabilities(live_trading=True),
+        )
+        adapter.position_intent_operations = ("split", "neg_risk_split")  # type: ignore[attr-defined]
+        calls = []
+
+        def position_intent(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"intent_only": True}
+
+        adapter.position_intent = position_intent  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["myriad_markets"].enabled = True
+        payload = market_position_intent_payload(
+            cfg,
+            Registry(),
+            "myriad_markets",
+            {
+                "operation": "neg_risk_split",
+                "amount": "1000",
+                "network_id": "56",
+                "event_id": "0x" + "ab" * 32,
+                "outcome_index": 2,
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["operation"], "neg_risk_split")
+        self.assertEqual(calls, [("neg_risk_split", {
+            "amount": "1000",
+            "network_id": "56",
+            "event_id": "0x" + "ab" * 32,
+            "outcome_index": 2,
+        })])
+        with self.assertRaises(UnsupportedFeatureError):
+            market_position_intent_payload(cfg, Registry(), "myriad_markets", {"operation": "redeem"})
+
+    def test_ibkr_account_and_order_management_payloads_forward_fixed_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="ibkr_forecasttrader",
+            display_name="IBKR ForecastTrader",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.account_recovery_operations = ("orders", "order_status")  # type: ignore[attr-defined]
+        adapter.order_management_operations = ("cancel_order", "cancel_all_orders", "modify_order")  # type: ignore[attr-defined]
+        account_calls = []
+        order_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        def manage_orders(operation, **kwargs):
+            order_calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["ibkr_forecasttrader"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "ibkr_forecasttrader",
+            "orders",
+            {"status": ["filled"], "force": ["true"]},
+        )
+        self.assertEqual(account["data"]["operation"], "orders")
+        self.assertEqual(account_calls, [("orders", {"filters": "filled", "force": True})])
+
+        instructions = {
+            "conid": 721095497,
+            "orderType": "LMT",
+            "side": "BUY",
+            "tif": "DAY",
+            "quantity": 5,
+            "price": 0.51,
+        }
+        mutation = market_order_management_payload(
+            cfg,
+            Registry(),
+            "ibkr_forecasttrader",
+            "modify_order",
+            {
+                "order_id": "987654",
+                "instructions": instructions,
+                "manual_indicator": "false",
+                "external_operator": "desk-1",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(mutation["data"], {"status": "accepted"})
+        self.assertEqual(order_calls[0][0], "modify_order")
+        self.assertEqual(order_calls[0][1]["order_id"], "987654")
+        self.assertEqual(order_calls[0][1]["instructions"], instructions)
+        self.assertEqual(order_calls[0][1]["manual_indicator"], "false")
+        self.assertEqual(order_calls[0][1]["external_operator"], "desk-1")
+        self.assertNotIn("unexpected", order_calls[0][1])
+
+    def test_manifold_account_and_order_management_payloads_forward_fixed_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="manifold",
+            display_name="Manifold",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.account_recovery_operations = ("account", "active_orders", "order_history")  # type: ignore[attr-defined]
+        adapter.order_management_operations = ("cancel_order",)  # type: ignore[attr-defined]
+        account_calls = []
+        order_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        def manage_orders(operation, **kwargs):
+            order_calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["manifold"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "manifold",
+            "active_orders",
+            {
+                "contract_id": ["mf-binary-1:YES"],
+                "limit": ["20"],
+                "before": ["bet-open-1"],
+                "from": ["1760000000"],
+            },
+        )
+        self.assertEqual(account["data"]["operation"], "active_orders")
+        self.assertEqual(account_calls, [("active_orders", {
+            "contract_id": "mf-binary-1:YES",
+            "limit": 20,
+            "before": "bet-open-1",
+            "after": None,
+            "before_time": None,
+            "after_time": 1760000000.0,
+        })])
+
+        mutation = market_order_management_payload(
+            cfg,
+            Registry(),
+            "manifold",
+            "cancel_order",
+            {
+                "order_id": "bet-open-1",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(mutation["data"], {"status": "accepted"})
+        self.assertEqual(order_calls, [("cancel_order", {
+            "market_id": "",
+            "instructions": None,
+            "customer_ref": "",
+            "market_version": None,
+            "async_request": False,
+            "confirm_global_cancel": "",
+            "order_id": "bet-open-1",
+            "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        })])
+
+    def test_prophet_exchange_account_and_order_management_payloads_forward_fixed_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="prophet_exchange",
+            display_name="Prophet Exchange",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.account_recovery_operations = ("balance", "transactions")  # type: ignore[attr-defined]
+        adapter.order_management_operations = ("cancel_order", "cancel_orders")  # type: ignore[attr-defined]
+        account_calls = []
+        order_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        def manage_orders(operation, **kwargs):
+            order_calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["prophet_exchange"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "prophet_exchange",
+            "transactions",
+            {"cursor": ["41"], "limit": ["25"]},
+        )
+        self.assertEqual(account["data"]["operation"], "transactions")
+        self.assertEqual(account_calls, [("transactions", {"cursor": "41", "limit": 25})])
+
+        mutation = market_order_management_payload(
+            cfg,
+            Registry(),
+            "prophet_exchange",
+            "cancel_order",
+            {
+                "order_id": "order-1",
+                "external_id": "external-1",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(mutation["data"], {"status": "accepted"})
+        self.assertEqual(order_calls, [("cancel_order", {
+            "market_id": "",
+            "instructions": None,
+            "customer_ref": "",
+            "market_version": None,
+            "async_request": False,
+            "confirm_global_cancel": "",
+            "order_id": "order-1",
+            "external_id": "external-1",
+            "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        })])
+
+        batch = market_order_management_payload(
+            cfg,
+            Registry(),
+            "prophet_exchange",
+            "cancel_orders",
+            {
+                "orders": [{"order_id": "order-1", "external_id": "external-1"}],
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            },
+        )
+        self.assertEqual(batch["data"], {"status": "accepted"})
+        self.assertEqual(order_calls[-1][1]["orders"], [{"order_id": "order-1", "external_id": "external-1"}])
+
+    def test_azuro_bet_history_account_payload_forwards_wallet_and_bounds(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="azuro",
+            display_name="Azuro",
+            capabilities=MarketCapabilities(),
+        )
+        adapter.account_recovery_operations = ("bet_history",)  # type: ignore[attr-defined]
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["azuro"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "azuro",
+            "bet_history",
+            {
+                "wallet": ["0x0000000000000000000000000000000000000001"],
+                "limit": ["25"],
+                "offset": ["4"],
+            },
+        )
+        self.assertEqual(account["data"]["operation"], "bet_history")
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "bet_history",
+                    {
+                        "wallet": "0x0000000000000000000000000000000000000001",
+                        "limit": 25,
+                        "offset": 4,
+                    },
+                )
+            ],
+        )
+
+    def test_thales_account_payload_forwards_wallet_market_and_time_bounds(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="thales_market",
+            display_name="Thales Market",
+            capabilities=MarketCapabilities(),
+        )
+        adapter.account_recovery_operations = ("positions", "transactions")  # type: ignore[attr-defined]
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["thales_market"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "thales_market",
+            "transactions",
+            {
+                "wallet": ["0x0000000000000000000000000000000000000001"],
+                "market_id": ["0x1111111111111111111111111111111111111111"],
+                "limit": ["12"],
+                "from": ["100"],
+                "to": ["200"],
+            },
+        )
+        self.assertEqual(account["data"]["operation"], "transactions")
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "transactions",
+                    {
+                        "wallet": "0x0000000000000000000000000000000000000001",
+                        "limit": 12,
+                        "market_id": "0x1111111111111111111111111111111111111111",
+                        "from_timestamp": 100.0,
+                        "to_timestamp": 200.0,
+                    },
+                )
+            ],
+        )
+
+        contract_account = market_account_payload(
+            cfg,
+            Registry(),
+            "thales_market",
+            "transactions",
+            {
+                "wallet": ["0x0000000000000000000000000000000000000001"],
+                "contract_id": ["0x1111111111111111111111111111111111111111:1"],
+            },
+        )
+        self.assertEqual(contract_account["data"]["operation"], "transactions")
+        self.assertEqual(account_calls[-1][1]["market_id"], "0x1111111111111111111111111111111111111111")
+        self.assertEqual(account_calls[-1][1]["contract_id"], "0x1111111111111111111111111111111111111111:1")
+
+    def test_metadao_activity_account_payload_forwards_wallet_and_bounds(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="metadao",
+            display_name="MetaDAO",
+            capabilities=MarketCapabilities(copy_trading=True),
+        )
+        adapter.account_recovery_operations = ("activity",)  # type: ignore[attr-defined]
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["metadao"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "metadao",
+            "activity",
+            {
+                "wallet": ["11111111111111111111111111111111"],
+                "limit": ["12"],
+            },
+        )
+        self.assertEqual(account["data"]["operation"], "activity")
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "activity",
+                    {
+                        "wallet": "11111111111111111111111111111111",
+                        "limit": 12,
+                    },
+                )
+            ],
+        )
+
+    def test_dflow_account_activity_payload_forwards_wallet_filters_and_bounds(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="dflow",
+            display_name="DFlow",
+            capabilities=MarketCapabilities(copy_trading=True),
+        )
+        adapter.account_recovery_operations = ("account_activity",)  # type: ignore[attr-defined]
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["dflow"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "dflow",
+            "account_activity",
+            {
+                "wallet": ["11111111111111111111111111111111"],
+                "limit": ["12"],
+                "ticker": ["KXBTC-26DEC31-100K"],
+                "mint": ["mint-yes"],
+            },
+        )
+        self.assertEqual(account["data"]["operation"], "account_activity")
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "account_activity",
+                    {
+                        "wallet": "11111111111111111111111111111111",
+                        "limit": 12,
+                        "cursor": "",
+                        "ticker": "KXBTC-26DEC31-100K",
+                        "mint": "mint-yes",
+                    },
+                )
+            ],
+        )
+
+    def test_myriad_account_activity_payload_forwards_wallet_and_bounds(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="myriad_markets",
+            display_name="Myriad Markets",
+            capabilities=MarketCapabilities(copy_trading=True),
+        )
+        adapter.account_recovery_operations = ("account_activity",)  # type: ignore[attr-defined]
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["myriad_markets"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "myriad_markets",
+            "account_activity",
+            {
+                "address": ["0x0000000000000000000000000000000000000001"],
+                "limit": ["10"],
+            },
+        )
+        self.assertEqual(account["data"]["operation"], "account_activity")
+        self.assertEqual(
+            account_calls,
+            [
+                (
+                    "account_activity",
+                    {
+                        "wallet": "0x0000000000000000000000000000000000000001",
+                        "limit": 10,
+                    },
+                )
+            ],
+        )
+
+    def test_myriad_portfolio_payload_forwards_documented_filters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="myriad_markets",
+            display_name="Myriad Markets",
+            capabilities=MarketCapabilities(copy_trading=True),
+        )
+        adapter.account_recovery_operations = ("portfolio", "market_positions")  # type: ignore[attr-defined]
+        account_calls = []
+
+        def account_recovery(operation, **kwargs):
+            account_calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["myriad_markets"].enabled = True
+        wallet = "0x0000000000000000000000000000000000000001"
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "myriad_markets",
+            "portfolio",
+            {
+                "wallet": [wallet],
+                "page": ["2"],
+                "limit": ["10"],
+                "trading_model": ["ob"],
+                "min_shares": ["1.5"],
+                "market_slug": ["btc-above-100k-2026"],
+                "market_id": ["501"],
+                "network_id": ["56"],
+                "token_address": [wallet],
+                "status": ["ongoing"],
+                "keyword": ["btc"],
+                "sort": ["desc"],
+                "sort_by": ["profit"],
+                "exclude_history": ["true"],
+                "group_by_event": ["true"],
+            },
+        )
+        self.assertEqual(account["data"]["operation"], "portfolio")
+        self.assertEqual(account_calls[0], (
+            "portfolio",
+            {
+                "wallet": wallet,
+                "limit": 10,
+                "page": 2,
+                "trading_model": "ob",
+                "min_shares": "1.5",
+                "market_slug": "btc-above-100k-2026",
+                "market_id": "501",
+                "network_id": "56",
+                "token_address": wallet,
+                "status": "ongoing",
+                "keyword": "btc",
+                "sort": "desc",
+                "sort_by": "profit",
+                "exclude_history": True,
+                "group_by_event": True,
+            },
+        ))
+
+    def test_kalshi_account_payload_forwards_signed_read_parameters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="kalshi",
+            display_name="Kalshi",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("fills",)  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "fills": [{"fill_id": "fill-1"}],
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["kalshi"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "kalshi",
+            "fills",
+            {
+                "ticker": ["KXTEST-YES"],
+                "order_id": ["order-1"],
+                "historical": ["true"],
+                "limit": ["12"],
+                "from": ["1700000000"],
+                "to": ["1700000100"],
+                "subaccount": ["2"],
+            },
+        )
+        self.assertEqual(payload["operation"], "fills")
+        self.assertEqual(payload["parameters"]["ticker"], "KXTEST-YES")
+        self.assertEqual(payload["parameters"]["order_id"], "order-1")
+        self.assertTrue(payload["parameters"]["historical"])
+        self.assertEqual(payload["parameters"]["limit"], 12)
+        self.assertEqual(payload["parameters"]["subaccount"], 2)
+        self.assertEqual(payload["data"]["fills"][0]["fill_id"], "fill-1")
+
+    def test_polymarket_account_payload_forwards_l2_filters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="polymarket",
+            display_name="Polymarket",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("active_orders", "order_detail", "fills")  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "data": [{"id": "order-1"}],
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["polymarket"].enabled = True
+        active = market_account_payload(
+            cfg,
+            Registry(),
+            "polymarket",
+            "active_orders",
+            {"market_id": ["0x" + "b" * 64], "contract_id": ["1234567890"], "cursor": ["MTAw"]},
+        )
+        self.assertEqual(
+            active["parameters"],
+            {"market_id": "0x" + "b" * 64, "contract_id": "1234567890", "next_cursor": "MTAw"},
+        )
+        fills = market_account_payload(
+            cfg,
+            Registry(),
+            "polymarket",
+            "fills",
+            {
+                "contract_id": ["1234567890"],
+                "trade_id": ["trade-1"],
+                "limit": ["20"],
+                "before": ["1760000300"],
+                "after": ["1760000000"],
+            },
+        )
+        self.assertEqual(fills["parameters"]["trade_id"], "trade-1")
+        self.assertEqual(fills["parameters"]["limit"], 20)
+        self.assertEqual(fills["parameters"]["before"], 1760000300.0)
+        detail = market_account_payload(cfg, Registry(), "polymarket", "order_detail", {"order_id": ["order-1"]})
+        self.assertEqual(detail["parameters"], {"order_id": "order-1"})
+
+    def test_polymarket_order_management_payload_forwards_cancel_fields_only(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="polymarket",
+            display_name="Polymarket",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_orders", "cancel_all_orders", "cancel_market_orders")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["polymarket"].enabled = True
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "polymarket",
+            "cancel_market_orders",
+            {
+                "market_id": "0x" + "b" * 64,
+                "asset_id": "1234567890",
+                "contract_id": "1234567890",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["market_id"], "0x" + "b" * 64)
+        self.assertEqual(calls[0][1]["asset_id"], "1234567890")
+        self.assertEqual(calls[0][1]["contract_id"], "1234567890")
+        self.assertNotIn("unexpected", calls[0][1])
+
+    def test_gemini_order_management_payload_forwards_only_documented_cancel_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="gemini_titan",
+            display_name="Gemini Predictions",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_order", "batch_cancel_orders")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["gemini_titan"].enabled = True
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "gemini_titan",
+            "batch_cancel_orders",
+            {
+                "orders": [106817811, "106817812"],
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["operation"], "batch_cancel_orders")
+        self.assertEqual(payload["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["orders"], [106817811, "106817812"])
+        self.assertEqual(
+            calls[0][1]["confirm_order_management"],
+            "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+        )
+        self.assertNotIn("unexpected", calls[0][1])
+
+    def test_hyperliquid_account_payload_forwards_safe_dex_and_limit(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="hyperliquid",
+            display_name="Hyperliquid",
+            capabilities=MarketCapabilities(credentials_required=False),
+        )
+        adapter.account_recovery_operations = ("active_orders", "order_history")  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "orders": [{"coin": "#10"}],
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["hyperliquid"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "hyperliquid",
+            "active_orders",
+            {"dex": ["xyz"]},
+        )
+        self.assertEqual(payload["operation"], "active_orders")
+        self.assertEqual(payload["parameters"], {"dex": "xyz"})
+        self.assertEqual(payload["data"]["orders"][0]["coin"], "#10")
+        history = market_account_payload(cfg, Registry(), "hyperliquid", "order_history", {"limit": ["12"]})
+        self.assertEqual(
+            history["parameters"],
+            {"limit": 12, "status": "filled", "from_timestamp": None, "to_timestamp": None},
+        )
+
+    def test_opinion_account_payload_forwards_page_filters_and_path_safe_order_id(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="opinion_labs",
+            display_name="Opinion Labs",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("order_history", "order_detail", "positions")  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "result": {"list": [{"orderId": "order-1"}]},
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["opinion_labs"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "opinion_labs",
+            "order_history",
+            {
+                "page": ["2"],
+                "limit": ["20"],
+                "market_id": ["77"],
+                "chain_id": ["56"],
+                "status": ["1,2"],
+            },
+        )
+        self.assertEqual(
+            payload["parameters"],
+            {"page": 2, "limit": 20, "market_id": "77", "chain_id": "56", "status": "1,2"},
+        )
+        detail = market_account_payload(
+            cfg, Registry(), "opinion_labs", "order_detail", {"order_id": ["order-1"]}
+        )
+        self.assertEqual(detail["parameters"], {"order_id": "order-1"})
+        clamped = market_account_payload(cfg, Registry(), "opinion_labs", "order_history", {"limit": ["99"]})
+        self.assertEqual(clamped["parameters"]["limit"], 20)
+
+    def test_betfair_account_payload_forwards_cleared_order_filters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="betfair_exchange",
+            display_name="Betfair Exchange",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = (  # type: ignore[attr-defined]
+            "active_orders",
+            "cleared_orders",
+            "funds",
+            "account",
+            "statement",
+            "currency_rates",
+        )
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "clearedOrders": [{"betId": "bet-1"}],
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["betfair_exchange"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "betfair_exchange",
+            "cleared_orders",
+            {
+                "contract_id": ["1.234:101"],
+                "status": ["SETTLED"],
+                "limit": ["12"],
+                "offset": ["2"],
+                "group_by": ["RUNNER"],
+                "include_item_description": ["true"],
+            },
+        )
+        self.assertEqual(
+            payload["parameters"],
+            {
+                "bet_status": "SETTLED",
+                "market_id": "1.234",
+                "event_type_id": "",
+                "event_id": "",
+                "runner_id": "101",
+                "bet_id": "",
+                "group_by": "RUNNER",
+                "include_item_description": True,
+                "limit": 12,
+                "offset": 2,
+                "from_timestamp": None,
+                "to_timestamp": None,
+            },
+        )
+        active = market_account_payload(
+            cfg,
+            Registry(),
+            "betfair_exchange",
+            "active_orders",
+            {
+                "contract_id": ["1.234:101"],
+                "status": ["EXECUTABLE"],
+                "order_by": ["BY_PLACE_TIME"],
+                "sort_dir": ["LATEST_TO_EARLIEST"],
+                "limit": ["8"],
+                "offset": ["3"],
+            },
+        )
+        self.assertEqual(
+            active["parameters"],
+            {
+                "market_id": "1.234",
+                "contract_id": "1.234:101",
+                "status": "EXECUTABLE",
+                "order_by": "BY_PLACE_TIME",
+                "sort_dir": "LATEST_TO_EARLIEST",
+                "include_item_description": False,
+                "limit": 8,
+                "offset": 3,
+                "from_timestamp": None,
+                "to_timestamp": None,
+            },
+        )
+        funds = market_account_payload(cfg, Registry(), "betfair_exchange", "funds", {"wallet": ["UK"]})
+        self.assertEqual(funds["parameters"], {"wallet": "UK"})
+        account = market_account_payload(cfg, Registry(), "betfair_exchange", "account", {})
+        self.assertEqual(account["parameters"], {})
+        statement = market_account_payload(
+            cfg,
+            Registry(),
+            "betfair_exchange",
+            "statement",
+            {
+                "locale": ["en"],
+                "wallet": ["UK"],
+                "limit": ["12"],
+                "offset": ["4"],
+                "from": ["1780272000"],
+                "to": ["1780358400"],
+            },
+        )
+        self.assertEqual(
+            statement["parameters"],
+            {
+                "locale": "en",
+                "limit": 12,
+                "offset": 4,
+                "include_item": True,
+                "wallet": "UK",
+                "from_timestamp": 1780272000.0,
+                "to_timestamp": 1780358400.0,
+            },
+        )
+        rates = market_account_payload(
+            cfg,
+            Registry(),
+            "betfair_exchange",
+            "currency_rates",
+            {"from_currency": ["GBP"]},
+        )
+        self.assertEqual(rates["parameters"], {"from_currency": "GBP"})
+
+    def test_betfair_order_management_payload_forwards_only_allowlisted_mutation_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="betfair_exchange",
+            display_name="Betfair Exchange",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.order_management_operations = ("cancel_orders", "update_orders", "replace_orders")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "SUCCESS"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["betfair_exchange"].enabled = True
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "betfair_exchange",
+            "cancel_orders",
+            {
+                "exchange_market_id": "1.234",
+                "instructions": [{"bet_id": "bet-1", "size_reduction": 1.25}],
+                "customerRef": "cancel-1",
+                "async": False,
+                "confirm_global_cancel": "",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["operation"], "cancel_orders")
+        self.assertEqual(payload["parameters"]["market_id"], "1.234")
+        self.assertEqual(payload["parameters"]["customer_ref"], "cancel-1")
+        self.assertEqual(payload["data"], {"status": "SUCCESS"})
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "cancel_orders",
+                    {
+                        "market_id": "1.234",
+                        "instructions": [{"bet_id": "bet-1", "size_reduction": 1.25}],
+                        "customer_ref": "cancel-1",
+                        "market_version": None,
+                        "async_request": False,
+                        "confirm_global_cancel": "",
+                    },
+                )
+            ],
+        )
+        with self.assertRaises(UnsupportedFeatureError):
+            market_order_management_payload(cfg, Registry(), "betfair_exchange", "place_orders", {})
+
+    def test_kalshi_order_management_payload_forwards_documented_fields_only(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="kalshi",
+            display_name="Kalshi",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_order", "batch_cancel_orders", "amend_order", "decrease_order")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["kalshi"].enabled = True
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "kalshi",
+            "amend_order",
+            {
+                "order_id": "order-1",
+                "ticker": "KXTEST-1",
+                "side": "bid",
+                "price": "0.44",
+                "count": "5",
+                "subaccount": 1,
+                "exchange_index": 0,
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["operation"], "amend_order")
+        self.assertEqual(payload["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["order_id"], "order-1")
+        self.assertEqual(calls[0][1]["ticker"], "KXTEST-1")
+        self.assertEqual(calls[0][1]["confirm_order_management"], "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS")
+        self.assertNotIn("unexpected", calls[0][1])
+
+    def test_hyperliquid_order_management_payload_forwards_signed_action_only(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="hyperliquid",
+            display_name="Hyperliquid",
+            capabilities=MarketCapabilities(credentials_required=False, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_order", "schedule_cancel")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["hyperliquid"].enabled = True
+        signed = {
+            "action": {"type": "cancel", "cancels": [{"a": 100000000, "o": 123456789}]},
+            "nonce": 1700000000000,
+            "signature": "0x" + "ab" * 65,
+        }
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "hyperliquid",
+            "cancel_order",
+            {
+                "signed_action": signed,
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["signed_action"], signed)
+        self.assertEqual(calls[0][1]["confirm_order_management"], "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS")
+        self.assertNotIn("unexpected", calls[0][1])
+        self.assertIsNone(calls[0][1]["instructions"])
+
+    def test_smarkets_account_and_order_management_payloads_forward_bounded_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="smarkets",
+            display_name="Smarkets",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.account_recovery_operations = ("order_history", "account")  # type: ignore[attr-defined]
+        adapter.order_management_operations = ("cancel_order", "cancel_orders")  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+        }
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["smarkets"].enabled = True
+        account = market_account_payload(
+            cfg,
+            Registry(),
+            "smarkets",
+            "order_history",
+            {"status": ["created,filled"], "limit": ["24"], "unexpected": ["ignored"]},
+        )
+        self.assertEqual(account["parameters"], {"status": "created,filled", "limit": 24})
+        mutation = market_order_management_payload(
+            cfg,
+            Registry(),
+            "smarkets",
+            "cancel_orders",
+            {
+                "market_id": "market-1",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(mutation["data"], {"status": "accepted"})
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "cancel_orders",
+                    {
+                        "market_id": "market-1",
+                        "instructions": None,
+                        "customer_ref": "",
+                        "market_version": None,
+                        "async_request": False,
+                        "confirm_global_cancel": "",
+                        "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                    },
+                )
+            ],
+        )
+
+    def test_matchbook_account_payload_forwards_report_and_offer_filters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="matchbook",
+            display_name="Matchbook",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("settled_bets", "current_bets", "current_offers", "balance", "account")  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "data": {"operation": operation},
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["matchbook"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "matchbook",
+            "settled_bets",
+            {
+                "sport_id": ["1"],
+                "event_id": ["101"],
+                "market_id": ["202"],
+                "limit": ["12"],
+                "offset": ["2"],
+                "from": ["1780344000"],
+                "to": ["1780347600"],
+                "odds_type": ["DECIMAL"],
+            },
+        )
+        self.assertEqual(
+            payload["parameters"],
+            {
+                "offset": 2,
+                "limit": 12,
+                "sport_id": "1",
+                "event_id": "101",
+                "market_id": "202",
+                "odds_type": "DECIMAL",
+                "from_timestamp": 1780344000.0,
+                "to_timestamp": 1780347600.0,
+            },
+        )
+        offers = market_account_payload(
+            cfg,
+            Registry(),
+            "matchbook",
+            "current_offers",
+            {
+                "side": ["back"],
+                "offer_status": ["open,matched"],
+                "interval": ["30"],
+                "include_edits": ["true"],
+                "aggregation_type": ["average"],
+            },
+        )
+        self.assertEqual(offers["parameters"]["side"], "back")
+        self.assertEqual(offers["parameters"]["status"], "open,matched")
+        self.assertEqual(offers["parameters"]["interval"], 30)
+        self.assertTrue(offers["parameters"]["include_edits"])
+        self.assertEqual(offers["parameters"]["aggregation_type"], "average")
+
+    def test_matchbook_order_management_payload_forwards_only_documented_fields(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="matchbook",
+            display_name="Matchbook",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_offers", "edit_offer")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["matchbook"].enabled = True
+        batch = market_order_management_payload(
+            cfg,
+            Registry(),
+            "matchbook",
+            "cancel_offers",
+            {
+                "offer_ids": [404, 405],
+                "event_ids": "101",
+                "market_ids": "202",
+                "runner_ids": "303",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(batch["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["offer_ids"], [404, 405])
+        self.assertEqual(calls[0][1]["event_ids"], "101")
+        self.assertNotIn("unexpected", calls[0][1])
+
+        single = market_order_management_payload(
+            cfg,
+            Registry(),
+            "matchbook",
+            "edit_offer",
+            {
+                "offer_id": 404,
+                "current_odds": 1.5,
+                "new_odds": 2.0,
+                "current_stake": 5,
+                "new_stake": 6,
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+            },
+        )
+        self.assertEqual(single["operation"], "edit_offer")
+        self.assertEqual(calls[1][1]["offer_id"], 404)
+        self.assertEqual(calls[1][1]["new_stake"], 6)
+
+    def test_myriad_order_management_payload_forwards_signed_fields_only(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="myriad_markets",
+            display_name="Myriad",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_order", "batch_cancel_orders")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["myriad_markets"].enabled = True
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "myriad_markets",
+            "cancel_order",
+            {
+                "order_hash": "0x" + "12" * 32,
+                "trader": "0x1234567890123456789012345678901234567890",
+                "timestamp": 1719835200,
+                "signature": "0x" + "ab" * 65,
+                "network_id": 56,
+                "allow_partial": True,
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["order_hash"], "0x" + "12" * 32)
+        self.assertEqual(calls[0][1]["network_id"], 56)
+        self.assertNotIn("unexpected", calls[0][1])
+
+    def test_opinion_order_management_payload_forwards_sdk_filters_only(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="opinion_labs",
+            display_name="Opinion Labs",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_order", "batch_cancel_orders", "cancel_all_orders")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["opinion_labs"].enabled = True
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "opinion_labs",
+            "cancel_all_orders",
+            {
+                "market_id": "77",
+                "side": "BUY",
+                "confirm_global_cancel": "CANCEL ALL OPINION ORDERS",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["market_id"], "77")
+        self.assertEqual(calls[0][1]["side"], "BUY")
+        self.assertEqual(calls[0][1]["confirm_global_cancel"], "CANCEL ALL OPINION ORDERS")
+        self.assertNotIn("unexpected", calls[0][1])
+
+    def test_limitless_order_management_payload_forwards_fixed_cancellation_fields_only(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="limitless_exchange",
+            display_name="Limitless Exchange",
+            capabilities=MarketCapabilities(credentials_required=True, live_trading=True),
+        )
+        adapter.order_management_operations = ("cancel_order", "batch_cancel_orders", "cancel_all_orders")  # type: ignore[attr-defined]
+        calls = []
+
+        def manage_orders(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"status": "accepted"}
+
+        adapter.manage_orders = manage_orders  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["limitless_exchange"].enabled = True
+        payload = market_order_management_payload(
+            cfg,
+            Registry(),
+            "limitless_exchange",
+            "cancel_all_orders",
+            {
+                "market_slug": "doge-above-021652-sep-1-1200-utc",
+                "confirm_global_cancel": "CANCEL ALL LIMITLESS ORDERS",
+                "confirm_order_management": "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS",
+                "unexpected": "ignored",
+            },
+        )
+        self.assertEqual(payload["data"], {"status": "accepted"})
+        self.assertEqual(calls[0][1]["market_slug"], "doge-above-021652-sep-1-1200-utc")
+        self.assertEqual(calls[0][1]["confirm_global_cancel"], "CANCEL ALL LIMITLESS ORDERS")
+        self.assertEqual(calls[0][1]["confirm_order_management"], "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS")
+        self.assertNotIn("unexpected", calls[0][1])
+
+    def test_limitless_account_payload_forwards_delegated_read_parameters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="limitless_exchange",
+            display_name="Limitless Exchange",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("user_orders",)  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "orders": [{"order_id": "order-1"}],
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["limitless_exchange"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "limitless_exchange",
+            "user_orders",
+            {
+                "market_slug": ["doge-above-021652-sep-1-1200-utc"],
+                "on_behalf_of": ["profile-123"],
+            },
+        )
+        self.assertEqual(payload["operation"], "user_orders")
+        self.assertEqual(
+            payload["parameters"],
+            {
+                "on_behalf_of": "profile-123",
+                "market_slug": "doge-above-021652-sep-1-1200-utc",
+            },
+        )
+        self.assertEqual(payload["data"]["orders"][0]["order_id"], "order-1")
+
+    def test_xmarket_account_payload_forwards_bounded_market_order_parameters(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="xmarket",
+            display_name="Xmarket",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = ("positions", "user_orders", "market_orders")  # type: ignore[attr-defined]
+        adapter.account_recovery = lambda operation, **kwargs: {  # type: ignore[method-assign]
+            "operation": operation,
+            "parameters": kwargs,
+            "items": [{"id": "xorder-1"}],
+        }
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["xmarket"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "xmarket",
+            "market_orders",
+            {
+                "market_id": ["market-1"],
+                "status": ["open"],
+                "page": ["2"],
+                "limit": ["25"],
+                "unexpected": ["ignored"],
+            },
+        )
+        self.assertEqual(payload["operation"], "market_orders")
+        self.assertEqual(
+            payload["parameters"],
+            {"status": "open", "page": 2, "limit": 25, "market_id": "market-1"},
+        )
+        self.assertEqual(payload["data"]["items"][0]["id"], "xorder-1")
+
+    def test_xo_account_payload_forwards_documented_filters_and_path_ids(self) -> None:
+        adapter = MarketAdapter({})
+        adapter.metadata = MarketMetadata(
+            market_id="xo_market",
+            display_name="XO Market",
+            capabilities=MarketCapabilities(credentials_required=True),
+        )
+        adapter.account_recovery_operations = (
+            "account",
+            "positions",
+            "orders",
+            "trades",
+            "settlement",
+            "settlement_history",
+            "audit_logs",
+        )  # type: ignore[attr-defined]
+        calls = []
+
+        def account_recovery(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"operation": operation, "parameters": kwargs}
+
+        adapter.account_recovery = account_recovery  # type: ignore[method-assign]
+
+        class Registry:
+            def create(self, _market_id: str, _settings=None):
+                return adapter
+
+        cfg = AppConfig()
+        cfg.markets["xo_market"].enabled = True
+        payload = market_account_payload(
+            cfg,
+            Registry(),
+            "xo_market",
+            "trades",
+            {
+                "market_id": ["us-election-2028"],
+                "outcome_id": ["vance"],
+                "from": ["2024-12-01T09:15:00Z"],
+                "to": ["2024-12-01T09:30:00Z"],
+                "limit": ["12"],
+                "unexpected": ["ignored"],
+            },
+        )
+        self.assertEqual(payload["parameters"]["limit"], 12)
+        self.assertEqual(payload["parameters"]["market_id"], "us-election-2028")
+        self.assertEqual(payload["parameters"]["outcome_id"], "vance")
+        self.assertEqual(payload["parameters"]["start_time"], "2024-12-01T09:15:00Z")
+        self.assertEqual(payload["parameters"]["end_time"], "2024-12-01T09:30:00Z")
+
+        settlement = market_account_payload(
+            cfg,
+            Registry(),
+            "xo_market",
+            "settlement_history",
+            {"contract_id": ["us-election-2028:vance"], "limit": ["5"], "cursor": ["next"]},
+        )
+        self.assertEqual(
+            settlement["parameters"],
+            {"market_id": "us-election-2028", "limit": 5, "cursor": "next"},
+        )
+        self.assertEqual(calls[0][0], "trades")
+        self.assertEqual(calls[1][0], "settlement_history")
 
     def test_markets_payload_includes_diagnostics_without_secret_values(self) -> None:
         cfg = AppConfig()
@@ -806,6 +3823,122 @@ class WebApiTests(unittest.TestCase):
         self.assertFalse(preview["live"])
         self.assertTrue(preview["pricing"]["capped_by_max_usdc"])
         self.assertAlmostEqual(preview["order"]["limit_price"], 0.47)
+
+    def test_opinion_wallet_activity_uses_official_feed_and_copy_simulation(self) -> None:
+        cfg = AppConfig()
+        cfg.selected_market_id = "opinion_labs"
+        cfg.markets["opinion_labs"].enabled = True
+        cfg.wallets = [WalletWatch(wallet=WALLET, display_name="tracked")]
+        cfg.copytrading = CopyTradeSettings(
+            enabled=True,
+            live=False,
+            follow_wallet=WALLET,
+            follow_wallets=[WALLET],
+            scale=1.0,
+            max_usdc_per_trade=1.0,
+            slippage=0.02,
+        )
+        recent: list[dict] = []
+
+        result = poll_wallet_activity(cfg, FakeRegistry(FakeOpinionCopyAdapter()), recent)
+
+        self.assertEqual(result["problems"], [])
+        self.assertEqual(len(result["activity"]), 1)
+        preview = result["activity"][0]["copy_preview"]
+        self.assertEqual(preview["status"], "simulation")
+        self.assertEqual(preview["order"]["market_id"], "opinion_labs")
+        self.assertEqual(preview["order"]["contract_id"], "77:YES:0xyes")
+        self.assertTrue(preview["pricing"]["capped_by_max_usdc"])
+
+    def test_myriad_wallet_activity_uses_public_feed_and_collateral_budget_copy(self) -> None:
+        cfg = AppConfig()
+        cfg.selected_market_id = "myriad_markets"
+        cfg.markets["myriad_markets"].enabled = True
+        cfg.wallets = [WalletWatch(wallet=WALLET, display_name="tracked")]
+        cfg.copytrading = CopyTradeSettings(
+            enabled=True,
+            live=False,
+            follow_wallet=WALLET,
+            follow_wallets=[WALLET],
+            scale=1.0,
+            max_usdc_per_trade=1.0,
+            slippage=0.02,
+        )
+        recent: list[dict] = []
+
+        result = poll_wallet_activity(cfg, FakeRegistry(FakeMyriadCopyAdapter()), recent)
+
+        self.assertEqual(result["problems"], [])
+        self.assertEqual(len(result["activity"]), 1)
+        preview = result["activity"][0]["copy_preview"]
+        self.assertEqual(preview["status"], "simulation")
+        self.assertEqual(preview["order"]["market_id"], "myriad_markets")
+        self.assertEqual(preview["order"]["contract_id"], "501:1")
+        self.assertAlmostEqual(preview["order"]["size"], 1.0)
+        self.assertAlmostEqual(preview["order"]["approx_notional"], 1.0)
+        self.assertTrue(preview["pricing"]["capped_by_max_usdc"])
+
+    def test_azuro_wallet_copy_uses_decimal_odds_and_stake_budget(self) -> None:
+        cfg = AppConfig()
+        cfg.selected_market_id = "azuro"
+        cfg.markets["azuro"].enabled = True
+        cfg.wallets = [WalletWatch(wallet=WALLET, display_name="tracked")]
+        cfg.copytrading = CopyTradeSettings(
+            enabled=True,
+            live=False,
+            follow_wallet=WALLET,
+            follow_wallets=[WALLET],
+            scale=1.0,
+            max_usdc_per_trade=1.0,
+            slippage=0.02,
+        )
+
+        preview = copy_trade_preview_from_activity(
+            cfg,
+            FakeRegistry(FakeAzuroCopyAdapter()),
+            {
+                "proxyWallet": WALLET,
+                "asset": "30061006000000000029214016:300610060000000000649714110000000000000227249395:29",
+                "side": "BUY",
+                "price": 1 / 1.85,
+                "odds": 1.85,
+                "size": 10.0,
+                "transactionHash": "azuro-tx-1",
+            },
+        )
+
+        self.assertEqual(preview["status"], "simulation")
+        self.assertAlmostEqual(preview["order"]["size"], 1.0)
+        self.assertAlmostEqual(preview["order"]["limit_price"], 1.85 * 0.98)
+        self.assertAlmostEqual(preview["order"]["approx_notional"], 1.0)
+        self.assertEqual(preview["pricing"]["raw_odds"], 1.85)
+        self.assertTrue(preview["pricing"]["capped_by_max_usdc"])
+
+    def test_manifold_wallet_and_copy_settings_use_prefixed_public_identity(self) -> None:
+        cfg = AppConfig()
+        cfg.selected_market_id = "manifold"
+        cfg.markets["manifold"].enabled = True
+
+        wallet = add_wallet_watch(cfg, {"wallet": "Manifold:ForecastUser", "display_name": "ForecastUser"})
+        settings = apply_copy_settings_patch(
+            cfg,
+            {
+                "enabled": True,
+                "follow_wallets": ["MANIFOLD:ForecastUser"],
+                "copy_percentage": 100,
+                "max_usdc_per_trade": 5,
+                "slippage": 0.01,
+            },
+        )
+        payload = copy_payload(cfg, FakeRegistry(FakePolymarketAdapter()))
+
+        self.assertEqual(wallet.wallet, "manifold:forecastuser")
+        self.assertEqual(settings.normalized_follow_wallets(), ["manifold:forecastuser"])
+        self.assertTrue(payload["copy_trading_supported"])
+        self.assertEqual(payload["activity_identity_hint"], "manifold:<username>")
+
+        with self.assertRaises(ValueError):
+            add_wallet_watch(cfg, {"wallet": "ForecastUser"})
 
     def test_copy_settings_and_live_preview_use_shared_preflight_without_ordering(self) -> None:
         cfg = AppConfig()
@@ -1790,6 +4923,51 @@ class WebApiTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             apply_market_patch(cfg, "kalshi", {"settings": "bad"})
 
+    def test_apply_market_patch_rejects_nested_credentials_atomically(self) -> None:
+        cfg = AppConfig()
+        before = cfg.markets["kalshi"].to_dict()
+
+        with self.assertRaisesRegex(ValueError, "environment variables") as ctx:
+            apply_market_patch(
+                cfg,
+                "kalshi",
+                {
+                    "enabled": True,
+                    "settings": {"nested": {"POLY_PASSPHRASE": "do-not-persist"}},
+                },
+            )
+
+        self.assertEqual(cfg.markets["kalshi"].to_dict(), before)
+        self.assertNotIn("do-not-persist", str(ctx.exception))
+
+    def test_apply_market_patch_rejects_all_outbound_endpoint_and_policy_settings_atomically(self) -> None:
+        for key in sorted(OUTBOUND_ENDPOINT_SETTING_KEYS | OUTBOUND_POLICY_SETTING_KEYS):
+            with self.subTest(key=key):
+                cfg = AppConfig()
+                before = cfg.markets["kalshi"].to_dict()
+                with self.assertRaisesRegex(ValueError, "cannot be changed through the HTTP API"):
+                    apply_market_patch(cfg, "kalshi", {"enabled": True, "settings": {key: "https://example.com"}})
+                self.assertEqual(cfg.markets["kalshi"].to_dict(), before)
+
+    def test_settings_redaction_is_recursive_without_masking_market_token_identifiers(self) -> None:
+        sanitized = sanitize_settings(
+            {
+                "nested": {
+                    "POLY_PASSPHRASE": "pass",
+                    "POLY_SIGNATURE": "signature",
+                },
+                "sx_bet_base_token": "USDC",
+                "token_id": "contract-yes",
+                "auth_headers": {"custom": "defense-in-depth"},
+            }
+        )
+
+        self.assertEqual(sanitized["nested"]["POLY_PASSPHRASE"], "***")
+        self.assertEqual(sanitized["nested"]["POLY_SIGNATURE"], "***")
+        self.assertEqual(sanitized["sx_bet_base_token"], "USDC")
+        self.assertEqual(sanitized["token_id"], "contract-yes")
+        self.assertEqual(sanitized["auth_headers"], "***")
+
     def test_apply_market_patch_persists_validated_live_safety_fields(self) -> None:
         cfg = AppConfig()
 
@@ -1939,10 +5117,16 @@ class WebApiTests(unittest.TestCase):
 
     def test_health_payload_documents_parallel_gui_contract(self) -> None:
         with patch("web_api.project_version", return_value="9.8.7"):
-            payload = health_payload(Path("local-config.json"), Path("frontend-dist"))
+            payload = health_payload(
+                Path("local-config.json"),
+                Path("frontend-dist"),
+                {"source_revision": "a" * 40, "frontend_sha256": "b" * 64},
+            )
 
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["api_version"], "9.8.7")
+        self.assertEqual(payload["runtime_source_revision"], "a" * 40)
+        self.assertEqual(payload["runtime_frontend_sha256"], "b" * 64)
         self.assertEqual(payload["mode"], "parallel")
         self.assertTrue(payload["python_gui_available"])
         self.assertEqual(payload["python_gui_command"], "python app.py")
@@ -1956,8 +5140,16 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["observability"]["metrics_endpoint"], "/metrics")
         self.assertEqual(payload["observability"]["metrics_format"], "prometheus")
         self.assertEqual(payload["observability"]["request_logging"], "structured_json")
+        self.assertEqual(payload["observability"]["max_http_workers"], MAX_HTTP_WORKERS)
+        self.assertEqual(payload["observability"]["max_http_response_bytes"], MAX_HTTP_RESPONSE_BYTES)
+        self.assertEqual(
+            payload["observability"]["connection_timeout_seconds"],
+            HTTP_CONNECTION_TIMEOUT_SECONDS,
+        )
         self.assertIn("/metrics", payload["routes"]["GET"])
         self.assertIn("/api/state", payload["routes"]["GET"])
+        self.assertIn("/api/markets/support-matrix", payload["routes"]["GET"])
+        self.assertIn("/api/markets/{market_id}/support", payload["routes"]["GET"])
         self.assertIn("/api/live-safety", payload["routes"]["GET"])
         self.assertIn("/api/polymarket/coverage", payload["routes"]["GET"])
         self.assertIn("/api/polymarket/clob-readiness", payload["routes"]["GET"])
@@ -1971,6 +5163,8 @@ class WebApiTests(unittest.TestCase):
         self.assertIn("/api/polymarket/users/mdd/export.csv", payload["routes"]["GET"])
         self.assertIn("/api/config", payload["routes"]["PATCH"])
         self.assertIn("/api/live-safety/preflight", payload["routes"]["POST"])
+        self.assertIn("/api/markets/{market_id}/orders/{operation}", payload["routes"]["POST"])
+        self.assertNotIn("/api/markets/{market_id}/orders/{operation}", payload["routes"]["GET"])
         self.assertIn("/api/polymarket/users/mdd/cache/purge", payload["routes"]["POST"])
         self.assertIn("/api/polymarket/live-validation/reports", payload["routes"]["POST"])
         self.assertIn("/api/polymarket/users/mdd/cache/{key}", payload["routes"]["DELETE"])
@@ -2168,6 +5362,67 @@ class WebApiTests(unittest.TestCase):
                 self.assertEqual(allowed["stored"]["duplicate_of"], first["stored"]["key"])
                 self.assertIn("Stored duplicate", allowed["message"])
 
+    def test_generated_live_evidence_retries_bind_to_normalized_client_request(self) -> None:
+        cfg = AppConfig()
+        report_a = json.loads((LIVE_REPORT_FIXTURE_ROOT / "valid_dry_run.json").read_text(encoding="utf-8"))
+        report_b = json.loads(json.dumps(report_a))
+        report_b["generated_at"] = "2099-01-02T03:04:05Z"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            report_path = root / "reports.json"
+            decision_path = root / "decisions.json"
+            snapshot_path = root / "snapshots.json"
+            environment = {
+                "POLYMARKET_LIVE_VALIDATION_REPORTS_PATH": str(report_path),
+                "POLYMARKET_LIVE_VALIDATION_DECISIONS_PATH": str(decision_path),
+                "POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_PATH": str(snapshot_path),
+            }
+            with patch.dict(os.environ, environment, clear=False), patch(
+                "web_api.polymarket_live_validation_payload",
+                side_effect=[report_a, report_b],
+            ) as report_builder:
+                first_report = polymarket_live_validation_report_store_payload(
+                    cfg,
+                    {},
+                    idempotency_key="generated-report-retry",
+                )
+                replayed_report = polymarket_live_validation_report_store_payload(
+                    cfg,
+                    {},
+                    idempotency_key="generated-report-retry",
+                )
+
+            self.assertEqual(replayed_report["stored"]["key"], first_report["stored"]["key"])
+            self.assertTrue(replayed_report["stored"]["idempotent_replay"])
+            self.assertEqual(replayed_report["counts"]["entries"], 1)
+            self.assertEqual(report_builder.call_count, 1)
+
+            proposal_a = live_validation_coverage_promotion_proposal(
+                report_store_path=report_path,
+                decision_path=decision_path,
+            )
+            proposal_b = json.loads(json.dumps(proposal_a))
+            proposal_b.pop("proposal_hash", None)
+            proposal_b["generated_at"] = "2099-01-02T03:04:05Z"
+            with patch.dict(os.environ, environment, clear=False), patch(
+                "web_api.live_validation_coverage_promotion_proposal",
+                side_effect=[proposal_a, proposal_b],
+            ) as proposal_builder:
+                first_snapshot = polymarket_live_validation_promotion_proposal_snapshot_store_payload(
+                    {"target_tier": "credential_live_verified"},
+                    idempotency_key="generated-snapshot-retry",
+                )
+                replayed_snapshot = polymarket_live_validation_promotion_proposal_snapshot_store_payload(
+                    {"target_tier": " credential_live_verified "},
+                    idempotency_key="generated-snapshot-retry",
+                )
+
+            self.assertEqual(replayed_snapshot["stored"]["key"], first_snapshot["stored"]["key"])
+            self.assertTrue(replayed_snapshot["stored"]["idempotent_replay"])
+            self.assertEqual(replayed_snapshot["counts"]["entries"], 1)
+            self.assertEqual(proposal_builder.call_count, 1)
+
     def test_polymarket_live_validation_report_routes_open_export_and_delete(self) -> None:
         report = {
             "generated_at": 123.0,
@@ -2210,9 +5465,23 @@ class WebApiTests(unittest.TestCase):
                         "/api/polymarket/live-validation/reports",
                         method="POST",
                         payload={"report_json": json.dumps(report), "label": "route report"},
+                        headers={"Idempotency-Key": "route-report-1"},
                     )
                     self.assertEqual(status, 200)
                     report_key = stored["stored"]["key"]
+
+                    status, replayed = self._request_json(
+                        base_url,
+                        "/api/polymarket/live-validation/reports",
+                        method="POST",
+                        payload={"report_json": json.dumps(report), "label": "route report"},
+                        headers={"Idempotency-Key": "route-report-1"},
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(replayed["stored"]["key"], report_key)
+                    self.assertTrue(replayed["stored"]["idempotent_replay"])
+                    self.assertEqual(replayed["counts"]["entries"], 1)
+                    self.assertIn("Replayed", replayed["message"])
 
                     status, listing = self._request_json(base_url, "/api/polymarket/live-validation/reports")
                     self.assertEqual(status, 200)
@@ -2277,6 +5546,7 @@ class WebApiTests(unittest.TestCase):
                         "/api/polymarket/live-validation/decisions",
                         method="POST",
                         payload={**decision_request, "reviewer_note": "Second rejected route decision."},
+                        headers={"Idempotency-Key": "route-decision-2"},
                     )
                     self.assertEqual(status, 200)
                     self.assertEqual(decision["counts"]["entries"], 2)
@@ -2355,6 +5625,7 @@ class WebApiTests(unittest.TestCase):
                         "/api/polymarket/live-validation/promotion-proposal/snapshots",
                         method="POST",
                         payload={"target_tier": "credential_live_verified", "source": "route-test"},
+                        headers={"Idempotency-Key": "route-snapshot-1"},
                     )
                     self.assertEqual(status, 200)
                     self.assertEqual(snapshots["counts"]["entries"], 2)
@@ -2470,6 +5741,7 @@ class WebApiTests(unittest.TestCase):
                         "/api/polymarket/live-validation/reports",
                         method="POST",
                         payload={"report_json": json.dumps(invalid), "label": "bad fixture"},
+                        headers={"Idempotency-Key": "schema-invalid-1"},
                     )
                     self.assertEqual(status, 400)
                     self.assertEqual(failed["error"]["code"], "live_validation_report_schema_error")
@@ -2487,6 +5759,7 @@ class WebApiTests(unittest.TestCase):
                         "/api/polymarket/live-validation/reports",
                         method="POST",
                         payload={"report_json": json.dumps(valid), "label": "valid dry-run fixture"},
+                        headers={"Idempotency-Key": "schema-valid-1"},
                     )
                     self.assertEqual(status, 200)
                     self.assertTrue(stored["stored"]["schema_validation"]["ok"])
@@ -2498,11 +5771,38 @@ class WebApiTests(unittest.TestCase):
 
     def test_polymarket_coverage_route_includes_guarded_report_promotion_inventory(self) -> None:
         report = {
+            "ok": True,
             "generated_at": 123.0,
             "market_id": "polymarket",
             "mode": "strict_cli",
+            "source_provenance": {
+                "schema_version": 1,
+                "repository": "market-sentinel",
+                "repository_origin": "github.com/yunushan/market-sentinel",
+                "source_revision": "a" * 40,
+                "initial_revision": "a" * 40,
+                "final_revision": "a" * 40,
+                "initial_clean": True,
+                "final_clean": True,
+                "stable": True,
+            },
+            "public_checks": {
+                "clob_time": {"status": "ok", "semantic_check": "current_unix_time"},
+                "gamma_markets": {"status": "ok", "semantic_check": "market_identity"},
+                "data_leaderboard": {"status": "ok", "semantic_check": "leaderboard_identity"},
+                "bridge_supported_assets": {
+                    "status": "ok",
+                    "semantic_check": "supported_asset_identity",
+                },
+            },
             "authenticated_read_checks": {
-                "user_websocket_connect": {"status": "ok", "detail": "connected", "sample_type": "dict"}
+                "clob_l2_orders": {
+                    "status": "ok",
+                    "detail": "read",
+                    "sample_type": "list",
+                    "semantic_check": "authenticated_order_collection",
+                    "records_observed": 0,
+                }
             },
             "funded_live_order_check": {"status": "dry_run", "live_action": False},
             "stage_gates": {
@@ -2524,6 +5824,7 @@ class WebApiTests(unittest.TestCase):
                         "/api/polymarket/live-validation/reports",
                         method="POST",
                         payload={"report_json": json.dumps(report), "label": "credentialed read"},
+                        headers={"Idempotency-Key": "credentialed-read-1"},
                     )
                     self.assertEqual(status, 200)
 
@@ -2531,7 +5832,7 @@ class WebApiTests(unittest.TestCase):
                     self.assertEqual(status, 200)
                     promotion = coverage["stored_live_validation_report_promotion"]
                     self.assertFalse(promotion["static_coverage_mutated"])
-                    self.assertEqual(promotion["credential_live_verified"], "yes")
+                    self.assertEqual(promotion["credential_live_verified"], "candidate_only")
                     self.assertEqual(promotion["funded_live_verified"], "blocked")
                     self.assertEqual(promotion["counts"]["credential_candidates"], 1)
                     authenticated_category = [
@@ -2566,6 +5867,12 @@ class WebApiTests(unittest.TestCase):
             _read_json_body(FakeBodyHandler(b"{}", "1000001"))
         with self.assertRaisesRegex(ValueError, "Content-Length must be an integer"):
             _read_json_body(FakeBodyHandler(b"{}", "bad"))
+        with self.assertRaisesRegex(ValueError, "Content-Length cannot be negative"):
+            _read_json_body(FakeBodyHandler(b"", "-1"))
+        with self.assertRaisesRegex(ValueError, "JSON request body is incomplete"):
+            _read_json_body(FakeBodyHandler(b"{}", "3"))
+        with self.assertRaisesRegex(ValueError, "Transfer-Encoding is not supported"):
+            _read_json_body(FakeBodyHandler(b"{}", headers={"Transfer-Encoding": "chunked"}))
         with self.assertRaisesRegex(ValueError, "JSON request body must be UTF-8"):
             _read_json_body(FakeBodyHandler(b"\xff"))
 
@@ -2588,6 +5895,16 @@ class WebApiTests(unittest.TestCase):
                     method="PATCH",
                     payload={"theme": "blue"},
                 )
+                with patch(
+                    "web_api.save_config",
+                    side_effect=ConfigConflictError("stale conflict with sensitive internal detail"),
+                ):
+                    status_conflict, conflict = self._request_json(
+                        base_url,
+                        "/api/config",
+                        method="PATCH",
+                        payload={"theme": "dark"},
+                    )
                 status_not_found, not_found = self._request_json(base_url, "/api/missing")
             finally:
                 server.shutdown()
@@ -2600,8 +5917,59 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(status_validation, 400)
         self.assertEqual(validation["error"]["code"], "validation_error")
         self.assertEqual(validation["error"]["message"], "theme must be light or dark.")
+        self.assertEqual(status_conflict, HTTPStatus.CONFLICT)
+        self.assertEqual(conflict["error"]["code"], "config_conflict")
+        self.assertNotIn("sensitive internal detail", json.dumps(conflict))
         self.assertEqual(status_not_found, 404)
         self.assertEqual(not_found["error"]["code"], "not_found")
+
+    def test_http_market_patch_rejects_credentials_and_endpoint_overrides_without_persisting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.json"
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            save_config(AppConfig(), config_path)
+            before = config_path.read_bytes()
+            server, thread, base_url = self._serve_api(config_path, frontend_dir)
+            credential = "credential-must-never-be-echoed"
+            try:
+                credential_status, credential_payload = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi",
+                    method="PATCH",
+                    payload={
+                        "enabled": True,
+                        "settings": {"nested": {"POLY_PASSPHRASE": credential}},
+                    },
+                )
+                endpoint_status, endpoint_payload = self._request_json(
+                    base_url,
+                    "/api/markets/kalshi",
+                    method="PATCH",
+                    payload={
+                        "enabled": True,
+                        "settings": {"kalshi_api_base_url": "http://127.0.0.1:9999"},
+                    },
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            after = config_path.read_bytes()
+            stored = load_config(config_path)
+
+        self.assertEqual(credential_status, HTTPStatus.BAD_REQUEST)
+        self.assertEqual(credential_payload["error"]["code"], "validation_error")
+        self.assertNotIn(credential, json.dumps(credential_payload))
+        self.assertEqual(endpoint_status, HTTPStatus.BAD_REQUEST)
+        self.assertEqual(endpoint_payload["error"]["code"], "validation_error")
+        self.assertNotIn("127.0.0.1", json.dumps(endpoint_payload))
+        self.assertEqual(after, before)
+        self.assertFalse(stored.markets["kalshi"].enabled)
+        self.assertNotIn("kalshi_api_base_url", stored.markets["kalshi"].settings)
 
     def test_http_static_route_reports_missing_react_build_with_fallbacks(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2620,6 +5988,56 @@ class WebApiTests(unittest.TestCase):
         self.assertIn("npm run build", payload["error"]["details"]["build_command"])
         self.assertEqual(payload["error"]["details"]["dev_command"], "run_web_gui_dev.bat")
         self.assertIn("run_gui.bat", payload["error"]["details"]["tkinter_fallback"])
+
+    def test_http_rejects_oversized_json_text_and_static_responses_before_headers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.json"
+            frontend_dir = root / "dist"
+            asset_dir = frontend_dir / "assets"
+            asset_dir.mkdir(parents=True)
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            (asset_dir / "oversized.js").write_bytes(b"x" * 2048)
+            server, thread, base_url = self._serve_api(config_path, frontend_dir)
+            try:
+                with (
+                    patch("web_api.MAX_HTTP_RESPONSE_BYTES", 512),
+                    patch("web_api.health_payload", return_value={"payload": "x" * 2048}),
+                ):
+                    json_status, json_headers, json_body = self._request_raw(base_url, "/api/health")
+
+                with (
+                    patch("web_api.MAX_HTTP_RESPONSE_BYTES", 512),
+                    patch.object(server.http_metrics, "prometheus_text", return_value="x" * 2048),
+                ):
+                    text_status, text_headers, text_body = self._request_raw(base_url, "/metrics")
+
+                with patch("web_api.MAX_HTTP_RESPONSE_BYTES", 512):
+                    static_status, static_headers, static_body = self._request_raw(
+                        base_url,
+                        "/assets/oversized.js",
+                    )
+
+                metrics_status, _metrics_headers, metrics_body = self._request_raw(base_url, "/metrics")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+        for status, headers, body in (
+            (json_status, json_headers, json_body),
+            (text_status, text_headers, text_body),
+            (static_status, static_headers, static_body),
+        ):
+            with self.subTest(status=status):
+                self.assertEqual(status, HTTPStatus.INTERNAL_SERVER_ERROR)
+                self.assertEqual(headers.get("Content-Type"), "application/json; charset=utf-8")
+                self.assertEqual(int(headers["Content-Length"]), len(body))
+                self.assertLess(len(body), 512)
+                self.assertEqual(json.loads(body.decode("utf-8"))["error"]["code"], "response_too_large")
+
+        self.assertEqual(metrics_status, HTTPStatus.OK)
+        self.assertIn(b"market_sentinel_http_response_too_large_total 3", metrics_body)
 
     def test_http_static_route_serves_built_react_assets_and_spa_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2679,6 +6097,8 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(health_headers.get("Cache-Control"), "no-store")
         health = json.loads(health_body.decode("utf-8"))
         self.assertTrue(health["frontend_build_available"])
+        self.assertRegex(health["runtime_source_revision"], r"^[0-9a-f]{40}$")
+        self.assertRegex(health["runtime_frontend_sha256"], r"^[0-9a-f]{64}$")
 
     def test_static_cache_control_rejects_unknown_relative_path(self) -> None:
         self.assertEqual(static_cache_control(None), "no-store")
@@ -2708,6 +6128,18 @@ class WebApiTests(unittest.TestCase):
                 ReactGuiHandler._resolve_static_path(None, static_files, "/assets/app.js"),
                 asset.resolve(),
             )
+
+    def test_static_file_catalog_uses_packaged_frontend_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            frontend_dir = Path(tmpdir) / "dist"
+            frontend_dir.mkdir()
+            index = frontend_dir / "index.html"
+            index.write_text("<html></html>", encoding="utf-8")
+
+            with patch("web_api.DEFAULT_FRONTEND_DIR", frontend_dir):
+                static_files = ReactGuiHandler._static_file_catalog()
+
+        self.assertEqual(static_files, {"index.html": index.resolve()})
 
     def test_app_state_payload_combines_initial_react_gui_state(self) -> None:
         cfg = AppConfig()
@@ -2759,6 +6191,28 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["health"]["status"], "ok")
         self.assertEqual(payload["config"]["selected_market_id"], "kalshi")
         self.assertEqual(payload["paper"]["counts"]["history"], 1)
+
+    def test_http_support_matrix_routes_return_full_catalog_and_single_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "dist"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            server, thread, base_url = self._serve_api(root / "config.json", frontend_dir)
+            try:
+                status, payload = self._request_json(base_url, "/api/markets/support-matrix")
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(len(payload["markets"]), 68)
+                self.assertEqual(payload["counts"]["total"], 68)
+
+                status, row_payload = self._request_json(base_url, "/api/markets/kalshi/support")
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(row_payload["market"]["market_id"], "kalshi")
+                self.assertEqual(row_payload["markets"], [row_payload["market"]])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 name: Release
+run-name: Release ${{ inputs.tag_name || github.ref_name }}
 
 on:
   push:
@@ -25,7 +26,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.event.inputs.tag_name || github.ref_name }}
+  # Share this immutable lock with release-evidence-reconcile.yml so a stale
+  # reconciler can never draft a newer publication while it is being produced.
+  group: release-${{ github.sha }}
   cancel-in-progress: false
 
 env:
@@ -54,50 +57,44 @@ jobs:
 
       - name: Resolve release inputs
         id: release
+        env:
+          DISPATCH_TAG_NAME: ${{ inputs.tag_name }}
+          DISPATCH_PRERELEASE: ${{ inputs.prerelease }}
+          DISPATCH_DRAFT: ${{ inputs.draft }}
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            tag_name="${{ inputs.tag_name }}"
-            prerelease="${{ inputs.prerelease }}"
-            draft="${{ inputs.draft }}"
+            tag_name="${DISPATCH_TAG_NAME}"
+            requested_prerelease="${DISPATCH_PRERELEASE}"
+            draft="${DISPATCH_DRAFT}"
           else
             tag_name="${GITHUB_REF_NAME}"
-            if [[ "${tag_name}" == *-* ]]; then
-              prerelease="true"
-            else
-              prerelease="false"
-            fi
             draft="false"
           fi
 
-          if ! [[ "${tag_name}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
-            echo "Release tag must look like v1.2.3 or v1.2.3-rc.1; got ${tag_name}" >&2
+          version="$(python scripts/release_version.py normalize-tag "${tag_name}")"
+          prerelease="$(python scripts/release_version.py is-prerelease "${tag_name}")"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && \
+             [ "${requested_prerelease}" != "${prerelease}" ]; then
+            echo "The prerelease input (${requested_prerelease}) conflicts with tag ${tag_name} (${prerelease})." >&2
+            echo "Prerelease state is derived from the validated release tag; correct the input and retry." >&2
             exit 1
           fi
 
           echo "tag_name=${tag_name}" >> "${GITHUB_OUTPUT}"
-          echo "version=${tag_name#v}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "prerelease=${prerelease}" >> "${GITHUB_OUTPUT}"
           echo "draft=${draft}" >> "${GITHUB_OUTPUT}"
 
       - name: Validate package version matches release tag
         env:
-          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
         shell: bash
         run: |
-          python - <<'PY'
-          import os
-          from pathlib import Path
-          import tomllib
-
-          expected = os.environ["RELEASE_VERSION"]
-          actual = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
-          if actual != expected:
-              raise SystemExit(
-                  f"pyproject.toml project.version is {actual}, but the release tag is {expected}. "
-                  "Update [project].version before publishing this release."
-              )
-          PY
+          python scripts/release_version.py validate-project \
+            --tag "${RELEASE_TAG}" \
+            --pyproject pyproject.toml
 
       - name: Require release tag to resolve to workflow commit on protected main
         env:
@@ -299,7 +296,16 @@ jobs:
     name: Build Windows EXE and MSI
     runs-on: windows-2025-vs2026
     timeout-minutes: 45
-    environment: release
+    # Protected environments are branch-scoped and can reject tag-triggered
+    # jobs before a runner starts. Use the protected environment for signed
+    # production releases, and an unprotected environment for explicitly
+    # unsigned testing/development artifacts.
+    environment:
+      name: ${{ vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' && 'release' || 'release-unsigned' }}
+    env:
+      # Keep signed releases fail-closed when explicitly required, while
+      # allowing an explicitly unsigned ZIP/MSI for development or testing.
+      WINDOWS_SIGNING_REQUIRED: ${{ vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' }}
     needs:
       - metadata
       - frontend-dist
@@ -315,18 +321,20 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Verify protected Windows signing configuration
+      - name: Verify Windows signing configuration
         env:
-          REQUIRE_WINDOWS_CODE_SIGNING: ${{ vars.REQUIRE_WINDOWS_CODE_SIGNING }}
+          WINDOWS_SIGNING_REQUIRED: ${{ vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' }}
           WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64 }}
           WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD }}
           WINDOWS_CODE_SIGNING_TIMESTAMP_URL: ${{ vars.WINDOWS_CODE_SIGNING_TIMESTAMP_URL }}
         shell: pwsh
         run: |
-          $missing = [System.Collections.Generic.List[string]]::new()
-          if ($env:REQUIRE_WINDOWS_CODE_SIGNING -cne "true") {
-            $missing.Add("repository or release-environment variable REQUIRE_WINDOWS_CODE_SIGNING=true")
+          if ($env:WINDOWS_SIGNING_REQUIRED -ne "true") {
+            Write-Warning "Windows code signing is disabled; this release will contain unsigned Windows artifacts."
+            exit 0
           }
+
+          $missing = [System.Collections.Generic.List[string]]::new()
           if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64)) {
             $missing.Add("release-environment secret WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64")
           }
@@ -383,7 +391,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
-          python -m pip install --no-cache-dir --require-hashes -r requirements.lock
+          python -m pip install --no-cache-dir --require-hashes -r requirements-live.lock
           python -m pip install --no-cache-dir --no-deps -e .
           python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock
 
@@ -404,32 +412,111 @@ jobs:
           }
           $wixVersion
 
-      - name: Build Windows portable zip and MSI
+      - name: Prepare Windows application payload
         shell: pwsh
         run: |
           python scripts/build_windows_release.py `
             --version "${{ needs.metadata.outputs.version }}" `
             --tag "${{ needs.metadata.outputs.tag_name }}" `
             --frontend-zip "release-inputs/release-frontend-dist.zip" `
-            --output-dir "release-assets"
+            --output-dir "release-assets" `
+            --prepare-only
 
-      - name: Sign Windows release packages
+      - name: Smoke test staged Windows executable
+        shell: pwsh
+        run: |
+          $executable = "build/windows-release/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64/market-sentinel.exe"
+          & $executable --smoke-test
+
+      - name: Sign staged Windows executable
+        if: ${{ env.WINDOWS_SIGNING_REQUIRED == 'true' }}
         env:
           WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64 }}
           WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD }}
           WINDOWS_CODE_SIGNING_TIMESTAMP_URL: ${{ vars.WINDOWS_CODE_SIGNING_TIMESTAMP_URL }}
         shell: pwsh
         run: |
-          $targets = Get-ChildItem release-assets -File | Where-Object { $_.Extension -in '.exe', '.msi' }
-          if (-not $targets) {
-            throw "No Windows EXE or MSI files were produced for signing."
+          $executable = "build/windows-release/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64/market-sentinel.exe"
+          python scripts/sign_windows_release.py --path $executable
+
+      - name: Package Windows portable zip and MSI
+        shell: pwsh
+        run: |
+          python scripts/build_windows_release.py `
+            --version "${{ needs.metadata.outputs.version }}" `
+            --tag "${{ needs.metadata.outputs.tag_name }}" `
+            --output-dir "release-assets" `
+            --package-only
+
+      - name: Remove WiX debug database
+        shell: pwsh
+        run: |
+          # WiX emits a .wixpdb alongside the MSI by default. It is a build
+          # debug database, not a release asset, so remove it before the exact
+          # release inventory and upload steps run.
+          Get-ChildItem -LiteralPath "release-assets" -File -Filter "*.wixpdb" |
+            Remove-Item -Force
+
+      - name: Sign Windows MSI package
+        if: ${{ env.WINDOWS_SIGNING_REQUIRED == 'true' }}
+        env:
+          WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64 }}
+          WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD }}
+          WINDOWS_CODE_SIGNING_TIMESTAMP_URL: ${{ vars.WINDOWS_CODE_SIGNING_TIMESTAMP_URL }}
+        shell: pwsh
+        run: |
+          $installer = "release-assets/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64.msi"
+          python scripts/sign_windows_release.py --path $installer
+
+      - name: Verify signatures in final Windows artifacts
+        if: ${{ env.WINDOWS_SIGNING_REQUIRED == 'true' }}
+        shell: pwsh
+        run: |
+          $tag = "${{ needs.metadata.outputs.tag_name }}"
+          $installer = "release-assets/market-sentinel-$tag-win-x64.msi"
+          $portable = "release-assets/market-sentinel-$tag-win-x64.zip"
+          $extractDirectory = Join-Path $env:RUNNER_TEMP "market-sentinel-portable-signature-check"
+          Expand-Archive -LiteralPath $portable -DestinationPath $extractDirectory
+          $embeddedExecutables = @(
+            Get-ChildItem -LiteralPath $extractDirectory -Recurse -File -Filter "market-sentinel.exe"
+          )
+          if ($embeddedExecutables.Count -ne 1) {
+            throw "Expected exactly one embedded market-sentinel.exe; found $($embeddedExecutables.Count)."
           }
-          $arguments = @()
-          foreach ($target in $targets) {
-            $arguments += "--path"
-            $arguments += $target.FullName
+          $signTool = (Get-Command signtool.exe -ErrorAction Stop).Source
+          & $signTool verify /pa /all $embeddedExecutables[0].FullName
+          if ($LASTEXITCODE -ne 0) {
+            throw "The executable embedded in the portable ZIP failed Authenticode verification."
           }
-          python scripts/sign_windows_release.py @arguments
+          & $signTool verify /pa /all $installer
+          if ($LASTEXITCODE -ne 0) {
+            throw "The final MSI failed Authenticode verification."
+          }
+
+      - name: Verify unsigned Windows artifacts
+        if: ${{ env.WINDOWS_SIGNING_REQUIRED != 'true' }}
+        shell: pwsh
+        run: |
+          $tag = "${{ needs.metadata.outputs.tag_name }}"
+          $installer = "release-assets/market-sentinel-$tag-win-x64.msi"
+          $portable = "release-assets/market-sentinel-$tag-win-x64.zip"
+          foreach ($path in @($portable, $installer)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Unsigned Windows release artifact is missing: $path"
+            }
+          }
+          $extractDirectory = Join-Path $env:RUNNER_TEMP "market-sentinel-portable-content-check"
+          if (Test-Path -LiteralPath $extractDirectory) {
+            Remove-Item -LiteralPath $extractDirectory -Recurse -Force
+          }
+          Expand-Archive -LiteralPath $portable -DestinationPath $extractDirectory
+          $embeddedExecutables = @(
+            Get-ChildItem -LiteralPath $extractDirectory -Recurse -File -Filter "market-sentinel.exe"
+          )
+          if ($embeddedExecutables.Count -ne 1) {
+            throw "Expected exactly one embedded market-sentinel.exe; found $($embeddedExecutables.Count)."
+          }
+          Write-Warning "Windows EXE/MSI artifacts are intentionally unsigned; do not treat this release as production-trusted."
 
       - name: Upload Windows release packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -441,7 +528,7 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs:
       - metadata
@@ -449,7 +536,12 @@ jobs:
       - python-dist
       - frontend-dist
       - windows-app
-    environment: release
+    # Keep signed production publication behind the reviewed release
+    # environment. Unsigned testing/development publication uses the
+    # unprotected release-unsigned environment so tag-triggered runs can
+    # complete without unavailable signing secrets or self-review.
+    environment:
+      name: ${{ vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' && 'release' || 'release-unsigned' }}
     permissions:
       attestations: write
       contents: write
@@ -499,15 +591,22 @@ jobs:
             --output "release-assets/${APP_NAME}-${RELEASE_VERSION}-sbom.spdx.json"
 
       - name: Generate checksums and release notes
+        env:
+          WINDOWS_SIGNING_REQUIRED: ${{ vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' }}
         shell: bash
         run: |
           tag="${{ needs.metadata.outputs.tag_name }}"
           version="${{ needs.metadata.outputs.version }}"
+          if [ "${WINDOWS_SIGNING_REQUIRED}" = "true" ]; then
+            windows_signing_note='- Windows EXE/MSI packages Authenticode-signed and verified'
+          else
+            windows_signing_note='- Windows EXE/MSI packages intentionally unsigned (testing/development distribution only)'
+          fi
           (
             cd release-assets
             sha256sum * > SHA256SUMS.txt
           )
-          cat > RELEASE_NOTES.md <<EOF
+          cat > release-assets/RELEASE_NOTES.md <<EOF
           ## ${APP_NAME} ${tag}
 
           Automated release for \`${tag}\`.
@@ -519,6 +618,7 @@ jobs:
           - React production build
           - Python wheel/sdist build
           - Windows executable, portable zip, and MSI installer build
+          ${windows_signing_note}
           - SHA256 checksum generation
 
           Assets:
@@ -543,29 +643,358 @@ jobs:
         with:
           subject-path: release-assets/*
 
-      - name: Publish or update GitHub release
+      - name: Reconcile and publish GitHub release
+        id: publish_release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ needs.metadata.outputs.tag_name }}
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
           PRERELEASE: ${{ needs.metadata.outputs.prerelease }}
           DRAFT: ${{ needs.metadata.outputs.draft }}
         shell: bash
         run: |
-          release_flags=()
-          if [ "${PRERELEASE}" = "true" ]; then
-            release_flags+=(--prerelease)
-          fi
-          if [ "${DRAFT}" = "true" ]; then
-            release_flags+=(--draft)
+          remote_release_json="${RUNNER_TEMP}/market-sentinel-release.json"
+          remote_assets_json="${RUNNER_TEMP}/market-sentinel-release-assets.json"
+          stale_asset_ids="${RUNNER_TEMP}/market-sentinel-stale-release-asset-ids.txt"
+          release_index_json="${RUNNER_TEMP}/market-sentinel-release-index.json"
+          release_preflight_json="${RUNNER_TEMP}/market-sentinel-release-preflight.json"
+          prepared_release_json="${RUNNER_TEMP}/market-sentinel-release-prepared.json"
+
+          release_state_flags=(
+            "--prerelease=${PRERELEASE}"
+            "--draft=${DRAFT}"
+          )
+
+          prepared_release_id=""
+          # Draft releases are intentionally omitted from the REST
+          # /releases/tags/{tag} endpoint. List releases instead so a failed
+          # attempt can be resumed without creating an orphaned release.
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            | jq 'flatten' > "${release_index_json}"
+          release_match_count="$(jq -er \
+            --arg tag "${TAG_NAME}" \
+            '[.[] | select(.tag_name == $tag)] | length' \
+            "${release_index_json}")"
+
+          if [ "${release_match_count}" = "0" ]; then
+            gh release create "${TAG_NAME}" \
+              --draft \
+              --title "${TAG_NAME}" \
+              --notes-file release-assets/RELEASE_NOTES.md \
+              --target "${GITHUB_SHA}"
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              | jq 'flatten' > "${release_index_json}"
+            release_match_count="$(jq -er \
+              --arg tag "${TAG_NAME}" \
+              '[.[] | select(.tag_name == $tag)] | length' \
+              "${release_index_json}")"
           fi
 
-          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
-            gh release upload "${TAG_NAME}" release-assets/* --clobber
-            gh release edit "${TAG_NAME}" --title "${TAG_NAME}" --notes-file RELEASE_NOTES.md "${release_flags[@]}"
-          else
-            gh release create "${TAG_NAME}" release-assets/* \
-              --title "${TAG_NAME}" \
-              --notes-file RELEASE_NOTES.md \
-              --target "${GITHUB_SHA}" \
-              "${release_flags[@]}"
+          if [ "${release_match_count}" != "1" ]; then
+            echo "Expected exactly one release for ${TAG_NAME}, found ${release_match_count}; refusing asset mutation." >&2
+            exit 1
+          fi
+          jq -e \
+            --arg tag "${TAG_NAME}" \
+            'map(select(.tag_name == $tag))[0]' \
+            "${release_index_json}" > "${release_preflight_json}"
+          if ! jq -e \
+            --arg tag "${TAG_NAME}" \
+            --arg target "${GITHUB_SHA}" \
+            '.id | type == "number" and . > 0' \
+            "${release_preflight_json}" >/dev/null || \
+            ! jq -e \
+              --arg tag "${TAG_NAME}" \
+              --arg target "${GITHUB_SHA}" \
+              '.tag_name == $tag and
+               .target_commitish == $target and
+               (.draft | type == "boolean") and
+               (.prerelease | type == "boolean")' \
+              "${release_preflight_json}" >/dev/null; then
+            echo "Existing or new release identity, target, or state is not canonical; refusing to mutate it." >&2
+            exit 1
+          fi
+          prepared_release_id="$(jq -er '.id' "${release_preflight_json}")"
+          release_endpoint="repos/${GITHUB_REPOSITORY}/releases/${prepared_release_id}"
+          current_draft="$(jq -er '.draft' "${release_preflight_json}")"
+          current_prerelease="$(jq -er '.prerelease' "${release_preflight_json}")"
+          if [[ "${current_draft}" != "true" &&
+                "${current_prerelease}" != "${PRERELEASE}" ]]; then
+            echo "Existing published release prerelease state conflicts with ${TAG_NAME}; refusing to unpublish it." >&2
+            exit 1
+          fi
+          # Never expose a mixture of assets from two workflow attempts.
+          gh api --method PATCH \
+            "${release_endpoint}" \
+            -F draft=true > "${prepared_release_json}"
+          if ! jq -e \
+            --argjson release_id "${prepared_release_id}" \
+            --arg tag "${TAG_NAME}" \
+            --arg target "${GITHUB_SHA}" \
+            '.id == $release_id and
+             .tag_name == $tag and
+             .target_commitish == $target and
+             .draft == true and
+             (.prerelease | type == "boolean")' \
+            "${prepared_release_json}" >/dev/null; then
+            echo "Existing release changed during draft transition; refusing asset mutation." >&2
+            exit 1
+          fi
+
+          gh api "${release_endpoint}" \
+            > "${prepared_release_json}"
+          if ! jq -e \
+            --argjson release_id "${prepared_release_id}" \
+            --arg tag "${TAG_NAME}" \
+            --arg target "${GITHUB_SHA}" \
+            '.id == $release_id and
+             .tag_name == $tag and
+             .target_commitish == $target and
+             .draft == true and
+             (.prerelease | type == "boolean")' \
+            "${prepared_release_json}" >/dev/null; then
+            echo "Release identity changed before asset upload; refusing mutation." >&2
+            exit 1
+          fi
+
+          # Draft releases are not addressable by tag through `gh release`.
+          # Upload through the authenticated release-id endpoint instead, so
+          # retries can safely resume the same draft without creating another
+          # release or silently targeting a different one.
+          gh api "${release_endpoint}" > "${remote_release_json}"
+          release_id="$(jq -er '.id | select(type == "number" and . > 0)' "${remote_release_json}")"
+          if [ "${release_id}" != "${prepared_release_id}" ]; then
+            echo "Release identity changed during asset upload." >&2
+            exit 1
+          fi
+
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+            | jq 'flatten' > "${remote_assets_json}"
+          while IFS=$'\t' read -r asset_id asset_name; do
+            if [[ ! "${asset_id}" =~ ^[1-9][0-9]*$ ]] ||
+               [[ ! "${asset_name}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+              echo "Refusing invalid existing release asset identity: ${asset_id} ${asset_name}" >&2
+              exit 1
+            fi
+            if [[ -f "release-assets/${asset_name}" ]]; then
+              gh api --method DELETE \
+                "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+            fi
+          done < <(jq -r '.[] | [(.id | tostring), .name] | @tsv' "${remote_assets_json}")
+
+          for asset_path in release-assets/*; do
+            if [[ ! -f "${asset_path}" ]]; then
+              continue
+            fi
+            asset_name="$(basename -- "${asset_path}")"
+            if [[ ! "${asset_name}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+              echo "Refusing invalid release asset name: ${asset_name}" >&2
+              exit 1
+            fi
+            gh api --method POST \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'Content-Type: application/octet-stream' \
+              --input "${asset_path}" \
+              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${asset_name}" \
+              > /dev/null
+          done
+
+          gh api "${release_endpoint}" > "${remote_release_json}"
+          release_id="$(jq -er '.id | select(type == "number" and . > 0)' "${remote_release_json}")"
+          if [ "${release_id}" != "${prepared_release_id}" ]; then
+            echo "Release identity changed during asset upload." >&2
+            exit 1
+          fi
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+            | jq 'flatten' > "${remote_assets_json}"
+          python scripts/verify_release_assets.py \
+            --asset-dir release-assets \
+            --version "${RELEASE_VERSION}" \
+            --tag "${TAG_NAME}" \
+            --remote-release-json "${remote_release_json}" \
+            --remote-assets-json "${remote_assets_json}" \
+            --print-stale-remote-asset-ids > "${stale_asset_ids}"
+
+          while IFS= read -r asset_id; do
+            if [[ ! "${asset_id}" =~ ^[1-9][0-9]*$ ]]; then
+              echo "Refusing invalid release asset id: ${asset_id}" >&2
+              exit 1
+            fi
+            gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+          done < "${stale_asset_ids}"
+
+          gh api "${release_endpoint}" > "${remote_release_json}"
+          reconciled_release_id="$(jq -er '.id | select(type == "number" and . > 0)' "${remote_release_json}")"
+          if [ "${reconciled_release_id}" != "${release_id}" ]; then
+            echo "Release identity changed during asset reconciliation." >&2
+            exit 1
+          fi
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+            | jq 'flatten' > "${remote_assets_json}"
+          python scripts/verify_release_assets.py \
+            --asset-dir release-assets \
+            --version "${RELEASE_VERSION}" \
+            --tag "${TAG_NAME}" \
+            --remote-release-json "${remote_release_json}" \
+            --remote-assets-json "${remote_assets_json}" \
+            --verify-remote-inventory
+
+          downloaded_assets="$(mktemp -d "${RUNNER_TEMP}/market-sentinel-published-assets.XXXXXX")"
+          # Draft release assets cannot be downloaded through gh release
+          # download because that command resolves releases by tag. Download
+          # each asset by its authenticated release-asset endpoint instead.
+          while IFS=$'\t' read -r asset_id asset_name; do
+            if [[ ! "${asset_id}" =~ ^[1-9][0-9]*$ ]] ||
+               [[ -z "${asset_name}" || "${asset_name}" == */* ||
+                  "${asset_name}" == "." || "${asset_name}" == ".." ]]; then
+              echo "Refusing invalid release asset identity: ${asset_id} ${asset_name}" >&2
+              exit 1
+            fi
+            gh api \
+              -H 'Accept: application/octet-stream' \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" \
+              > "${downloaded_assets}/${asset_name}"
+          done < <(jq -r '.[] | [(.id | tostring), .name] | @tsv' "${remote_assets_json}")
+          python scripts/verify_release_assets.py \
+            --asset-dir "${downloaded_assets}" \
+            --version "${RELEASE_VERSION}" \
+            --tag "${TAG_NAME}"
+          for local_asset in release-assets/*; do
+            cmp -- "${local_asset}" "${downloaded_assets}/$(basename "${local_asset}")"
+          done
+
+          # Publish only after the remote inventory and downloaded bytes match locally.
+          echo "release_prepared=true" >> "${GITHUB_OUTPUT}"
+          gh release edit "${TAG_NAME}" \
+            --title "${TAG_NAME}" \
+            --notes-file release-assets/RELEASE_NOTES.md \
+            "${release_state_flags[@]}"
+          final_release_json="${RUNNER_TEMP}/market-sentinel-final-release.json"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${prepared_release_id}" > "${final_release_json}"
+          if ! jq -e \
+            --argjson release_id "${prepared_release_id}" \
+            --arg tag "${TAG_NAME}" \
+            --arg target "${GITHUB_SHA}" \
+            --argjson expected_draft "${DRAFT}" \
+            --argjson expected_prerelease "${PRERELEASE}" \
+            '.id == $release_id and
+             .tag_name == $tag and
+             .target_commitish == $target and
+             .draft == $expected_draft and
+             .prerelease == $expected_prerelease' \
+            "${final_release_json}" >/dev/null; then
+            echo "Final release identity or state does not match the publish request." >&2
+            exit 1
+          fi
+          release_fingerprint="$(
+            jq -cS '{id,tag_name,target_commitish,draft,prerelease,name,body,published_at,updated_at}' \
+              "${final_release_json}" | sha256sum | cut -d ' ' -f 1
+          )"
+          echo "release_id=${prepared_release_id}" >> "${GITHUB_OUTPUT}"
+          echo "release_fingerprint=${release_fingerprint}" >> "${GITHUB_OUTPUT}"
+
+      - name: Generate exact published release evidence
+        if: needs.metadata.outputs.prerelease == 'false' && needs.metadata.outputs.draft == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.metadata.outputs.tag_name }}
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+        shell: bash
+        run: |
+          evidence_dir="${RUNNER_TEMP}/market-sentinel-release-evidence"
+          mkdir -p "${evidence_dir}" release-evidence
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}" \
+            > "${evidence_dir}/release.json"
+          release_id="$(jq -er '.id | select(type == "number" and . > 0)' "${evidence_dir}/release.json")"
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+            | jq 'flatten' > "${evidence_dir}/assets.json"
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            | jq 'flatten' > "${evidence_dir}/history.json"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            > "${evidence_dir}/run.json"
+          python scripts/generate_release_evidence.py \
+            --asset-dir release-assets \
+            --release-json "${evidence_dir}/release.json" \
+            --assets-json "${evidence_dir}/assets.json" \
+            --history-json "${evidence_dir}/history.json" \
+            --run-json "${evidence_dir}/run.json" \
+            --version "${RELEASE_VERSION}" \
+            --tag "${TAG_NAME}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --revision "${GITHUB_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --workflow-ref "${GITHUB_WORKFLOW_REF}" \
+            --source-ref "${GITHUB_REF}" \
+            --event "${GITHUB_EVENT_NAME}" \
+            --output release-evidence/release-evidence.json
+
+      - name: Attest exact published release evidence
+        if: needs.metadata.outputs.prerelease == 'false' && needs.metadata.outputs.draft == 'false'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release-evidence/release-evidence.json
+
+      - name: Upload published release evidence
+        if: needs.metadata.outputs.prerelease == 'false' && needs.metadata.outputs.draft == 'false'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-evidence/release-evidence.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Re-draft release after evidence failure
+        if: ${{ always() && steps.publish_release.outputs.release_prepared == 'true' && (failure() || cancelled()) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.metadata.outputs.tag_name }}
+          RELEASE_ID: ${{ steps.publish_release.outputs.release_id }}
+          RELEASE_FINGERPRINT: ${{ steps.publish_release.outputs.release_fingerprint }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${RELEASE_ID}" =~ ^[1-9][0-9]*$ ]] || [[ ! "${RELEASE_FINGERPRINT}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Release cleanup identity is missing or malformed; refusing mutation." >&2
+            exit 1
+          fi
+          current_release_json="${RUNNER_TEMP}/market-sentinel-cleanup-current-release.json"
+          redrafted_release_json="${RUNNER_TEMP}/market-sentinel-cleanup-redrafted-release.json"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" > "${current_release_json}"
+          current_fingerprint="$(
+            jq -cS '{id,tag_name,target_commitish,draft,prerelease,name,body,published_at,updated_at}' \
+              "${current_release_json}" | sha256sum | cut -d ' ' -f 1
+          )"
+          if [ "${current_fingerprint}" != "${RELEASE_FINGERPRINT}" ]; then
+            echo "Release changed after publication; preserving the newer state instead of re-drafting it." >&2
+            exit 1
+          fi
+          if ! jq -e \
+            --argjson release_id "${RELEASE_ID}" \
+            --arg tag "${TAG_NAME}" \
+            --arg target "${GITHUB_SHA}" \
+            '.id == $release_id and .tag_name == $tag and .target_commitish == $target and .draft == false' \
+            "${current_release_json}" >/dev/null; then
+            echo "Release cleanup preflight identity or state mismatch; refusing mutation." >&2
+            exit 1
+          fi
+          gh api --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -F draft=true > "${redrafted_release_json}"
+          if ! jq -e \
+            --argjson release_id "${RELEASE_ID}" \
+            --arg tag "${TAG_NAME}" \
+            --arg target "${GITHUB_SHA}" \
+            '.id == $release_id and .tag_name == $tag and .target_commitish == $target and .draft == true' \
+            "${redrafted_release_json}" >/dev/null; then
+            echo "Release evidence failed and the exact release could not be returned to draft state." >&2
+            exit 1
           fi

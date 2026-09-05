@@ -4,6 +4,7 @@ import argparse
 from datetime import datetime, timezone
 import hmac
 import hashlib
+import io
 import importlib.metadata as importlib_metadata
 import ipaddress
 import json
@@ -12,7 +13,9 @@ import os
 import posixpath
 import re
 import secrets
+import signal
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -27,26 +30,46 @@ try:
 except ModuleNotFoundError:  # Python 3.10 compatibility.
     import tomli as tomllib
 
-from core.models import AppConfig, CopyTradeSettings, PaperTradeRecord, PriceAlert, UIDesign, WalletWatch
-from core.storage import DEFAULT_CONFIG_PATH, load_config, save_config
-from market_adapters import build_default_registry
+from core.models import (
+    AppConfig,
+    CopyTradeSettings,
+    MutationJournalEntry,
+    PaperTradeRecord,
+    PriceAlert,
+    UIDesign,
+    WalletWatch,
+    bounded_mutation_result,
+    MAX_MUTATION_RESULT_BYTES,
+)
+from core.config_security import assert_no_persisted_secrets, is_sensitive_display_key
+from core.deployment_identity import capture_runtime_identity
+from core.storage import ConfigConflictError, DEFAULT_CONFIG_PATH, load_config, save_config
+from market_adapters import build_default_registry, support_matrix_entry, support_matrix_summary
 from market_adapters.registry import AdapterRegistry
 from market_adapters.catalog import MARKET_CATALOG, MARKET_IDS
-from market_adapters.errors import UnsupportedFeatureError
+from market_adapters.errors import MarketConfigurationError, UnsupportedFeatureError
+from market_adapters.identity import activity_identity_hint, normalize_activity_identity
+from market_adapters.outbound import is_outbound_endpoint_setting
 from market_adapters.types import (
     MarketCapabilities,
+    MarketCandle,
+    MarketContract,
+    MarketEvent,
     MarketMetadata,
     OrderBookSnapshot,
     PaperOrderRequest,
     PaperOrderResult,
     PriceSnapshot,
+    MarketTrade,
 )
 from polymarket import data_api, gamma
 from polymarket.analytics_cache import (
+    ANALYTICS_CACHE_VERSION,
     DEFAULT_ANALYTICS_CACHE_MAX_ENTRIES,
     DEFAULT_ANALYTICS_CACHE_TTL_SECONDS,
     POLYMARKET_MDD_AUDIT_KIND,
     analytics_cache_health,
+    analytics_cache_path,
     analytics_cache_summary,
     list_analytics_artifacts,
     load_analytics_artifact,
@@ -65,6 +88,11 @@ from polymarket.live_verification import (
     build_live_validation_stage_gates,
 )
 from polymarket.live_reports import (
+    LIVE_VALIDATION_IDEMPOTENCY_KEY_MAX_LENGTH,
+    LIVE_VALIDATION_DECISIONS_VERSION,
+    LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_VERSION,
+    LIVE_VALIDATION_REPORTS_VERSION,
+    LiveValidationStoreDurabilityError,
     list_live_validation_report_decisions,
     list_live_validation_coverage_promotion_proposal_snapshots,
     load_live_validation_coverage_promotion_proposal_snapshot,
@@ -74,15 +102,21 @@ from polymarket.live_reports import (
     live_validation_promotion_proposal_snapshot_export_filename,
     live_validation_promotion_proposal_snapshot_diff_markdown,
     live_validation_promotion_proposal_snapshot_markdown,
+    live_validation_report_payload_hash,
     live_validation_report_review_bundle,
     live_validation_report_review_export_filename,
     live_validation_report_review_markdown,
     live_validation_report_decisions_markdown,
     live_validation_report_promotion_inventory,
     list_live_validation_reports,
+    live_validation_decisions_path,
+    live_validation_promotion_proposal_snapshots_path,
+    live_validation_reports_path,
     load_live_validation_report,
     purge_live_validation_coverage_promotion_proposal_snapshots,
     purge_live_validation_reports,
+    reconcile_live_validation_promotion_proposal_snapshot_idempotency,
+    reconcile_live_validation_report_idempotency,
     record_live_validation_report_decision,
     store_live_validation_coverage_promotion_proposal_snapshot,
     store_live_validation_report,
@@ -107,16 +141,27 @@ from polymarket.ws_user import build_user_subscription
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_FRONTEND_DIR = (
-    Path(sys.executable).resolve().parent / "frontend" / "dist"
-    if getattr(sys, "frozen", False)
-    else PROJECT_ROOT / "frontend" / "dist"
-)
+# PyInstaller's onedir layout keeps the bundled Python modules below the
+# release root and places ``frontend/dist`` beside the executable.  Derive the
+# release root from this module rather than from ``sys.executable`` so a
+# deployment cannot turn the static-file root into attacker-controlled input.
+_RESOURCE_ROOT = PROJECT_ROOT.parent if getattr(sys, "frozen", False) else PROJECT_ROOT
+DEFAULT_FRONTEND_DIR = _RESOURCE_ROOT / "frontend" / "dist"
 PROJECT_NAME = "market-sentinel"
 HASHED_FRONTEND_ASSET_RE = re.compile(r"-[A-Za-z0-9_-]{8,}\.[^.]+$")
 STATIC_FRONTEND_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 MAX_JSON_BODY_BYTES = 1_000_000
+MAX_HTTP_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_HTTP_WORKERS = 32
+MAX_HTTP_MUTATION_WORKERS = 8
+HTTP_RESERVED_READ_WORKERS = 4
 HTTP_CONNECTION_TIMEOUT_SECONDS = 15.0
+HTTP_OVERLOAD_RETRY_AFTER_SECONDS = 1
+HTTP_MUTATION_LOCK_TIMEOUT_SECONDS = 5.0
+HTTP_MUTATION_DRAIN_TIMEOUT_SECONDS = 10.0
+HTTP_RESPONSE_CHUNK_BYTES = 32 * 1024
+LOCAL_READINESS_CACHE_SECONDS = 5.0
+MAX_READINESS_JSON_STORE_BYTES = 64 * 1024 * 1024
 AUTH_FAILURE_MAX_ATTEMPTS = 10
 AUTH_FAILURE_WINDOW_SECONDS = 60.0
 MAX_TRACKED_AUTH_FAILURE_CLIENTS = 1_024
@@ -126,6 +171,21 @@ REACT_DEV_COMMAND = "run_web_gui_dev.bat"
 REACT_DEV_MANUAL_COMMAND = "python web_api.py --host 127.0.0.1 --port 8765 + cd frontend && npm run dev"
 REACT_BUILD_COMMAND = "cd frontend && npm install && npm run build"
 REACT_PROD_COMMAND = "run_web_gui_prod.bat"
+IDEMPOTENT_MUTATION_ROUTES = frozenset(
+    {
+        "/api/polymarket/live-validation/reports",
+        "/api/polymarket/live-validation/decisions",
+        "/api/polymarket/live-validation/promotion-proposal/snapshots",
+    }
+)
+LOCAL_DURABLE_CREATE_ROUTES = frozenset(
+    {
+        "/api/alerts",
+        "/api/wallets",
+        "/api/paper/orders",
+    }
+)
+LIVE_MUTATION_RECONCILIATION_CONFIRMATION = "I_VERIFIED_VENUE_ORDER_HISTORY"
 
 
 class HttpRequestMetrics:
@@ -133,11 +193,83 @@ class HttpRequestMetrics:
 
     _METHODS = frozenset({"GET", "POST", "PATCH", "DELETE", "OPTIONS"})
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        max_http_workers: int = MAX_HTTP_WORKERS,
+        max_mutation_workers: int = MAX_HTTP_MUTATION_WORKERS,
+        reserved_read_workers: int = HTTP_RESERVED_READ_WORKERS,
+    ) -> None:
         self._lock = threading.Lock()
         self._started_at = time.time()
+        self._max_http_workers = max(1, int(max_http_workers))
+        self._max_mutation_workers = max(1, int(max_mutation_workers))
+        self._reserved_read_workers = max(0, int(reserved_read_workers))
         self._requests: Dict[Tuple[str, int], int] = {}
         self._duration_seconds_total = 0.0
+        self._requests_in_flight = 0
+        self._overload_rejections = 0
+        self._response_too_large = 0
+        self._mutations_in_flight = 0
+        self._mutations_active = 0
+        self._mutation_admission_rejections = 0
+        self._mutation_lock_timeouts = 0
+
+    def request_started(self) -> None:
+        with self._lock:
+            self._requests_in_flight += 1
+
+    def request_finished(self) -> None:
+        with self._lock:
+            self._requests_in_flight = max(0, self._requests_in_flight - 1)
+
+    def record_overload_rejection(self) -> None:
+        with self._lock:
+            self._overload_rejections += 1
+
+    def record_response_too_large(self) -> None:
+        with self._lock:
+            self._response_too_large += 1
+
+    def mutation_admitted(self) -> None:
+        with self._lock:
+            self._mutations_in_flight += 1
+
+    def mutation_finished(self) -> None:
+        with self._lock:
+            self._mutations_in_flight = max(0, self._mutations_in_flight - 1)
+
+    def mutation_started(self) -> None:
+        with self._lock:
+            self._mutations_active += 1
+
+    def mutation_stopped(self) -> None:
+        with self._lock:
+            self._mutations_active = max(0, self._mutations_active - 1)
+
+    def record_mutation_admission_rejection(self) -> None:
+        with self._lock:
+            self._mutation_admission_rejections += 1
+
+    def record_mutation_lock_timeout(self) -> None:
+        with self._lock:
+            self._mutation_lock_timeouts += 1
+
+    def snapshot(self) -> Dict[str, Any]:
+        """Return a consistent bounded admission snapshot for readiness checks."""
+        with self._lock:
+            return {
+                "started_at": self._started_at,
+                "requests_in_flight": self._requests_in_flight,
+                "overload_rejections_total": self._overload_rejections,
+                "response_too_large_total": self._response_too_large,
+                "mutations_in_flight": self._mutations_in_flight,
+                "mutations_active": self._mutations_active,
+                "mutation_admission_rejections_total": self._mutation_admission_rejections,
+                "mutation_lock_timeouts_total": self._mutation_lock_timeouts,
+                "max_http_workers": self._max_http_workers,
+                "max_mutation_workers": self._max_mutation_workers,
+                "reserved_read_workers": self._reserved_read_workers,
+            }
 
     def record(self, method: str, status: int, duration_seconds: float) -> None:
         normalized_method = str(method or "OTHER").upper()
@@ -156,6 +288,16 @@ class HttpRequestMetrics:
             total = sum(self._requests.values())
             duration_seconds_total = self._duration_seconds_total
             started_at = self._started_at
+            requests_in_flight = self._requests_in_flight
+            overload_rejections = self._overload_rejections
+            response_too_large = self._response_too_large
+            mutations_in_flight = self._mutations_in_flight
+            mutations_active = self._mutations_active
+            mutation_admission_rejections = self._mutation_admission_rejections
+            mutation_lock_timeouts = self._mutation_lock_timeouts
+            max_http_workers = self._max_http_workers
+            max_mutation_workers = self._max_mutation_workers
+            reserved_read_workers = self._reserved_read_workers
         lines = [
             "# HELP market_sentinel_http_requests_total Completed HTTP requests by method and status.",
             "# TYPE market_sentinel_http_requests_total counter",
@@ -172,6 +314,36 @@ class HttpRequestMetrics:
                 "# HELP market_sentinel_http_requests_completed_total Total completed HTTP requests.",
                 "# TYPE market_sentinel_http_requests_completed_total counter",
                 f"market_sentinel_http_requests_completed_total {total}",
+                "# HELP market_sentinel_http_requests_in_flight Currently admitted HTTP request workers.",
+                "# TYPE market_sentinel_http_requests_in_flight gauge",
+                f"market_sentinel_http_requests_in_flight {requests_in_flight}",
+                "# HELP market_sentinel_http_overload_rejections_total HTTP connections rejected at the worker limit.",
+                "# TYPE market_sentinel_http_overload_rejections_total counter",
+                f"market_sentinel_http_overload_rejections_total {overload_rejections}",
+                "# HELP market_sentinel_http_response_too_large_total Responses rejected before headers because they exceeded the byte limit.",
+                "# TYPE market_sentinel_http_response_too_large_total counter",
+                f"market_sentinel_http_response_too_large_total {response_too_large}",
+                "# HELP market_sentinel_http_mutations_in_flight Mutation callers admitted for body parsing, lock wait, or execution.",
+                "# TYPE market_sentinel_http_mutations_in_flight gauge",
+                f"market_sentinel_http_mutations_in_flight {mutations_in_flight}",
+                "# HELP market_sentinel_http_mutations_active Mutations currently holding the serialization lock.",
+                "# TYPE market_sentinel_http_mutations_active gauge",
+                f"market_sentinel_http_mutations_active {mutations_active}",
+                "# HELP market_sentinel_http_mutation_admission_rejections_total Mutation requests rejected before body parsing because admission was saturated.",
+                "# TYPE market_sentinel_http_mutation_admission_rejections_total counter",
+                f"market_sentinel_http_mutation_admission_rejections_total {mutation_admission_rejections}",
+                "# HELP market_sentinel_http_mutation_lock_timeouts_total Admitted mutations rejected after a bounded serialization-lock wait.",
+                "# TYPE market_sentinel_http_mutation_lock_timeouts_total counter",
+                f"market_sentinel_http_mutation_lock_timeouts_total {mutation_lock_timeouts}",
+                "# HELP market_sentinel_http_worker_limit Maximum concurrently admitted HTTP connections.",
+                "# TYPE market_sentinel_http_worker_limit gauge",
+                f"market_sentinel_http_worker_limit {max_http_workers}",
+                "# HELP market_sentinel_http_mutation_admission_limit Maximum mutation body readers, lock waiters, and executors.",
+                "# TYPE market_sentinel_http_mutation_admission_limit gauge",
+                f"market_sentinel_http_mutation_admission_limit {max_mutation_workers}",
+                "# HELP market_sentinel_http_reserved_read_workers HTTP worker capacity unavailable to mutation admission.",
+                "# TYPE market_sentinel_http_reserved_read_workers gauge",
+                f"market_sentinel_http_reserved_read_workers {reserved_read_workers}",
                 "# HELP market_sentinel_http_server_start_time_seconds Unix time when the HTTP server started.",
                 "# TYPE market_sentinel_http_server_start_time_seconds gauge",
                 f"market_sentinel_http_server_start_time_seconds {started_at:.6f}",
@@ -263,7 +435,17 @@ API_ROUTES = {
         "/api/health",
         "/api/state",
         "/api/config",
+        "/api/mutations",
         "/api/markets",
+        "/api/markets/support-matrix",
+        "/api/markets/{market_id}/support",
+        "/api/markets/{market_id}/events",
+        "/api/markets/{market_id}/contracts",
+        "/api/markets/{market_id}/price",
+        "/api/markets/{market_id}/orderbook",
+        "/api/markets/{market_id}/trades",
+        "/api/markets/{market_id}/candles",
+        "/api/markets/{market_id}/account/{operation}",
         "/api/alerts",
         "/api/wallets",
         "/api/copy",
@@ -314,6 +496,8 @@ API_ROUTES = {
         "/api/wallets/poll",
         "/api/copy/preview",
         "/api/live-safety/preflight",
+        "/api/markets/{market_id}/positions",
+        "/api/markets/{market_id}/orders/{operation}",
         "/api/paper/quote",
         "/api/paper/quote-limit",
         "/api/paper/preview-impact",
@@ -325,6 +509,7 @@ API_ROUTES = {
         "/api/paper/marks/refresh-selected",
         "/api/paper/marks/clear",
         "/api/paper/marks/clear-selected",
+        "/api/mutations/reconcile",
         "/api/polymarket/users/mdd/cache/purge",
         "/api/polymarket/live-validation/reports",
         "/api/polymarket/live-validation/decisions",
@@ -338,19 +523,16 @@ API_ROUTES = {
         "/api/polymarket/live-validation/promotion-proposal/snapshots/{key}",
     ],
 }
-SENSITIVE_SETTING_FRAGMENTS = (
-    "api_key",
-    "apikey",
-    "secret",
-    "token",
-    "password",
-    "private",
-    "cookie",
-    "session",
-)
 POLYMARKET_L2_HEADERS = ("POLY_ADDRESS", "POLY_API_KEY", "POLY_PASSPHRASE", "POLY_SIGNATURE", "POLY_TIMESTAMP")
 POLYMARKET_RELAYER_HEADERS = ("RELAYER_API_KEY", "RELAYER_API_KEY_ADDRESS")
 POLYMARKET_USER_WS_KEYS = ("POLY_API_KEY", "POLY_API_SECRET", "POLY_SECRET", "POLY_PASSPHRASE")
+SENSITIVE_SETTING_POLICY_LABELS = (
+    "api credentials",
+    "passwords and passphrases",
+    "private and signing keys",
+    "session cookies and credential tokens",
+    "request signatures",
+)
 LIVE_SETTING_KEYS = {
     "live_trading_enabled",
     "live_trading_confirmed",
@@ -368,20 +550,51 @@ ALERT_SOURCE_IDS = {str(option["id"]) for option in ALERT_SOURCE_OPTIONS}
 ALERT_DIRECTIONS = {"above", "below"}
 
 
-def _json_bytes(payload: Dict[str, Any]) -> bytes:
-    return json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+class HttpResponseTooLargeError(RuntimeError):
+    """Raised before response headers when a representation exceeds the server limit."""
+
+
+def _json_bytes(payload: Dict[str, Any], *, max_bytes: Optional[int] = None) -> bytes:
+    limit = MAX_HTTP_RESPONSE_BYTES if max_bytes is None else max(1, int(max_bytes))
+    buffer = io.BytesIO()
+    encoder = json.JSONEncoder(indent=2, sort_keys=True)
+    for text_chunk in encoder.iterencode(payload):
+        chunk = text_chunk.encode("utf-8")
+        if buffer.tell() + len(chunk) > limit:
+            raise HttpResponseTooLargeError(f"HTTP response exceeds {limit} bytes.")
+        buffer.write(chunk)
+    return buffer.getvalue()
+
+
+def _utf8_bytes(text: str, *, max_bytes: Optional[int] = None) -> bytes:
+    limit = MAX_HTTP_RESPONSE_BYTES if max_bytes is None else max(1, int(max_bytes))
+    value = str(text)
+    buffer = io.BytesIO()
+    for offset in range(0, len(value), HTTP_RESPONSE_CHUNK_BYTES):
+        chunk = value[offset : offset + HTTP_RESPONSE_CHUNK_BYTES].encode("utf-8")
+        if buffer.tell() + len(chunk) > limit:
+            raise HttpResponseTooLargeError(f"HTTP response exceeds {limit} bytes.")
+        buffer.write(chunk)
+    return buffer.getvalue()
 
 
 def _read_json_body(handler: BaseHTTPRequestHandler) -> Dict[str, Any]:
+    transfer_encoding = str(handler.headers.get("Transfer-Encoding") or "").strip()
+    if transfer_encoding:
+        raise ValueError("Transfer-Encoding is not supported for JSON request bodies; send Content-Length.")
     try:
         length = int(handler.headers.get("Content-Length") or 0)
     except ValueError as exc:
         raise ValueError("Content-Length must be an integer.") from exc
+    if length < 0:
+        raise ValueError("Content-Length cannot be negative.")
     if length > MAX_JSON_BODY_BYTES:
         raise ValueError("JSON request body is too large.")
     if length <= 0:
         return {}
     raw = handler.rfile.read(length)
+    if len(raw) != length:
+        raise ValueError("JSON request body is incomplete.")
     if not raw:
         return {}
     try:
@@ -392,6 +605,224 @@ def _read_json_body(handler: BaseHTTPRequestHandler) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("JSON request body must be an object.")
     return data
+
+
+def _discard_available_request_body(handler: BaseHTTPRequestHandler) -> None:
+    """Best-effort drain of a small already-sent body before an early close.
+
+    Closing a Windows socket with unread request bytes can reset the connection
+    and hide the structured overload response. Never wait long enough for a
+    slow sender to occupy reserved read capacity.
+    """
+    try:
+        length = int(handler.headers.get("Content-Length") or "0")
+    except (TypeError, ValueError):
+        return
+    if length <= 0 or length > MAX_JSON_BODY_BYTES:
+        return
+    connection = handler.connection
+    previous_timeout = connection.gettimeout()
+    remaining = length
+    deadline = time.monotonic() + 0.05
+    try:
+        connection.settimeout(0.05)
+        while remaining > 0 and time.monotonic() < deadline:
+            chunk = handler.rfile.read1(min(remaining, HTTP_RESPONSE_CHUNK_BYTES))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            connection.settimeout(previous_timeout)
+        except OSError:
+            pass
+
+
+def _validated_idempotency_key(headers: Mapping[str, Any], payload: Mapping[str, Any]) -> str:
+    """Resolve one visible-ASCII idempotency key without exposing it in responses."""
+    header_key = str(headers.get("Idempotency-Key") or "")
+    raw_body_key = payload.get("idempotency_key")
+    if raw_body_key is not None and not isinstance(raw_body_key, str):
+        raise ValueError("idempotency_key must be a string.")
+    body_key = str(raw_body_key or "")
+    for candidate in (header_key, body_key):
+        if candidate and (
+            len(candidate) > LIVE_VALIDATION_IDEMPOTENCY_KEY_MAX_LENGTH
+            or any(ord(char) < 33 or ord(char) > 126 for char in candidate)
+        ):
+            raise ValueError(
+                "Idempotency keys must contain 1-"
+                f"{LIVE_VALIDATION_IDEMPOTENCY_KEY_MAX_LENGTH} visible ASCII characters."
+            )
+    if header_key and body_key and not hmac.compare_digest(header_key, body_key):
+        raise ValueError("Idempotency-Key header and idempotency_key body field must match.")
+    key = header_key or body_key
+    if not key:
+        return ""
+    return key
+
+
+def _is_live_order_management_route(method: str, path: str) -> bool:
+    parts = str(path or "").strip("/").split("/")
+    return (
+        str(method or "").strip().upper() == "POST"
+        and len(parts) == 5
+        and parts[:2] == ["api", "markets"]
+        and parts[3] == "orders"
+        and bool(parts[2])
+        and bool(parts[4])
+    )
+
+
+def _is_general_durable_mutation(method: str, path: str) -> bool:
+    return (
+        str(method or "").strip().upper() == "POST"
+        and (path in LOCAL_DURABLE_CREATE_ROUTES or _is_live_order_management_route(method, path))
+    )
+
+
+def _mutation_key_hash(idempotency_key: str) -> str:
+    return hashlib.sha256(str(idempotency_key).encode("utf-8")).hexdigest()
+
+
+def _mutation_request_hash(payload: Mapping[str, Any]) -> str:
+    try:
+        encoded = json.dumps(
+            dict(payload),
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Mutation request must contain canonical JSON values.") from exc
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _mutation_journal_entry(
+    cfg: AppConfig,
+    idempotency_key: str,
+) -> Optional[MutationJournalEntry]:
+    key_hash = _mutation_key_hash(idempotency_key)
+    return next((entry for entry in cfg.mutation_journal if entry.key_hash == key_hash), None)
+
+
+def _new_mutation_journal_entry(
+    idempotency_key: str,
+    method: str,
+    path: str,
+    payload: Mapping[str, Any],
+    *,
+    live: bool,
+) -> MutationJournalEntry:
+    return MutationJournalEntry(
+        key_hash=_mutation_key_hash(idempotency_key),
+        method=str(method or "").strip().upper(),
+        path=str(path or "").strip(),
+        request_hash=_mutation_request_hash(payload),
+        live=bool(live),
+    )
+
+
+def _assert_mutation_request_matches(
+    entry: MutationJournalEntry,
+    method: str,
+    path: str,
+    payload: Mapping[str, Any],
+) -> None:
+    request_hash = _mutation_request_hash(payload)
+    if not (
+        hmac.compare_digest(entry.method, str(method or "").strip().upper())
+        and hmac.compare_digest(entry.path, str(path or "").strip())
+        and hmac.compare_digest(entry.request_hash, request_hash)
+    ):
+        raise IdempotencyConflictError(
+            "The Idempotency-Key was already used for a different route or request body."
+        )
+
+
+def _stored_mutation_result(
+    payload: Mapping[str, Any],
+    *,
+    preserve_shape: bool = False,
+    max_bytes: Optional[int] = None,
+) -> Dict[str, Any]:
+    sanitized = sanitize_audit_value(dict(payload))
+    stored = bounded_mutation_result(
+        sanitized,
+        preserve_shape=preserve_shape,
+        max_bytes=max_bytes if max_bytes is not None else MAX_MUTATION_RESULT_BYTES,
+    )
+    try:
+        assert_no_persisted_secrets(stored)
+    except ValueError:
+        encoded = json.dumps(
+            stored,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return {
+            "ok": True,
+            "mutation_result": {
+                "stored": "receipt_only",
+                "reason": "sensitive_fields_were_redacted",
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+            },
+        }
+    return stored
+
+
+def _client_mutation_result(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    """Keep the original mutation response shape, trimming only huge bodies."""
+
+    candidate = dict(payload)
+    try:
+        _json_bytes(candidate)
+    except (HttpResponseTooLargeError, TypeError, ValueError):
+        return bounded_mutation_result(
+            sanitize_audit_value(candidate),
+            preserve_shape=True,
+            max_bytes=MAX_HTTP_RESPONSE_BYTES,
+        )
+    return candidate
+
+
+def mutation_journal_payload(cfg: AppConfig) -> Dict[str, Any]:
+    entries = sorted(
+        cfg.mutation_journal,
+        key=lambda item: (item.updated_at, item.created_at, item.id),
+        reverse=True,
+    )
+    return {
+        "entries": [
+            {
+                "id": entry.id,
+                "method": entry.method,
+                "path": entry.path,
+                "live": entry.live,
+                "state": entry.state,
+                "response_status": entry.response_status or None,
+                "outcome_code": entry.outcome_code,
+                "outcome_message": entry.outcome_message,
+                "created_at": entry.created_at,
+                "updated_at": entry.updated_at,
+                "replay_authorized_at": entry.replay_authorized_at or None,
+            }
+            for entry in entries
+        ],
+        "counts": {
+            "total": len(entries),
+            "unresolved": sum(1 for entry in entries if entry.state in {"pending", "ambiguous"}),
+        },
+    }
+
+
+class IdempotencyConflictError(RuntimeError):
+    """Raised when one client key is reused for a different mutation."""
 
 
 def api_error_payload(
@@ -488,6 +919,9 @@ def activity_key(item: Mapping[str, Any]) -> str:
     tx = str(item.get("transactionHash") or item.get("transaction_hash") or "").strip().lower()
     if tx:
         return f"tx:{tx}"
+    activity_id = str(item.get("activityId") or item.get("activity_id") or "").strip().lower()
+    if activity_id:
+        return f"activity-id:{activity_id}"
     fields = ("timestamp", "proxyWallet", "asset", "side", "price", "size", "slug", "outcome")
     return "activity:" + "|".join(str(item.get(key) or "").strip().lower() for key in fields)
 
@@ -701,8 +1135,7 @@ def optional_positive_float(raw: Any, label: str) -> Optional[float]:
 def sanitize_settings(settings: Mapping[str, Any]) -> Dict[str, Any]:
     sanitized: Dict[str, Any] = {}
     for key, value in settings.items():
-        normalized = str(key).strip().lower()
-        if any(fragment in normalized for fragment in SENSITIVE_SETTING_FRAGMENTS):
+        if is_sensitive_display_key(key):
             sanitized[str(key)] = "***" if value not in (None, "") else ""
         else:
             sanitized[str(key)] = sanitize_audit_value(value, str(key))
@@ -710,8 +1143,7 @@ def sanitize_settings(settings: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def sanitize_audit_value(value: Any, key: str = "") -> Any:
-    normalized = str(key).strip().lower()
-    if any(fragment in normalized for fragment in SENSITIVE_SETTING_FRAGMENTS):
+    if is_sensitive_display_key(key):
         return "***" if value not in (None, "") else ""
     if isinstance(value, Mapping):
         return {str(child_key): sanitize_audit_value(child_value, str(child_key)) for child_key, child_value in value.items()}
@@ -785,10 +1217,13 @@ def market_health_payload(meta: MarketMetadata, cfg: AppConfig, registry: Option
     market_cfg = cfg.markets.get(meta.market_id)
     settings = dict(market_cfg.settings) if market_cfg else {}
     registry = registry or build_default_registry()
+    adapter = None
+    adapter_error = ""
     try:
         adapter = registry.create(meta.market_id, settings)
         health = adapter.health_check()
     except Exception as exc:
+        adapter_error = f"Adapter health check failed: {type(exc).__name__}."
         health = {
             "market_id": meta.market_id,
             "ok": False,
@@ -797,6 +1232,14 @@ def market_health_payload(meta: MarketMetadata, cfg: AppConfig, registry: Option
             "adapter": "",
             "capabilities": meta.capabilities.to_dict(),
         }
+    blocker = None
+    if health.get("verified_blocker"):
+        blocker = {
+            "reason": health.get("message") or "Verified upstream blocker.",
+            "references": health.get("references") or [],
+            "last_reviewed": health.get("last_reviewed") or "",
+        }
+    support = support_matrix_entry(meta, adapter, blocker=blocker, adapter_error=adapter_error)
     credential_sources = health.get("credential_sources") if isinstance(health.get("credential_sources"), list) else []
     credential_env_vars = [str(value) for value in settings.get("credential_env_vars") or []]
     return {
@@ -811,6 +1254,7 @@ def market_health_payload(meta: MarketMetadata, cfg: AppConfig, registry: Option
         "settings": sanitize_settings(settings),
         "safety": market_safety_payload(settings, bool(market_cfg and market_cfg.enabled)),
         "health": health,
+        "support": support,
         "status_text": market_status_text(meta, bool(market_cfg and market_cfg.enabled), health, settings),
         "credential_env_vars": credential_env_vars,
         "credential_sources": credential_sources,
@@ -826,14 +1270,52 @@ def market_health_payload(meta: MarketMetadata, cfg: AppConfig, registry: Option
 def markets_payload(cfg: AppConfig, registry: Optional[AdapterRegistry] = None) -> Dict[str, Any]:
     registry = registry or build_default_registry()
     markets = [market_health_payload(meta, cfg, registry) for meta in MARKET_CATALOG]
+    support_matrix = [market["support"] for market in markets]
+    support_summary = support_matrix_summary(support_matrix)
     return {
         "selected_market_id": cfg.selected_market_id,
         "markets": markets,
+        "support_matrix": support_matrix,
+        "support_summary": support_summary,
         "counts": {
             "total": len(markets),
             "enabled": sum(1 for market in markets if market["enabled"]),
             "implemented": sum(1 for market in markets if any(market["capabilities"].values())),
+            "verified_blocked": sum(1 for item in support_matrix if item["implementation_status"] == "verified_blocked"),
+            "guarded_markets": sum(
+                1
+                for item in support_matrix
+                if any(operation["status"] == "guarded" for operation in item["operations"].values())
+            ),
         },
+    }
+
+
+def market_support_payload(
+    cfg: AppConfig,
+    registry: Optional[AdapterRegistry] = None,
+    market_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return the canonical support matrix, optionally narrowed to one market."""
+
+    payload = markets_payload(cfg, registry)
+    normalized = str(market_id or "").strip().lower()
+    if not normalized:
+        return {
+            "selected_market_id": payload["selected_market_id"],
+            "markets": payload["support_matrix"],
+            "support_summary": payload["support_summary"],
+            "counts": payload["counts"],
+        }
+    rows = [row for row in payload["support_matrix"] if row["market_id"] == normalized]
+    if not rows:
+        raise ValueError(f"Unknown market id: {normalized}")
+    return {
+        "selected_market_id": normalized,
+        "market": rows[0],
+        "markets": rows,
+        "support_summary": payload["support_summary"],
+        "counts": payload["counts"],
     }
 
 
@@ -881,21 +1363,22 @@ def live_safety_payload(
         "can_preflight": bool(enabled and meta.capabilities.live_trading),
         "controls": safety,
         "redaction": {
-            "sensitive_key_fragments": list(SENSITIVE_SETTING_FRAGMENTS),
+            "sensitive_key_policy": list(SENSITIVE_SETTING_POLICY_LABELS),
             "audit_payloads_redacted": True,
+            "persistent_credentials_allowed": False,
         },
     }
 
 
 def format_live_preflight(preflight: Mapping[str, Any]) -> str:
     preview = str(preflight.get("dry_run_preview") or "Live order preflight passed.")
-    notional = preflight.get("approx_notional")
+    exposure = preflight.get("approx_notional")
     max_notional = preflight.get("max_notional")
     warnings = preflight.get("warnings") if isinstance(preflight.get("warnings"), list) else []
 
     parts = [f"Preflight OK: {preview}"]
-    if isinstance(notional, (int, float)):
-        parts.append(f"notional~{float(notional):g}")
+    if isinstance(exposure, (int, float)):
+        parts.append(f"max_exposure~{float(exposure):g}")
     if isinstance(max_notional, (int, float)):
         parts.append(f"max_notional={float(max_notional):g}")
     if warnings:
@@ -910,7 +1393,11 @@ def live_order_audit_payload(order: PaperOrderRequest) -> Dict[str, Any]:
         "side": order.side,
         "size": order.size,
         "limit_price": order.limit_price,
-        "approx_notional": order.size * float(order.limit_price) if order.limit_price is not None else order.size,
+        # This initial audit record is produced before an adapter is selected.
+        # Use the shared fail-closed upper bound; successful preflight replaces
+        # it with the venue-specific exposure model in ``preflight``.
+        "approx_notional": order.size * max(1.0, float(order.limit_price or 0.0)),
+        "exposure_model": "full_size_upper_bound",
         "metadata_keys": sorted(str(key) for key in order.metadata.keys()),
     }
 
@@ -997,11 +1484,316 @@ def config_payload(cfg: AppConfig) -> Dict[str, Any]:
     }
 
 
-def health_payload(config_path: Path = DEFAULT_CONFIG_PATH, frontend_dir: Path = DEFAULT_FRONTEND_DIR) -> Dict[str, Any]:
+def _directory_write_probe(path: Path) -> tuple[bool, str]:
+    """Prove create-and-unlink access without modifying a durable state file."""
+    parent = path.parent
+    if not parent.exists():
+        return False, "parent_missing"
+    if not parent.is_dir():
+        return False, "parent_not_directory"
+    descriptor = -1
+    probe_name = ""
+    try:
+        descriptor, probe_name = tempfile.mkstemp(prefix=".market-sentinel-readiness-", dir=parent)
+        os.close(descriptor)
+        descriptor = -1
+        Path(probe_name).unlink()
+        probe_name = ""
+        return True, "create_unlink_succeeded"
+    except OSError as exc:
+        return False, f"create_unlink_failed:{type(exc).__name__}"
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if probe_name:
+            try:
+                Path(probe_name).unlink()
+            except OSError:
+                pass
+
+
+def _json_store_readiness(
+    name: str,
+    path: Path,
+    *,
+    config_store: bool = False,
+    collection_key: str = "",
+    expected_version: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Inspect one local JSON store without changing its durable contents."""
+    target = path.expanduser()
+    result: Dict[str, Any] = {
+        "name": name,
+        "path": str(target),
+        "exists": False,
+        "readable": False,
+        "writable": False,
+        "schema_valid": False,
+        "ready": False,
+        "size_bytes": 0,
+        "last_modified_at": None,
+        "age_seconds": None,
+    }
+    writable, write_probe = _directory_write_probe(target)
+    result["writable"] = writable
+    result["write_probe"] = write_probe
+    try:
+        if target.is_symlink():
+            result["read_status"] = "target_symlink_rejected"
+            return result
+        if not target.exists():
+            # All stores have safe in-memory empty defaults. A missing file is
+            # ready only when its parent has proven atomic-publication access.
+            result["readable"] = True
+            result["schema_valid"] = True
+            result["read_status"] = "uninitialized_default_available"
+            result["ready"] = writable
+            return result
+        if not target.is_file():
+            result["read_status"] = "target_not_regular_file"
+            return result
+        stat_result = target.stat()
+        result["exists"] = True
+        result["size_bytes"] = int(stat_result.st_size)
+        result["last_modified_at"] = float(stat_result.st_mtime)
+        result["age_seconds"] = max(0.0, time.time() - float(stat_result.st_mtime))
+        if stat_result.st_size > MAX_READINESS_JSON_STORE_BYTES:
+            result["read_status"] = "store_exceeds_readiness_size_limit"
+            return result
+        if config_store:
+            load_config(target)
+        else:
+            with target.open("rb") as handle:
+                raw = handle.read(MAX_READINESS_JSON_STORE_BYTES + 1)
+            if len(raw) > MAX_READINESS_JSON_STORE_BYTES:
+                result["read_status"] = "store_exceeds_readiness_size_limit"
+                return result
+            parsed = json.loads(raw.decode("utf-8"))
+            if not isinstance(parsed, Mapping):
+                result["read_status"] = "json_root_not_object"
+                return result
+            if expected_version is not None:
+                version = parsed.get("version")
+                if version is None:
+                    result["read_status"] = "schema_version_missing"
+                    return result
+                if isinstance(version, bool) or not isinstance(version, int) or version != expected_version:
+                    result["read_status"] = "schema_version_mismatch"
+                    return result
+            if collection_key:
+                collection = parsed.get(collection_key)
+                if collection is None:
+                    result["read_status"] = f"collection_missing:{collection_key}"
+                    return result
+                if not isinstance(collection, Mapping):
+                    result["read_status"] = f"collection_not_object:{collection_key}"
+                    return result
+        result["readable"] = True
+        result["schema_valid"] = True
+        result["read_status"] = "validated"
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, RuntimeError) as exc:
+        result["read_status"] = f"validation_failed:{type(exc).__name__}"
+    result["ready"] = bool(result["readable"] and result["writable"])
+    return result
+
+
+def _backup_freshness_signal() -> Dict[str, Any]:
+    """Report bounded backup metadata; integrity remains an offline verifier job."""
+    configured = str(os.environ.get("MARKET_SENTINEL_BACKUP_DIRECTORY") or "").strip()
+    if not configured:
+        return {
+            "configured": False,
+            "status": "unknown",
+            "authoritative": False,
+            "message": "Set MARKET_SENTINEL_BACKUP_DIRECTORY to expose bounded backup-age metadata.",
+        }
+    directory = Path(configured).expanduser()
+    signal: Dict[str, Any] = {
+        "configured": True,
+        "directory": str(directory),
+        "status": "missing",
+        "authoritative": False,
+        "integrity_verified": False,
+        "manifest_pairs_seen": 0,
+        "scan_truncated": False,
+        "latest_manifest_modified_at": None,
+        "latest_manifest_age_seconds": None,
+        "message": "Metadata only; use verify_production_deployment.py for cryptographic backup verification.",
+    }
+    try:
+        if directory.is_symlink() or not directory.is_dir():
+            return signal
+        newest: Optional[float] = None
+        seen = 0
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                seen += 1
+                if seen > 1_000:
+                    signal["scan_truncated"] = True
+                    break
+                if not entry.name.endswith(".manifest.json") or entry.is_symlink():
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                archive_name = entry.name[: -len(".manifest.json")]
+                archive = directory / archive_name
+                if archive.is_symlink() or not archive.is_file():
+                    continue
+                signal["manifest_pairs_seen"] += 1
+                modified_at = float(entry.stat(follow_symlinks=False).st_mtime)
+                newest = modified_at if newest is None else max(newest, modified_at)
+        if newest is not None:
+            age = max(0.0, time.time() - newest)
+            signal["latest_manifest_modified_at"] = newest
+            signal["latest_manifest_age_seconds"] = age
+            signal["status"] = "recent_metadata" if age <= 36 * 60 * 60 else "stale_metadata"
+    except OSError as exc:
+        signal["status"] = f"inspection_failed:{type(exc).__name__}"
+    return signal
+
+
+def local_resource_readiness(config_path: Path, frontend_dir: Path) -> Dict[str, Any]:
+    """Probe local production dependencies without making any network calls."""
+    stores = [
+        _json_store_readiness("configuration", config_path, config_store=True),
+        _json_store_readiness(
+            "analytics_cache",
+            analytics_cache_path(),
+            collection_key="entries",
+            expected_version=ANALYTICS_CACHE_VERSION,
+        ),
+        _json_store_readiness(
+            "live_validation_reports",
+            live_validation_reports_path(),
+            collection_key="reports",
+            expected_version=LIVE_VALIDATION_REPORTS_VERSION,
+        ),
+        _json_store_readiness(
+            "live_validation_decisions",
+            live_validation_decisions_path(),
+            collection_key="decisions",
+            expected_version=LIVE_VALIDATION_DECISIONS_VERSION,
+        ),
+        _json_store_readiness(
+            "live_validation_promotion_snapshots",
+            live_validation_promotion_proposal_snapshots_path(),
+            collection_key="snapshots",
+            expected_version=LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_VERSION,
+        ),
+    ]
     frontend_index = frontend_dir / "index.html"
+    frontend_ready = False
+    frontend_status = "missing"
+    try:
+        frontend_ready = bool(not frontend_index.is_symlink() and frontend_index.is_file())
+        frontend_status = "available" if frontend_ready else "missing"
+    except OSError as exc:
+        frontend_status = f"inspection_failed:{type(exc).__name__}"
+    return {
+        "storage": {
+            "ready": all(bool(store["ready"]) for store in stores),
+            "stores": stores,
+        },
+        "frontend": {
+            "ready": frontend_ready,
+            "status": frontend_status,
+            "index_path": str(frontend_index),
+        },
+        "backup": _backup_freshness_signal(),
+        "network_checks_performed": False,
+    }
+
+
+def runtime_readiness_payload(
+    resources: Mapping[str, Any],
+    admission: Mapping[str, Any],
+    wallet_polling: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Combine cached local probes with live admission and freshness state."""
+    max_workers = max(1, int(admission.get("max_http_workers") or MAX_HTTP_WORKERS))
+    mutation_capacity = max(1, int(admission.get("max_mutation_workers") or 1))
+    requests_in_flight = max(0, int(admission.get("requests_in_flight") or 0))
+    mutations_in_flight = max(0, int(admission.get("mutations_in_flight") or 0))
+    reserved = max(0, int(admission.get("reserved_read_workers") or 0))
+    admission_payload = dict(admission)
+    admission_payload.update(
+        {
+            "worker_saturated": requests_in_flight >= max_workers,
+            "mutation_saturated": mutations_in_flight >= mutation_capacity,
+            "ready": (
+                reserved >= 1
+                and not bool(admission.get("draining", False))
+                and requests_in_flight < max_workers
+                and mutations_in_flight < mutation_capacity
+                and int(admission.get("mutations_active") or 0) <= 1
+            ),
+        }
+    )
+    polling = dict(wallet_polling or {})
+    interval = max(2.0, float(polling.get("poll_interval_seconds") or 10.0))
+    last_polled_at = polling.get("last_polled_at")
+    last_polled = float(last_polled_at) if isinstance(last_polled_at, (int, float)) else None
+    poll_age = max(0.0, time.time() - last_polled) if last_polled is not None else None
+    polling_freshness = {
+        "last_polled_at": last_polled,
+        "age_seconds": poll_age,
+        "stale_after_seconds": max(60.0, interval * 3),
+        "status": (
+            "not_started"
+            if poll_age is None
+            else "fresh"
+            if poll_age <= max(60.0, interval * 3)
+            else "stale"
+        ),
+        "required_for_service_readiness": False,
+    }
+    storage = resources.get("storage") if isinstance(resources.get("storage"), Mapping) else {}
+    frontend = resources.get("frontend") if isinstance(resources.get("frontend"), Mapping) else {}
+    ready = bool(storage.get("ready") and frontend.get("ready") and admission_payload["ready"])
+    return {
+        "ready": ready,
+        "status": "ready" if ready else "degraded",
+        "storage": dict(storage),
+        "frontend": dict(frontend),
+        "admission": admission_payload,
+        "freshness": {
+            "wallet_polling": polling_freshness,
+            "backup": dict(resources.get("backup") or {}),
+        },
+        "network_checks_performed": False,
+    }
+
+
+def health_payload(
+    config_path: Path = DEFAULT_CONFIG_PATH,
+    frontend_dir: Path = DEFAULT_FRONTEND_DIR,
+    runtime_identity: Optional[Mapping[str, str]] = None,
+    max_http_workers: int = MAX_HTTP_WORKERS,
+    runtime_readiness: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    frontend_index = frontend_dir / "index.html"
+    identity = runtime_identity or {}
+    if runtime_readiness is None:
+        reserved = min(HTTP_RESERVED_READ_WORKERS, max(1, int(max_http_workers) // 4))
+        mutation_capacity = max(1, min(MAX_HTTP_MUTATION_WORKERS, int(max_http_workers) - reserved))
+        runtime_readiness = runtime_readiness_payload(
+            local_resource_readiness(config_path, frontend_dir),
+            {
+                "max_http_workers": max(1, int(max_http_workers)),
+                "max_mutation_workers": mutation_capacity,
+                "reserved_read_workers": max(0, int(max_http_workers) - mutation_capacity),
+                "requests_in_flight": 0,
+                "mutations_in_flight": 0,
+                "mutations_active": 0,
+            },
+        )
     return {
         "status": "ok",
+        "ready": bool(runtime_readiness.get("ready")),
+        "readiness": dict(runtime_readiness),
         "api_version": project_version(),
+        "runtime_source_revision": str(identity.get("source_revision") or ""),
+        "runtime_frontend_sha256": str(identity.get("frontend_sha256") or ""),
         "mode": "parallel",
         "python_gui_available": True,
         "python_gui_command": PYTHON_GUI_COMMAND,
@@ -1020,6 +1812,16 @@ def health_payload(config_path: Path = DEFAULT_CONFIG_PATH, frontend_dir: Path =
             "metrics_format": "prometheus",
             "request_logging": "structured_json",
             "metrics_access": "same server authorization as the API",
+            "max_http_workers": max(1, int(max_http_workers)),
+            "max_mutation_workers": int(
+                (runtime_readiness.get("admission") or {}).get("max_mutation_workers") or 1
+            ),
+            "reserved_read_workers": int(
+                (runtime_readiness.get("admission") or {}).get("reserved_read_workers") or 0
+            ),
+            "mutation_lock_timeout_seconds": HTTP_MUTATION_LOCK_TIMEOUT_SECONDS,
+            "max_http_response_bytes": MAX_HTTP_RESPONSE_BYTES,
+            "connection_timeout_seconds": HTTP_CONNECTION_TIMEOUT_SECONDS,
         },
         "routes": API_ROUTES,
     }
@@ -1034,10 +1836,19 @@ def app_state_payload(
     alert_price_state: Optional[Mapping[Tuple[str, str], Mapping[str, Any]]] = None,
     wallet_polling: Optional[Mapping[str, Any]] = None,
     recent_wallet_activity: Optional[List[Dict[str, Any]]] = None,
+    runtime_identity: Optional[Mapping[str, str]] = None,
+    max_http_workers: int = MAX_HTTP_WORKERS,
+    runtime_readiness: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     registry = registry or build_default_registry()
     return {
-        "health": health_payload(config_path, frontend_dir),
+        "health": health_payload(
+            config_path,
+            frontend_dir,
+            runtime_identity,
+            max_http_workers,
+            runtime_readiness,
+        ),
         "config": config_payload(cfg),
         "markets": markets_payload(cfg, registry),
         "alerts": alerts_payload(cfg, registry, alert_price_state),
@@ -1069,13 +1880,32 @@ def apply_config_patch(cfg: AppConfig, payload: Dict[str, Any]) -> AppConfig:
     return cfg
 
 
-def apply_market_patch(cfg: AppConfig, market_id: str, payload: Dict[str, Any]) -> AppConfig:
+def _blocked_outbound_setting_keys(value: Any) -> List[str]:
+    blocked: set[str] = set()
+    if isinstance(value, Mapping):
+        for raw_key, child in value.items():
+            key = str(raw_key)
+            if is_outbound_endpoint_setting(key):
+                blocked.add(key)
+            blocked.update(_blocked_outbound_setting_keys(child))
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            blocked.update(_blocked_outbound_setting_keys(child))
+    return sorted(blocked)
+
+
+def apply_market_patch(
+    cfg: AppConfig,
+    market_id: str,
+    payload: Dict[str, Any],
+    *,
+    allow_outbound_endpoint_changes: bool = False,
+) -> AppConfig:
     normalized = str(market_id or "").strip().lower()
     if normalized not in cfg.markets:
         raise ValueError(f"Unknown market id: {normalized}")
     market_cfg = cfg.markets[normalized]
-    if "enabled" in payload:
-        market_cfg.enabled = bool(payload["enabled"])
+    enabled = bool(payload["enabled"]) if "enabled" in payload else market_cfg.enabled
     settings = dict(market_cfg.settings)
     for key in ("live_trading_enabled", "live_trading_confirmed", "live_trading_kill_switch"):
         if key in payload:
@@ -1096,7 +1926,16 @@ def apply_market_patch(cfg: AppConfig, market_id: str, payload: Dict[str, Any]) 
         raw_settings = payload["settings"]
         if not isinstance(raw_settings, dict):
             raise ValueError("settings must be an object.")
+        assert_no_persisted_secrets(raw_settings)
+        blocked_outbound = _blocked_outbound_setting_keys(raw_settings)
+        if blocked_outbound and not allow_outbound_endpoint_changes:
+            raise ValueError(
+                "Outbound endpoint and custom-host policy settings cannot be changed through the HTTP API; "
+                "edit trusted local configuration and restart: "
+                + ", ".join(blocked_outbound)
+            )
         settings.update(raw_settings)
+    market_cfg.enabled = enabled
     market_cfg.settings = settings
     return cfg
 
@@ -1351,6 +2190,21 @@ def require_polymarket_selected(cfg: AppConfig, feature: str) -> None:
     if str(cfg.selected_market_id or "").strip().lower() != "polymarket":
         raise ValueError(f"{feature} is only available when the selected market is polymarket.")
     require_market_enabled(cfg, "polymarket", feature)
+
+
+def require_selected_market(cfg: AppConfig, feature: str) -> str:
+    """Require an enabled selected market and return its normalized id.
+
+    Wallet tracking and simulation-first copy workflows are market-scoped now;
+    Polymarket analytics remains intentionally protected by
+    ``require_polymarket_selected`` above.
+    """
+
+    market_id = str(cfg.selected_market_id or "").strip().lower()
+    if not market_id:
+        raise ValueError(f"{feature} requires a selected market.")
+    require_market_enabled(cfg, market_id, feature)
+    return market_id
 
 
 def wallet_payload(wallet: WalletWatch) -> Dict[str, Any]:
@@ -1984,22 +2838,52 @@ def polymarket_live_validation_promotion_proposal_snapshot_diff_payload(key: str
 
 def polymarket_live_validation_promotion_proposal_snapshot_store_payload(
     payload: Mapping[str, Any],
+    *,
+    idempotency_key: str = "",
 ) -> Dict[str, Any]:
-    target_tier = str(payload.get("target_tier") or "")
-    label = str(payload.get("label") or "")
-    source = str(payload.get("source") or "react_preview")
+    target_tier = str(payload.get("target_tier") or "").strip()
+    label = str(payload.get("label") or "").strip()
+    source = str(payload.get("source") or "react_preview").strip() or "react_preview"
+    idempotency_request = {
+        "target_tier": target_tier,
+        "label": label,
+        "source": source,
+    }
+    replayed = (
+        reconcile_live_validation_promotion_proposal_snapshot_idempotency(
+            idempotency_key=idempotency_key,
+            idempotency_request=idempotency_request,
+        )
+        if idempotency_key
+        else None
+    )
+    if replayed is not None:
+        inventory = polymarket_live_validation_promotion_proposal_snapshots_payload()
+        inventory.update(
+            {
+                "stored": replayed,
+                "message": f"Replayed promotion proposal snapshot {replayed.get('key')}.",
+            }
+        )
+        return inventory
     proposal = live_validation_coverage_promotion_proposal(target_tier=target_tier)
     stored = store_live_validation_coverage_promotion_proposal_snapshot(
         proposal=proposal,
         target_tier=target_tier,
         label=label,
         source=source,
+        idempotency_key=idempotency_key,
+        idempotency_request=idempotency_request,
     )
     inventory = polymarket_live_validation_promotion_proposal_snapshots_payload()
     inventory.update(
         {
             "stored": stored,
-            "message": f"Stored promotion proposal snapshot {stored.get('key')}.",
+            "message": (
+                f"Replayed promotion proposal snapshot {stored.get('key')}."
+                if stored.get("idempotent_replay")
+                else f"Stored promotion proposal snapshot {stored.get('key')}."
+            ),
         }
     )
     return inventory
@@ -2018,22 +2902,40 @@ def polymarket_live_validation_promotion_proposal_snapshot_purge_payload(payload
     )
 
 
-def polymarket_live_validation_decision_store_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
+def polymarket_live_validation_decision_store_payload(
+    payload: Mapping[str, Any],
+    *,
+    idempotency_key: str = "",
+) -> Dict[str, Any]:
+    normalized_request = {
+        "report_key": str(payload.get("report_key") or "").strip(),
+        "payload_hash": str(payload.get("payload_hash") or "").strip(),
+        "target_tier": str(payload.get("target_tier") or "").strip(),
+        "decision": str(payload.get("decision") or "").strip().lower(),
+        "reviewer_note": str(payload.get("reviewer_note") or "").strip(),
+        "review_bundle_hash": str(payload.get("review_bundle_hash") or "").strip(),
+        "reviewer": str(payload.get("reviewer") or "").strip() or "operator",
+    }
     stored = record_live_validation_report_decision(
-        report_key=str(payload.get("report_key") or ""),
-        payload_hash=str(payload.get("payload_hash") or ""),
-        target_tier=str(payload.get("target_tier") or ""),
-        decision=str(payload.get("decision") or ""),
-        reviewer_note=str(payload.get("reviewer_note") or ""),
-        review_bundle_hash=str(payload.get("review_bundle_hash") or ""),
-        reviewer=str(payload.get("reviewer") or ""),
+        report_key=normalized_request["report_key"],
+        payload_hash=normalized_request["payload_hash"],
+        target_tier=normalized_request["target_tier"],
+        decision=normalized_request["decision"],
+        reviewer_note=normalized_request["reviewer_note"],
+        review_bundle_hash=normalized_request["review_bundle_hash"],
+        reviewer=normalized_request["reviewer"],
+        idempotency_key=idempotency_key,
+        idempotency_request=normalized_request,
     )
     ledger = polymarket_live_validation_decisions_payload()
     ledger.update(
         {
             "stored": stored,
             "message": (
-                f"Recorded {stored.get('decision')} decision for {stored.get('target_tier')} "
+                f"Replayed {stored.get('decision')} decision for {stored.get('target_tier')} "
+                f"on report {stored.get('report_key')}."
+                if stored.get("idempotent_replay")
+                else f"Recorded {stored.get('decision')} decision for {stored.get('target_tier')} "
                 f"on report {stored.get('report_key')}."
             ),
         }
@@ -2041,26 +2943,66 @@ def polymarket_live_validation_decision_store_payload(payload: Mapping[str, Any]
     return ledger
 
 
-def polymarket_live_validation_report_store_payload(cfg: AppConfig, payload: Mapping[str, Any]) -> Dict[str, Any]:
+def polymarket_live_validation_report_store_payload(
+    cfg: AppConfig,
+    payload: Mapping[str, Any],
+    *,
+    idempotency_key: str = "",
+) -> Dict[str, Any]:
     label = str(payload.get("label") or "").strip()
     source = str(payload.get("source") or "").strip()
     source_file = payload.get("source_file") if str(payload.get("source_file") or "").strip() else None
     allow_duplicate = bool(payload.get("allow_duplicate"))
     skip_duplicate = bool(payload.get("skip_duplicate", True)) and not allow_duplicate
-    report: Mapping[str, Any]
+    report: Optional[Mapping[str, Any]]
+    request_mode: str
 
     if "report_json" in payload and str(payload.get("report_json") or "").strip():
         report = parse_live_validation_report_json(str(payload.get("report_json") or ""))
         source = source or "cli_import"
         label = label or "CLI import"
+        request_mode = "report_json"
     elif isinstance(payload.get("report"), Mapping):
         report = payload["report"]  # type: ignore[assignment]
         source = source or "cli_import"
         label = label or "Imported report"
+        request_mode = "report"
     else:
-        report = polymarket_live_validation_payload(cfg)
+        report = None
         source = source or "gui_snapshot"
         label = label or "GUI readiness snapshot"
+        request_mode = "generated"
+
+    idempotency_request: Dict[str, Any] = {
+        "mode": request_mode,
+        "source": source,
+        "label": label,
+        "source_file": str(Path(str(source_file))) if source_file is not None else "",
+        "duplicate_policy": "allow" if allow_duplicate or not skip_duplicate else "skip",
+    }
+    if request_mode != "generated":
+        assert report is not None
+        idempotency_request["payload_hash"] = live_validation_report_payload_hash(report)
+
+    replayed = (
+        reconcile_live_validation_report_idempotency(
+            idempotency_key=idempotency_key,
+            idempotency_request=idempotency_request,
+        )
+        if idempotency_key
+        else None
+    )
+    if replayed is not None:
+        inventory = polymarket_live_validation_reports_payload()
+        inventory.update(
+            {
+                "stored": replayed,
+                "message": f"Replayed live validation report {replayed.get('key')}.",
+            }
+        )
+        return inventory
+    if report is None:
+        report = polymarket_live_validation_payload(cfg)
 
     stored = store_live_validation_report(
         report,
@@ -2069,9 +3011,13 @@ def polymarket_live_validation_report_store_payload(cfg: AppConfig, payload: Map
         source_file=source_file,
         allow_duplicate=allow_duplicate,
         skip_duplicate=skip_duplicate,
+        idempotency_key=idempotency_key,
+        idempotency_request=idempotency_request,
     )
     inventory = polymarket_live_validation_reports_payload()
-    if stored.get("duplicate") and not stored.get("stored"):
+    if stored.get("idempotent_replay"):
+        message = f"Replayed live validation report {stored.get('key')}."
+    elif stored.get("duplicate") and not stored.get("stored"):
         message = f"Skipped duplicate live validation report {stored.get('duplicate_key') or stored.get('key')}."
     elif stored.get("duplicate"):
         message = f"Stored duplicate live validation report {stored.get('key')}."
@@ -2760,10 +3706,17 @@ def find_wallet(cfg: AppConfig, wallet_id: str) -> WalletWatch:
     raise ValueError(f"Unknown wallet id: {normalized}")
 
 
-def wallet_from_payload(payload: Mapping[str, Any], existing: Optional[WalletWatch] = None) -> WalletWatch:
+def wallet_from_payload(
+    payload: Mapping[str, Any],
+    existing: Optional[WalletWatch] = None,
+    *,
+    market_id: str = "polymarket",
+) -> WalletWatch:
     raw_wallet = str(payload.get("wallet") if "wallet" in payload else (existing.wallet if existing else "")).strip()
-    wallet = normalize_wallet(raw_wallet)
+    wallet = normalize_activity_identity(market_id, raw_wallet)
     if not wallet:
+        if str(market_id or "").strip().lower() == "manifold":
+            raise ValueError("wallet must use the safe manifold:<username> activity identity format.")
         raise ValueError("wallet must be a valid 0x wallet/proxyWallet address.")
     display_name = str(
         payload.get("display_name") if "display_name" in payload else (existing.display_name if existing else "")
@@ -2784,8 +3737,8 @@ def wallet_from_payload(payload: Mapping[str, Any], existing: Optional[WalletWat
 
 
 def add_wallet_watch(cfg: AppConfig, payload: Mapping[str, Any]) -> WalletWatch:
-    require_polymarket_selected(cfg, "Wallet tracking")
-    wallet = wallet_from_payload(payload)
+    market_id = require_selected_market(cfg, "Wallet tracking")
+    wallet = wallet_from_payload(payload, market_id=market_id)
     if any(item.wallet == wallet.wallet for item in cfg.wallets):
         raise ValueError("This wallet is already being tracked.")
     cfg.wallets.append(wallet)
@@ -2793,8 +3746,9 @@ def add_wallet_watch(cfg: AppConfig, payload: Mapping[str, Any]) -> WalletWatch:
 
 
 def update_wallet_watch(cfg: AppConfig, wallet_id: str, payload: Mapping[str, Any]) -> WalletWatch:
+    market_id = require_selected_market(cfg, "Wallet tracking")
     wallet = find_wallet(cfg, wallet_id)
-    wallet_from_payload(payload, existing=wallet)
+    wallet_from_payload(payload, existing=wallet, market_id=market_id)
     duplicates = [item for item in cfg.wallets if item.wallet == wallet.wallet and item.id != wallet.id]
     if duplicates:
         raise ValueError("This wallet is already being tracked.")
@@ -2812,7 +3766,8 @@ def copy_payload(
     registry: Optional[AdapterRegistry] = None,
 ) -> Dict[str, Any]:
     registry = registry or build_default_registry()
-    market_cfg = cfg.markets.get("polymarket")
+    market_id = str(cfg.selected_market_id or "").strip().lower() or "polymarket"
+    market_cfg = cfg.markets.get(market_id)
     settings = market_cfg.settings if market_cfg else {}
     status = "simulation"
     if not cfg.copytrading.enabled:
@@ -2830,12 +3785,12 @@ def copy_payload(
         "max_notional": _safe_float(settings.get("live_trading_max_notional"), None),
     }
     try:
-        adapter = adapter_for_market(cfg, "polymarket", registry)
+        adapter = adapter_for_market(cfg, market_id, registry)
         capability = adapter.capabilities.copy_trading
         adapter_name = adapter.display_name
     except Exception:
         capability = False
-        adapter_name = "polymarket"
+        adapter_name = market_id
     followed_wallets = cfg.copytrading.normalized_follow_wallets()
     tracked_wallets = {wallet.wallet for wallet in cfg.wallets}
     return {
@@ -2848,11 +3803,18 @@ def copy_payload(
         "simulation_first": not cfg.copytrading.live,
         "copy_trading_supported": bool(capability),
         "adapter": adapter_name,
+        "market_id": market_id,
+        "activity_identity_hint": activity_identity_hint(market_id),
         "live_gate": live_gate,
     }
 
 
-def _wallets_from_copy_payload(payload: Mapping[str, Any], existing: CopyTradeSettings) -> List[str]:
+def _wallets_from_copy_payload(
+    payload: Mapping[str, Any],
+    existing: CopyTradeSettings,
+    *,
+    market_id: str = "polymarket",
+) -> List[str]:
     raw_values: List[Any] = []
     if "follow_wallets" in payload:
         raw = payload.get("follow_wallets")
@@ -2869,19 +3831,26 @@ def _wallets_from_copy_payload(payload: Mapping[str, Any], existing: CopyTradeSe
 
     wallets: List[str] = []
     for raw in raw_values:
-        raw_wallet = str(raw or "").strip().lower()
+        raw_wallet = str(raw or "").strip()
         if not raw_wallet:
             continue
-        normalized = normalize_wallet(raw_wallet)
+        normalized = normalize_activity_identity(market_id, raw_wallet)
         if not normalized:
-            raise ValueError("follow_wallets must contain only valid 0x wallet/proxyWallet addresses.")
+            if str(market_id or "").strip().lower() == "manifold":
+                raise ValueError("follow_wallets must contain only safe manifold:<username> activity identities.")
+            raise ValueError("follow_wallets must contain only valid activity identities (0x or Solana wallets).")
         if normalized not in wallets:
             wallets.append(normalized)
     return wallets
 
 
-def copy_settings_from_payload(payload: Mapping[str, Any], existing: CopyTradeSettings) -> CopyTradeSettings:
-    follow_wallets = _wallets_from_copy_payload(payload, existing)
+def copy_settings_from_payload(
+    payload: Mapping[str, Any],
+    existing: CopyTradeSettings,
+    *,
+    market_id: str = "polymarket",
+) -> CopyTradeSettings:
+    follow_wallets = _wallets_from_copy_payload(payload, existing, market_id=market_id)
     percentage_keys = ("copy_percentage", "scale_percent", "percentage")
     percentage_value = next((payload[key] for key in percentage_keys if key in payload), None)
     if percentage_value is not None:
@@ -2922,8 +3891,8 @@ def copy_settings_from_payload(payload: Mapping[str, Any], existing: CopyTradeSe
 
 
 def apply_copy_settings_patch(cfg: AppConfig, payload: Mapping[str, Any]) -> CopyTradeSettings:
-    require_polymarket_selected(cfg, "Copy trading settings")
-    cfg.copytrading = copy_settings_from_payload(payload, cfg.copytrading)
+    market_id = require_selected_market(cfg, "Copy trading settings")
+    cfg.copytrading = copy_settings_from_payload(payload, cfg.copytrading, market_id=market_id)
     return cfg.copytrading
 
 
@@ -2986,37 +3955,53 @@ def copy_trade_preview_from_activity(
     activity: Mapping[str, Any],
     conflict_state: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    if str(cfg.selected_market_id or "").strip().lower() != "polymarket":
-        return {"status": "skipped", "reason": "selected market is not polymarket"}
+    market_id = require_selected_market(cfg, "Copy trading preview")
     settings = cfg.copytrading
     if not settings.enabled:
         return {"status": "skipped", "reason": "copy trading disabled"}
+    adapter = adapter_for_market(cfg, market_id, registry)
+    if not adapter.capabilities.copy_trading:
+        return {
+            "status": "skipped",
+            "reason": f"{adapter.display_name} does not expose an official account-activity copy feed",
+        }
     followed_wallets = settings.normalized_follow_wallets()
     if not followed_wallets:
         return {"status": "skipped", "reason": "follow wallet is not set"}
-    if str(activity.get("proxyWallet") or "").strip().lower() not in followed_wallets:
+    activity_identity = normalize_activity_identity(market_id, activity.get("proxyWallet"))
+    if not activity_identity or activity_identity not in followed_wallets:
         return {"status": "skipped", "reason": "activity wallet does not match follow wallet"}
     side = str(activity.get("side") or "").strip().upper()
     if side not in {"BUY", "SELL"}:
         return {"status": "skipped", "reason": "activity side is not BUY or SELL"}
     if side == "SELL" and not settings.allow_sells:
         return {"status": "skipped", "reason": "SELL copying disabled"}
-    token_id = str(activity.get("asset") or "").strip()
+    token_id = str(activity.get("asset") or activity.get("contract_id") or "").strip()
     if not token_id:
         return {"status": "skipped", "reason": "activity has no asset token"}
     raw_size = _safe_float(activity.get("size"), 0.0) or 0.0
     raw_price = _safe_float(activity.get("price"), None)
     size = max(0.0, raw_size * float(settings.scale))
-    adapter = adapter_for_market(cfg, "polymarket", registry)
     best_bid = best_ask = None
-    try:
-        orderbook = adapter.get_orderbook(token_id)
-        best_bid = orderbook.bids[0].price if orderbook.bids else None
-        best_ask = orderbook.asks[0].price if orderbook.asks else None
-    except Exception:
-        pass
+    is_azuro = market_id == "azuro"
+    if not is_azuro:
+        try:
+            orderbook = adapter.get_orderbook(token_id)
+            best_bid = orderbook.bids[0].price if orderbook.bids else None
+            best_ask = orderbook.asks[0].price if orderbook.asks else None
+        except Exception:
+            pass
     slippage = max(0.0, min(float(settings.slippage), 1.0))
-    if side == "BUY":
+    if is_azuro:
+        raw_odds = _safe_float(activity.get("odds"), None)
+        if raw_odds is None and raw_price is not None and raw_price > 0:
+            raw_odds = 1.0 / raw_price
+        if raw_odds is None or raw_odds <= 0:
+            return {"status": "skipped", "reason": "Azuro activity has no valid decimal odds"}
+        # Azuro copy previews use decimal minimum odds; slippage lowers the
+        # accepted odds floor instead of adding to a probability.
+        limit_price = max(1e-12, float(raw_odds) * (1.0 - slippage))
+    elif side == "BUY":
         reference_price = best_ask if best_ask is not None else raw_price
         limit_price = min(1.0, float(reference_price if reference_price is not None else 0.99) + slippage)
     else:
@@ -3024,7 +4009,15 @@ def copy_trade_preview_from_activity(
         limit_price = max(0.0, float(reference_price if reference_price is not None else 0.01) - slippage)
     max_usdc = max(0.01, float(settings.max_usdc_per_trade))
     capped = False
-    if limit_price > 0:
+    # Manifold and Myriad BUY activity sizes are collateral budgets, while
+    # SELL activity sizes are shares. Do not divide a BUY budget by
+    # probability a second time.
+    buy_budget_activity = market_id in {"azuro", "manifold", "myriad_markets"} and side == "BUY"
+    if buy_budget_activity:
+        if size > max_usdc:
+            size = max_usdc
+            capped = True
+    elif limit_price > 0:
         max_shares = max_usdc / limit_price
         if size > max_shares:
             size = max_shares
@@ -3034,13 +4027,25 @@ def copy_trade_preview_from_activity(
     conflict_reason = copy_trade_conflict_reason(settings, activity, conflict_state)
     if conflict_reason:
         return {"status": "skipped", "reason": conflict_reason, "conflict_guard": True}
+    order_metadata: Dict[str, Any] = {
+        "source": "copy_trading",
+        "tif": "FOK",
+        "activity_key": activity_key(activity),
+    }
+    if market_id in {"manifold", "myriad_markets"} and side == "SELL":
+        order_metadata["shares"] = activity.get("shares") or size
     order = PaperOrderRequest(
-        market_id="polymarket",
+        market_id=market_id,
         contract_id=token_id,
         side=side,
         size=size,
         limit_price=limit_price,
-        metadata={"source": "copy_trading", "tif": "FOK", "activity_key": activity_key(activity)},
+        metadata=order_metadata,
+    )
+    approx_notional = (
+        order.size
+        if buy_budget_activity
+        else order.size * max(1.0, float(order.limit_price or 0.0))
     )
     result: Dict[str, Any] = {
         "status": "live_preflight" if settings.live else "simulation",
@@ -3052,10 +4057,12 @@ def copy_trade_preview_from_activity(
             "side": order.side,
             "size": order.size,
             "limit_price": order.limit_price,
-            "approx_notional": order.size * float(order.limit_price or 0.0),
+            "approx_notional": approx_notional,
+            "exposure_model": "full_size_upper_bound",
         },
         "pricing": {
             "raw_price": raw_price,
+            "raw_odds": _safe_float(activity.get("odds"), None),
             "best_bid": best_bid,
             "best_ask": best_ask,
             "slippage": slippage,
@@ -3081,11 +4088,11 @@ def copy_trade_preview_from_activity(
 
 
 def copy_preview_payload(cfg: AppConfig, registry: AdapterRegistry, payload: Mapping[str, Any]) -> Dict[str, Any]:
-    require_polymarket_selected(cfg, "Copy trading preview")
+    require_selected_market(cfg, "Copy trading preview")
     default_wallets = cfg.copytrading.normalized_follow_wallets()
     activity = {
         "proxyWallet": payload.get("proxyWallet") or payload.get("proxy_wallet") or (default_wallets[0] if default_wallets else ""),
-        "asset": payload.get("asset") or payload.get("token_id") or "",
+        "asset": payload.get("asset") or payload.get("contract_id") or payload.get("token_id") or "",
         "side": payload.get("side") or "BUY",
         "size": payload.get("size") if "size" in payload else 0,
         "price": payload.get("price") if "price" in payload else None,
@@ -3104,7 +4111,13 @@ def poll_wallet_activity(
     *,
     limit: int = 25,
 ) -> Dict[str, Any]:
-    require_polymarket_selected(cfg, "Wallet polling")
+    market_id = require_selected_market(cfg, "Wallet polling")
+    adapter = adapter_for_market(cfg, market_id, registry)
+    activity_loader = getattr(adapter, "list_activity", None)
+    if not callable(activity_loader) and market_id != "polymarket":
+        raise ValueError(
+            f"{adapter.display_name} does not expose an official wallet activity feed for tracking."
+        )
     emitted: List[Dict[str, Any]] = []
     problems: List[str] = []
     copy_conflicts: Dict[str, Dict[str, Any]] = {}
@@ -3112,18 +4125,23 @@ def poll_wallet_activity(
         if not wallet.enabled:
             continue
         try:
-            items = data_api.get_activity(wallet.wallet, limit=limit, types=["TRADE"])
+            if callable(activity_loader):
+                items = activity_loader(wallet.wallet, limit=limit)
+            else:
+                items = data_api.get_activity(wallet.wallet, limit=limit, types=["TRADE"])
         except Exception as exc:
             problems.append(f"{wallet.wallet}: {exc}")
             continue
         seen_keys = set(wallet.seen_activity_keys or [])
         new_items: List[Tuple[str, Mapping[str, Any]]] = []
-        for item in reversed(items):
+        for item in reversed(items or []):
+            if not isinstance(item, Mapping):
+                continue
             key = activity_key(item)
             if key in seen_keys:
                 continue
             timestamp = int(item.get("timestamp") or 0)
-            tx = str(item.get("transactionHash") or "")
+            tx = str(item.get("transactionHash") or item.get("transaction_hash") or "")
             if timestamp > (wallet.last_seen_ts or 0):
                 new_items.append((key, item))
                 seen_keys.add(key)
@@ -3134,7 +4152,7 @@ def poll_wallet_activity(
             if wallet.only_market_slug and str(item.get("slug") or "") != wallet.only_market_slug:
                 continue
             wallet.last_seen_ts = max(wallet.last_seen_ts or 0, int(item.get("timestamp") or 0))
-            wallet.last_seen_tx = str(item.get("transactionHash") or wallet.last_seen_tx or "")
+            wallet.last_seen_tx = str(item.get("transactionHash") or item.get("transaction_hash") or wallet.last_seen_tx or "")
             wallet.seen_activity_keys.append(key)
             if len(wallet.seen_activity_keys) > 200:
                 wallet.seen_activity_keys = wallet.seen_activity_keys[-200:]
@@ -3230,6 +4248,32 @@ def format_paper_order_impact(impact: Mapping[str, Any]) -> str:
     return "; ".join(parts)
 
 
+def serialize_market_event(event: MarketEvent) -> Dict[str, Any]:
+    """Return the stable, non-raw event schema shared by API and clients."""
+
+    return {
+        "market_id": event.market_id,
+        "event_id": event.event_id,
+        "title": event.title,
+        "url": event.url,
+        "status": event.status,
+    }
+
+
+def serialize_market_contract(contract: MarketContract) -> Dict[str, Any]:
+    """Return the stable, non-raw contract schema shared by API and clients."""
+
+    return {
+        "market_id": contract.market_id,
+        "contract_id": contract.contract_id,
+        "event_id": contract.event_id,
+        "title": contract.title,
+        "outcome": contract.outcome,
+        "url": contract.url,
+        "status": contract.status,
+    }
+
+
 def serialize_price_snapshot(snapshot: Optional[PriceSnapshot]) -> Optional[Dict[str, Any]]:
     if snapshot is None:
         return None
@@ -3257,6 +4301,818 @@ def serialize_orderbook(orderbook: Optional[OrderBookSnapshot]) -> Optional[Dict
         "asks": [{"price": level.price, "size": level.size} for level in orderbook.asks],
         "best_bid": orderbook.bids[0].price if orderbook.bids else None,
         "best_ask": orderbook.asks[0].price if orderbook.asks else None,
+    }
+
+
+def serialize_market_trade(trade: MarketTrade) -> Dict[str, Any]:
+    return {
+        "market_id": trade.market_id,
+        "contract_id": trade.contract_id,
+        "trade_id": trade.trade_id,
+        "side": trade.side,
+        "price": trade.price,
+        "size": trade.size,
+        "timestamp": trade.timestamp,
+    }
+
+
+def serialize_market_candle(candle: MarketCandle) -> Dict[str, Any]:
+    return {
+        "market_id": candle.market_id,
+        "contract_id": candle.contract_id,
+        "timestamp": candle.timestamp,
+        "open": candle.open,
+        "high": candle.high,
+        "low": candle.low,
+        "close": candle.close,
+        "volume": candle.volume,
+    }
+
+
+def market_events_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    query_params: Mapping[str, List[str]],
+) -> Dict[str, Any]:
+    normalized_market_id = str(market_id or "").strip().lower()
+    require_market_enabled(cfg, normalized_market_id, "event listing")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    query = _query_value(query_params, "query", "")
+    limit = _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 1000)
+    events = adapter.list_events(query, limit=limit)
+    return {
+        "market_id": normalized_market_id,
+        "query": query,
+        "limit": limit,
+        "events": [serialize_market_event(event) for event in events],
+    }
+
+
+def market_contracts_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    query_params: Mapping[str, List[str]],
+) -> Dict[str, Any]:
+    normalized_market_id = str(market_id or "").strip().lower()
+    event_id = _query_value(query_params, "event_id")
+    if not event_id:
+        raise ValueError("event_id is required.")
+    require_market_enabled(cfg, normalized_market_id, "contract listing")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    contracts = adapter.list_contracts(event_id)
+    return {
+        "market_id": normalized_market_id,
+        "event_id": event_id,
+        "contracts": [serialize_market_contract(contract) for contract in contracts],
+    }
+
+
+def market_price_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    query_params: Mapping[str, List[str]],
+) -> Dict[str, Any]:
+    normalized_market_id = str(market_id or "").strip().lower()
+    contract_id = _query_value(query_params, "contract_id")
+    if not contract_id:
+        raise ValueError("contract_id is required.")
+    require_market_enabled(cfg, normalized_market_id, "price reading")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    return {
+        "market_id": normalized_market_id,
+        "contract_id": contract_id,
+        "price": serialize_price_snapshot(adapter.get_price(contract_id)),
+    }
+
+
+def market_orderbook_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    query_params: Mapping[str, List[str]],
+) -> Dict[str, Any]:
+    normalized_market_id = str(market_id or "").strip().lower()
+    contract_id = _query_value(query_params, "contract_id")
+    if not contract_id:
+        raise ValueError("contract_id is required.")
+    require_market_enabled(cfg, normalized_market_id, "orderbook reading")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    return {
+        "market_id": normalized_market_id,
+        "contract_id": contract_id,
+        "orderbook": serialize_orderbook(adapter.get_orderbook(contract_id)),
+    }
+
+
+def market_trades_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    query_params: Mapping[str, List[str]],
+) -> Dict[str, Any]:
+    normalized_market_id = str(market_id or "").strip().lower()
+    contract_id = _query_value(query_params, "contract_id")
+    if not contract_id:
+        raise ValueError("contract_id is required.")
+    require_market_enabled(cfg, normalized_market_id, "trade history")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    limit = _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 500)
+    before = _query_float(query_params, "before")
+    after = _query_float(query_params, "after")
+    trades = adapter.list_trades(contract_id, limit=limit, before=before, after=after)
+    return {
+        "market_id": normalized_market_id,
+        "contract_id": contract_id,
+        "limit": limit,
+        "before": before,
+        "after": after,
+        "trades": [serialize_market_trade(trade) for trade in trades],
+    }
+
+
+def market_candles_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    query_params: Mapping[str, List[str]],
+) -> Dict[str, Any]:
+    normalized_market_id = str(market_id or "").strip().lower()
+    contract_id = _query_value(query_params, "contract_id")
+    if not contract_id:
+        raise ValueError("contract_id is required.")
+    require_market_enabled(cfg, normalized_market_id, "candle history")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    resolution = _query_value(query_params, "resolution", "1h")
+    candles = adapter.list_candles(
+        contract_id,
+        resolution=resolution,
+        from_timestamp=_query_float(query_params, "from"),
+        to_timestamp=_query_float(query_params, "to"),
+    )
+    return {
+        "market_id": normalized_market_id,
+        "contract_id": contract_id,
+        "resolution": resolution,
+        "from": _query_float(query_params, "from"),
+        "to": _query_float(query_params, "to"),
+        "candles": [serialize_market_candle(candle) for candle in candles],
+    }
+
+
+def market_account_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    operation: str,
+    query_params: Mapping[str, List[str]],
+) -> Dict[str, Any]:
+    """Read one explicitly documented authenticated account operation.
+
+    Account recovery is not treated as public market-data history.  The
+    adapter must publish an operation allow-list; arbitrary authenticated
+    paths are never accepted by this route.
+    """
+
+    normalized_market_id = str(market_id or "").strip().lower()
+    normalized_operation = str(operation or "").strip().lower()
+    require_market_enabled(cfg, normalized_market_id, "account recovery")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    supported = tuple(str(value).strip().lower() for value in getattr(adapter, "account_recovery_operations", ()))
+    if normalized_operation not in supported:
+        raise UnsupportedFeatureError(
+            normalized_market_id,
+            "account_recovery",
+            f"{normalized_market_id} does not support account operation {normalized_operation or '<empty>'}. "
+            f"Supported operations: {', '.join(supported) or 'none'}.",
+        )
+
+    kwargs: Dict[str, Any] = {}
+    if normalized_market_id == "limitless_exchange":
+        kwargs = {"on_behalf_of": _query_value(query_params, "on_behalf_of") or None}
+        if normalized_operation == "user_orders":
+            raw_market_slug = _query_value(query_params, "market_slug")
+            if not raw_market_slug:
+                raw_market_slug = _query_value(query_params, "contract_id").split(":", 1)[0]
+            kwargs["market_slug"] = raw_market_slug
+    elif normalized_market_id == "xmarket":
+        raw_contract = _query_value(query_params, "contract_id")
+        market_id_filter = _query_value(query_params, "market_id")
+        if not market_id_filter and raw_contract:
+            market_id_filter = raw_contract.split(":", 1)[0].strip()
+        kwargs = {
+            "status": _query_value(query_params, "status") or None,
+            "page": _clamp_int(_query_value(query_params, "page", "1"), 1, 1, 10000),
+            "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 1000),
+        }
+        if normalized_operation == "market_orders":
+            kwargs["market_id"] = market_id_filter
+    elif normalized_market_id == "smarkets":
+        kwargs = {
+            "status": _query_value(query_params, "status"),
+            "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 1000),
+        }
+    elif normalized_market_id == "probable":
+        kwargs = {
+            "page": _clamp_int(_query_value(query_params, "page", "1"), 1, 1, 10000),
+            "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 50),
+            "event_id": _query_value(query_params, "event_id"),
+            "token_ids": query_params.get("token_ids") or query_params.get("token_id") or [],
+        }
+        if normalized_operation == "order":
+            kwargs = {
+                "order_id": _query_value(query_params, "order_id"),
+                "token_id": _query_value(query_params, "token_id"),
+                "client_order_id": _query_value(query_params, "client_order_id"),
+            }
+    elif normalized_market_id == "kalshi":
+        raw_contract = _query_value(query_params, "contract_id")
+        ticker = _query_value(query_params, "ticker") or raw_contract.split(":", 1)[0]
+        raw_subaccount = _query_value(query_params, "subaccount")
+        subaccount = _clamp_int(raw_subaccount, 0, 0, 63) if raw_subaccount else None
+        kwargs.update(
+            {
+                "ticker": ticker,
+                "event_ticker": _query_value(query_params, "event_ticker"),
+                "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 1000),
+                "cursor": _query_value(query_params, "cursor"),
+                "min_timestamp": _query_float(query_params, "from"),
+                "max_timestamp": _query_float(query_params, "to"),
+                "subaccount": subaccount,
+            }
+        )
+        if normalized_operation == "order_history":
+            kwargs.update(
+                {
+                    "status": _query_value(query_params, "status", "executed").lower(),
+                    "historical": _query_bool(query_params, "historical", False),
+                }
+            )
+        elif normalized_operation == "fills":
+            kwargs.update(
+                {
+                    "order_id": _query_value(query_params, "order_id"),
+                    "historical": _query_bool(query_params, "historical", False),
+                }
+            )
+        elif normalized_operation == "positions":
+            kwargs["count_filter"] = _query_value(query_params, "count_filter")
+        elif normalized_operation == "queue_positions":
+            kwargs = {
+                "ticker": ticker,
+                "event_ticker": _query_value(query_params, "event_ticker"),
+                "subaccount": subaccount,
+            }
+        elif normalized_operation == "balance":
+            kwargs = {"subaccount": subaccount}
+    elif normalized_market_id == "polymarket":
+        raw_contract = _query_value(query_params, "contract_id")
+        kwargs = {
+            "market_id": _query_value(query_params, "market_id"),
+            "contract_id": raw_contract,
+            "next_cursor": _query_value(query_params, "cursor"),
+        }
+        if normalized_operation == "order_detail":
+            kwargs = {"order_id": _query_value(query_params, "order_id")}
+        elif normalized_operation == "fills":
+            kwargs.update(
+                {
+                    "trade_id": _query_value(query_params, "trade_id"),
+                    "before": _query_float(query_params, "before")
+                    if _query_value(query_params, "before") is not None
+                    else _query_float(query_params, "to"),
+                    "after": _query_float(query_params, "after")
+                    if _query_value(query_params, "after") is not None
+                    else _query_float(query_params, "from"),
+                    "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 500),
+                }
+            )
+    elif normalized_market_id == "hyperliquid":
+        if normalized_operation in {"active_orders", "positions"}:
+            kwargs["dex"] = _query_value(query_params, "dex") or ""
+        elif normalized_operation == "order_history":
+            kwargs["limit"] = _clamp_int(_query_value(query_params, "limit", "2000"), 2000, 1, 2000)
+    elif normalized_market_id == "dflow":
+        kwargs = {
+            "wallet": _query_value(query_params, "wallet") or _query_value(query_params, "address"),
+            "limit": _clamp_int(_query_value(query_params, "limit", "25"), 25, 1, 250),
+            "cursor": _query_value(query_params, "cursor"),
+            "ticker": _query_value(query_params, "ticker") or _query_value(query_params, "market_id"),
+            "mint": _query_value(query_params, "mint") or _query_value(query_params, "token_id"),
+        }
+    elif normalized_market_id == "predict_fun":
+        if normalized_operation == "account":
+            kwargs = {}
+        elif normalized_operation == "order_detail":
+            kwargs = {"order_id": _query_value(query_params, "order_id")}
+        elif normalized_operation == "positions_by_address":
+            kwargs = {
+                "address": _query_value(query_params, "wallet") or _query_value(query_params, "address"),
+                "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 100),
+                "cursor": _query_value(query_params, "cursor"),
+                "market_id": _query_value(query_params, "market_id"),
+                "is_resolved": _query_value(query_params, "is_resolved"),
+                "sort": _query_value(query_params, "sort"),
+            }
+        else:
+            kwargs = {
+                "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 100),
+                "cursor": _query_value(query_params, "cursor"),
+                "market_id": _query_value(query_params, "market_id"),
+                "status": _query_value(query_params, "status"),
+                "is_resolved": _query_value(query_params, "is_resolved"),
+                "sort": _query_value(query_params, "sort"),
+            }
+            if normalized_operation == "account_activity":
+                kwargs["event_types"] = _query_value(query_params, "event_types")
+    elif normalized_market_id == "manifold":
+        if normalized_operation == "account":
+            kwargs = {}
+        else:
+            kwargs = {
+                "contract_id": _query_value(query_params, "contract_id") or None,
+                "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 1000),
+                "before": _query_value(query_params, "before") or None,
+                "after": _query_value(query_params, "after") or None,
+                "before_time": _query_float(query_params, "before_time")
+                if _query_value(query_params, "before_time")
+                else _query_float(query_params, "to"),
+                "after_time": _query_float(query_params, "after_time")
+                if _query_value(query_params, "after_time")
+                else _query_float(query_params, "from"),
+            }
+    elif normalized_market_id == "prophet_exchange":
+        if normalized_operation == "balance":
+            kwargs = {}
+        elif normalized_operation == "order_detail":
+            kwargs = {"order_id": _query_value(query_params, "order_id")}
+        elif normalized_operation == "order_history":
+            kwargs = {
+                "cursor": _query_value(query_params, "cursor") or _query_value(query_params, "next_cursor"),
+                "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 100),
+                "market_id": _query_value(query_params, "market_id"),
+                "event_id": _query_value(query_params, "event_id"),
+                "matching_status": _query_value(query_params, "matching_status"),
+                "status": _query_value(query_params, "status"),
+                "from": _query_value(query_params, "from"),
+                "to": _query_value(query_params, "to"),
+            }
+        elif normalized_operation == "trades":
+            kwargs = {
+                "cursor": _query_value(query_params, "cursor") or _query_value(query_params, "next_cursor"),
+                "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 100),
+                "from": _query_value(query_params, "from"),
+                "to": _query_value(query_params, "to"),
+            }
+        else:
+            raw_cursor = _query_value(query_params, "cursor") or _query_value(query_params, "next")
+            kwargs = {
+                "cursor": raw_cursor or None,
+                "limit": _clamp_int(_query_value(query_params, "limit", "10"), 10, 1, 500),
+            }
+    elif normalized_market_id == "azuro":
+        kwargs = {
+            "wallet": _query_value(query_params, "wallet") or _query_value(query_params, "address"),
+            "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 1000),
+            "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 1_000_000),
+        }
+    elif normalized_market_id == "thales_market":
+        raw_market_id = _query_value(query_params, "market_id")
+        raw_contract_id = _query_value(query_params, "contract_id")
+        if not raw_market_id and raw_contract_id:
+            raw_market_id = raw_contract_id.split(":", 1)[0].strip()
+        kwargs = {
+            "wallet": _query_value(query_params, "wallet") or _query_value(query_params, "address"),
+            "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 1000),
+            "market_id": raw_market_id or None,
+            "from_timestamp": _query_float(query_params, "from"),
+            "to_timestamp": _query_float(query_params, "to"),
+        }
+        if raw_contract_id:
+            kwargs["contract_id"] = raw_contract_id
+    elif normalized_market_id in {"metadao", "omen", "gnosis_prediction_markets"}:
+        kwargs = {
+            "wallet": _query_value(query_params, "wallet") or _query_value(query_params, "address"),
+            "limit": _clamp_int(_query_value(query_params, "limit", "25"), 25, 1, 100),
+        }
+    elif normalized_market_id == "metaculus":
+        kwargs = {
+            "forecaster_id": _query_value(query_params, "forecaster_id") or None,
+            "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 100),
+            "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100_000),
+            "with_cp": _query_bool(query_params, "with_cp", False),
+            "include_cp_history": _query_bool(query_params, "include_cp_history", False),
+            "include_descriptions": _query_bool(query_params, "include_descriptions", False),
+        }
+    elif normalized_market_id == "good_judgment_open":
+        kwargs = {
+            "page": _clamp_int(_query_value(query_params, "page", "0"), 0, 0, 100_000),
+            "membership_id": _query_value(query_params, "membership_id") or None,
+            "question_id": _query_value(query_params, "question_id") or None,
+            "filter": _query_value(query_params, "filter") or None,
+            "created_before": _query_value(query_params, "created_before") or None,
+            "created_after": _query_value(query_params, "created_after") or None,
+            "updated_before": _query_value(query_params, "updated_before") or None,
+            "updated_after": _query_value(query_params, "updated_after") or None,
+            "score_type": _query_value(query_params, "score_type") or None,
+            "scoreable_id": _query_value(query_params, "scoreable_id") or None,
+            "predictor_type": _query_value(query_params, "predictor_type") or None,
+            "include_daily_scores": _query_bool(query_params, "include_daily_scores", False),
+        }
+    elif normalized_market_id == "myriad_markets":
+        kwargs = {
+            "wallet": _query_value(query_params, "wallet") or _query_value(query_params, "address"),
+            "limit": _clamp_int(_query_value(query_params, "limit", "25"), 25, 1, 100),
+        }
+        if normalized_operation in {"portfolio", "market_positions"}:
+            kwargs.update(
+                {
+                    "page": _clamp_int(_query_value(query_params, "page", "1"), 1, 1, 10_000),
+                    "trading_model": _query_value(query_params, "trading_model", "all"),
+                    "min_shares": _query_value(query_params, "min_shares"),
+                    "market_slug": _query_value(query_params, "market_slug"),
+                    "market_id": _query_value(query_params, "market_id"),
+                    "network_id": _query_value(query_params, "network_id"),
+                    "token_address": _query_value(query_params, "token_address"),
+                    "status": _query_value(query_params, "status"),
+                    "keyword": _query_value(query_params, "keyword"),
+                    "sort": _query_value(query_params, "sort"),
+                    "sort_by": _query_value(query_params, "sort_by"),
+                    "exclude_history": _query_bool(query_params, "exclude_history", False),
+                    "group_by_event": _query_bool(query_params, "group_by_event", False),
+                }
+            )
+            if normalized_operation == "market_positions":
+                kwargs.update(
+                    {
+                        "state": _query_value(query_params, "state"),
+                        "topics": _query_value(query_params, "topics"),
+                        "market_ids": _query_value(query_params, "market_ids"),
+                    }
+                )
+    elif normalized_market_id == "xo_market":
+        if normalized_operation in {"account", "positions", "orders"}:
+            kwargs = {}
+        elif normalized_operation in {"settlement", "settlement_history"}:
+            raw_contract = _query_value(query_params, "contract_id")
+            market_id_filter = _query_value(query_params, "market_id")
+            if not market_id_filter and raw_contract:
+                market_id_filter = raw_contract.split(":", 1)[0].strip()
+            kwargs = {"market_id": market_id_filter}
+            if normalized_operation == "settlement_history":
+                kwargs.update(
+                    {
+                        "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 1000),
+                        "cursor": _query_value(query_params, "cursor") or None,
+                    }
+                )
+        elif normalized_operation in {"trades", "audit_logs"}:
+            kwargs = {
+                "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 1000),
+                "market_id": _query_value(query_params, "market_id") or None,
+                "outcome_id": _query_value(query_params, "outcome_id") or None,
+                "start_time": _query_value(query_params, "start_time") or _query_value(query_params, "from"),
+                "end_time": _query_value(query_params, "end_time") or _query_value(query_params, "to"),
+            }
+            if normalized_operation == "audit_logs":
+                kwargs["event_type"] = _query_value(query_params, "event_type") or None
+    elif normalized_market_id == "sx_bet":
+        if normalized_operation == "balance":
+            kwargs = {}
+        elif normalized_operation == "active_orders":
+            kwargs = {
+                "market_hash": _query_value(query_params, "market_hash") or _query_value(query_params, "market_id"),
+                "event_id": _query_value(query_params, "event_id"),
+                "per_page": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 100),
+                "next_key": _query_value(query_params, "cursor"),
+            }
+        elif normalized_operation == "order_detail":
+            kwargs = {"order_id": _query_value(query_params, "order_id")}
+        elif normalized_operation == "order_by_client_id":
+            kwargs = {"client_order_id": _query_value(query_params, "client_order_id")}
+        elif normalized_operation == "order_history":
+            kwargs = {
+                "market_hash": _query_value(query_params, "market_hash") or _query_value(query_params, "market_id"),
+                "status": _query_value(query_params, "status"),
+                "start_date": _query_value(query_params, "start_date"),
+                "end_date": _query_value(query_params, "end_date"),
+                "sort_asc": _query_bool(query_params, "sort_asc", True),
+                "per_page": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 100),
+                "next_key": _query_value(query_params, "cursor"),
+            }
+        elif normalized_operation == "fills":
+            kwargs = {
+                "trade_id": _query_value(query_params, "trade_id"),
+                "order_id": _query_value(query_params, "order_id"),
+                "start_date": _query_value(query_params, "start_date"),
+                "end_date": _query_value(query_params, "end_date"),
+                "sort_asc": _query_bool(query_params, "sort_asc", True),
+                "per_page": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 100),
+                "next_key": _query_value(query_params, "cursor"),
+            }
+        elif normalized_operation == "positions":
+            kwargs = {
+                "status": _query_value(query_params, "status"),
+                "event_id": _query_value(query_params, "event_id"),
+                "sort_asc": _query_bool(query_params, "sort_asc", False),
+                "per_page": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 100),
+                "next_key": _query_value(query_params, "cursor"),
+            }
+    elif normalized_market_id in {"ibkr_forecasttrader", "forecastex", "cme_prediction_markets"}:
+        kwargs = {
+            "filters": _query_value(query_params, "status") or "",
+            "force": _query_bool(query_params, "force", False),
+        }
+        if normalized_operation == "order_status":
+            kwargs["order_id"] = _query_value(query_params, "order_id")
+    elif normalized_market_id == "opinion_labs":
+        if normalized_operation == "order_detail":
+            kwargs = {"order_id": _query_value(query_params, "order_id")}
+        else:
+            kwargs = {
+                "page": _clamp_int(_query_value(query_params, "page", "1"), 1, 1, 10000),
+                "limit": _clamp_int(_query_value(query_params, "limit", "10"), 10, 1, 20),
+                "market_id": _query_value(query_params, "market_id"),
+                "chain_id": _query_value(query_params, "chain_id"),
+            }
+            if normalized_operation == "order_history":
+                kwargs["status"] = _query_value(query_params, "status")
+    elif normalized_market_id == "matchbook":
+        if normalized_operation in {"balance", "account"}:
+            kwargs = {}
+        elif normalized_operation in {"settled_bets", "current_bets"}:
+            kwargs = {
+                "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+                "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 1000),
+                "sport_id": _query_value(query_params, "sport_id"),
+                "event_id": _query_value(query_params, "event_id"),
+                "market_id": _query_value(query_params, "market_id"),
+                "odds_type": _query_value(query_params, "odds_type", "DECIMAL"),
+                "from_timestamp": _query_float(query_params, "from"),
+                "to_timestamp": _query_float(query_params, "to"),
+            }
+        elif normalized_operation == "current_offers":
+            raw_interval = _query_value(query_params, "interval")
+            kwargs = {
+                "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+                "limit": _clamp_int(_query_value(query_params, "limit", "20"), 20, 1, 1000),
+                "sport_id": _query_value(query_params, "sport_id"),
+                "event_id": _query_value(query_params, "event_id"),
+                "market_id": _query_value(query_params, "market_id"),
+                "runner_id": _query_value(query_params, "runner_id"),
+                "side": _query_value(query_params, "side"),
+                "status": _query_value(query_params, "offer_status"),
+                "interval": _clamp_int(raw_interval, 0, 0, 2147483647) if raw_interval else None,
+                "include_edits": _query_bool(query_params, "include_edits", False),
+                "cancellation_reason": _query_value(query_params, "cancellation_reason"),
+                "aggregation_type": _query_value(query_params, "aggregation_type", "none"),
+                "odds_type": _query_value(query_params, "odds_type", "DECIMAL"),
+            }
+    elif normalized_market_id == "betfair_exchange":
+        if normalized_operation in {"funds", "account"}:
+            if normalized_operation == "funds":
+                kwargs = {"wallet": _query_value(query_params, "wallet")}
+        elif normalized_operation == "statement":
+            kwargs = {
+                "locale": _query_value(query_params, "locale", "en"),
+                "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 1000),
+                "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+                "include_item": not _query_bool(query_params, "exclude_item", False),
+                "wallet": _query_value(query_params, "wallet"),
+                "from_timestamp": _query_float(query_params, "from"),
+                "to_timestamp": _query_float(query_params, "to"),
+            }
+        elif normalized_operation == "currency_rates":
+            kwargs = {"from_currency": _query_value(query_params, "from_currency")}
+        elif normalized_operation in {"active_orders", "cleared_orders"}:
+            market_id_filter = _query_value(query_params, "market_id")
+            runner_id = _query_value(query_params, "runner_id")
+            raw_contract = _query_value(query_params, "contract_id")
+            if not market_id_filter and raw_contract:
+                parts = raw_contract.split(":", 1)
+                market_id_filter = parts[0].strip()
+                if len(parts) == 2 and not runner_id:
+                    runner_id = parts[1].strip()
+            if normalized_operation == "active_orders":
+                kwargs = {
+                    "market_id": market_id_filter,
+                    "contract_id": raw_contract,
+                    "status": _query_value(query_params, "status"),
+                    "order_by": _query_value(query_params, "order_by", "BY_MATCH_TIME"),
+                    "sort_dir": _query_value(query_params, "sort_dir", "EARLIEST_TO_LATEST"),
+                    "include_item_description": _query_bool(query_params, "include_item_description", False),
+                    "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 1000),
+                    "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+                    "from_timestamp": _query_float(query_params, "from"),
+                    "to_timestamp": _query_float(query_params, "to"),
+                }
+            else:
+                kwargs = {
+                    "bet_status": _query_value(query_params, "status", "SETTLED"),
+                    "market_id": market_id_filter,
+                    "event_type_id": _query_value(query_params, "event_type_id"),
+                    "event_id": _query_value(query_params, "event_id"),
+                    "runner_id": runner_id,
+                    "bet_id": _query_value(query_params, "bet_id"),
+                    "group_by": _query_value(query_params, "group_by", "BET"),
+                    "include_item_description": _query_bool(query_params, "include_item_description", False),
+                    "limit": _clamp_int(_query_value(query_params, "limit", "100"), 100, 1, 1000),
+                    "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+                    "from_timestamp": _query_float(query_params, "from"),
+                    "to_timestamp": _query_float(query_params, "to"),
+                }
+    elif normalized_operation in {"active_orders", "order_history"}:
+        kwargs.update(
+            {
+                "contract_id": _query_value(query_params, "contract_id") or None,
+                "limit": _clamp_int(_query_value(query_params, "limit", "50"), 50, 1, 1000),
+                "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+            }
+        )
+    if normalized_market_id not in {"kalshi", "limitless_exchange", "opinion_labs", "xmarket", "smarkets", "manifold", "sx_bet"} and normalized_operation == "order_history":
+        kwargs.update(
+            {
+                "status": _query_value(query_params, "status", "filled").lower(),
+                "from_timestamp": _query_float(query_params, "from"),
+                "to_timestamp": _query_float(query_params, "to"),
+            }
+        )
+    elif normalized_market_id not in {"kalshi", "limitless_exchange", "opinion_labs", "xmarket", "sx_bet"} and normalized_operation == "positions":
+        raw_limit = _query_value(query_params, "limit")
+        kwargs.update(
+            {
+                "event_ticker": _query_value(query_params, "event_ticker"),
+                "limit": _clamp_int(raw_limit, 100, 1, 1000) if raw_limit else None,
+                "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+                "sort": _query_value(query_params, "sort") or None,
+            }
+        )
+    elif normalized_market_id not in {"kalshi", "limitless_exchange", "opinion_labs"} and normalized_operation == "settled_positions":
+        kwargs.update(
+            {
+                "event_ticker": _query_value(query_params, "event_ticker"),
+                "limit": _clamp_int(_query_value(query_params, "limit", "1000"), 1000, 1, 1000),
+                "offset": _clamp_int(_query_value(query_params, "offset", "0"), 0, 0, 100000),
+                "sort": _query_value(query_params, "sort", "-date"),
+                "search": _query_value(query_params, "search"),
+                "category": _query_value(query_params, "category"),
+                "with_cash_outs": _query_bool(query_params, "with_cash_outs", False),
+            }
+        )
+    elif normalized_market_id not in {"kalshi", "limitless_exchange", "opinion_labs"} and normalized_operation == "volume_metrics":
+        kwargs.update(
+            {
+                "event_ticker": _query_value(query_params, "event_ticker"),
+                "start_timestamp": _query_float(query_params, "from"),
+                "end_timestamp": _query_float(query_params, "to"),
+            }
+        )
+
+    data = adapter.account_recovery(normalized_operation, **kwargs)
+    return {
+        "market_id": normalized_market_id,
+        "operation": normalized_operation,
+        "parameters": kwargs,
+        "data": data,
+    }
+
+
+def market_position_intent_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    payload: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Request an unsigned, reviewable position transaction from a venue."""
+
+    normalized_market_id = str(market_id or "").strip().lower()
+    require_market_enabled(cfg, normalized_market_id, "position transaction intent")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    operation = str(payload.get("operation") or "").strip().lower()
+    supported = tuple(str(value).strip().lower() for value in getattr(adapter, "position_intent_operations", ()))
+    if operation not in supported:
+        raise UnsupportedFeatureError(
+            normalized_market_id,
+            "position_intent",
+            f"{normalized_market_id} does not support position operation {operation or '<empty>'}. "
+            f"Supported operations: {', '.join(supported) or 'none'}.",
+        )
+    kwargs: Dict[str, Any] = {}
+    for key in ("market_id", "marketId", "amount", "network_id", "networkId", "event_id", "eventId", "outcome_index", "outcomeIndex"):
+        if key in payload:
+            kwargs[key] = payload.get(key)
+    data = adapter.position_intent(operation, **kwargs)
+    return {
+        "market_id": normalized_market_id,
+        "operation": operation,
+        "parameters": kwargs,
+        "data": data,
+    }
+
+
+def market_order_management_payload(
+    cfg: AppConfig,
+    registry: AdapterRegistry,
+    market_id: str,
+    operation: str,
+    payload: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Run one explicitly allow-listed live order-management mutation."""
+
+    normalized_market_id = str(market_id or "").strip().lower()
+    normalized_operation = str(operation or "").strip().lower()
+    require_market_enabled(cfg, normalized_market_id, "order management")
+    adapter = adapter_for_market(cfg, normalized_market_id, registry)
+    supported = tuple(str(value).strip().lower() for value in getattr(adapter, "order_management_operations", ()))
+    if normalized_operation not in supported:
+        raise UnsupportedFeatureError(
+            normalized_market_id,
+            "order_management",
+            f"{normalized_market_id} does not support order-management operation "
+            f"{normalized_operation or '<empty>'}. Supported operations: {', '.join(supported) or 'none'}.",
+        )
+    if not isinstance(payload, Mapping):
+        raise ValueError("Order-management payload must be a JSON object.")
+    if (
+        normalized_market_id == "kalshi"
+        and normalized_operation == "decrease_order"
+        and payload.get("reduce_by") not in (None, "")
+    ):
+        raise ValueError(
+            "Kalshi reduce_by is disabled through the web API because stale quantities can over-reduce a live order; use an explicit reduce_to value."
+        )
+    kwargs: Dict[str, Any] = {
+        "market_id": str(payload.get("market_id") or payload.get("exchange_market_id") or "").strip(),
+        "instructions": payload.get("instructions"),
+        "customer_ref": str(payload.get("customer_ref") or payload.get("customerRef") or "").strip(),
+        "market_version": payload.get("market_version", payload.get("marketVersion")),
+        "async_request": bool_from_setting(payload.get("async_request", payload.get("async")), False),
+        "confirm_global_cancel": str(payload.get("confirm_global_cancel") or "").strip(),
+    }
+    market_slug = str(payload.get("market_slug") or payload.get("marketSlug") or "").strip()
+    if market_slug:
+        kwargs["market_slug"] = market_slug
+    if normalized_market_id == "polymarket":
+        kwargs.update(
+            {
+                "contract_id": str(payload.get("contract_id") or "").strip(),
+                "asset_id": str(payload.get("asset_id") or "").strip(),
+            }
+        )
+    for key in (
+        "order_id",
+        "external_id",
+        "order_ids",
+        "token_id",
+        "token_ids",
+        "event_id",
+        "offer_id",
+        "offer_ids",
+        "event_ids",
+        "market_ids",
+        "runner_ids",
+        "current_odds",
+        "new_odds",
+        "current_stake",
+        "new_stake",
+        "ticker",
+        "side",
+        "price",
+        "count",
+        "client_order_id",
+        "updated_client_order_id",
+        "reduce_by",
+        "reduce_to",
+        "order_hash",
+        "order_hashes",
+        "trader",
+        "timestamp",
+        "nonce",
+        "signature",
+        "signature_type",
+        "network_id",
+        "allow_partial",
+        "cancel",
+        "place",
+        "subaccount",
+        "exchange_index",
+        "orders",
+        "signed_action",
+        "signed_cancel",
+        "confirm_order_management",
+        "manual_indicator",
+        "external_operator",
+    ):
+        if key in payload:
+            kwargs[key] = payload.get(key)
+    data = adapter.manage_orders(normalized_operation, **kwargs)
+    return {
+        "market_id": normalized_market_id,
+        "operation": normalized_operation,
+        "parameters": kwargs,
+        "data": data,
     }
 
 
@@ -3537,21 +5393,47 @@ class ReactGuiServer(ThreadingHTTPServer):
         adapter_registry: Optional[AdapterRegistry] = None,
         api_token: str = "",
         allowed_origins: Optional[Sequence[str]] = None,
+        max_http_workers: int = MAX_HTTP_WORKERS,
+        max_mutation_workers: Optional[int] = None,
+        mutation_lock_timeout_seconds: float = HTTP_MUTATION_LOCK_TIMEOUT_SECONDS,
     ) -> None:
         bind_host = str(server_address[0]).strip()
         is_loopback = is_loopback_host(bind_host)
         token = str(api_token or "").strip()
+        worker_limit = int(max_http_workers)
+        if worker_limit < 1:
+            raise ValueError("max_http_workers must be at least 1.")
+        reserved_target = min(HTTP_RESERVED_READ_WORKERS, max(1, worker_limit // 4))
+        default_mutation_limit = max(1, min(MAX_HTTP_MUTATION_WORKERS, worker_limit - reserved_target))
+        mutation_limit = default_mutation_limit if max_mutation_workers is None else int(max_mutation_workers)
+        if mutation_limit < 1:
+            raise ValueError("max_mutation_workers must be at least 1.")
+        if worker_limit > 1 and mutation_limit >= worker_limit:
+            raise ValueError("max_mutation_workers must reserve at least one HTTP worker for reads.")
+        if worker_limit == 1 and mutation_limit != 1:
+            raise ValueError("A one-worker server supports exactly one mutation worker and cannot reserve read capacity.")
+        mutation_lock_timeout = float(mutation_lock_timeout_seconds)
+        if mutation_lock_timeout <= 0:
+            raise ValueError("mutation_lock_timeout_seconds must be positive.")
         if not is_loopback and not token:
             raise ValueError("A non-loopback React GUI bind requires a non-empty API token.")
+        trusted_frontend_dir = _resolve_trusted_frontend_dir(frontend_dir)
+        if trusted_frontend_dir is None:
+            raise ValueError(
+                "The frontend directory must resolve beneath the deployment resource root. "
+                f"Allowed root: {_RESOURCE_ROOT}"
+            )
+        runtime_identity = capture_runtime_identity(PROJECT_ROOT, trusted_frontend_dir)
         super().__init__(server_address, request_handler_class)
         self.bind_host = bind_host
         self.is_loopback = is_loopback
         self.api_token = token
         self.config_path = config_path
-        self.frontend_dir = frontend_dir
+        self.frontend_dir = trusted_frontend_dir
+        self.runtime_identity = runtime_identity
         # Static files are a deployment-time input. Build the immutable catalog
         # before serving requests so URL parsing never performs filesystem work.
-        self.static_files = ReactGuiHandler._static_file_catalog()
+        self.static_files = ReactGuiHandler._static_file_catalog(self.frontend_dir)
         self.adapter_registry = adapter_registry or build_default_registry()
         default_origins = {
             f"http://{self.bind_host}:{self.server_address[1]}",
@@ -3573,8 +5455,145 @@ class ReactGuiServer(ThreadingHTTPServer):
             "last_polled_at": None,
             "last_message": "Not polled yet.",
         }
-        self.http_metrics = HttpRequestMetrics()
+        self.http_metrics = HttpRequestMetrics(worker_limit, mutation_limit, max(0, worker_limit - mutation_limit))
         self.auth_failure_limiter = AuthFailureLimiter()
+        self.max_http_workers = worker_limit
+        self.max_mutation_workers = mutation_limit
+        self.reserved_read_workers = max(0, worker_limit - mutation_limit)
+        self.mutation_lock_timeout_seconds = mutation_lock_timeout
+        self._worker_slots = threading.BoundedSemaphore(worker_limit)
+        self._mutation_slots = threading.BoundedSemaphore(mutation_limit)
+        self.mutation_lock = threading.RLock()
+        self._draining = threading.Event()
+        self._drain_condition = threading.Condition()
+        self._admitted_mutations = 0
+        self._readiness_cache_lock = threading.Lock()
+        self._readiness_cache_at = 0.0
+        self._readiness_cache: Dict[str, Any] = {}
+
+    def try_admit_mutation(self) -> bool:
+        """Bound mutation body readers and lock waiters below the HTTP worker pool."""
+        if self._draining.is_set():
+            return False
+        if not self._mutation_slots.acquire(blocking=False):
+            self.http_metrics.record_mutation_admission_rejection()
+            return False
+        with self._drain_condition:
+            if self._draining.is_set():
+                self._mutation_slots.release()
+                return False
+            self._admitted_mutations += 1
+        self.http_metrics.mutation_admitted()
+        return True
+
+    def finish_mutation_admission(self) -> None:
+        self.http_metrics.mutation_finished()
+        with self._drain_condition:
+            self._admitted_mutations = max(0, self._admitted_mutations - 1)
+            if self._admitted_mutations == 0:
+                self._drain_condition.notify_all()
+        self._mutation_slots.release()
+
+    @property
+    def is_draining(self) -> bool:
+        return self._draining.is_set()
+
+    def begin_drain(self) -> bool:
+        """Stop admitting mutations and report whether this call began the drain."""
+
+        with self._drain_condition:
+            already_draining = self._draining.is_set()
+            self._draining.set()
+            return not already_draining
+
+    def wait_for_mutation_drain(self, timeout_seconds: float) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        with self._drain_condition:
+            while self._admitted_mutations:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._drain_condition.wait(timeout=remaining)
+            return True
+
+    def readiness_snapshot(self) -> Dict[str, Any]:
+        """Return cached local probes combined with current admission counters."""
+        now = time.monotonic()
+        with self._readiness_cache_lock:
+            if not self._readiness_cache or now - self._readiness_cache_at >= LOCAL_READINESS_CACHE_SECONDS:
+                self._readiness_cache = local_resource_readiness(self.config_path, self.frontend_dir)
+                self._readiness_cache_at = now
+            resources = dict(self._readiness_cache)
+        metrics = self.http_metrics.snapshot()
+        return runtime_readiness_payload(
+            resources,
+            {
+                **metrics,
+                "max_http_workers": self.max_http_workers,
+                "max_mutation_workers": self.max_mutation_workers,
+                "reserved_read_workers": self.reserved_read_workers,
+                "mutation_lock_timeout_seconds": self.mutation_lock_timeout_seconds,
+                "draining": self.is_draining,
+            },
+            self.wallet_polling,
+        )
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        """Admit at most ``max_http_workers`` connections before creating threads."""
+        if not self._worker_slots.acquire(blocking=False):
+            self.http_metrics.record_overload_rejection()
+            self._reject_overloaded_request(request)
+            return
+        self.http_metrics.request_started()
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.http_metrics.request_finished()
+            self._worker_slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.http_metrics.request_finished()
+            self._worker_slots.release()
+
+    def _reject_overloaded_request(self, request: Any) -> None:
+        request_id = secrets.token_hex(12)
+        data = json.dumps(
+            api_error_payload(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "server_overloaded",
+                "The HTTP server has reached its active request limit; retry shortly.",
+                {"retry_after_seconds": HTTP_OVERLOAD_RETRY_AFTER_SECONDS},
+            ),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        response = (
+            b"HTTP/1.1 503 Service Unavailable\r\n"
+            b"Content-Type: application/json; charset=utf-8\r\n"
+            b"Cache-Control: no-store\r\n"
+            b"Connection: close\r\n"
+            b"Retry-After: "
+            + str(HTTP_OVERLOAD_RETRY_AFTER_SECONDS).encode("ascii")
+            + b"\r\nX-Content-Type-Options: nosniff\r\n"
+            + b"X-Frame-Options: DENY\r\n"
+            + b"X-Request-ID: "
+            + request_id.encode("ascii")
+            + b"\r\nContent-Length: "
+            + str(len(data)).encode("ascii")
+            + b"\r\n\r\n"
+            + data
+        )
+        try:
+            request.settimeout(float(HTTP_OVERLOAD_RETRY_AFTER_SECONDS))
+            request.sendall(response)
+        except OSError:
+            pass
+        finally:
+            self.shutdown_request(request)
 
 
 class ReactGuiHandler(BaseHTTPRequestHandler):
@@ -3667,17 +5686,17 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
     def do_PATCH(self) -> None:
         if not self._require_authorized_request():
             return
-        self._handle_mutation("PATCH")
+        self._handle_admitted_mutation("PATCH")
 
     def do_POST(self) -> None:
         if not self._require_authorized_request():
             return
-        self._handle_mutation("POST")
+        self._handle_admitted_mutation("POST")
 
     def do_DELETE(self) -> None:
         if not self._require_authorized_request():
             return
-        self._handle_mutation("DELETE")
+        self._handle_admitted_mutation("DELETE")
 
     def log_message(self, fmt: str, *args: Any) -> None:
         # handle_one_request emits a structured, query-string-free event instead.
@@ -3727,11 +5746,21 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
 
     def _handle_api_get(self, path: str, query: str = "") -> None:
         try:
-            cfg = self._load_config()
             query_params = parse_qs(query, keep_blank_values=True)
             if path == "/api/health":
-                self._send_json(HTTPStatus.OK, health_payload(self.app_server.config_path, self.app_server.frontend_dir))
+                readiness = self.app_server.readiness_snapshot()
+                self._send_json(
+                    HTTPStatus.OK,
+                    health_payload(
+                        self.app_server.config_path,
+                        self.app_server.frontend_dir,
+                        self.app_server.runtime_identity,
+                        self.app_server.max_http_workers,
+                        readiness,
+                    ),
+                )
                 return
+            cfg = self._load_config()
             if path == "/api/state":
                 self._send_json(
                     HTTPStatus.OK,
@@ -3744,14 +5773,82 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                         self.app_server.alert_price_state,
                         self.app_server.wallet_polling,
                         self.app_server.wallet_recent_activity,
+                        self.app_server.runtime_identity,
+                        self.app_server.max_http_workers,
+                        self.app_server.readiness_snapshot(),
                     ),
                 )
                 return
             if path == "/api/config":
                 self._send_json(HTTPStatus.OK, config_payload(cfg))
                 return
+            if path == "/api/mutations":
+                self._send_json(HTTPStatus.OK, mutation_journal_payload(cfg))
+                return
             if path == "/api/markets":
                 self._send_json(HTTPStatus.OK, markets_payload(cfg, self.app_server.adapter_registry))
+                return
+            if path == "/api/markets/support-matrix":
+                self._send_json(HTTPStatus.OK, market_support_payload(cfg, self.app_server.adapter_registry))
+                return
+            market_route = path.strip("/").split("/")
+            if len(market_route) == 4 and market_route[:2] == ["api", "markets"]:
+                market_id = unquote(market_route[2])
+                if market_route[3] == "support":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_support_payload(cfg, self.app_server.adapter_registry, market_id),
+                    )
+                    return
+                if market_route[3] == "events":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_events_payload(cfg, self.app_server.adapter_registry, market_id, query_params),
+                    )
+                    return
+                if market_route[3] == "contracts":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_contracts_payload(cfg, self.app_server.adapter_registry, market_id, query_params),
+                    )
+                    return
+                if market_route[3] == "price":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_price_payload(cfg, self.app_server.adapter_registry, market_id, query_params),
+                    )
+                    return
+                if market_route[3] == "orderbook":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_orderbook_payload(cfg, self.app_server.adapter_registry, market_id, query_params),
+                    )
+                    return
+                if market_route[3] == "trades":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_trades_payload(cfg, self.app_server.adapter_registry, market_id, query_params),
+                    )
+                    return
+                if market_route[3] == "candles":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_candles_payload(cfg, self.app_server.adapter_registry, market_id, query_params),
+                    )
+                    return
+            if len(market_route) == 5 and market_route[:2] == ["api", "markets"] and market_route[3] == "account":
+                market_id = unquote(market_route[2])
+                operation = unquote(market_route[4])
+                self._send_json(
+                    HTTPStatus.OK,
+                    market_account_payload(
+                        cfg,
+                        self.app_server.adapter_registry,
+                        market_id,
+                        operation,
+                        query_params,
+                    ),
+                )
                 return
             if path == "/api/alerts":
                 self._send_json(HTTPStatus.OK, alerts_payload(cfg, self.app_server.adapter_registry, self.app_server.alert_price_state))
@@ -4032,16 +6129,356 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             print(f"[web-gui] internal error while handling GET {path}: {type(exc).__name__}")
             self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error", "Internal server error.")
 
-    def _handle_mutation(self, method: str) -> None:
-        parsed = urlparse(self.path)
-        path = parsed.path
+    def _handle_admitted_mutation(self, method: str) -> None:
+        """Bound body parsing and lock wait without weakening mutation serialization."""
+        if not self.app_server.try_admit_mutation():
+            _discard_available_request_body(self)
+            draining = self.app_server.is_draining
+            self._send_error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "server_draining" if draining else "mutation_admission_saturated",
+                (
+                    "The server is draining and is not accepting new mutations."
+                    if draining
+                    else "The mutation admission limit is saturated; read and health capacity remains reserved."
+                ),
+                {"retry_after_seconds": HTTP_OVERLOAD_RETRY_AFTER_SECONDS},
+                retry_after_seconds=HTTP_OVERLOAD_RETRY_AFTER_SECONDS,
+            )
+            return
+        try:
+            parsed = urlparse(self.path)
+            path = parsed.path
+            if not path.startswith("/api/"):
+                self._send_error(HTTPStatus.NOT_FOUND, "not_found", "Unknown route.")
+                return
+            try:
+                payload = _read_json_body(self)
+                idempotency_key = _validated_idempotency_key(self.headers, payload)
+                specialized_idempotency = method == "POST" and path in IDEMPOTENT_MUTATION_ROUTES
+                durable_mutation = _is_general_durable_mutation(method, path)
+                if specialized_idempotency and not idempotency_key:
+                    raise ValueError("Idempotency-Key is required for this durable create route.")
+                if durable_mutation and not str(self.headers.get("Idempotency-Key") or ""):
+                    raise ValueError("Idempotency-Key header is required for this durable mutation route.")
+                if idempotency_key and not (specialized_idempotency or durable_mutation):
+                    raise ValueError("Idempotency-Key is not supported for this mutation route.")
+            except json.JSONDecodeError:
+                self._send_error(HTTPStatus.BAD_REQUEST, "invalid_json", "Invalid JSON request body.")
+                return
+            except ValueError as exc:
+                self._send_error(HTTPStatus.BAD_REQUEST, "validation_error", str(exc))
+                return
+
+            acquired = self.app_server.mutation_lock.acquire(
+                timeout=self.app_server.mutation_lock_timeout_seconds
+            )
+            if not acquired:
+                self.app_server.http_metrics.record_mutation_lock_timeout()
+                self._send_error(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    "mutation_busy",
+                    "Another mutation is still running; retry rather than waiting indefinitely.",
+                    {"retry_after_seconds": HTTP_OVERLOAD_RETRY_AFTER_SECONDS},
+                    retry_after_seconds=HTTP_OVERLOAD_RETRY_AFTER_SECONDS,
+                )
+                return
+            self.app_server.http_metrics.mutation_started()
+            try:
+                self._handle_mutation(method, path, payload, idempotency_key)
+            finally:
+                self.app_server.http_metrics.mutation_stopped()
+                self.app_server.mutation_lock.release()
+        finally:
+            self.app_server.finish_mutation_admission()
+
+    def _prepare_general_idempotent_mutation(
+        self,
+        cfg: AppConfig,
+        method: str,
+        path: str,
+        payload: Mapping[str, Any],
+        idempotency_key: str,
+    ) -> tuple[Optional[MutationJournalEntry], bool]:
+        """Resolve replay/conflict state and persist the live dispatch barrier."""
+
+        live = _is_live_order_management_route(method, path)
+        route_parts = str(path or "").strip("/").split("/")
+        if (
+            live
+            and len(route_parts) == 5
+            and unquote(route_parts[2]).strip().lower() == "kalshi"
+            and unquote(route_parts[4]).strip().lower() == "decrease_order"
+            and payload.get("reduce_by") not in (None, "")
+        ):
+            raise ValueError(
+                "Kalshi reduce_by is disabled through the web API because stale quantities can over-reduce a live order; use an explicit reduce_to value."
+            )
+        if live and len(route_parts) == 5:
+            market_id = unquote(route_parts[2]).strip().lower()
+            operation = unquote(route_parts[4]).strip().lower()
+            require_market_enabled(cfg, market_id, "order management")
+            adapter = adapter_for_market(cfg, market_id, self.app_server.adapter_registry)
+            supported = tuple(
+                str(value).strip().lower()
+                for value in getattr(adapter, "order_management_operations", ())
+            )
+            if operation not in supported:
+                raise UnsupportedFeatureError(
+                    market_id,
+                    "order_management",
+                    f"{market_id} does not support order-management operation "
+                    f"{operation or '<empty>'}. Supported operations: {', '.join(supported) or 'none'}.",
+                )
+        entry = _mutation_journal_entry(cfg, idempotency_key)
+        if entry is not None:
+            _assert_mutation_request_matches(entry, method, path, payload)
+            if entry.state == "completed":
+                self._send_json(entry.response_status or HTTPStatus.OK, dict(entry.response))
+                return None, True
+            if entry.state == "rejected":
+                if (
+                    entry.outcome_code == "pre_dispatch_validation_failed"
+                    and entry.response_status
+                    and isinstance(entry.response, dict)
+                ):
+                    self._send_json(entry.response_status, dict(entry.response))
+                    return None, True
+                self._send_error(
+                    HTTPStatus.CONFLICT,
+                    "mutation_rejected_after_reconciliation",
+                    "The reconciled mutation was discarded and cannot be retried with this Idempotency-Key.",
+                    {"mutation_id": entry.id, "state": entry.state},
+                )
+                return None, True
+            if live and entry.state == "retryable" and entry.replay_authorized_at:
+                entry.state = "pending"
+                entry.updated_at = int(time.time())
+                entry.replay_authorized_at = 0
+                entry.outcome_code = "manual_retry_started"
+                entry.outcome_message = "The operator-authorized retry is in progress."
+                self._save_config(cfg)
+                return entry, False
+            self._send_error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "live_mutation_reconciliation_required" if entry.live else "mutation_reconciliation_required",
+                (
+                    "The previous live dispatch outcome is unresolved; inspect venue history and reconcile it before retrying."
+                    if entry.live
+                    else "The previous durable mutation outcome is unresolved and cannot be run again automatically."
+                ),
+                {
+                    "mutation_id": entry.id,
+                    "state": entry.state,
+                    "reconciliation_route": "/api/mutations/reconcile" if entry.live else None,
+                },
+                retry_after_seconds=HTTP_OVERLOAD_RETRY_AFTER_SECONDS,
+            )
+            return None, True
+
+        entry = _new_mutation_journal_entry(
+            idempotency_key,
+            method,
+            path,
+            payload,
+            live=live,
+        )
+        if live:
+            cfg.append_mutation_journal(entry)
+            self._save_config(cfg)
+        return entry, False
+
+    def _commit_local_idempotent_mutation(
+        self,
+        cfg: AppConfig,
+        entry: MutationJournalEntry,
+        response: Mapping[str, Any],
+        *,
+        status: int = HTTPStatus.OK,
+        preserve_response_shape: bool = False,
+        client_response: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        stored = _stored_mutation_result(response, preserve_shape=preserve_response_shape)
+        entry.state = "completed"
+        entry.response_status = int(status)
+        entry.response = stored
+        entry.outcome_code = "committed"
+        entry.outcome_message = "The local mutation and replay result were committed atomically."
+        entry.updated_at = int(time.time())
+        cfg.append_mutation_journal(entry)
+        self._save_config(cfg)
+        self._send_json(
+            status,
+            _client_mutation_result(client_response) if client_response is not None else stored,
+        )
+
+    def _execute_live_order_management(
+        self,
+        cfg: AppConfig,
+        entry: MutationJournalEntry,
+        market_id: str,
+        operation: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        """Execute once behind a durable pending barrier; never auto-retry ambiguity."""
+
+        try:
+            result = market_order_management_payload(
+                cfg,
+                self.app_server.adapter_registry,
+                market_id,
+                operation,
+                payload,
+            )
+        except (MarketConfigurationError, UnsupportedFeatureError) as exc:
+            # The supported live adapters use these explicit exception types
+            # for validation that completes before their transport call.  Keep
+            # generic exceptions (including a plain ValueError from a client or
+            # response parser) ambiguous: once adapter code has been entered,
+            # the caller cannot prove that the venue was not reached.
+            rejection = api_error_payload(
+                HTTPStatus.BAD_REQUEST,
+                "validation_error",
+                str(exc),
+                {"mutation_id": entry.id, "state": "rejected"},
+            )
+            entry.state = "rejected"
+            entry.response_status = HTTPStatus.BAD_REQUEST
+            entry.response = rejection
+            entry.outcome_code = "pre_dispatch_validation_failed"
+            entry.outcome_message = "Local validation failed before the live adapter was dispatched."
+            entry.updated_at = int(time.time())
+            try:
+                self._save_config(cfg)
+            except Exception as durability_exc:
+                # The durable pending barrier may still be on disk.  Keep the
+                # response fail-closed until that disposition can be saved.
+                print(
+                    "[web-gui] pre-dispatch rejection could not be durably updated: "
+                    f"{type(durability_exc).__name__}"
+                )
+                self._send_error(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    "live_mutation_durability_uncertain",
+                    "Local validation failed, but its replay disposition was not durably committed. Reconcile before retrying.",
+                    {
+                        "mutation_id": entry.id,
+                        "state": "pending",
+                        "reconciliation_route": "/api/mutations/reconcile",
+                    },
+                    retry_after_seconds=HTTP_OVERLOAD_RETRY_AFTER_SECONDS,
+                )
+                return
+            self._send_json(HTTPStatus.BAD_REQUEST, rejection)
+            return
+        except Exception as exc:
+            entry.state = "ambiguous"
+            entry.response_status = HTTPStatus.SERVICE_UNAVAILABLE
+            entry.response = {}
+            entry.outcome_code = "live_dispatch_outcome_unknown"
+            entry.outcome_message = (
+                "The live adapter returned without a provable non-dispatch outcome; venue reconciliation is required."
+            )
+            entry.updated_at = int(time.time())
+            try:
+                self._save_config(cfg)
+            except Exception as durability_exc:
+                print(
+                    "[web-gui] live mutation ambiguity could not be durably updated: "
+                    f"{type(durability_exc).__name__}"
+                )
+            print(
+                "[web-gui] live order-management outcome requires reconciliation: "
+                f"{type(exc).__name__}"
+            )
+            self._send_error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "live_mutation_outcome_ambiguous",
+                "The live mutation may have reached the venue. It will not be retried automatically; reconcile venue history first.",
+                {
+                    "mutation_id": entry.id,
+                    "state": "ambiguous",
+                    "reconciliation_route": "/api/mutations/reconcile",
+                },
+                retry_after_seconds=HTTP_OVERLOAD_RETRY_AFTER_SECONDS,
+            )
+            return
+
+        stored = _stored_mutation_result(result)
+        entry.state = "completed"
+        entry.response_status = HTTPStatus.OK
+        entry.response = stored
+        entry.outcome_code = "live_dispatch_completed"
+        entry.outcome_message = "The live mutation result was durably recorded."
+        entry.updated_at = int(time.time())
+        try:
+            self._save_config(cfg)
+        except Exception as exc:
+            # The on-disk pending barrier remains fail-closed.  Do not expose
+            # success when its replay disposition was not durably committed.
+            print(f"[web-gui] live mutation result durability is uncertain: {type(exc).__name__}")
+            self._send_error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "live_mutation_durability_uncertain",
+                "The venue returned a result, but its replay record was not durably committed. Reconcile before retrying.",
+                {
+                    "mutation_id": entry.id,
+                    "state": "pending",
+                    "reconciliation_route": "/api/mutations/reconcile",
+                },
+                retry_after_seconds=HTTP_OVERLOAD_RETRY_AFTER_SECONDS,
+            )
+            return
+        self._send_json(HTTPStatus.OK, stored)
+
+    def _handle_mutation(
+        self,
+        method: str,
+        path: str,
+        payload: Dict[str, Any],
+        idempotency_key: str = "",
+    ) -> None:
         if not path.startswith("/api/"):
             self._send_error(HTTPStatus.NOT_FOUND, "not_found", "Unknown route.")
             return
 
         try:
-            payload = _read_json_body(self)
             cfg = self._load_config()
+            journal_entry: Optional[MutationJournalEntry] = None
+            if _is_general_durable_mutation(method, path):
+                journal_entry, handled = self._prepare_general_idempotent_mutation(
+                    cfg,
+                    method,
+                    path,
+                    payload,
+                    idempotency_key,
+                )
+                if handled:
+                    return
+                if journal_entry is None:
+                    raise RuntimeError("Durable mutation journal preparation failed.")
+            if method == "POST":
+                order_route = path.strip("/").split("/")
+                if len(order_route) == 4 and order_route[:2] == ["api", "markets"] and order_route[3] == "positions":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        market_position_intent_payload(
+                            cfg,
+                            self.app_server.adapter_registry,
+                            unquote(order_route[2]),
+                            payload,
+                        ),
+                    )
+                    return
+                if len(order_route) == 5 and order_route[:2] == ["api", "markets"] and order_route[3] == "orders":
+                    self._execute_live_order_management(
+                        cfg,
+                        journal_entry,
+                        unquote(order_route[2]),
+                        unquote(order_route[4]),
+                        payload,
+                    )
+                    return
             if method == "PATCH" and path == "/api/config":
                 apply_config_patch(cfg, payload)
                 self._save_config(cfg)
@@ -4053,6 +6490,34 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 self._save_config(cfg)
                 self._send_json(HTTPStatus.OK, markets_payload(cfg, self.app_server.adapter_registry))
                 return
+            if method == "POST" and path == "/api/mutations/reconcile":
+                if str(payload.get("confirm_reconciliation") or "").strip() != LIVE_MUTATION_RECONCILIATION_CONFIRMATION:
+                    raise ValueError(
+                        "Live mutation reconciliation requires exact confirmation text "
+                        f"{LIVE_MUTATION_RECONCILIATION_CONFIRMATION}."
+                    )
+                raw_response = payload.get("response")
+                if raw_response is not None and not isinstance(raw_response, dict):
+                    raise ValueError("response must be a JSON object when supplied.")
+                entry = cfg.reconcile_ambiguous_mutation(
+                    str(payload.get("mutation_id") or ""),
+                    str(payload.get("resolution") or ""),
+                    _stored_mutation_result(raw_response) if isinstance(raw_response, dict) else None,
+                )
+                self._save_config(cfg)
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "reconciled": {
+                            "id": entry.id,
+                            "state": entry.state,
+                            "outcome_code": entry.outcome_code,
+                            "updated_at": entry.updated_at,
+                        },
+                        **mutation_journal_payload(cfg),
+                    },
+                )
+                return
             if method == "POST" and path == "/api/polymarket/users/mdd/cache/purge":
                 self._send_json(HTTPStatus.OK, polymarket_mdd_cache_purge_payload(payload))
                 return
@@ -4061,13 +6526,32 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, polymarket_mdd_cache_purge_payload({"key": cache_key}))
                 return
             if method == "POST" and path == "/api/polymarket/live-validation/reports":
-                self._send_json(HTTPStatus.OK, polymarket_live_validation_report_store_payload(cfg, payload))
+                self._send_json(
+                    HTTPStatus.OK,
+                    polymarket_live_validation_report_store_payload(
+                        cfg,
+                        payload,
+                        idempotency_key=idempotency_key,
+                    ),
+                )
                 return
             if method == "POST" and path == "/api/polymarket/live-validation/decisions":
-                self._send_json(HTTPStatus.OK, polymarket_live_validation_decision_store_payload(payload))
+                self._send_json(
+                    HTTPStatus.OK,
+                    polymarket_live_validation_decision_store_payload(
+                        payload,
+                        idempotency_key=idempotency_key,
+                    ),
+                )
                 return
             if method == "POST" and path == "/api/polymarket/live-validation/promotion-proposal/snapshots":
-                self._send_json(HTTPStatus.OK, polymarket_live_validation_promotion_proposal_snapshot_store_payload(payload))
+                self._send_json(
+                    HTTPStatus.OK,
+                    polymarket_live_validation_promotion_proposal_snapshot_store_payload(
+                        payload,
+                        idempotency_key=idempotency_key,
+                    ),
+                )
                 return
             if method == "DELETE" and path.startswith("/api/polymarket/live-validation/promotion-proposal/snapshots/"):
                 snapshot_key = unquote(path.rsplit("/", 1)[-1])
@@ -4083,11 +6567,12 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             if method == "POST" and path == "/api/alerts":
                 alert = alert_from_payload(cfg, self.app_server.adapter_registry, payload)
                 cfg.alerts.append(alert)
-                self._save_config(cfg)
-                self._send_json(
-                    HTTPStatus.OK,
-                    alerts_payload(cfg, self.app_server.adapter_registry, self.app_server.alert_price_state),
+                response = alerts_payload(
+                    cfg,
+                    self.app_server.adapter_registry,
+                    self.app_server.alert_price_state,
                 )
+                self._commit_local_idempotent_mutation(cfg, journal_entry, response)
                 return
             if method == "POST" and path == "/api/alerts/refresh":
                 result = refresh_all_alert_prices(cfg, self.app_server.adapter_registry, self.app_server.alert_price_state)
@@ -4148,11 +6633,12 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 return
             if method == "POST" and path == "/api/wallets":
                 add_wallet_watch(cfg, payload)
-                self._save_config(cfg)
-                self._send_json(
-                    HTTPStatus.OK,
-                    wallets_payload(cfg, self.app_server.wallet_polling, self.app_server.wallet_recent_activity),
+                response = wallets_payload(
+                    cfg,
+                    self.app_server.wallet_polling,
+                    self.app_server.wallet_recent_activity,
                 )
+                self._commit_local_idempotent_mutation(cfg, journal_entry, response)
                 return
             if method == "PATCH" and path == "/api/wallets/polling":
                 interval = optional_positive_float(payload.get("poll_interval_seconds"), "Poll interval")
@@ -4232,17 +6718,20 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 return
             if method == "POST" and path == "/api/paper/orders":
                 result = submit_paper_order(cfg, self.app_server.adapter_registry, payload)
-                self._save_config(cfg)
                 self.app_server.paper_position_marks = _paper_marks_for_rows(
                     self.app_server.paper_position_marks,
                     paper_position_rows(cfg.paper_trades),
                 )
-                self._send_json(
-                    HTTPStatus.OK,
-                    {
-                        **result,
-                        "paper": paper_payload(cfg, self.app_server.paper_position_marks),
-                    },
+                response = {
+                    **result,
+                    "paper": paper_payload(cfg, self.app_server.paper_position_marks),
+                }
+                self._commit_local_idempotent_mutation(
+                    cfg,
+                    journal_entry,
+                    response,
+                    preserve_response_shape=True,
+                    client_response=response,
                 )
                 return
             if method == "POST" and path == "/api/paper/history/use":
@@ -4336,6 +6825,34 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 {"schema_validation": exc.validation},
             )
             return
+        except ConfigConflictError:
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "config_conflict",
+                "Configuration changed in another process. Reload state and retry the mutation.",
+            )
+            return
+        except IdempotencyConflictError as exc:
+            self._send_error(
+                HTTPStatus.CONFLICT,
+                "idempotency_conflict",
+                str(exc),
+            )
+            return
+        except LiveValidationStoreDurabilityError:
+            self._send_error(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "live_validation_store_durability_uncertain",
+                "The evidence record may already be committed but durable flush confirmation failed. "
+                "Retry this exact request with the same Idempotency-Key.",
+                {
+                    "committed": True,
+                    "retryable": True,
+                    "retry_after_seconds": HTTP_OVERLOAD_RETRY_AFTER_SECONDS,
+                },
+                retry_after_seconds=HTTP_OVERLOAD_RETRY_AFTER_SECONDS,
+            )
+            return
         except ValueError as exc:
             self._send_error(HTTPStatus.BAD_REQUEST, "validation_error", str(exc))
             return
@@ -4374,14 +6891,20 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             relative_path = target.name
 
         content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        if target.stat().st_size > MAX_HTTP_RESPONSE_BYTES:
+            self._send_response_too_large()
+            return
         data = target.read_bytes()
+        if len(data) > MAX_HTTP_RESPONSE_BYTES:
+            self._send_response_too_large()
+            return
         self.send_response(HTTPStatus.OK)
         self._send_cors_headers()
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", static_cache_control(relative_path))
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        self._write_response_body(data)
 
     def _resolve_static_path(self, static_files: Mapping[str, Path], raw_path: str) -> Optional[Path]:
         path = unquote(raw_path.split("?", 1)[0])
@@ -4410,47 +6933,75 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         return static_files.get(relative_path)
 
     @staticmethod
-    def _static_file_catalog() -> Dict[str, Path]:
-        """Return the supported static files beneath a trusted build directory."""
+    def _static_file_catalog(frontend_dir: Optional[Path] = None) -> Dict[str, Path]:
+        """Return supported static files beneath a trusted deployment root."""
         try:
-            root = DEFAULT_FRONTEND_DIR.resolve()
-        except (OSError, RuntimeError, ValueError):
+            configured = frontend_dir if frontend_dir is not None else DEFAULT_FRONTEND_DIR
+            normalized_root = os.path.normcase(
+                os.path.realpath(os.path.expanduser(os.fspath(configured)))
+            )
+            normalized_default = os.path.normcase(
+                os.path.realpath(os.path.expanduser(os.fspath(DEFAULT_FRONTEND_DIR)))
+            )
+            normalized_allowed = os.path.normcase(os.path.realpath(os.fspath(_RESOURCE_ROOT)))
+            allowed_prefix = normalized_allowed.rstrip(os.sep) + os.sep
+            if normalized_root != normalized_default and not normalized_root.startswith(allowed_prefix):
+                return {}
+            # The canonical root is normalized and constrained immediately
+            # above, before any filesystem lookup.
+            root = Path(normalized_root)
+        except (OSError, RuntimeError, ValueError, TypeError):
             return {}
         if not root.is_dir():
             return {}
 
         catalog: Dict[str, Path] = {}
+        try:
+            index_target = (root / "index.html").resolve()
+            index_target.relative_to(root)
+            if index_target.is_file():
+                catalog["index.html"] = index_target
+        except (OSError, RuntimeError, ValueError):
+            pass
 
-        def add_file(relative_path: str, candidate: Path) -> None:
-            try:
-                target = candidate.resolve()
-                target.relative_to(root)
-            except (OSError, RuntimeError, ValueError):
-                return
-            if target.is_file():
-                catalog[relative_path] = target
-
-        add_file("index.html", root / "index.html")
         try:
             root_entries = tuple(root.iterdir())
         except OSError:
             return catalog
         for candidate in root_entries:
             if candidate.name != "index.html" and STATIC_FRONTEND_FILENAME_RE.fullmatch(candidate.name):
-                add_file(candidate.name, candidate)
+                try:
+                    target = candidate.resolve()
+                    target.relative_to(root)
+                    if target.is_file():
+                        catalog[candidate.name] = target
+                except (OSError, RuntimeError, ValueError):
+                    continue
 
         assets_dir = root / "assets"
         try:
-            asset_entries = tuple(assets_dir.iterdir()) if assets_dir.is_dir() else ()
+            asset_entries = (
+                tuple(assets_dir.iterdir()) if assets_dir.is_dir() else ()
+            )
         except OSError:
             return catalog
         for candidate in asset_entries:
             if STATIC_FRONTEND_FILENAME_RE.fullmatch(candidate.name):
-                add_file(f"assets/{candidate.name}", candidate)
+                try:
+                    target = candidate.resolve()
+                    target.relative_to(root)
+                    if target.is_file():
+                        catalog[f"assets/{candidate.name}"] = target
+                except (OSError, RuntimeError, ValueError):
+                    continue
         return catalog
 
     def _send_json(self, status: int, payload: Dict[str, Any], *, retry_after_seconds: Optional[int] = None) -> None:
-        data = _json_bytes(payload)
+        try:
+            data = _json_bytes(payload)
+        except HttpResponseTooLargeError:
+            self._send_response_too_large()
+            return
         self.send_response(status)
         self._send_cors_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -4460,12 +7011,15 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(data)
-        self.wfile.flush()
+        self._write_response_body(data)
         self.close_connection = True
 
     def _send_text(self, status: int, text: str, *, content_type: str, filename: Optional[str] = None) -> None:
-        data = str(text).encode("utf-8")
+        try:
+            data = _utf8_bytes(text)
+        except HttpResponseTooLargeError:
+            self._send_response_too_large()
+            return
         self.send_response(status)
         self._send_cors_headers()
         self.send_header("Content-Type", content_type)
@@ -4476,9 +7030,50 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(data)
-        self.wfile.flush()
+        self._write_response_body(data)
         self.close_connection = True
+
+    def _send_response_too_large(self) -> None:
+        self.app_server.http_metrics.record_response_too_large()
+        data = json.dumps(
+            api_error_payload(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "response_too_large",
+                "The server refused to send a response larger than its configured byte limit.",
+                {"max_response_bytes": MAX_HTTP_RESPONSE_BYTES},
+            ),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.send_response(HTTPStatus.INTERNAL_SERVER_ERROR)
+        self._send_cors_headers()
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self._write_response_body(data)
+        self.close_connection = True
+
+    def _write_response_body(self, data: bytes) -> None:
+        """Write large responses in bounded chunks and verify every byte is sent.
+
+        Some Windows loopback/socket combinations can return from a single
+        large buffered write after only 128 KiB while the handler proceeds to
+        close the connection.  Chunking keeps the HTTP ``Content-Length``
+        contract intact for the support matrix, bundled assets, and exports.
+        """
+
+        view = memoryview(data)
+        while view:
+            chunk = view[:HTTP_RESPONSE_CHUNK_BYTES]
+            written = self.wfile.write(chunk)
+            if written is None:
+                written = len(chunk)
+            if written <= 0:
+                raise ConnectionError("HTTP response writer made no progress.")
+            view = view[written:]
+        self.wfile.flush()
 
     def _send_error(
         self,
@@ -4501,7 +7096,10 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", _safe_http_header_value(origin))
             self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, PATCH, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Market-Sentinel-Token")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, Authorization, X-Market-Sentinel-Token, Idempotency-Key",
+        )
         self.send_header("Access-Control-Expose-Headers", "X-Request-ID")
 
 
@@ -4515,6 +7113,30 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
+def _resolve_trusted_frontend_dir(frontend_dir: Path) -> Optional[Path]:
+    """Normalize a deployment frontend path and keep it inside the bundle root."""
+    try:
+        # Normalize before constructing a filesystem path and compare the
+        # canonical strings with the trusted deployment root. This follows the
+        # CodeQL containment pattern and also handles macOS /var symlinks.
+        configured_root = os.path.realpath(os.path.expanduser(os.fspath(frontend_dir)))
+        default_root = os.path.realpath(os.path.expanduser(os.fspath(DEFAULT_FRONTEND_DIR)))
+        # The module-level default is a deployment resource, not request data.
+        # Keep this fast path so packaged builds and test-configured defaults
+        # do not need to widen the trusted-root boundary.
+        if os.path.normcase(configured_root) == os.path.normcase(default_root):
+            return Path(configured_root)
+        allowed_root = os.path.realpath(os.fspath(_RESOURCE_ROOT))
+        normalized_root = os.path.normcase(configured_root)
+        normalized_allowed_root = os.path.normcase(allowed_root)
+        if os.path.commonpath((normalized_root, normalized_allowed_root)) != normalized_allowed_root:
+            return None
+        # The commonpath check above proves this is beneath the trusted root.
+        return Path(configured_root)
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return None
+
+
 def run_server(
     host: str,
     port: int,
@@ -4523,8 +7145,14 @@ def run_server(
     api_token: str = "",
     allow_remote: bool = False,
     allowed_origins: Optional[Sequence[str]] = None,
+    frontend_dir: Path = DEFAULT_FRONTEND_DIR,
 ) -> None:
-    frontend_dir = DEFAULT_FRONTEND_DIR
+    frontend_dir = _resolve_trusted_frontend_dir(frontend_dir)
+    if frontend_dir is None:
+        raise ValueError(
+            "The frontend directory must resolve beneath the deployment resource root. "
+            f"Allowed root: {_RESOURCE_ROOT}"
+        )
     if not is_loopback_host(host) and not allow_remote:
         raise ValueError(
             "Refusing a non-loopback bind without --allow-remote. Keep the default loopback bind and use a TLS reverse proxy."
@@ -4541,17 +7169,38 @@ def run_server(
     )
     print(f"React GUI API listening on http://{host}:{port}")
     if (frontend_dir / "index.html").exists():
-        print(f"Serving built React GUI from {frontend_dir}")
+        print("Serving built React GUI from the configured frontend directory")
     else:
-        print(f"React build not found at {frontend_dir}")
+        print("React build not found in the configured frontend directory")
         print(f"Build it with `{REACT_BUILD_COMMAND}`, or run `{REACT_DEV_COMMAND}` for Vite.")
     print(f"Tkinter GUI is unchanged: run `{PYTHON_GUI_SCRIPT}` or `{PYTHON_GUI_COMMAND}`.")
+    previous_signal_handlers: Dict[int, Any] = {}
+
+    def begin_signal_drain(signum: int, _frame: Any) -> None:
+        if server.begin_drain():
+            print(f"\nSignal {signum} received; draining mutations before shutdown.")
+            threading.Thread(target=server.shutdown, name="market-sentinel-shutdown", daemon=True).start()
+
+    if threading.current_thread() is threading.main_thread():
+        for signal_name in ("SIGTERM", "SIGINT"):
+            signal_number = getattr(signal, signal_name, None)
+            if signal_number is None:
+                continue
+            previous_signal_handlers[int(signal_number)] = signal.getsignal(signal_number)
+            signal.signal(signal_number, begin_signal_drain)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nStopping React GUI API.")
     finally:
+        server.begin_drain()
+        if not server.wait_for_mutation_drain(HTTP_MUTATION_DRAIN_TIMEOUT_SECONDS):
+            print(
+                "[web-gui] mutation drain deadline expired; unresolved live requests remain protected by durable pending journal entries."
+            )
         server.server_close()
+        for signal_number, previous_handler in previous_signal_handlers.items():
+            signal.signal(signal_number, previous_handler)
 
 
 def main() -> None:
@@ -4559,6 +7208,12 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    parser.add_argument(
+        "--frontend-dir",
+        type=Path,
+        default=DEFAULT_FRONTEND_DIR,
+        help="Built React frontend directory. Must remain beneath the deployment resource root.",
+    )
     parser.add_argument(
         "--api-token",
         default=os.environ.get("MARKET_SENTINEL_API_TOKEN", ""),
@@ -4583,6 +7238,7 @@ def main() -> None:
         api_token=args.api_token,
         allow_remote=args.allow_remote,
         allowed_origins=configured_allowed_origins(args.allow_origin),
+        frontend_dir=args.frontend_dir,
     )
 
 
