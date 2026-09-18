@@ -4120,6 +4120,43 @@ class WebApiTests(unittest.TestCase):
         self.assertTrue(preview["pricing"]["capped_by_max_usdc"])
         self.assertAlmostEqual(preview["order"]["limit_price"], 0.47)
 
+    def test_wallet_activity_observer_does_not_advance_delivery_cursor(self) -> None:
+        cfg = AppConfig()
+        cfg.markets["polymarket"].enabled = True
+        wallet = WalletWatch(
+            wallet=WALLET,
+            last_seen_ts=99,
+            last_seen_tx="tx0",
+            seen_activity_keys=["tx:old"],
+        )
+        cfg.wallets = [wallet]
+        activity = [
+            {
+                "transactionHash": "tx1",
+                "timestamp": 100,
+                "proxyWallet": WALLET,
+                "asset": "token-yes",
+                "side": "BUY",
+                "price": "0.44",
+                "size": "1",
+                "slug": "market",
+            }
+        ]
+        recent: list[dict] = []
+
+        with patch("web_api.data_api.get_activity", return_value=activity):
+            result = poll_wallet_activity(
+                cfg,
+                FakeRegistry(FakePolymarketAdapter()),
+                recent,
+                advance_seen=False,
+            )
+
+        self.assertEqual(result["problems"], [])
+        self.assertEqual(len(result["activity"]), 1)
+        self.assertEqual((wallet.last_seen_ts, wallet.last_seen_tx), (99, "tx0"))
+        self.assertEqual(wallet.seen_activity_keys, ["tx:old"])
+
     def test_opinion_wallet_activity_uses_official_feed_and_copy_simulation(self) -> None:
         cfg = AppConfig()
         cfg.selected_market_id = "opinion_labs"

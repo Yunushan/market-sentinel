@@ -661,13 +661,23 @@ def execute_task_once(task: str, config_path: Path, wallet_limit: int) -> Attemp
             problems = len(result.get("problems") or [])
             emitted = sum(len(item.get("messages") or []) for item in result.get("refreshed") or [])
         elif task == TASK_WALLETS:
-            result = poll_wallet_activity(cfg, registry, [], limit=wallet_limit)
+            # This timer has no durable activity consumer.  It may observe
+            # upstream events for health telemetry, but must not advance the
+            # cursor that the desktop/API poller uses to deliver them.
+            result = poll_wallet_activity(
+                cfg,
+                registry,
+                [],
+                limit=wallet_limit,
+                advance_seen=False,
+            )
             processed = max(0, _integer(result.get("polled_wallets")))
             problems = len(result.get("problems") or [])
             emitted = len(result.get("activity") or [])
         else:
             return AttemptResult(task, "unsupported_task", False, exit_code=EXIT_USAGE)
-        save_config(cfg, config_path)
+        if task == TASK_ALERTS:
+            save_config(cfg, config_path)
         if problems:
             return AttemptResult(
                 task,
