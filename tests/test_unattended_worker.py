@@ -199,8 +199,8 @@ class UnattendedWorkerAttemptTests(unittest.TestCase):
 
         self.assertEqual(result.outcome, "succeeded")
         self.assertEqual((result.processed, result.emitted), (2, 1))
-        poll.assert_called_once_with(cfg, "registry", [], limit=17)
-        save.assert_called_once_with(cfg, config_path)
+        poll.assert_called_once_with(cfg, "registry", [], limit=17, advance_seen=False)
+        save.assert_not_called()
 
     def test_config_conflict_is_retryable_and_uncertain_commit_is_not(self) -> None:
         cfg = SimpleNamespace()

@@ -58,15 +58,18 @@ regional restrictions.
   not install their settings or report successful actions. The config root and
   unchanged journal objects retain their identities for background workers.
 - The installed systemd web service runs only the HTTP API. Separate reviewed
-  timers invoke `core.unattended_worker` for price-alert refreshes and wallet
-  polling. Both tasks share one lock and one atomic status file, reload state
-  before every bounded attempt, use compare-and-swap configuration commits,
-  and treat partial feed failures as failures rather than fresh success.
-  Aggregate and per-attempt deadlines, bounded exponential backoff, process-
-  group termination, and durable last-success telemetry are part of the unit
-  contract. These workers do not execute copy trading or place orders.
-  Do not add ad hoc concurrent polling timers or reuse the privileged web
-  environment.
+  timers invoke `core.unattended_worker` for price-alert refreshes and
+  read-only wallet-feed observation. Both tasks share one lock and one atomic status file,
+  reload state before every bounded attempt, and treat partial feed failures as failures rather than fresh success.
+  The alert task uses compare-and-swap configuration commits
+  for its refreshed state; the wallet observer
+  deliberately does not advance the durable wallet-delivery cursor because it
+  has no activity consumer. Desktop/API polling owns cursor advancement and
+  delivery, so an unattended observation cannot discard an event before that
+  consumer sees it. Aggregate and per-attempt deadlines, bounded exponential
+  backoff, process-group termination, and durable last-success telemetry are
+  part of the unit contract. These workers do not execute copy trading or place orders.
+  Do not add ad hoc concurrent polling timers or reuse the privileged web environment.
 - Configuration replacement is the commit point. `ConfigCommitError` means the
   replacement completed but subsequent synchronization or cleanup failed; the
   saved revision remains attached to the candidate. Do not treat that error as

@@ -4147,7 +4147,15 @@ def poll_wallet_activity(
     recent_activity: List[Dict[str, Any]],
     *,
     limit: int = 25,
+    advance_seen: bool = True,
 ) -> Dict[str, Any]:
+    """Poll enabled wallets and optionally advance their durable dedupe cursor.
+
+    Interactive/API polling keeps the default ``advance_seen=True`` behavior.
+    Read-only unattended observers pass ``False`` because they have no durable
+    activity consumer; advancing the cursor there would discard events before
+    the desktop/API poller can deliver them.
+    """
     market_id = require_selected_market(cfg, "Wallet polling")
     adapter = adapter_for_market(cfg, market_id, registry)
     activity_loader = getattr(adapter, "list_activity", None)
@@ -4188,11 +4196,17 @@ def poll_wallet_activity(
         for key, item in new_items:
             if wallet.only_market_slug and str(item.get("slug") or "") != wallet.only_market_slug:
                 continue
-            wallet.last_seen_ts = max(wallet.last_seen_ts or 0, int(item.get("timestamp") or 0))
-            wallet.last_seen_tx = str(item.get("transactionHash") or item.get("transaction_hash") or wallet.last_seen_tx or "")
-            wallet.seen_activity_keys.append(key)
-            if len(wallet.seen_activity_keys) > 200:
-                wallet.seen_activity_keys = wallet.seen_activity_keys[-200:]
+            if advance_seen:
+                wallet.last_seen_ts = max(wallet.last_seen_ts or 0, int(item.get("timestamp") or 0))
+                wallet.last_seen_tx = str(
+                    item.get("transactionHash")
+                    or item.get("transaction_hash")
+                    or wallet.last_seen_tx
+                    or ""
+                )
+                wallet.seen_activity_keys.append(key)
+                if len(wallet.seen_activity_keys) > 200:
+                    wallet.seen_activity_keys = wallet.seen_activity_keys[-200:]
             activity = wallet_activity_payload(wallet, item)
             activity["copy_preview"] = copy_trade_preview_from_activity(cfg, registry, item, copy_conflicts)
             emitted.insert(0, activity)
