@@ -22,7 +22,11 @@ from core.request_control import RequestCancelled, RequestControl, RequestDeadli
 from market_adapters.errors import MarketConfigurationError
 from market_adapters.outbound import OutboundEndpointPolicy
 from polymarket import ws_market, ws_sports, ws_transport, ws_user
-from test_polymarket_http_transport import local_tls_server, resolver_for
+from test_polymarket_http_transport import (
+    local_tls_server,
+    require_unintercepted_local_tls,
+    resolver_for,
+)
 
 
 def upgrade(handler):
@@ -282,6 +286,7 @@ class ManagedWebSocketConnectionTests(unittest.TestCase):
 
     def test_real_tls_preserves_hostname_sni_trust_bundle_and_single_dns_lookup(self):
         with tempfile.TemporaryDirectory() as directory, local_tls_server(directory, send_ready) as (port, ca, observed):
+            require_unintercepted_local_tls(self, port, Path(directory) / "server.pem", observed)
             origin = f"wss://venue.example.test:{port}"
             connection = None
             try:
@@ -353,6 +358,7 @@ class ManagedWebSocketConnectionTests(unittest.TestCase):
                 finished.set()
 
         with tempfile.TemporaryDirectory() as directory, local_tls_server(directory, handler) as (port, ca, observed):
+            require_unintercepted_local_tls(self, port, Path(directory) / "server.pem", observed)
             origin = f"wss://venue.example.test:{port}"
             context = ssl.create_default_context(cafile=str(ca))
             connection = ws_transport.BoundedWebSocket(sslopt={"context": context})
@@ -396,16 +402,12 @@ class ManagedWebSocketConnectionTests(unittest.TestCase):
             "ciphers": "ECDHE+AESGCM", "ecdh_curve": "prime256v1", "suppress_ragged_eofs": False,
         }
         with (
-            patch.object(ws_transport.ssl, "SSLContext", return_value=context) as create_context,
+            patch.object(ws_transport, "create_verified_client_context", return_value=context) as create_context,
             patch.object(ws_transport, "_WebSocketTLS") as wrap,
             patch.dict(os.environ, {"SSLKEYLOGFILE": "test-keylog.log"}),
         ):
             self.assertIs(ws_transport._wrap_tls_socket(sock, options, "venue.example.test"), wrap.return_value)
-        create_context.assert_called_once_with(ssl.PROTOCOL_TLS_CLIENT)
-        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
-        self.assertIs(context.check_hostname, True)
-        context.load_verify_locations.assert_called_once_with(cafile="explicit-ca.pem", capath="ca-directory")
-        context.load_default_certs.assert_not_called()
+        create_context.assert_called_once_with(cafile="explicit-ca.pem", capath="ca-directory")
         self.assertEqual([call.args for call in context.load_cert_chain.call_args_list], [
             ("client.pem", "client.key", "test-password"),
             ("alternate.pem", "alternate.key", "alternate-password"),
@@ -415,7 +417,7 @@ class ManagedWebSocketConnectionTests(unittest.TestCase):
         self.assertEqual(context.keylog_filename, "test-keylog.log")
         wrap.assert_called_once_with(sock, context, server_hostname="venue.example.test", suppress_ragged_eofs=False)
 
-        with patch.object(ws_transport.ssl, "SSLContext") as create_context, patch.object(ws_transport, "_WebSocketTLS") as wrap:
+        with patch.object(ws_transport, "create_verified_client_context") as create_context, patch.object(ws_transport, "_WebSocketTLS") as wrap:
             ws_transport._wrap_tls_socket(sock, {"context": context}, "venue.example.test")
         create_context.assert_not_called()
         wrap.assert_called_once_with(sock, context, server_hostname="venue.example.test", suppress_ragged_eofs=True)
@@ -428,21 +430,16 @@ class ManagedWebSocketConnectionTests(unittest.TestCase):
                 with self.subTest(bundle=bundle):
                     context = Mock()
                     with (
-                        patch.object(ws_transport.ssl, "SSLContext", return_value=context),
+                        patch.object(ws_transport, "create_verified_client_context", return_value=context) as create_context,
                         patch.object(ws_transport, "_WebSocketTLS"),
                         patch.dict(os.environ, {"WEBSOCKET_CLIENT_CA_BUNDLE": bundle}),
                     ):
                         ws_transport._wrap_tls_socket(Mock(), {}, "venue.example.test")
-                    if cafile or capath:
-                        context.load_verify_locations.assert_called_once_with(cafile=cafile, capath=capath)
-                        context.load_default_certs.assert_not_called()
-                    else:
-                        context.load_default_certs.assert_called_once_with(ssl.Purpose.SERVER_AUTH)
-                        context.load_verify_locations.assert_not_called()
+                    create_context.assert_called_once_with(cafile=cafile, capath=capath)
         for chain in ("client.pem", (), ("client.pem", "client.key")):
             with self.subTest(chain=chain):
                 with (
-                    patch.object(ws_transport.ssl, "SSLContext"),
+                    patch.object(ws_transport, "create_verified_client_context"),
                     patch.object(ws_transport, "_WebSocketTLS") as wrap,
                 ):
                     with self.assertRaisesRegex(ws_transport.WebSocketTransportError, "cert_chain"):

@@ -15,6 +15,7 @@ import posixpath
 import re
 import secrets
 import signal
+import stat
 import sys
 import tempfile
 import threading
@@ -177,6 +178,11 @@ MAX_READINESS_JSON_STORE_BYTES = 64 * 1024 * 1024
 AUTH_FAILURE_MAX_ATTEMPTS = 10
 AUTH_FAILURE_WINDOW_SECONDS = 60.0
 MAX_TRACKED_AUTH_FAILURE_CLIENTS = 1_024
+MIN_REMOTE_API_TOKEN_LENGTH = 32
+MIN_REMOTE_API_TOKEN_UNIQUE_CHARACTERS = 10
+MAX_API_TOKEN_BYTES = 512
+MAX_API_TOKEN_FILE_BYTES = 4 * 1024
+OBSERVABILITY_GET_ROUTES = frozenset({"/api/health", "/metrics"})
 PYTHON_GUI_COMMAND = "python app.py"
 PYTHON_GUI_SCRIPT = "run_gui.bat"
 REACT_DEV_COMMAND = "run_web_gui_dev.bat"
@@ -5403,11 +5409,6 @@ class AuthFailureLimiter:
             self._attempts[key] = attempts
         return None
 
-    def clear(self, client_id: str) -> None:
-        with self._lock:
-            self._attempts.pop(str(client_id or "unknown")[:256], None)
-
-
 class ReactGuiServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -5423,6 +5424,7 @@ class ReactGuiServer(ThreadingHTTPServer):
         frontend_dir: Path = DEFAULT_FRONTEND_DIR,
         adapter_registry: Optional[AdapterRegistry] = None,
         api_token: str = "",
+        observability_token: str = "",
         allowed_origins: Optional[Sequence[str]] = None,
         max_http_workers: int = MAX_HTTP_WORKERS,
         max_mutation_workers: Optional[int] = None,
@@ -5431,6 +5433,18 @@ class ReactGuiServer(ThreadingHTTPServer):
         bind_host = str(server_address[0]).strip()
         is_loopback = is_loopback_host(bind_host)
         token = str(api_token or "").strip()
+        if not is_loopback:
+            token = _validated_remote_api_token(token)
+        observability = str(observability_token or "").strip()
+        if observability:
+            observability = _validated_observability_api_token(observability)
+            token = _validated_strong_api_token(
+                token,
+                label="The admin API token",
+                required_message="An observability API token requires an admin API token.",
+            )
+            if _constant_time_token_match(observability, token):
+                raise ValueError("The observability API token must be distinct from the admin API token.")
         worker_limit = int(max_http_workers)
         if worker_limit < 1:
             raise ValueError("max_http_workers must be at least 1.")
@@ -5446,8 +5460,6 @@ class ReactGuiServer(ThreadingHTTPServer):
         mutation_lock_timeout = float(mutation_lock_timeout_seconds)
         if mutation_lock_timeout <= 0:
             raise ValueError("mutation_lock_timeout_seconds must be positive.")
-        if not is_loopback and not token:
-            raise ValueError("A non-loopback React GUI bind requires a non-empty API token.")
         trusted_frontend_dir = _resolve_trusted_frontend_dir(frontend_dir)
         if trusted_frontend_dir is None:
             raise ValueError(
@@ -5459,6 +5471,7 @@ class ReactGuiServer(ThreadingHTTPServer):
         self.bind_host = bind_host
         self.is_loopback = is_loopback
         self.api_token = token
+        self.observability_token = observability
         self.config_path = config_path
         self.frontend_dir = trusted_frontend_dir
         self.runtime_identity = runtime_identity
@@ -5743,9 +5756,9 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
-        if not self._require_authorized_request():
-            return
         parsed = urlparse(self.path)
+        if not self._require_authorized_request(allow_observability=parsed.path in OBSERVABILITY_GET_ROUTES):
+            return
         if parsed.path == "/metrics":
             self._send_text(
                 HTTPStatus.OK,
@@ -5791,20 +5804,29 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         origin = str(self.headers.get("Origin") or "").strip().rstrip("/")
         return not origin or origin in self.app_server.allowed_origins
 
-    def _require_authorized_request(self) -> bool:
+    def _require_authorized_request(self, *, allow_observability: bool = False) -> bool:
         if not self._origin_is_allowed():
             self._send_error(HTTPStatus.FORBIDDEN, "cors_origin_forbidden", "Request origin is not allowed.")
             return False
-        expected = self.app_server.api_token
-        if not expected:
+        admin_token = self.app_server.api_token
+        if not admin_token:
             return True
         presented = str(self.headers.get("X-Market-Sentinel-Token") or "").strip()
         authorization = str(self.headers.get("Authorization") or "").strip()
         if authorization.lower().startswith("bearer "):
             presented = authorization[7:].strip()
         client_id = str(self.client_address[0] or "unknown")
-        if hmac.compare_digest(presented, expected):
-            self.app_server.auth_failure_limiter.clear(client_id)
+        admin_match = _constant_time_token_match(presented, admin_token)
+        observability_match = bool(
+            allow_observability
+            and self.app_server.observability_token
+            and _constant_time_token_match(presented, self.app_server.observability_token)
+        )
+        if admin_match or observability_match:
+            # A trusted reverse proxy and local metrics scraper share one
+            # socket peer.  A valid request must not erase failures produced
+            # by another client behind that peer; the bounded window expires
+            # them without weakening brute-force protection.
             return True
         retry_after = self.app_server.auth_failure_limiter.record_failure(client_id)
         if retry_after is not None:
@@ -7192,6 +7214,117 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
+def _constant_time_token_match(presented: str, expected: str) -> bool:
+    """Compare arbitrary parsed header text without non-ASCII type errors."""
+    return hmac.compare_digest(
+        str(presented).encode("utf-8", errors="surrogatepass"),
+        str(expected).encode("utf-8", errors="surrogatepass"),
+    )
+
+
+def _validated_strong_api_token(token: str, *, label: str, required_message: str) -> str:
+    """Require a plausibly generated bearer token for a privileged role."""
+    normalized = str(token or "").strip()
+    if not normalized:
+        raise ValueError(required_message)
+    try:
+        encoded = normalized.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{label} must contain only token-safe ASCII characters.") from exc
+    if len(encoded) < MIN_REMOTE_API_TOKEN_LENGTH:
+        raise ValueError(
+            f"{label} must contain at least {MIN_REMOTE_API_TOKEN_LENGTH} characters "
+            "generated from a cryptographically secure random source."
+        )
+    if len(encoded) > MAX_API_TOKEN_BYTES:
+        raise ValueError(f"{label} must not exceed {MAX_API_TOKEN_BYTES} bytes.")
+    if re.fullmatch(r"[A-Za-z0-9._~+/-]+=*", normalized) is None:
+        raise ValueError(f"{label} must contain only token-safe ASCII characters.")
+
+    token_body = normalized.rstrip("=")
+    collapsed = re.sub(r"[^a-z0-9]", "", token_body.lower())
+    weak_markers = ("apitoken", "changeme", "exampletoken", "password", "replaceme", "testtoken")
+    repeated = any(
+        len(token_body) % width == 0 and token_body == token_body[:width] * (len(token_body) // width)
+        for width in range(1, min(16, len(token_body) // 2) + 1)
+    )
+    if (
+        len(set(token_body)) < MIN_REMOTE_API_TOKEN_UNIQUE_CHARACTERS
+        or repeated
+        or any(marker in collapsed for marker in weak_markers)
+    ):
+        raise ValueError(
+            f"{label} is too predictable; generate at least 32 random bytes "
+            "(for example, `openssl rand -hex 32`)."
+        )
+    return normalized
+
+
+def _validated_remote_api_token(token: str) -> str:
+    """Require a plausibly generated admin token before exposing remote binds."""
+    return _validated_strong_api_token(
+        token,
+        label="A non-loopback API token",
+        required_message="A non-loopback React GUI bind requires an API token.",
+    )
+
+
+def _validated_observability_api_token(token: str) -> str:
+    """Require strong entropy for the least-privilege observability role."""
+    return _validated_strong_api_token(
+        token,
+        label="The observability API token",
+        required_message="The observability API token must not be empty.",
+    )
+
+
+def _read_api_token_file(path: Path) -> str:
+    """Read a bounded API token from a regular, non-symlink file."""
+    descriptor = -1
+    try:
+        path_stat = os.lstat(path)
+        if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
+            raise ValueError("The API token file must be a regular, non-symlink file.")
+        if path_stat.st_size > MAX_API_TOKEN_FILE_BYTES:
+            raise ValueError(f"The API token file must not exceed {MAX_API_TOKEN_FILE_BYTES} bytes.")
+        if os.name != "nt" and path_stat.st_mode & 0o077:
+            raise ValueError("The API token file must not be accessible by group or other users.")
+
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        opened_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(opened_stat.st_mode):
+            raise ValueError("The API token file must be a regular, non-symlink file.")
+        if (path_stat.st_dev, path_stat.st_ino) != (opened_stat.st_dev, opened_stat.st_ino):
+            raise ValueError("The API token file changed while it was being opened.")
+        chunks = []
+        remaining = MAX_API_TOKEN_FILE_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) > MAX_API_TOKEN_FILE_BYTES:
+            raise ValueError(f"The API token file must not exceed {MAX_API_TOKEN_FILE_BYTES} bytes.")
+        try:
+            token = raw.decode("utf-8").strip()
+        except UnicodeDecodeError as exc:
+            raise ValueError("The API token file must contain UTF-8 text.") from exc
+        if not token:
+            raise ValueError("The API token file must not be empty.")
+        return token
+    except ValueError:
+        raise
+    except (OSError, RuntimeError, TypeError) as exc:
+        raise ValueError("The API token file could not be read safely.") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def _resolve_trusted_frontend_dir(frontend_dir: Path) -> Optional[Path]:
     """Normalize a deployment frontend path and keep it inside the bundle root."""
     try:
@@ -7222,6 +7355,7 @@ def run_server(
     config_path: Path,
     *,
     api_token: str = "",
+    observability_token: str = "",
     allow_remote: bool = False,
     allowed_origins: Optional[Sequence[str]] = None,
     frontend_dir: Path = DEFAULT_FRONTEND_DIR,
@@ -7244,6 +7378,7 @@ def run_server(
         config_path=config_path,
         frontend_dir=frontend_dir,
         api_token=api_token,
+        observability_token=observability_token,
         allowed_origins=allowed_origins,
     )
     print(f"React GUI API listening on http://{host}:{port}")
@@ -7293,10 +7428,35 @@ def main() -> None:
         default=DEFAULT_FRONTEND_DIR,
         help="Built React frontend directory. Must remain beneath the deployment resource root.",
     )
-    parser.add_argument(
+    token_source = parser.add_mutually_exclusive_group()
+    token_source.add_argument(
         "--api-token",
-        default=os.environ.get("MARKET_SENTINEL_API_TOKEN", ""),
-        help="Required for non-loopback binds. Defaults to MARKET_SENTINEL_API_TOKEN.",
+        default=None,
+        help=(
+            "Deprecated because command-line arguments may be visible to other users. "
+            "Use MARKET_SENTINEL_API_TOKEN or --api-token-file instead."
+        ),
+    )
+    token_source.add_argument(
+        "--api-token-file",
+        type=Path,
+        default=None,
+        help="Read the API token from a private regular file instead of exposing it in process arguments.",
+    )
+    observability_token_source = parser.add_mutually_exclusive_group()
+    observability_token_source.add_argument(
+        "--observability-token",
+        default=None,
+        help=(
+            "Deprecated because command-line arguments may be visible to other users. "
+            "Use MARKET_SENTINEL_OBSERVABILITY_TOKEN or --observability-token-file instead."
+        ),
+    )
+    observability_token_source.add_argument(
+        "--observability-token-file",
+        type=Path,
+        default=None,
+        help="Read the least-privilege health/metrics token from a private regular file.",
     )
     parser.add_argument(
         "--allow-remote",
@@ -7310,11 +7470,50 @@ def main() -> None:
         help="Additional browser Origin allowed for CORS. Repeat as needed; wildcard origins are never accepted.",
     )
     args = parser.parse_args()
+    if args.api_token is not None:
+        if not is_loopback_host(args.host):
+            parser.error(
+                "--api-token is not permitted for a non-loopback bind because process arguments may be exposed; "
+                "use MARKET_SENTINEL_API_TOKEN or --api-token-file"
+            )
+        print(
+            "warning: --api-token is deprecated because command-line secrets may be exposed; "
+            "use MARKET_SENTINEL_API_TOKEN or --api-token-file",
+            file=sys.stderr,
+        )
+        api_token = args.api_token
+    elif args.api_token_file is not None:
+        try:
+            api_token = _read_api_token_file(args.api_token_file)
+        except ValueError as exc:
+            parser.error(str(exc))
+    else:
+        api_token = os.environ.get("MARKET_SENTINEL_API_TOKEN", "")
+    if args.observability_token is not None:
+        if not is_loopback_host(args.host):
+            parser.error(
+                "--observability-token is not permitted for a non-loopback bind because process arguments may be "
+                "exposed; use MARKET_SENTINEL_OBSERVABILITY_TOKEN or --observability-token-file"
+            )
+        print(
+            "warning: --observability-token is deprecated because command-line secrets may be exposed; "
+            "use MARKET_SENTINEL_OBSERVABILITY_TOKEN or --observability-token-file",
+            file=sys.stderr,
+        )
+        observability_token = args.observability_token
+    elif args.observability_token_file is not None:
+        try:
+            observability_token = _read_api_token_file(args.observability_token_file)
+        except ValueError as exc:
+            parser.error(str(exc))
+    else:
+        observability_token = os.environ.get("MARKET_SENTINEL_OBSERVABILITY_TOKEN", "")
     run_server(
         args.host,
         args.port,
         args.config,
-        api_token=args.api_token,
+        api_token=api_token,
+        observability_token=observability_token,
         allow_remote=args.allow_remote,
         allowed_origins=configured_allowed_origins(args.allow_origin),
         frontend_dir=args.frontend_dir,

@@ -6,8 +6,10 @@ __pycache__/
 .venv/
 venv/
 env/
+.codex-*-venv/
 
 .pytest_cache/
+pytest-cache-files-*/
 .mypy_cache/
 .ruff_cache/
 .cache/

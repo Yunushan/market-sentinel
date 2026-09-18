@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import nullcontext
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -36,8 +38,23 @@ def raw_production_deployment_report(
 ) -> dict[str, object]:
     """Build semantically valid but deliberately unattested collector output."""
 
+    from core.unattended_worker import worker_invocation_sha256
     from scripts.review_deployment_evidence import required_check_names
-    from scripts.verify_production_deployment import DURABLE_STATE_PATHS, PUBLIC_PROXY_AUTH_PROBES
+    from scripts.verify_production_deployment import (
+        DEFAULT_WORKER_ENVIRONMENT_PATH,
+        DEFAULT_WORKER_LOCK_PATH,
+        DEFAULT_WORKER_STATE_PATH,
+        DURABLE_STATE_PATHS,
+        HEALTH_CHECK_MAX_AGE_SECONDS,
+        PUBLIC_PROXY_AUTH_PROBES,
+        REQUIRED_HEALTH_SERVICE_PROPERTIES,
+        REQUIRED_SYSTEMD_TIMER_CONTRACTS,
+        REQUIRED_UNATTENDED_SERVICE_CONTRACTS,
+        REQUIRED_WORKER_UNIT_CONTRACT_SHA256,
+        REQUIRED_WEB_EXEC_START_PRE_COMMANDS,
+        UNATTENDED_WORKER_SERVICES,
+        UNATTENDED_WORKER_TASK_MAX_AGE_SECONDS,
+    )
 
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     collected_at = current - timedelta(minutes=2)
@@ -81,6 +98,146 @@ def raw_production_deployment_report(
             "durable_store_count": len(DURABLE_STATE_PATHS),
             "state_directory": "/var/lib/market-sentinel",
             "backup_source": "/var/lib/market-sentinel",
+        }
+    )
+    indexed["health_credential_isolation"].update(
+        {
+            "environment_path": "/etc/market-sentinel/market-sentinel-health.env",
+            "service_user": "market-sentinel-health",
+            "service_group": "market-sentinel-health",
+            "private_user_namespace": True,
+            "process_visibility": "invisible",
+            "verified_service_property_count": len(REQUIRED_HEALTH_SERVICE_PROPERTIES) + 1,
+            "environment_variable_count": 1,
+            "admin_environment_unset": True,
+            "token_preflight_removed": True,
+            "probe_requires_observability": True,
+            "web_startup_probe_removed": True,
+            "inline_environment_empty": True,
+            "manager_environment_not_passed": True,
+        }
+    )
+    indexed["web_startup_preflight"].update(
+        {
+            "expected_command_count": len(REQUIRED_WEB_EXEC_START_PRE_COMMANDS),
+            "command_count": len(REQUIRED_WEB_EXEC_START_PRE_COMMANDS),
+            "commands": [list(command) for command in REQUIRED_WEB_EXEC_START_PRE_COMMANDS],
+            "commands_succeeded": True,
+        }
+    )
+    indexed["systemd_timer_contracts"].update(
+        {
+            "expected_timer_count": len(REQUIRED_SYSTEMD_TIMER_CONTRACTS),
+            "timer_count": len(REQUIRED_SYSTEMD_TIMER_CONTRACTS),
+            "timers": deepcopy(REQUIRED_SYSTEMD_TIMER_CONTRACTS),
+        }
+    )
+    monitoring_completed_at = collected_at - timedelta(minutes=1)
+    indexed["systemd_recent_success_market-sentinel-health.service"].update(
+        {
+            "unit": "market-sentinel-health.service",
+            "completed_at": monitoring_completed_at.strftime("%a %Y-%m-%d %H:%M:%S UTC"),
+            "completed_at_unix_seconds": monitoring_completed_at.timestamp(),
+            "age_seconds": 60,
+            "max_age_seconds": HEALTH_CHECK_MAX_AGE_SECONDS,
+        }
+    )
+    worker_finish_times = {
+        "alerts-refresh": collected_at - timedelta(seconds=30.75),
+        "wallets-poll": collected_at - timedelta(seconds=90.25),
+    }
+    worker_run_ids = {
+        "alerts-refresh": "00000000-0000-4000-8000-000000000201",
+        "wallets-poll": "00000000-0000-4000-8000-000000000202",
+    }
+    worker_tasks: dict[str, dict[str, object]] = {}
+    worker_services: dict[str, dict[str, object]] = {}
+    for service, identity in UNATTENDED_WORKER_SERVICES.items():
+        task = identity["task"]
+        finished = worker_finish_times[task]
+        started = finished - timedelta(seconds=2)
+        attempted = finished - timedelta(seconds=1)
+        completed = finished.replace(microsecond=0)
+        maximum_age = UNATTENDED_WORKER_TASK_MAX_AGE_SECONDS[task]
+        worker_tasks[task] = {
+            "service": service,
+            "timer": identity["timer"],
+            "state": "succeeded",
+            "run_id": worker_run_ids[task],
+            "source_revision": revision,
+            "service_unit": service,
+            "unit_contract_sha256": REQUIRED_WORKER_UNIT_CONTRACT_SHA256[service],
+            "invocation_sha256": worker_invocation_sha256(
+                task=task,
+                service_unit=service,
+                source_revision=revision,
+                unit_contract_sha256=REQUIRED_WORKER_UNIT_CONTRACT_SHA256[service],
+            ),
+            "last_started_at": started.isoformat().replace("+00:00", "Z"),
+            "last_started_at_unix_seconds": started.timestamp(),
+            "last_attempt_at": attempted.isoformat().replace("+00:00", "Z"),
+            "last_attempt_at_unix_seconds": attempted.timestamp(),
+            "last_finished_at": finished.isoformat().replace("+00:00", "Z"),
+            "last_finished_at_unix_seconds": finished.timestamp(),
+            "last_success_at": finished.isoformat().replace("+00:00", "Z"),
+            "last_success_at_unix_seconds": finished.timestamp(),
+            "last_duration_seconds": 2.0,
+            "deadline_seconds": 90.0,
+            "max_attempts": 3,
+            "attempts_completed": 1,
+            "last_attempt_outcome": "succeeded",
+            "last_outcome": "succeeded",
+            "last_attempt_processed": 2,
+            "last_attempt_problems": 0,
+            "last_attempt_emitted": 1,
+            "processed": 2,
+            "problems": 0,
+            "emitted": 1,
+            "consecutive_failures": 0,
+            "abandoned_runs": 0,
+            "total_runs": 4,
+            "total_successes": 3,
+            "total_failures": 1,
+            "freshness_age_seconds": (collected_at - finished).total_seconds(),
+            "max_age_seconds": maximum_age,
+        }
+        completed_text = completed.strftime("%a %Y-%m-%d %H:%M:%S UTC")
+        service_evidence = {
+            "task": task,
+            "timer": identity["timer"],
+            "completed_at": completed_text,
+            "completed_at_unix_seconds": completed.timestamp(),
+            "age_seconds": (collected_at - completed).total_seconds(),
+            "max_age_seconds": maximum_age,
+            "source_revision": revision,
+            "unit_contract_sha256": REQUIRED_WORKER_UNIT_CONTRACT_SHA256[service],
+        }
+        worker_services[service] = service_evidence
+        indexed[f"systemd_recent_success_{service}"].update(
+            {
+                "unit": service,
+                "completed_at": completed_text,
+                "completed_at_unix_seconds": completed.timestamp(),
+                "age_seconds": (collected_at - completed).total_seconds(),
+                "max_age_seconds": maximum_age,
+            }
+        )
+    latest_worker_finish = max(worker_finish_times.values())
+    indexed["unattended_workers"].update(
+        {
+            "state_file": DEFAULT_WORKER_STATE_PATH.as_posix(),
+            "state_schema_version": 1,
+            "state_updated_at": latest_worker_finish.isoformat().replace("+00:00", "Z"),
+            "state_updated_at_unix_seconds": latest_worker_finish.timestamp(),
+            "state_sha256": "9" * 64,
+            "lock_file": DEFAULT_WORKER_LOCK_PATH.as_posix(),
+            "environment_file": DEFAULT_WORKER_ENVIRONMENT_PATH.as_posix(),
+            "environment_keys": ["MARKET_SENTINEL_SOURCE_REVISION"],
+            "expected_service_count": len(UNATTENDED_WORKER_SERVICES),
+            "service_count": len(UNATTENDED_WORKER_SERVICES),
+            "service_contracts": deepcopy(REQUIRED_UNATTENDED_SERVICE_CONTRACTS),
+            "services": worker_services,
+            "tasks": worker_tasks,
         }
     )
     indexed["verified_recent_state_backup"].update(
@@ -215,6 +372,7 @@ def successful_public_live_gh_run(
     run_overrides: dict[str, object] | None = None,
     jobs_overrides: dict[str, object] | None = None,
     attestation_mutator: Callable[[list[dict[str, Any]]], None] | None = None,
+    reverse_required_steps: bool = False,
 ) -> Callable[..., subprocess.CompletedProcess[bytes]]:
     current = now or datetime.now(timezone.utc)
 
@@ -315,7 +473,17 @@ def successful_public_live_gh_run(
                         "labels": ["ubuntu-24.04"],
                         "started_at": (current - timedelta(minutes=4)).isoformat().replace("+00:00", "Z"),
                         "completed_at": (current - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
-                        "steps": [
+                        "steps": list(reversed([
+                            {"name": name, "status": "completed", "conclusion": "success"}
+                            for name in (
+                                "Verify exact clean source before probe",
+                                "Probe reviewed public Polymarket endpoints",
+                                "Revalidate public-only evidence before attestation",
+                                "Reverify exact clean source after probe",
+                                "Attest exact public-live evidence file",
+                                "Upload public-live evidence",
+                            )
+                        ])) if reverse_required_steps else [
                             {"name": name, "status": "completed", "conclusion": "success"}
                             for name in (
                                 "Verify exact clean source before probe",
@@ -352,6 +520,21 @@ def successful_public_live_gh_run(
         raise AssertionError(f"unexpected command: {command}")
 
     return run
+
+
+def successful_public_live_gh_json(
+    revision: str,
+    **kwargs: Any,
+) -> Callable[..., tuple[object | None, str]]:
+    run = successful_public_live_gh_run(revision, **kwargs)
+
+    def query(command: list[str], **_kwargs: object) -> tuple[object | None, str]:
+        result = run(command)
+        if result.returncode != 0:
+            return None, "GitHub CLI verification failed"
+        return json.loads(result.stdout), ""
+
+    return query
 
 
 class ProductReadinessTests(unittest.TestCase):
@@ -480,8 +663,8 @@ class ProductReadinessTests(unittest.TestCase):
             path = Path(temporary) / "public-live.json"
             path.write_text(json.dumps(attested_public_live_payload(revision, now=now)), encoding="utf-8")
             with patch(
-                "scripts.check_product_readiness.subprocess.run",
-                side_effect=successful_public_live_gh_run(revision, now=now),
+                "scripts.check_product_readiness._run_gh_json",
+                side_effect=successful_public_live_gh_json(revision, now=now),
             ) as run:
                 result = _attested_public_live_report(str(path), expected_revision=revision, now=now)
 
@@ -570,11 +753,11 @@ class ProductReadinessTests(unittest.TestCase):
             path = Path(temporary) / "public-live.json"
             path.write_text(json.dumps(attested_public_live_payload(revision, now=now)), encoding="utf-8")
 
-            def fail_attestation(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            def fail_attestation(command: list[str], **kwargs: object) -> tuple[None, str]:
                 self.assertEqual(command[:3], ["gh", "attestation", "verify"])
-                return subprocess.CompletedProcess(command, 1, b"", b"not trusted")
+                return None, "GitHub CLI verification failed"
 
-            with patch("scripts.check_product_readiness.subprocess.run", side_effect=fail_attestation) as run:
+            with patch("scripts.check_product_readiness._run_gh_json", side_effect=fail_attestation) as run:
                 result = _attested_public_live_report(str(path), expected_revision=revision, now=now)
 
         self.assertEqual(result["status"], "fail")
@@ -599,8 +782,8 @@ class ProductReadinessTests(unittest.TestCase):
             for mismatch in mismatches:
                 with self.subTest(mismatch=mismatch):
                     with patch(
-                        "scripts.check_product_readiness.subprocess.run",
-                        side_effect=successful_public_live_gh_run(
+                        "scripts.check_product_readiness._run_gh_json",
+                        side_effect=successful_public_live_gh_json(
                             revision,
                             now=now,
                             run_overrides=mismatch,
@@ -621,8 +804,8 @@ class ProductReadinessTests(unittest.TestCase):
             for total_count in (2, 101):
                 with self.subTest(total_count=total_count):
                     with patch(
-                        "scripts.check_product_readiness.subprocess.run",
-                        side_effect=successful_public_live_gh_run(
+                        "scripts.check_product_readiness._run_gh_json",
+                        side_effect=successful_public_live_gh_json(
                             revision,
                             now=now,
                             jobs_overrides={"total_count": total_count},
@@ -631,6 +814,26 @@ class ProductReadinessTests(unittest.TestCase):
                         result = _attested_public_live_report(str(path), expected_revision=revision, now=now)
                     self.assertEqual(result["status"], "fail")
                     self.assertIn("public job", result["detail"])
+
+    def test_attested_public_live_report_rejects_reordered_safety_steps(self) -> None:
+        from scripts.check_product_readiness import _attested_public_live_report
+
+        revision = repository_revision()
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "public-live.json"
+            path.write_text(json.dumps(attested_public_live_payload(revision, now=now)), encoding="utf-8")
+            with patch(
+                "scripts.check_product_readiness._run_gh_json",
+                side_effect=successful_public_live_gh_json(
+                    revision,
+                    now=now,
+                    reverse_required_steps=True,
+                ),
+            ):
+                result = _attested_public_live_report(str(path), expected_revision=revision, now=now)
+        self.assertEqual(result["status"], "fail")
+        self.assertIn("in order", result["detail"])
 
     def test_attested_public_live_report_rejects_immutable_binding_mutations(self) -> None:
         from scripts.check_product_readiness import _attested_public_live_report
@@ -673,8 +876,8 @@ class ProductReadinessTests(unittest.TestCase):
                         set_path(attestation, path, deepcopy(changed))
 
                     with patch(
-                        "scripts.check_product_readiness.subprocess.run",
-                        side_effect=successful_public_live_gh_run(
+                        "scripts.check_product_readiness._run_gh_json",
+                        side_effect=successful_public_live_gh_json(
                             revision,
                             now=now,
                             attestation_mutator=mutate,
@@ -812,7 +1015,7 @@ class ProductReadinessTests(unittest.TestCase):
             report = score_deployment_evidence(path, revision)
 
         operations = next(item for item in report["categories"] if item["name"] == "operations_recovery")
-        self.assertEqual(operations["earned"], 12)
+        self.assertEqual(operations["earned"], 10)
         self.assertTrue(any("strict semantic review" in item for item in operations["missing"]))
 
     def test_handwritten_valid_raw_deployment_report_remains_diagnostic_only(self) -> None:
@@ -834,7 +1037,7 @@ class ProductReadinessTests(unittest.TestCase):
 
         self.assertEqual(semantic_review["status"], "ok")
         operations = next(item for item in report["categories"] if item["name"] == "operations_recovery")
-        self.assertEqual(operations["earned"], 12)
+        self.assertEqual(operations["earned"], 10)
         self.assertTrue(any("passed semantic review" in item for item in operations["missing"]))
         self.assertTrue(any("not score-eligible" in item for item in operations["missing"]))
 
@@ -859,7 +1062,7 @@ class ProductReadinessTests(unittest.TestCase):
 
         self.assertEqual(summary["status"], "ok")
         operations = next(item for item in report["categories"] if item["name"] == "operations_recovery")
-        self.assertEqual(operations["earned"], 12)
+        self.assertEqual(operations["earned"], 10)
         self.assertTrue(any("strict semantic review" in item for item in operations["missing"]))
 
     def test_reviewed_partial_external_evidence_awards_only_its_scoped_points(self) -> None:
@@ -1439,12 +1642,230 @@ class ProductReadinessTests(unittest.TestCase):
         self.assertTrue(any("evidence_type=\'platform-ci\'" in item for item in platform["missing"]))
 
 
+    def test_external_gh_queries_require_an_operator_pinned_digest(self) -> None:
+        from scripts.check_product_readiness import (
+            _TOOL_TRUST_CONTEXT,
+            _ToolTrustContext,
+            _run_gh_json,
+        )
+
+        token = _TOOL_TRUST_CONTEXT.set(_ToolTrustContext(external_awards_requested=True))
+        try:
+            with (
+                patch("scripts.check_product_readiness.shutil.which") as which,
+                patch("scripts.check_product_readiness._run_bounded_process") as run,
+            ):
+                payload, error = _run_gh_json(["gh", "api", "repos/Yunushan/market-sentinel"])
+        finally:
+            _TOOL_TRUST_CONTEXT.reset(token)
+
+        self.assertIsNone(payload)
+        self.assertIn("ToolTrustError", error)
+        which.assert_not_called()
+        run.assert_not_called()
+
+    def test_external_evidence_requires_an_operator_pinned_git_digest(self) -> None:
+        from scripts.check_product_readiness import (
+            _configured_tool_trust,
+            _parser,
+            _repository_revision,
+        )
+
+        args = _parser().parse_args(["--no-run-local", "--public-live-report", "evidence.json"])
+        with (
+            _configured_tool_trust(args),
+            patch("scripts.check_product_readiness.shutil.which") as which,
+            patch("scripts.check_product_readiness._run_bounded_process") as run,
+        ):
+            revision = _repository_revision()
+
+        self.assertEqual(revision, "")
+        which.assert_not_called()
+        run.assert_not_called()
+
+    def test_repo_local_gh_is_rejected_even_when_its_digest_is_pinned(self) -> None:
+        from scripts.check_product_readiness import (
+            _TOOL_TRUST_CONTEXT,
+            _ToolTrustContext,
+            _run_gh_json,
+        )
+
+        fake_gh = ROOT / "scripts" / "check_product_readiness.py"
+        import hashlib
+
+        pin = hashlib.sha256(fake_gh.read_bytes()).hexdigest()
+        token = _TOOL_TRUST_CONTEXT.set(
+            _ToolTrustContext(external_awards_requested=True, pins={"gh": pin})
+        )
+        try:
+            with (
+                patch("scripts.check_product_readiness.shutil.which", return_value=str(fake_gh)),
+                patch("scripts.check_product_readiness._run_bounded_process") as run,
+            ):
+                payload, error = _run_gh_json(["gh", "api", "repos/Yunushan/market-sentinel"])
+        finally:
+            _TOOL_TRUST_CONTEXT.reset(token)
+
+        self.assertIsNone(payload)
+        self.assertIn("ToolTrustError", error)
+        run.assert_not_called()
+
+    def test_trusted_gh_uses_absolute_binary_private_cwd_and_scrubbed_environment(self) -> None:
+        from scripts.check_product_readiness import (
+            ROOT as SCORER_ROOT,
+            _TOOL_TRUST_CONTEXT,
+            _ToolTrustContext,
+            _resolve_executable_identity,
+            _run_gh_json,
+        )
+
+        identity = _resolve_executable_identity("git", require_pin=False)
+        context = _ToolTrustContext(
+            external_awards_requested=True,
+            pins={"gh": identity.sha256},
+        )
+        private_cwd = SCORER_ROOT.parent / "operator-private-tool-cwd"
+        completed = subprocess.CompletedProcess([], 0, b"{}", b"")
+        token = _TOOL_TRUST_CONTEXT.set(context)
+        try:
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "GH_TOKEN": "test-token",
+                        "GH_HOST": "attacker.invalid",
+                        "GH_CONFIG_DIR": "attacker-config",
+                        "GH_DEBUG": "api",
+                        "HTTPS_PROXY": "http://attacker.invalid",
+                        "GIT_DIR": "attacker-git-dir",
+                    },
+                    clear=False,
+                ),
+                patch("scripts.check_product_readiness._resolve_executable_identity", return_value=identity),
+                patch(
+                    "scripts.check_product_readiness._private_tool_work_directory",
+                    return_value=nullcontext(private_cwd),
+                ),
+                patch("pathlib.Path.mkdir"),
+                patch("scripts.check_product_readiness._run_bounded_process", return_value=completed) as run,
+            ):
+                payload, error = _run_gh_json(["gh", "api", "repos/Yunushan/market-sentinel"])
+        finally:
+            _TOOL_TRUST_CONTEXT.reset(token)
+
+        self.assertEqual(payload, {})
+        self.assertEqual(error, "")
+        command = run.call_args.args[0]
+        environment = run.call_args.kwargs["env"]
+        self.assertTrue(Path(command[0]).is_absolute())
+        self.assertEqual(run.call_args.kwargs["cwd"], private_cwd)
+        self.assertNotEqual(private_cwd, SCORER_ROOT)
+        self.assertEqual(environment["GH_HOST"], "github.com")
+        self.assertEqual(environment["GH_PROMPT_DISABLED"], "1")
+        self.assertEqual(environment["GH_TOKEN"], "test-token")
+        for name in ("GH_DEBUG", "HTTPS_PROXY", "GIT_DIR", "PATH"):
+            self.assertNotIn(name, environment)
+        self.assertNotEqual(environment["GH_CONFIG_DIR"], "attacker-config")
+
+    def test_trusted_tool_replacement_after_execution_is_rejected(self) -> None:
+        from scripts.check_product_readiness import (
+            ROOT as SCORER_ROOT,
+            _TOOL_TRUST_CONTEXT,
+            _ToolTrustContext,
+            _ToolTrustError,
+            _resolve_executable_identity,
+            _run_gh_json,
+        )
+
+        identity = _resolve_executable_identity("git", require_pin=False)
+        token = _TOOL_TRUST_CONTEXT.set(
+            _ToolTrustContext(external_awards_requested=True, pins={"gh": identity.sha256})
+        )
+        try:
+            with (
+                patch("scripts.check_product_readiness._resolve_executable_identity", return_value=identity),
+                patch(
+                    "scripts.check_product_readiness._private_tool_work_directory",
+                    return_value=nullcontext(SCORER_ROOT.parent / "operator-private-tool-cwd"),
+                ),
+                patch("pathlib.Path.mkdir"),
+                patch(
+                    "scripts.check_product_readiness._run_bounded_process",
+                    return_value=subprocess.CompletedProcess([], 0, b"{}", b""),
+                ),
+                patch(
+                    "scripts.check_product_readiness._recheck_executable_identity",
+                    side_effect=(None, _ToolTrustError("changed")),
+                ),
+            ):
+                payload, error = _run_gh_json(["gh", "api", "repos/Yunushan/market-sentinel"])
+        finally:
+            _TOOL_TRUST_CONTEXT.reset(token)
+
+        self.assertIsNone(payload)
+        self.assertIn("ToolTrustError", error)
+
+    def test_external_process_stdout_is_strictly_bounded(self) -> None:
+        from scripts.check_product_readiness import _ToolOutputLimitError, _run_bounded_process
+
+        with self.assertRaises(_ToolOutputLimitError):
+            _run_bounded_process(
+                [sys.executable, "-c", "import sys; sys.stdout.write('x' * 4096)"],
+                cwd=ROOT,
+                env=os.environ.copy(),
+                timeout=10,
+                maximum_stdout_bytes=128,
+                maximum_stderr_bytes=128,
+            )
+
+    def test_repository_cleanliness_rejects_sparse_unmerged_and_non_normal_index_flags(self) -> None:
+        from scripts.check_product_readiness import _repository_is_clean
+
+        root_output = (str(ROOT.resolve()) + "\n").encode()
+
+        def completed(stdout: bytes = b"", returncode: int = 0) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess([], returncode, stdout, b"")
+
+        cases = {
+            "skip-worktree": (completed(b"", 1), completed(), completed(b"S verify.py\x00")),
+            "assume-unchanged": (completed(b"", 1), completed(), completed(b"h verify.py\x00")),
+            "sparse-checkout": (completed(b"true\n"), completed(), completed(b"H verify.py\x00")),
+            "unmerged": (completed(b"", 1), completed(b"100644 1 a\tverify.py\x00"), completed()),
+        }
+        for label, (sparse, unmerged, index) in cases.items():
+            with self.subTest(label=label):
+                results = (completed(root_output), completed(), sparse, unmerged, index)
+                with patch("scripts.check_product_readiness._run_trusted_git", side_effect=results):
+                    self.assertFalse(_repository_is_clean())
+
+    def test_safe_report_derives_nested_release_evidence_status(self) -> None:
+        from scripts.check_product_readiness import _safe_report_for_output
+
+        for history, release, expected in (
+            ("pass", "pass", "pass"),
+            ("pass", "fail", "fail"),
+            ("not_run", "not_run", "not_run"),
+        ):
+            with self.subTest(history=history, release=release):
+                report = {
+                    "categories": [],
+                    "checks": {
+                        "release_evidence": {
+                            "history": {"status": history},
+                            "release": {"status": release},
+                        }
+                    },
+                }
+                safe = _safe_report_for_output(report)
+                self.assertEqual(safe["checks"]["release_evidence"]["status"], expected)
+
+
     def test_repository_git_probe_scrubs_overrides_and_disables_execution_hooks(self) -> None:
         from scripts.check_product_readiness import ROOT as SCORER_ROOT, _repository_revision
 
         completed = (
-            subprocess.CompletedProcess([], 0, stdout=str(SCORER_ROOT.resolve()) + "\n", stderr=""),
-            subprocess.CompletedProcess([], 0, stdout="a" * 40 + "\n", stderr=""),
+            subprocess.CompletedProcess([], 0, stdout=(str(SCORER_ROOT.resolve()) + "\n").encode(), stderr=b""),
+            subprocess.CompletedProcess([], 0, stdout=("a" * 40 + "\n").encode(), stderr=b""),
         )
         with (
             patch.dict(
@@ -1452,7 +1873,7 @@ class ProductReadinessTests(unittest.TestCase):
                 {"GIT_DIR": "attacker", "GIT_WORK_TREE": "attacker", "GIT_ASKPASS": "attacker"},
                 clear=False,
             ),
-            patch("scripts.check_product_readiness.subprocess.run", side_effect=completed) as run,
+            patch("scripts.check_product_readiness._run_bounded_process", side_effect=completed) as run,
         ):
             self.assertEqual(_repository_revision(), "a" * 40)
 
@@ -1462,14 +1883,15 @@ class ProductReadinessTests(unittest.TestCase):
             self.assertNotIn("GIT_WORK_TREE", environment)
             self.assertNotIn("GIT_ASKPASS", environment)
             command = call.args[0]
+            self.assertTrue(Path(command[0]).is_absolute())
             self.assertIn("core.fsmonitor=false", command)
             self.assertIn("core.hooksPath=", command)
 
     def test_repository_git_probe_rejects_a_different_top_level(self) -> None:
         from scripts.check_product_readiness import _repository_revision
 
-        forged = subprocess.CompletedProcess([], 0, stdout=str(ROOT.parent) + "\n", stderr="")
-        with patch("scripts.check_product_readiness.subprocess.run", return_value=forged):
+        forged = subprocess.CompletedProcess([], 0, stdout=(str(ROOT.parent) + "\n").encode(), stderr=b"")
+        with patch("scripts.check_product_readiness._run_bounded_process", return_value=forged):
             self.assertEqual(_repository_revision(), "")
 
 

@@ -9,13 +9,13 @@ still handled by the live report promotion guard.
 Local candidate eligibility is cumulative and fail-closed. Credential candidate review requires
 `report.ok=true`, the exact four successful semantic public checks, a stable
 clean source revision bound to the canonical `github.com/yunushan/market-sentinel`
-origin, and an accepted credentialed read. Funded promotion is unconditionally
-blocked while the repository exposes no reviewed CLOB V2 mutation client. After
-that migration, funded candidate review would additionally require a source
-revision recheck immediately before execution, a same-trading-client
-authenticated order read, geoblock clearance, sufficient balance and allowance,
-post-only maker guards, exact order identity, zero fills, explicit canceled
-state, and a resolved durable recovery journal. Local reports
+origin, and an accepted credentialed read. Funded candidate review additionally
+requires the dedicated one-shot audit path, a source-revision recheck immediately
+before execution, an independently configured token allow-list, explicit
+protected-environment approval, a same-trading-client authenticated order read,
+geoblock clearance, sufficient balance and allowance, post-only maker guards,
+exact order identity, zero fills, explicit canceled state, and a resolved
+durable recovery journal. Normal application mutation remains disabled. Local reports
 remain evidence candidates only and do not award production-readiness points
 without a trusted workflow and exact-byte attestation. Local summary and inventory
 labels use `candidate_only`, never `yes` or `verified`.
@@ -98,7 +98,7 @@ Deterministic schema fixtures live in `tests/fixtures/polymarket/live_reports/`:
 | Fixture | Expected result |
 | --- | --- |
 | `valid_credentialed_read.json` | Accepted `strict_cli`; becomes a local `candidate_only` credential evidence report because it contains accepted authenticated-read evidence. |
-| `valid_funded_audit.json` | Accepted `strict_cli` as a historical/schema fixture; funded promotion remains blocked because the current implementation does not support CLOB V2 mutations. |
+| `valid_funded_audit.json` | Accepted `strict_cli` as a deterministic local funded-candidate fixture; it remains candidate-only and cannot award production credit without the protected exact-revision workflow review and attestation. |
 | `valid_dry_run.json` | Accepted `strict_cli`; funded promotion remains blocked. |
 | `valid_runbook.json` | Accepted runbook mode; all promotion remains blocked. |
 | `valid_browser_smoke.json` | Accepted browser-smoke seed; all promotion remains blocked. |

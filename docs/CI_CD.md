@@ -26,11 +26,11 @@ Jobs:
 - Full project verification with `python verify.py`.
 - A pinned Ruff static-analysis gate (`F` correctness, `B` bugbear, and `S608`
   dynamic-SQL rules), run by `python verify.py` before the functional test suite.
-- Enforced branch-coverage floors of 65% for the full Python application and
-  74% for the headless/backend surface. The verifier measures both and fails on
+- Enforced branch-coverage floors of 72% for the full Python application and
+  76% for the headless/backend surface. The verifier measures both and fails on
   regression.
 - React production build with Node.js `24`.
-- Python wheel and source distribution build, explicit artifact-content verification, and an installed-wheel CLI, metadata, registry, and adapter import smoke from outside the source tree. `MANIFEST.in` keeps the source archive's fixtures, config, docs, frontend source, scripts, workflows, and visual assets while excluding generated frontend/build directories.
+- Python wheel and source distribution build, explicit artifact-content verification, and an installed-wheel CLI, metadata, registry, and adapter import smoke from a fresh virtual environment outside the source tree. The smoke check verifies that imports resolve under that environment's site-packages rather than the checkout. `MANIFEST.in` keeps the source archive's fixtures, config, docs, frontend source, scripts, workflows, and visual assets while excluding generated frontend/build directories.
 - Short-retention artifacts for the frontend bundle and Python distributions.
 - Every third-party action is pinned to a reviewed 40-character commit SHA,
   with its tracked major version retained as a comment for reviewability.
@@ -54,6 +54,22 @@ freshness, and requires both workflow and source ref to be `refs/heads/main`.
 This evidence establishes public endpoint reachability from that
 runner at that time; it is not deployment, credentialed-account, or funded-order
 evidence.
+
+Every point-bearing hosted compatibility job on protected `main` also invokes
+the local `platform-ci-receipt` composite action after its checks succeed. The
+action runs only for a protected-`main` push and writes a canonical receipt binding the source run ID and attempt, exact
+commit, workflow ref, stable job key, rendered job name, matrix identity,
+GitHub-hosted runner environment, OS/architecture, and generation time. Each
+job independently creates a GitHub build-provenance attestation for those exact
+bytes and uploads a uniquely named, run/attempt/job-bound artifact. Pull-request
+manual, pull-request, and non-`main` runs do not publish these trust-sensitive receipts.
+
+The manual `Platform evidence` workflow accepts only a successful, fresh
+protected-main CI run. It downloads the complete current-attempt receipt
+inventory, verifies every Sigstore result before producing aggregate evidence,
+and rejects absent, duplicate, stale, replayed, cross-revision, or cross-attempt
+receipts. The readiness scorer repeats those API and attestation checks rather
+than trusting runner labels or the aggregate report alone.
 
 ### Security
 
@@ -100,13 +116,25 @@ Release jobs:
   artifact bound to the exact repository, commit, tag, run, attempt, release
   history, and asset names/sizes/SHA-256 values.
 
-The publish job targets the protected `release` environment when
-`REQUIRE_WINDOWS_CODE_SIGNING=true`. When that variable is explicitly false,
-the workflow targets the unprotected `release-unsigned` environment so a
-tag-triggered testing/development release is not rejected by a protected
-branch deployment rule or an unavailable self-review. Configure protection
-rules on the release environment (`release`) for production publishing; unsigned releases remain
-explicitly non-production-trusted.
+The metadata job derives `SOURCE_DATE_EPOCH` from the exact release commit.
+Python package metadata and the SBOM inherit that value, source-distribution
+tar/gzip metadata is normalized, and frontend and Windows portable ZIPs use
+sorted entries, normalized permissions, and the same two-second ZIP timestamp.
+The wheel and source distribution are each built from separate clean source
+snapshots into clean output directories and must compare byte-for-byte before
+upload. Authenticode RFC 3161
+timestamps and MSI/toolchain internals remain intentionally outside the
+byte-reproducible claim.
+
+The publish job targets the protected `release` environment for every stable
+tag, including drafts, regardless of the `REQUIRE_WINDOWS_CODE_SIGNING`
+variable, and whenever that variable is `true`. The unprotected
+`release-unsigned` environment is available only to a validated prerelease when
+repository policy does not otherwise require signing. A verifier runs before
+any release mutation and rejects stable artifacts unless the Windows job
+completed final Authenticode verification. Configure
+protection rules on the release environment (`release`) for production publishing;
+unsigned releases remain explicitly non-production-trusted.
 
 Release reruns are fail-closed. An updatable existing release is returned to draft state before its assets change; a new release starts as a draft. After the verified local files are uploaded, the workflow enumerates every remote asset page, removes only numeric asset IDs belonging to that exact release whose names are absent locally, checks the exact remote names and metadata, downloads every asset, and compares the bytes with the attested local files. The requested draft or published state is applied only after those checks pass. If immutable releases are enabled, GitHub rejects modification of a published release instead of allowing a partial rerun.
 
@@ -192,14 +220,28 @@ Dependabot opens grouped weekly pull requests for:
 
 The bootstrap installer plus runtime, live SDK, test, build, and security-audit
 locks are regenerated with `pip-compile --allow-unsafe --generate-hashes` only
-during an intentional dependency update. Every Python workflow first installs
-the hash-locked `requirements-bootstrap.lock`; CI test jobs then install
+during an intentional dependency update. Python 3.14 and the hash-locked
+`requirements-build.lock` provide the pinned pip-tools toolchain; run
+`python scripts/regenerate_dependency_locks.py --upgrade` so all six graphs are
+updated and validated together. Every Python workflow first installs
+the hash-locked `requirements-bootstrap.lock`, which pins pip and the exact
+setuptools backend declared by `pyproject.toml`. Every source or editable
+install then uses `--no-build-isolation --check-build-dependencies --no-deps`,
+so pip verifies the already installed backend instead of resolving executable
+build code in an isolated environment. All workflow dependency installs set
+`PIP_ONLY_BINARY=:all:` in addition to hash checking; if a supported target has
+no reviewed wheel, it fails rather than building a dependency sdist with an
+unlocked, executable backend. CI test jobs then install
 `requirements-test.lock`, while package build jobs install
 `requirements.lock` plus `requirements-build.lock`. The security workflow and
 the release package gate install `requirements-security.lock` and audit every
 bootstrap, runtime, live, test, build, and security lock before publishing.
 This keeps all Python dependency graphs independently reviewable and hash
 protected.
+Distribution builds likewise use `python -m build --no-isolation` only after
+the hash-locked build toolchain is installed. The fresh-environment smoke gate
+installs only the wheel after `verify_python_dist_artifacts.py` validates its
+metadata and contents, and uses `--no-index` for that wheel installation.
 The release frontend build installs with lifecycle scripts disabled and runs
 `npm audit --audit-level=high` over its full build dependency tree before
 creating the published bundle.
@@ -219,7 +261,7 @@ The portable zip contains:
 - bundled `frontend/dist` React assets
 - `README.md`, `README_WINDOWS.txt`, `LICENSE`, `.env.example`, and `data/config.example.json`
 
-The MSI installs the same payload under Program Files, creates Start Menu shortcuts for the Tkinter and React launchers, and supports normal Windows uninstall/upgrade behavior through MSI product metadata. Set `REQUIRE_WINDOWS_CODE_SIGNING=true` for production releases; the `release` environment must then provide `WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64` and `WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD`. Before downloading build inputs or running WiX/PyInstaller, the release job verifies that the secret is a password-protected PFX with a private key and that the timestamp endpoint is HTTPS. `scripts/sign_windows_release.py` signs and verifies every EXE/MSI using an RFC 3161 timestamp URL; certificates are decoded only into a temporary file on the Windows runner. If `REQUIRE_WINDOWS_CODE_SIGNING` is explicitly false or absent, the workflow still builds and verifies the portable ZIP/MSI contents, but publishes them as intentionally unsigned testing/development artifacts and labels that status in the release notes. Unsigned Windows artifacts are not production-trusted.
+The MSI installs the same payload under Program Files, creates Start Menu shortcuts for the Tkinter and React launchers, and supports normal Windows uninstall/upgrade behavior through MSI product metadata. Every stable tag, including a draft, requires signing; setting `REQUIRE_WINDOWS_CODE_SIGNING=true` extends the same requirement to prereleases. The protected `release` environment must provide `WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64`, `WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD`, and the separately scoped `READINESS_ADMIN_TOKEN` used for the governance-evidence recheck described in `docs/REPOSITORY_SETTINGS.md`. Before downloading build inputs or running WiX/PyInstaller, the release job verifies that the signing secret is a password-protected PFX with a private key and that the timestamp endpoint is HTTPS. `scripts/sign_windows_release.py` signs and verifies every EXE/MSI using an RFC 3161 timestamp URL; certificates are decoded only into a temporary file on the Windows runner. If signing is not required, the workflow may build unsigned portable ZIP/MSI artifacts only for a validated prerelease and labels that status in the release notes. Unsigned Windows artifacts are not production-trusted.
 
 The Windows launchers use `data/config.json` when the package folder is writable, which keeps the portable zip self-contained. If the app is installed under a protected folder such as Program Files, the launchers set `PREDICTION_MARKET_CONFIG_PATH` to `%APPDATA%\market-sentinel\data\config.json` so normal users can save settings without administrator privileges.
 
@@ -227,18 +269,22 @@ The Windows launchers use `data/config.json` when the package folder is writable
 
 Recommended GitHub settings:
 
-- Require the `Python package build`, `Python dependency audit`, `CodeQL`, `Dependency review`, and `Frontend dependency audit` checks before merging. The package gate aggregates the Python/OS matrix, React build, mobile-web smoke, enterprise Linux checks, Windows 11, and real Tkinter GUI lifecycle job. When the `ENABLE_WINDOWS_10_SELF_HOSTED=true` repository variable is enabled, it also requires the Windows 10 self-hosted job to succeed; when the variable is absent, that optional job is intentionally skipped and does not block the aggregate gate.
+- Require the `Python package build`, `Python dependency audit`, `CodeQL`, `Dependency review`, `Frontend dependency audit`, `Secret history scan`, and `Workflow and shell lint` checks before merging. The package gate aggregates the Python/OS matrix, React build, mobile-web smoke, enterprise Linux checks, Windows 11, and real Tkinter GUI lifecycle job. When the `ENABLE_WINDOWS_10_SELF_HOSTED=true` repository variable is enabled, it also requires the Windows 10 self-hosted job to succeed; when the variable is absent, that optional job is intentionally skipped and does not block the aggregate gate.
 - Enable GitHub dependency graph; the dependency review job fails closed without it.
 - Keep GitHub Actions workflow permissions as read-only by default.
 - Create a protected `release` environment if production releases should require approval.
 - Enable Dependabot alerts, secret scanning, push protection, and private vulnerability reporting.
-- Use branch protection on `main` or `master`.
+- Apply branch protection to `main` with signed commits, required pull requests, stale-review dismissal,
+  last-push approval, and Code Owner review by an independent maintainer; the exact
+  production contract is in `docs/REPOSITORY_SETTINGS.md`.
 
 The release workflow uses the built-in `GITHUB_TOKEN` with `contents: write`,
 `attestations: write`, and `id-token: write` only on the protected publish job.
-Windows code-signing credentials are required before distributing a production
-installer publicly. Set `REQUIRE_WINDOWS_CODE_SIGNING=true` and the protected
-code-signing secrets in the `release` environment. For an explicitly unsigned
-testing/development release, set the variable to `false`; the workflow labels
-the resulting Windows artifacts as unsigned. See `docs/REPOSITORY_SETTINGS.md` and
+Windows code-signing credentials are required before distributing a stable
+installer publicly. The workflow enforces that rule even if
+`REQUIRE_WINDOWS_CODE_SIGNING` is false; set the variable to `true` to require
+signing for every release state and keep the protected code-signing secrets in
+the `release` environment. An explicitly unsigned testing/development release
+must use a validated prerelease tag, and the workflow labels its Windows artifacts
+as unsigned. See `docs/REPOSITORY_SETTINGS.md` and
 `docs/PRODUCTION_OPERATIONS.md` for the mandatory repository and deployment controls.
