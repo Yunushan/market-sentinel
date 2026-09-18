@@ -44,6 +44,11 @@ REQUIRED_IMPORTS = {
 
 MIN_TOTAL_BRANCH_COVERAGE = 72.0
 MIN_BACKEND_BRANCH_COVERAGE = 76.0
+# Windows Python 3.11+ exercises the Windows-only release and ACL branches
+# that are intentionally skipped on POSIX and Python 3.10 lanes.  Keep the
+# stricter floor for that canonical lane while using the repository's previous
+# compatibility floor where those branches cannot be collected by design.
+COMPATIBILITY_BACKEND_BRANCH_COVERAGE = 74.0
 BACKEND_COVERAGE_INCLUDE = "core/*,market_adapters/*,polymarket/*,web_api.py,market_sentinel_cli.py"
 RESOURCE_WARNING_POLICY = "error::ResourceWarning"
 
@@ -2064,6 +2069,19 @@ def run_polymarket_credential_runbook_check() -> None:
     print("[ok] Polymarket credential runbook")
 
 
+def effective_backend_coverage_floor() -> float:
+    """Return the backend floor supported by this matrix lane.
+
+    Windows Python 3.11+ runs the Windows-only release and ACL tests.  POSIX
+    lanes and Python 3.10 intentionally skip those branches, so they use the
+    compatibility floor instead of failing on coverage that cannot be
+    collected on that host.
+    """
+    if os.name == "nt" and sys.version_info >= (3, 11):
+        return MIN_BACKEND_BRANCH_COVERAGE
+    return COMPATIBILITY_BACKEND_BRANCH_COVERAGE
+
+
 def run_unit_tests() -> None:
     suite = unittest.defaultTestLoader.discover(str(ROOT / "tests"))
     test_count = suite.countTestCases()
@@ -2074,6 +2092,7 @@ def run_unit_tests() -> None:
     env["COVERAGE_FILE"] = str(coverage_file)
     existing_warnings = env.get("PYTHONWARNINGS", "").strip()
     env["PYTHONWARNINGS"] = ",".join(filter(None, (existing_warnings, RESOURCE_WARNING_POLICY)))
+    backend_coverage_floor = effective_backend_coverage_floor()
     commands = (
         [sys.executable, "-m", "coverage", "erase"],
         [
@@ -2101,7 +2120,7 @@ def run_unit_tests() -> None:
             "coverage",
             "report",
             f"--include={BACKEND_COVERAGE_INCLUDE}",
-            f"--fail-under={MIN_BACKEND_BRANCH_COVERAGE:g}",
+            f"--fail-under={backend_coverage_floor:g}",
         ],
     )
     for command in commands:
@@ -2110,7 +2129,7 @@ def run_unit_tests() -> None:
             raise SystemExit(result.returncode)
     print(
         f"[ok] unit tests ({test_count} tests); combined statement/branch coverage "
-        f">= {MIN_TOTAL_BRANCH_COVERAGE:g}% overall and >= {MIN_BACKEND_BRANCH_COVERAGE:g}% backend"
+        f">= {MIN_TOTAL_BRANCH_COVERAGE:g}% overall and >= {backend_coverage_floor:g}% backend"
     )
 
 

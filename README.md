@@ -814,7 +814,7 @@ This runs:
 - frontend build readiness checks; the build is skipped unless `frontend/node_modules` exists
 - optional Live Safety report-history browser smoke checks when `--frontend-live-smoke` is supplied
 - offline unit tests for config/storage, API wrapper parsing, alert crossing, copy-trade percentage sizing, and wallet activity de-duplication
-- enforced combined statement/branch-coverage floors of 72% across the full Python application and 76% across the headless/backend surface; `python verify.py` fails when either floor regresses
+- enforced combined statement/branch-coverage floors of 72% across the full Python application and 76% across the headless/backend surface on Windows Python 3.11+; POSIX and Python 3.10 compatibility lanes use a 74% backend floor because platform-specific release/ACL tests are intentionally skipped, and `python verify.py` applies the lane-appropriate floor
 
 Install `requirements-test.lock` before running the pytest suite:
 ```bash
