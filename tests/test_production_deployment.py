@@ -298,6 +298,58 @@ def _worker_runner(
     return runner
 
 
+def _restrict_worker_fixture_permissions(*paths: Path) -> None:
+    if os.name == "posix":
+        for path in paths:
+            path.chmod(0o600)
+
+
+@contextlib.contextmanager
+def _pretend_worker_fixture_root_owned(*paths: Path):
+    """Model the root-owned deployment files required by the POSIX verifier.
+
+    CI runs the tests as an unprivileged account, so temporary fixture files
+    cannot actually be chowned to root.  Keep the production ownership checks
+    intact and adjust only the metadata observed for these fixture paths.
+    """
+    if os.name != "posix":
+        yield
+        return
+
+    targets = {path.resolve() for path in paths}
+    original_lstat = Path.lstat
+    original_open = os.open
+    original_fstat = os.fstat
+    target_descriptors: set[int] = set()
+
+    def root_owned(result: os.stat_result) -> os.stat_result:
+        values = list(result)
+        values[4] = 0
+        return os.stat_result(values)
+
+    def lstat(path: Path) -> os.stat_result:
+        result = original_lstat(path)
+        return root_owned(result) if path.resolve() in targets else result
+
+    def open_file(*args, **kwargs) -> int:
+        descriptor = original_open(*args, **kwargs)
+        path = Path(args[0])
+        if path.resolve() in targets:
+            target_descriptors.add(descriptor)
+        return descriptor
+
+    def fstat(descriptor: int) -> os.stat_result:
+        result = original_fstat(descriptor)
+        return root_owned(result) if descriptor in target_descriptors else result
+
+    with (
+        patch.object(Path, "lstat", autospec=True, side_effect=lstat),
+        patch.object(os, "open", side_effect=open_file),
+        patch.object(os, "fstat", side_effect=fstat),
+    ):
+        yield
+
+
 class _Response:
     status = 200
 
@@ -704,14 +756,16 @@ class ProductionDeploymentTests(unittest.TestCase):
                 f"{allowed_key}={secret_value}\n",
                 encoding="utf-8",
             )
-            check = check_unattended_workers(
-                _worker_runner(finishes),
-                state_path=state_path,
-                lock_path=lock_path,
-                environment_path=environment_path,
-                expected_revision=TEST_SOURCE_REVISION,
-                clock=lambda: now,
-            )
+            _restrict_worker_fixture_permissions(state_path, lock_path, environment_path)
+            with _pretend_worker_fixture_root_owned(state_path, lock_path, environment_path):
+                check = check_unattended_workers(
+                    _worker_runner(finishes),
+                    state_path=state_path,
+                    lock_path=lock_path,
+                    environment_path=environment_path,
+                    expected_revision=TEST_SOURCE_REVISION,
+                    clock=lambda: now,
+                )
 
         self.assertEqual(check["status"], "pass", check)
         self.assertEqual(
@@ -762,18 +816,20 @@ class ProductionDeploymentTests(unittest.TestCase):
                     f"MARKET_SENTINEL_SOURCE_REVISION={TEST_SOURCE_REVISION}\n",
                     encoding="utf-8",
                 )
-                check = check_unattended_workers(
-                    _worker_runner(
-                        finishes,
-                        property_overrides=property_overrides,
-                        command_overrides=command_overrides,
-                    ),
-                    state_path=state_path,
-                    lock_path=lock_path,
-                    environment_path=environment_path,
-                    expected_revision=TEST_SOURCE_REVISION,
-                    clock=lambda: now,
-                )
+                _restrict_worker_fixture_permissions(state_path, lock_path, environment_path)
+                with _pretend_worker_fixture_root_owned(state_path, lock_path, environment_path):
+                    check = check_unattended_workers(
+                        _worker_runner(
+                            finishes,
+                            property_overrides=property_overrides,
+                            command_overrides=command_overrides,
+                        ),
+                        state_path=state_path,
+                        lock_path=lock_path,
+                        environment_path=environment_path,
+                        expected_revision=TEST_SOURCE_REVISION,
+                        clock=lambda: now,
+                    )
             self.assertEqual(check["status"], "fail", check)
 
     def test_unattended_worker_future_skew_is_bounded_to_five_seconds(self) -> None:
@@ -810,14 +866,16 @@ class ProductionDeploymentTests(unittest.TestCase):
                     f"MARKET_SENTINEL_SOURCE_REVISION={TEST_SOURCE_REVISION}\n",
                     encoding="utf-8",
                 )
-                check = check_unattended_workers(
-                    _worker_runner({**finishes, "alerts-refresh": finished - 2}),
-                    state_path=state_path,
-                    lock_path=lock_path,
-                    environment_path=environment_path,
-                    expected_revision=TEST_SOURCE_REVISION,
-                    clock=lambda: now,
-                )
+                _restrict_worker_fixture_permissions(state_path, lock_path, environment_path)
+                with _pretend_worker_fixture_root_owned(state_path, lock_path, environment_path):
+                    check = check_unattended_workers(
+                        _worker_runner({**finishes, "alerts-refresh": finished - 2}),
+                        state_path=state_path,
+                        lock_path=lock_path,
+                        environment_path=environment_path,
+                        expected_revision=TEST_SOURCE_REVISION,
+                        clock=lambda: now,
+                    )
             self.assertEqual(check["status"], expected_status, check)
 
     def test_unattended_workers_reject_disallowed_environment_keys_without_leaking_values(self) -> None:
@@ -836,14 +894,16 @@ class ProductionDeploymentTests(unittest.TestCase):
                 f"PRIVATE_KEY={secret_value}\n",
                 encoding="utf-8",
             )
-            check = check_unattended_workers(
-                _worker_runner(finishes),
-                state_path=state_path,
-                lock_path=lock_path,
-                environment_path=environment_path,
-                expected_revision=TEST_SOURCE_REVISION,
-                clock=lambda: now,
-            )
+            _restrict_worker_fixture_permissions(state_path, lock_path, environment_path)
+            with _pretend_worker_fixture_root_owned(state_path, lock_path, environment_path):
+                check = check_unattended_workers(
+                    _worker_runner(finishes),
+                    state_path=state_path,
+                    lock_path=lock_path,
+                    environment_path=environment_path,
+                    expected_revision=TEST_SOURCE_REVISION,
+                    clock=lambda: now,
+                )
 
         self.assertEqual(check["status"], "fail")
         self.assertNotIn(secret_value, json.dumps(check, sort_keys=True))
@@ -911,14 +971,16 @@ class ProductionDeploymentTests(unittest.TestCase):
                     f"MARKET_SENTINEL_SOURCE_REVISION={TEST_SOURCE_REVISION}\n",
                     encoding="utf-8",
                 )
-                check = check_unattended_workers(
-                    _worker_runner(finishes),
-                    state_path=state_path,
-                    lock_path=lock_path,
-                    environment_path=environment_path,
-                    expected_revision=TEST_SOURCE_REVISION,
-                    clock=lambda: now,
-                )
+                _restrict_worker_fixture_permissions(state_path, lock_path, environment_path)
+                with _pretend_worker_fixture_root_owned(state_path, lock_path, environment_path):
+                    check = check_unattended_workers(
+                        _worker_runner(finishes),
+                        state_path=state_path,
+                        lock_path=lock_path,
+                        environment_path=environment_path,
+                        expected_revision=TEST_SOURCE_REVISION,
+                        clock=lambda: now,
+                    )
             self.assertEqual(check["status"], "fail", check)
 
     def test_backup_evidence_opens_and_cryptographically_verifies_a_recent_pair(self) -> None:
