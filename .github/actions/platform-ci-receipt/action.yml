@@ -1,0 +1,108 @@
+name: Publish cryptographically attested platform receipt
+description: Generate, attest, and upload one exact hosted CI job receipt.
+
+inputs:
+  job-key:
+    description: Stable workflow job key.
+    required: true
+  matrix-os:
+    description: Matrix operating-system identity when applicable.
+    required: false
+    default: ""
+  matrix-python-version:
+    description: Matrix Python identity when applicable.
+    required: false
+    default: ""
+  matrix-name:
+    description: Matrix display identity when applicable.
+    required: false
+    default: ""
+  matrix-target:
+    description: Matrix mobile target identity when applicable.
+    required: false
+    default: ""
+
+outputs:
+  artifact-name:
+    description: Exact run/attempt/job-bound receipt artifact name.
+    value: ${{ steps.generate.outputs.artifact-name }}
+  identity-sha256:
+    description: Canonical source-job identity digest.
+    value: ${{ steps.generate.outputs.identity-sha256 }}
+  receipt-sha256:
+    description: SHA-256 of the exact canonical receipt bytes.
+    value: ${{ steps.generate.outputs.receipt-sha256 }}
+
+runs:
+  using: composite
+  steps:
+    - name: Generate canonical hosted-job receipt
+      id: generate
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        INPUT_JOB_KEY: ${{ inputs.job-key }}
+        INPUT_MATRIX_OS: ${{ inputs.matrix-os }}
+        INPUT_MATRIX_PYTHON_VERSION: ${{ inputs.matrix-python-version }}
+        INPUT_MATRIX_NAME: ${{ inputs.matrix-name }}
+        INPUT_MATRIX_TARGET: ${{ inputs.matrix-target }}
+      run: |
+        set -euo pipefail
+        test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+        git diff --quiet --no-ext-diff "${GITHUB_SHA}" -- \
+          .github/actions/platform-ci-receipt/action.yml \
+          scripts/platform_ci_receipt.py \
+          scripts/trusted_readiness_evidence.py \
+          polymarket/funded_policy.py
+        receipt_dir="${RUNNER_TEMP}/market-sentinel-platform-receipt"
+        mkdir -p "${receipt_dir}"
+        python -B scripts/platform_ci_receipt.py generate \
+          --repository "${GITHUB_REPOSITORY}" \
+          --source-revision "${GITHUB_SHA}" \
+          --run-id "${GITHUB_RUN_ID}" \
+          --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+          --workflow-ref "${GITHUB_WORKFLOW_REF}" \
+          --event "${GITHUB_EVENT_NAME}" \
+          --job-key "${INPUT_JOB_KEY}" \
+          --matrix-os "${INPUT_MATRIX_OS}" \
+          --matrix-python-version "${INPUT_MATRIX_PYTHON_VERSION}" \
+          --matrix-name "${INPUT_MATRIX_NAME}" \
+          --matrix-target "${INPUT_MATRIX_TARGET}" \
+          --runner-environment "${RUNNER_ENVIRONMENT}" \
+          --runner-os "${RUNNER_OS}" \
+          --runner-arch "${RUNNER_ARCH}" \
+          --output "${receipt_dir}/platform-ci-receipt.json" \
+          --github-output "${GITHUB_OUTPUT}"
+
+    - name: Attest canonical hosted-job receipt
+      uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+      with:
+        subject-path: ${{ steps.generate.outputs.receipt-path }}
+
+    - name: Reverify canonical hosted-job receipt
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        EXPECTED_IDENTITY: ${{ steps.generate.outputs.identity-sha256 }}
+        EXPECTED_RECEIPT_SHA256: ${{ steps.generate.outputs.receipt-sha256 }}
+        RECEIPT_PATH: ${{ steps.generate.outputs.receipt-path }}
+      run: |
+        set -euo pipefail
+        test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+        git diff --quiet --no-ext-diff "${GITHUB_SHA}" -- \
+          .github/actions/platform-ci-receipt/action.yml \
+          scripts/platform_ci_receipt.py \
+          scripts/trusted_readiness_evidence.py \
+          polymarket/funded_policy.py
+        python -B scripts/platform_ci_receipt.py identity \
+          --input "${RECEIPT_PATH}" \
+          --expected-identity "${EXPECTED_IDENTITY}" \
+          --expected-sha256 "${EXPECTED_RECEIPT_SHA256}"
+
+    - name: Upload canonical hosted-job receipt
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: ${{ steps.generate.outputs.artifact-name }}
+        path: ${{ steps.generate.outputs.receipt-path }}
+        if-no-files-found: error
+        retention-days: 7

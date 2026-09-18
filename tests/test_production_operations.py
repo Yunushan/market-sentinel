@@ -8,6 +8,44 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class ProductionOperationsTests(unittest.TestCase):
+    def test_production_systemd_version_floor_is_explicit(self) -> None:
+        operations = (ROOT / "docs" / "PRODUCTION_OPERATIONS.md").read_text(encoding="utf-8")
+
+        for fragment in (
+            "systemd 247+ (RHEL/Rocky 9+ or supported Ubuntu)",
+            "requires systemd 247 or newer",
+            "systemd 239 shipped by RHEL/Rocky 8",
+            "ProtectProc=",
+            "ProcSubset=",
+            "systemctl --version",
+            "test \"${SYSTEMD_VERSION}\" -ge 247",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, operations)
+
+    def test_runbook_documents_serialized_unattended_alert_and_wallet_polling(self) -> None:
+        operations = (ROOT / "docs" / "PRODUCTION_OPERATIONS.md").read_text(encoding="utf-8")
+        web_unit = (ROOT / "deploy" / "systemd" / "market-sentinel-web.service").read_text(
+            encoding="utf-8"
+        )
+
+        for fragment in (
+            "Separate reviewed",
+            "core.unattended_worker",
+            "Both tasks share one lock and one atomic status file",
+            "compare-and-swap configuration commits",
+            "partial feed failures as failures rather than fresh success",
+            "These workers do not execute copy trading or place orders",
+            "Do not add ad hoc concurrent polling timers",
+            "market-sentinel-worker status --task all",
+            "/var/lib/market-sentinel/.unattended-worker.lock",
+            "/var/lib/market-sentinel/unattended-worker-state.json",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, operations)
+        self.assertNotIn("alerts refresh", web_unit)
+        self.assertNotIn("wallets poll", web_unit)
+
     def test_systemd_unit_uses_loopback_and_service_hardening(self) -> None:
         unit = (ROOT / "deploy" / "systemd" / "market-sentinel-web.service").read_text(encoding="utf-8")
         for fragment in (
@@ -45,13 +83,14 @@ class ProductionOperationsTests(unittest.TestCase):
             "ExecStartPre=/opt/market-sentinel/.venv/bin/python -m market_sentinel_cli doctor --strict --compact",
             "--config /var/lib/market-sentinel/config.json",
             "--frontend-dir /opt/market-sentinel/frontend/dist",
-            "verify_service_health.py",
             "StartLimitIntervalSec=5min",
             "StartLimitBurst=5",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, unit)
         self.assertNotIn("EnvironmentFile=-/etc/market-sentinel/market-sentinel.env", unit)
+        self.assertNotIn("ExecStartPost=", unit)
+        self.assertNotIn("verify_service_health.py", unit)
 
     def test_proxy_and_governance_artifacts_require_authenticated_tls_access(self) -> None:
         proxy = (ROOT / "deploy" / "caddy" / "Caddyfile.example").read_text(encoding="utf-8")
@@ -59,6 +98,9 @@ class ProductionOperationsTests(unittest.TestCase):
         repository_settings = (ROOT / "docs" / "REPOSITORY_SETTINGS.md").read_text(encoding="utf-8")
         codeowners = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
         service_environment = (ROOT / "deploy" / "systemd" / "market-sentinel.env.example").read_text(encoding="utf-8")
+        health_environment = (ROOT / "deploy" / "systemd" / "market-sentinel-health.env.example").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("basic_auth", proxy)
         self.assertIn("X-Market-Sentinel-Token", proxy)
         self.assertIn("127.0.0.1:8765", proxy)
@@ -70,13 +112,22 @@ class ProductionOperationsTests(unittest.TestCase):
         self.assertIn("Cross-Origin-Opener-Policy", proxy)
         self.assertIn("Cross-Origin-Resource-Policy", proxy)
         self.assertIn("Report a vulnerability", security)
-        self.assertIn("Team production policy", repository_settings)
+        self.assertIn("Independent-review prerequisite", repository_settings)
+        self.assertIn("required Code Owner review", repository_settings)
+        self.assertIn("Signed commits", repository_settings)
         self.assertIn("secret scanning", repository_settings)
         self.assertIn("Python package build", repository_settings)
         self.assertIn("Python dependency audit", repository_settings)
         self.assertIn("Frontend dependency audit", repository_settings)
+        self.assertIn("Secret history scan", repository_settings)
+        self.assertIn("Workflow and shell lint", repository_settings)
+        self.assertIn("gitleaks/gitleaks-action", repository_settings)
+        self.assertIn("raven-actions/actionlint", repository_settings)
         self.assertIn("Release` workflow", repository_settings)
         self.assertIn("MARKET_SENTINEL_ALLOWED_ORIGINS", service_environment)
+        self.assertIn("MARKET_SENTINEL_OBSERVABILITY_TOKEN", service_environment)
+        self.assertIn("MARKET_SENTINEL_OBSERVABILITY_TOKEN", health_environment)
+        self.assertNotIn("MARKET_SENTINEL_API_TOKEN", health_environment)
         self.assertIn("* @Yunushan", codeowners)
 
     def test_service_environment_places_every_durable_store_under_the_backed_up_state_root(self) -> None:
@@ -87,6 +138,9 @@ class ProductionOperationsTests(unittest.TestCase):
             encoding="utf-8"
         )
         health_unit = (ROOT / "deploy" / "systemd" / "market-sentinel-health.service").read_text(
+            encoding="utf-8"
+        )
+        health_environment = (ROOT / "deploy" / "systemd" / "market-sentinel-health.env.example").read_text(
             encoding="utf-8"
         )
         backup_unit = (ROOT / "deploy" / "systemd" / "market-sentinel-backup.service").read_text(
@@ -115,17 +169,26 @@ class ProductionOperationsTests(unittest.TestCase):
                 self.assertEqual(service_environment.count(f"{name}="), 1)
                 self.assertTrue(expected_path.is_relative_to(state_root))
         self.assertIn("EnvironmentFile=/etc/market-sentinel/market-sentinel.env", web_unit)
-        self.assertIn("EnvironmentFile=/etc/market-sentinel/market-sentinel.env", health_unit)
+        self.assertIn("EnvironmentFile=/etc/market-sentinel/market-sentinel-health.env", health_unit)
+        self.assertNotIn("EnvironmentFile=/etc/market-sentinel/market-sentinel.env", health_unit)
         self.assertNotIn("EnvironmentFile=-/etc/market-sentinel/market-sentinel.env", web_unit)
-        self.assertNotIn("EnvironmentFile=-/etc/market-sentinel/market-sentinel.env", health_unit)
+        self.assertNotIn("EnvironmentFile=-/etc/market-sentinel/market-sentinel-health.env", health_unit)
+        health_assignments = {
+            name: value
+            for line in health_environment.splitlines()
+            if line and not line.startswith("#") and "=" in line
+            for name, value in [line.split("=", 1)]
+        }
+        self.assertEqual(set(health_assignments), {"MARKET_SENTINEL_OBSERVABILITY_TOKEN"})
         self.assertIn("--source /var/lib/market-sentinel", backup_unit)
 
     def test_systemd_health_timer_performs_periodic_loopback_checks(self) -> None:
         health_unit = (ROOT / "deploy" / "systemd" / "market-sentinel-health.service").read_text(encoding="utf-8")
         timer = (ROOT / "deploy" / "systemd" / "market-sentinel-health.timer").read_text(encoding="utf-8")
         for fragment in (
-            "User=market-sentinel",
-            "verify_service_health.py --retries 2 --retry-delay 5",
+            "EnvironmentFile=/etc/market-sentinel/market-sentinel-health.env",
+            "UnsetEnvironment=MARKET_SENTINEL_API_TOKEN",
+            "verify_service_health.py --require-observability-token --retries 2 --retry-delay 5",
             "NoNewPrivileges=true",
             "PrivateDevices=true",
             "ProtectSystem=strict",
@@ -136,9 +199,44 @@ class ProductionOperationsTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, health_unit)
+        self.assertIn("User=market-sentinel-health", health_unit.splitlines())
+        self.assertIn("Group=market-sentinel-health", health_unit.splitlines())
+        self.assertNotIn("User=market-sentinel", health_unit.splitlines())
+        self.assertIn("PrivateUsers=true", health_unit.splitlines())
+        self.assertIn("ProtectProc=invisible", health_unit.splitlines())
+        self.assertNotIn("ExecStartPre=", health_unit)
         self.assertIn("OnUnitActiveSec=1min", timer)
         self.assertIn("Persistent=true", timer)
         self.assertIn("Unit=market-sentinel-health.service", timer)
+
+    def test_prometheus_uses_a_private_raw_observability_credential(self) -> None:
+        scrape = (ROOT / "deploy" / "prometheus" / "market-sentinel-scrape.yml").read_text(
+            encoding="utf-8"
+        )
+        operations = (ROOT / "docs" / "PRODUCTION_OPERATIONS.md").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "credentials_file: /etc/prometheus/market-sentinel-observability-token",
+            scrape,
+        )
+        self.assertIn(
+            "install -o root -g prometheus -m 0640 /dev/null "
+            "/etc/prometheus/market-sentinel-observability-token",
+            operations,
+        )
+        self.assertIn("root:prometheus:640", operations)
+        self.assertIn("credentials_file` must contain only the raw token", operations)
+        self.assertIn("promtool check rules", operations)
+        self.assertIn("promtool check config", operations)
+        self.assertIn("controlled test alert", operations)
+        self.assertIn("not a standalone include file", operations)
+        self.assertIn("Updating only one copy causes", operations)
+        self.assertIn("market-sentinel-attestation-prometheus.yml.example", operations)
+        self.assertIn("market-sentinel-attestation-alertmanager.yml.example", operations)
+        self.assertIn("/var/lib/prometheus/market-sentinel-attestation", operations)
+        self.assertIn("sudo amtool check-config", operations)
+        self.assertIn("GitHub-hosted random challenge", operations)
+        self.assertIn("proves the bound rule is absent", operations)
 
     def test_systemd_backup_timer_keeps_offline_backups_hardened(self) -> None:
         backup_unit = (ROOT / "deploy" / "systemd" / "market-sentinel-backup.service").read_text(encoding="utf-8")
@@ -165,6 +263,18 @@ class ProductionOperationsTests(unittest.TestCase):
         tmpfiles = (ROOT / "deploy" / "systemd" / "market-sentinel.conf").read_text(encoding="utf-8")
         self.assertIn("install -m 0644 deploy/systemd/market-sentinel.conf /etc/tmpfiles.d/market-sentinel.conf", operations)
         self.assertIn("systemd-tmpfiles --create /etc/tmpfiles.d/market-sentinel.conf", operations)
+        self.assertIn(
+            "deploy/systemd/market-sentinel-health.env.example /etc/market-sentinel/market-sentinel-health.env",
+            operations,
+        )
+        self.assertIn(
+            "deploy/systemd/market-sentinel-worker.env.example /etc/market-sentinel/market-sentinel-worker.env",
+            operations,
+        )
+        self.assertIn(
+            "useradd --system --home /nonexistent --shell /sbin/nologin market-sentinel-health",
+            operations,
+        )
         self.assertIn("/var/lib/market-sentinel-deployment-evidence/deployment-evidence-<RELEASE_VERSION>.json", operations)
         self.assertIn("private root-owned parent directory", operations)
         self.assertIn("d /var/lib/market-sentinel-deployment-evidence 0700 root root -", tmpfiles)

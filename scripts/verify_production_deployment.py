@@ -7,6 +7,7 @@ import ipaddress
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -70,6 +71,8 @@ REQUIRED_UNITS = (
     "market-sentinel-web.service",
     "market-sentinel-health.timer",
     "market-sentinel-backup.timer",
+    "market-sentinel-alerts-refresh.timer",
+    "market-sentinel-wallets-poll.timer",
 )
 REQUIRED_PROXY_HEADER_VALUES = {
     "strict-transport-security": ("max-age=31536000", "includesubdomains"),
@@ -93,11 +96,24 @@ REQUIRED_PROXY_HEADER_VALUES = {
 }
 BACKUP_MAX_AGE_SECONDS = 26 * 60 * 60
 BACKUP_MAX_FUTURE_SKEW_SECONDS = 5 * 60
+HEALTH_CHECK_MAX_AGE_SECONDS = 5 * 60
+UNATTENDED_WORKER_MAX_FUTURE_SKEW_SECONDS = 5
+UNATTENDED_WORKER_COMPLETION_SKEW_SECONDS = 60
+UNATTENDED_WORKER_STATE_MAX_BYTES = 64 * 1024
+UNATTENDED_WORKER_ENVIRONMENT_MAX_BYTES = 32 * 1024
+UNATTENDED_WORKER_TASK_MAX_AGE_SECONDS = {
+    "alerts-refresh": 5 * 60,
+    "wallets-poll": 10 * 60,
+}
 ROLLBACK_DRILL_MAX_AGE_SECONDS = 24 * 60 * 60
 ROLLBACK_DRILL_MAX_FUTURE_SKEW_SECONDS = 5 * 60
 DEFAULT_BACKUP_DIRECTORY = Path("/var/lib/market-sentinel-backups")
 DEFAULT_STATE_DIRECTORY = Path("/var/lib/market-sentinel")
 DEFAULT_SERVICE_ENVIRONMENT_PATH = Path("/etc/market-sentinel/market-sentinel.env")
+DEFAULT_HEALTH_ENVIRONMENT_PATH = Path("/etc/market-sentinel/market-sentinel-health.env")
+DEFAULT_WORKER_ENVIRONMENT_PATH = Path("/etc/market-sentinel/market-sentinel-worker.env")
+DEFAULT_WORKER_STATE_PATH = DEFAULT_STATE_DIRECTORY / "unattended-worker-state.json"
+DEFAULT_WORKER_LOCK_PATH = DEFAULT_STATE_DIRECTORY / ".unattended-worker.lock"
 DURABLE_STATE_PATHS = {
     "POLYMARKET_ANALYTICS_CACHE_PATH": DEFAULT_STATE_DIRECTORY / "polymarket_analytics_cache.json",
     "POLYMARKET_LIVE_VALIDATION_REPORTS_PATH": (
@@ -109,6 +125,370 @@ DURABLE_STATE_PATHS = {
     "POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_PATH": (
         DEFAULT_STATE_DIRECTORY / "polymarket_live_validation_promotion_proposal_snapshots.json"
     ),
+}
+REQUIRED_WEB_SERVICE_PROPERTIES = {
+    "User": "market-sentinel",
+    "Group": "market-sentinel",
+    "WorkingDirectory": "/opt/market-sentinel",
+    "Restart": "on-failure",
+    "PermissionsStartOnly": "no",
+    "RootDirectoryStartOnly": "no",
+    "UMask": "0077",
+    "NoNewPrivileges": "yes",
+    "PrivateTmp": "yes",
+    "PrivateDevices": "yes",
+    "ProtectClock": "yes",
+    "ProtectHostname": "yes",
+    "ProtectSystem": "strict",
+    "ProtectHome": "yes",
+    "ProtectKernelTunables": "yes",
+    "ProtectKernelModules": "yes",
+    "ProtectKernelLogs": "yes",
+    "ProtectControlGroups": "yes",
+    "ProtectProc": "invisible",
+    "ProcSubset": "pid",
+    "RestrictSUIDSGID": "yes",
+    "RestrictRealtime": "yes",
+    "RestrictNamespaces": "yes",
+    "SystemCallArchitectures": "native",
+    "LockPersonality": "yes",
+    "MemoryDenyWriteExecute": "yes",
+    "MemoryMax": str(1024 * 1024 * 1024),
+    "TasksMax": "128",
+    "LimitNOFILE": "4096",
+}
+REQUIRED_WEB_ADDRESS_FAMILIES = frozenset({"AF_UNIX", "AF_INET", "AF_INET6"})
+REQUIRED_WEB_EXEC_START_PRE_COMMANDS = (
+    (
+        "/usr/bin/test",
+        "${POLYMARKET_ANALYTICS_CACHE_PATH}",
+        "=",
+        "/var/lib/market-sentinel/polymarket_analytics_cache.json",
+    ),
+    (
+        "/usr/bin/test",
+        "${POLYMARKET_LIVE_VALIDATION_REPORTS_PATH}",
+        "=",
+        "/var/lib/market-sentinel/polymarket_live_validation_reports.json",
+    ),
+    (
+        "/usr/bin/test",
+        "${POLYMARKET_LIVE_VALIDATION_DECISIONS_PATH}",
+        "=",
+        "/var/lib/market-sentinel/polymarket_live_validation_decisions.json",
+    ),
+    (
+        "/usr/bin/test",
+        "${POLYMARKET_LIVE_VALIDATION_PROMOTION_PROPOSAL_SNAPSHOTS_PATH}",
+        "=",
+        "/var/lib/market-sentinel/polymarket_live_validation_promotion_proposal_snapshots.json",
+    ),
+    (
+        "/opt/market-sentinel/.venv/bin/python",
+        "-m",
+        "market_sentinel_cli",
+        "doctor",
+        "--strict",
+        "--compact",
+        "--config",
+        "/var/lib/market-sentinel/config.json",
+        "--frontend-dir",
+        "/opt/market-sentinel/frontend/dist",
+    ),
+)
+REQUIRED_SYSTEMD_TIMER_CONTRACTS = {
+    "market-sentinel-health.timer": {
+        "unit": "market-sentinel-health.service",
+        "persistent": True,
+        "monotonic_schedules": [
+            {"base": "OnBootUSec", "offset_usec": 120_000_000},
+            {"base": "OnUnitActiveUSec", "offset_usec": 60_000_000},
+        ],
+        "calendar_schedules": [],
+        "accuracy_usec": 10_000_000,
+    },
+    "market-sentinel-backup.timer": {
+        "unit": "market-sentinel-backup.service",
+        "persistent": True,
+        "monotonic_schedules": [],
+        "calendar_schedules": ["daily"],
+        "randomized_delay_usec": 900_000_000,
+    },
+    "market-sentinel-alerts-refresh.timer": {
+        "unit": "market-sentinel-alerts-refresh.service",
+        "persistent": True,
+        "monotonic_schedules": [],
+        "calendar_schedules": ["*-*-* *:0/2:15"],
+        "accuracy_usec": 10_000_000,
+        "randomized_delay_usec": 10_000_000,
+    },
+    "market-sentinel-wallets-poll.timer": {
+        "unit": "market-sentinel-wallets-poll.service",
+        "persistent": True,
+        "monotonic_schedules": [],
+        "calendar_schedules": ["*-*-* *:0/5:45"],
+        "accuracy_usec": 10_000_000,
+        "randomized_delay_usec": 10_000_000,
+    },
+}
+REQUIRED_HEALTH_SERVICE_PROPERTIES = {
+    "Type": "oneshot",
+    "User": "market-sentinel-health",
+    "Group": "market-sentinel-health",
+    "WorkingDirectory": "/opt/market-sentinel",
+    "UMask": "0077",
+    "NoNewPrivileges": "yes",
+    "PrivateTmp": "yes",
+    "PrivateDevices": "yes",
+    "ProtectClock": "yes",
+    "ProtectHostname": "yes",
+    "ProtectSystem": "strict",
+    "ProtectHome": "yes",
+    "ProtectKernelTunables": "yes",
+    "ProtectKernelModules": "yes",
+    "ProtectKernelLogs": "yes",
+    "ProtectControlGroups": "yes",
+    "ProtectProc": "invisible",
+    "ProcSubset": "pid",
+    "RestrictSUIDSGID": "yes",
+    "RestrictRealtime": "yes",
+    "RestrictNamespaces": "yes",
+    "PrivateUsers": "yes",
+    "SystemCallArchitectures": "native",
+    "LockPersonality": "yes",
+    "MemoryDenyWriteExecute": "yes",
+    "MemoryMax": str(128 * 1024 * 1024),
+    "TasksMax": "32",
+    "LimitNOFILE": "256",
+}
+REQUIRED_HEALTH_ADDRESS_FAMILIES = frozenset({"AF_UNIX", "AF_INET", "AF_INET6"})
+REQUIRED_WORKER_ADDRESS_FAMILIES = frozenset({"AF_UNIX", "AF_INET", "AF_INET6"})
+REQUIRED_WORKER_SERVICE_PROPERTIES = {
+    "Type": "oneshot",
+    "User": "market-sentinel",
+    "Group": "market-sentinel",
+    "WorkingDirectory": "/opt/market-sentinel",
+    "StateDirectory": "market-sentinel",
+    "StateDirectoryMode": "0700",
+    "KillMode": "mixed",
+    "UMask": "0077",
+    "NoNewPrivileges": "yes",
+    "PrivateTmp": "yes",
+    "PrivateDevices": "yes",
+    "ProtectClock": "yes",
+    "ProtectHostname": "yes",
+    "ProtectSystem": "strict",
+    "ProtectHome": "yes",
+    "ProtectKernelTunables": "yes",
+    "ProtectKernelModules": "yes",
+    "ProtectKernelLogs": "yes",
+    "ProtectControlGroups": "yes",
+    "ProtectProc": "invisible",
+    "ProcSubset": "pid",
+    "RestrictSUIDSGID": "yes",
+    "RestrictRealtime": "yes",
+    "RestrictNamespaces": "yes",
+    "SystemCallArchitectures": "native",
+    "LockPersonality": "yes",
+    "MemoryDenyWriteExecute": "yes",
+    "MemoryMax": str(512 * 1024 * 1024),
+    "TasksMax": "64",
+    "LimitNOFILE": "1024",
+}
+REQUIRED_WORKER_UNSET_ENVIRONMENT = frozenset(
+    {
+        "MARKET_SENTINEL_API_TOKEN",
+        "MARKET_SENTINEL_OBSERVABILITY_TOKEN",
+        "PRIVATE_KEY",
+        "POLYMARKET_PRIVATE_KEY",
+        "POLY_API_SECRET",
+        "POLY_SECRET",
+        "POLY_PASSPHRASE",
+        "POLY_SIGNATURE",
+        "POLY_BUILDER_API_KEY",
+        "POLY_BUILDER_SECRET",
+        "POLY_BUILDER_PASSPHRASE",
+        "POLY_BUILDER_SIGNATURE",
+        "RELAYER_API_KEY",
+        "RELAYER_API_KEY_ADDRESS",
+        "KALSHI_PRIVATE_KEY_PATH",
+        "KALSHI_PRIVATE_KEY_PEM",
+        "KALSHI_PRIVATE_KEY_PASSWORD",
+        "OPINION_PRIVATE_KEY",
+        "SX_BET_PRIVATE_KEY",
+        "GEMINI_API_SECRET",
+        "XO_API_SECRET",
+        "PROB_API_SECRET",
+        "PROBABLE_API_SECRET",
+        "PROB_PASSPHRASE",
+        "PROBABLE_API_PASSPHRASE",
+        "LIMITLESS_TOKEN_SECRET",
+        "PROPHET_EXCHANGE_SECRET_KEY",
+        "SSLKEYLOGFILE",
+        "PYTHONHOME",
+        "PYTHONINSPECT",
+        "PYTHONSTARTUP",
+        "PYTHONBREAKPOINT",
+    }
+)
+ALLOWED_WORKER_ENVIRONMENT_KEYS = frozenset(
+    {
+        "MARKET_SENTINEL_SOURCE_REVISION",
+        "CONTEXT_API_KEY",
+        "CRYPTO_COM_PREDICTIONS_API_KEY",
+        "DFLOW_API_KEY",
+        "DRAFTKINGS_PREDICTIONS_API_KEY",
+        "FANDUEL_PREDICTS_API_KEY",
+        "GJOPEN_API_TOKEN",
+        "MANIFOLD_API_KEY",
+        "METACULUS_API_TOKEN",
+        "NADEX_PREDICTIONS_API_KEY",
+        "OPINION_API_KEY",
+        "PREDICT_FUN_API_KEY",
+        "SCICAST_API_KEY",
+        "XMARKET_API_KEY",
+    }
+)
+REQUIRED_WORKER_EXEC_START_PRE_COMMANDS = (
+    ("/usr/bin/test", "-f", "/var/lib/market-sentinel/config.json"),
+    ("/usr/bin/test", "!", "-L", "/var/lib/market-sentinel/config.json"),
+)
+_WORKER_COMMAND_PREFIX = (
+    "/opt/market-sentinel/.venv/bin/python",
+    "-m",
+    "core.unattended_worker",
+    "run",
+)
+_WORKER_COMMAND_SUFFIX = (
+    "--config",
+    "/var/lib/market-sentinel/config.json",
+    "--state-file",
+    DEFAULT_WORKER_STATE_PATH.as_posix(),
+    "--lock-file",
+    DEFAULT_WORKER_LOCK_PATH.as_posix(),
+    "--deadline-seconds",
+    "90",
+    "--attempt-timeout-seconds",
+    "40",
+    "--lock-timeout-seconds",
+    "5",
+    "--max-attempts",
+    "3",
+    "--initial-backoff-seconds",
+    "2",
+    "--max-backoff-seconds",
+    "8",
+)
+WORKER_SOURCE_REVISION_ENVIRONMENT_KEY = "MARKET_SENTINEL_SOURCE_REVISION"
+WORKER_SOURCE_REVISION_TOKEN = "${MARKET_SENTINEL_SOURCE_REVISION}"
+WORKER_UNIT_CONTRACT_BINDING_PLACEHOLDER = "0" * 64
+_NORMALIZED_WORKER_EXEC_START_COMMANDS = {
+    "market-sentinel-alerts-refresh.service": (
+        *_WORKER_COMMAND_PREFIX,
+        "--task",
+        "alerts-refresh",
+        "--source-revision",
+        WORKER_SOURCE_REVISION_TOKEN,
+        "--service-unit",
+        "market-sentinel-alerts-refresh.service",
+        "--unit-contract-sha256",
+        WORKER_UNIT_CONTRACT_BINDING_PLACEHOLDER,
+        *_WORKER_COMMAND_SUFFIX,
+    ),
+    "market-sentinel-wallets-poll.service": (
+        *_WORKER_COMMAND_PREFIX,
+        "--task",
+        "wallets-poll",
+        "--source-revision",
+        WORKER_SOURCE_REVISION_TOKEN,
+        "--service-unit",
+        "market-sentinel-wallets-poll.service",
+        "--unit-contract-sha256",
+        WORKER_UNIT_CONTRACT_BINDING_PLACEHOLDER,
+        *_WORKER_COMMAND_SUFFIX,
+        "--wallet-limit",
+        "25",
+    ),
+}
+UNATTENDED_WORKER_SERVICES = {
+    "market-sentinel-alerts-refresh.service": {
+        "task": "alerts-refresh",
+        "timer": "market-sentinel-alerts-refresh.timer",
+    },
+    "market-sentinel-wallets-poll.service": {
+        "task": "wallets-poll",
+        "timer": "market-sentinel-wallets-poll.timer",
+    },
+}
+def _unattended_service_contract(
+    service: str,
+    exec_start: tuple[str, ...],
+) -> dict[str, Any]:
+    identity = UNATTENDED_WORKER_SERVICES[service]
+    return {
+        **identity,
+        "exec_start": list(exec_start),
+        "exec_start_pre": [list(command) for command in REQUIRED_WORKER_EXEC_START_PRE_COMMANDS],
+        "properties": dict(REQUIRED_WORKER_SERVICE_PROPERTIES),
+        "address_families": sorted(REQUIRED_WORKER_ADDRESS_FAMILIES),
+        "environment_file": DEFAULT_WORKER_ENVIRONMENT_PATH.as_posix(),
+        "environment": ["PYTHONUNBUFFERED=1"],
+        "unset_environment": sorted(REQUIRED_WORKER_UNSET_ENVIRONMENT),
+        "pass_environment": [],
+        "read_only_paths": ["/etc/market-sentinel"],
+        "read_write_paths": [DEFAULT_STATE_DIRECTORY.as_posix()],
+        "capability_bounding_set": [],
+        "ambient_capabilities": [],
+        "timeout_start_usec": 105_000_000,
+        "timeout_stop_usec": 10_000_000,
+    }
+
+
+def _worker_unit_contract_sha256(contract: dict[str, Any]) -> str:
+    canonical = json.dumps(contract, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(b"market-sentinel-worker-unit-contract-v1\0" + canonical.encode("ascii")).hexdigest()
+
+
+def worker_invocation_sha256(
+    *,
+    task: str,
+    service_unit: str,
+    source_revision: str,
+    unit_contract_sha256: str,
+) -> str:
+    """Independently derive the worker's revision-and-unit invocation binding."""
+
+    payload = {
+        "schema_version": 1,
+        "service_unit": service_unit,
+        "source_revision": source_revision,
+        "task": task,
+        "unit_contract_sha256": unit_contract_sha256,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(b"market-sentinel-worker-invocation-v1\0" + canonical.encode("ascii")).hexdigest()
+
+
+_NORMALIZED_UNATTENDED_SERVICE_CONTRACTS = {
+    service: _unattended_service_contract(service, _NORMALIZED_WORKER_EXEC_START_COMMANDS[service])
+    for service in UNATTENDED_WORKER_SERVICES
+}
+REQUIRED_WORKER_UNIT_CONTRACT_SHA256 = {
+    service: _worker_unit_contract_sha256(contract)
+    for service, contract in _NORMALIZED_UNATTENDED_SERVICE_CONTRACTS.items()
+}
+REQUIRED_WORKER_EXEC_START_COMMANDS = {
+    service: tuple(
+        REQUIRED_WORKER_UNIT_CONTRACT_SHA256[service]
+        if token == WORKER_UNIT_CONTRACT_BINDING_PLACEHOLDER
+        else token
+        for token in command
+    )
+    for service, command in _NORMALIZED_WORKER_EXEC_START_COMMANDS.items()
+}
+REQUIRED_UNATTENDED_SERVICE_CONTRACTS = {
+    service: _unattended_service_contract(service, REQUIRED_WORKER_EXEC_START_COMMANDS[service])
+    for service in UNATTENDED_WORKER_SERVICES
 }
 EVIDENCE_SCHEMA_VERSION = 1
 COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -124,6 +504,8 @@ ROLLBACK_DRILL_STEPS = (
 )
 REQUIRED_PRIVATE_PATHS = (
     (DEFAULT_SERVICE_ENVIRONMENT_PATH, S_IFREG, True),
+    (DEFAULT_HEALTH_ENVIRONMENT_PATH, S_IFREG, True),
+    (DEFAULT_WORKER_ENVIRONMENT_PATH, S_IFREG, True),
     (DEFAULT_STATE_DIRECTORY, S_IFDIR, False),
 )
 PUBLIC_PROXY_AUTH_PROBES = (
@@ -315,19 +697,412 @@ def check_filesystem_permissions(
     ]
 
 
-def _systemd_property(runner: CommandRunner, unit: str, property_name: str) -> str:
+def _systemd_property(
+    runner: CommandRunner,
+    unit: str,
+    property_name: str,
+    *,
+    allow_empty: bool = False,
+) -> str:
     result = runner(["systemctl", "show", unit, f"--property={property_name}", "--value"])
     if result.returncode != 0:
         raise RuntimeError(f"systemd could not read {property_name} for {unit}")
     value = result.stdout.strip()
-    if not value:
+    if not value and not allow_empty:
         raise RuntimeError(f"systemd returned an empty {property_name} for {unit}")
     return value
+
+
+_SYSTEMD_EXEC_EX_SIGNATURE = "a(sasasttttuii)"
+_SYSTEMD_WEB_SERVICE_OBJECT = (
+    "/org/freedesktop/systemd1/unit/market_2dsentinel_2dweb_2eservice"
+)
+_SYSTEMD_WORKER_SERVICE_OBJECTS = {
+    "market-sentinel-alerts-refresh.service": (
+        "/org/freedesktop/systemd1/unit/market_2dsentinel_2dalerts_2drefresh_2eservice"
+    ),
+    "market-sentinel-wallets-poll.service": (
+        "/org/freedesktop/systemd1/unit/market_2dsentinel_2dwallets_2dpoll_2eservice"
+    ),
+}
+_SYSTEMD_DURATION_TOKEN = re.compile(r"(?P<value>[0-9]+)(?P<unit>min|ms|us|s|h|d|w)")
+_SYSTEMD_DURATION_MULTIPLIERS = {
+    "us": 1,
+    "ms": 1_000,
+    "s": 1_000_000,
+    "min": 60_000_000,
+    "h": 3_600_000_000,
+    "d": 86_400_000_000,
+    "w": 604_800_000_000,
+}
+
+
+def _parse_systemd_exec_commands(value: str) -> tuple[tuple[str, ...], ...]:
+    """Parse busctl's typed ExecStartPreEx value without losing argv boundaries."""
+    if not value or len(value) > 64 * 1024:
+        raise ValueError("invalid systemd command-array size")
+    try:
+        tokens = shlex.split(value, posix=True)
+    except ValueError as exc:
+        raise ValueError("invalid quoting in systemd command array") from exc
+    position = 0
+
+    def take_token(label: str) -> str:
+        nonlocal position
+        if position >= len(tokens):
+            raise ValueError(f"systemd command array is missing {label}")
+        token = tokens[position]
+        position += 1
+        return token
+
+    def take_count(label: str, *, maximum: int) -> int:
+        token = take_token(label)
+        if re.fullmatch(r"[0-9]+", token) is None:
+            raise ValueError(f"systemd command array has invalid {label}")
+        count = int(token)
+        if count > maximum:
+            raise ValueError(f"systemd command array exceeds the {label} limit")
+        return count
+
+    if take_token("D-Bus signature") != _SYSTEMD_EXEC_EX_SIGNATURE:
+        raise ValueError("systemd returned an unexpected ExecStartPreEx signature")
+    command_count = take_count("command count", maximum=32)
+    if command_count == 0:
+        raise ValueError("systemd returned an empty command array")
+    commands: list[tuple[str, ...]] = []
+    for _ in range(command_count):
+        path = take_token("command path")
+        argument_count = take_count("argument count", maximum=128)
+        argv = tuple(take_token("command argument") for _ in range(argument_count))
+        flag_count = take_count("execution flag count", maximum=16)
+        flags = tuple(take_token("execution flag") for _ in range(flag_count))
+        runtime_values = tuple(
+            take_count("runtime value", maximum=(1 << 64) - 1)
+            for _ in range(7)
+        )
+        start_realtime, start_monotonic, stop_realtime, stop_monotonic, _pid, code, status = (
+            runtime_values
+        )
+        if not argv or argv[0] != path or flags:
+            raise ValueError("systemd command path or execution flags are not exact")
+        if (
+            code != 1
+            or status != 0
+            or min(start_realtime, start_monotonic, stop_realtime, stop_monotonic) <= 0
+        ):
+            raise ValueError("systemd command does not attest a completed successful execution")
+        commands.append(argv)
+    if position != len(tokens):
+        raise ValueError("systemd command array has unexpected trailing data")
+    return tuple(commands)
+
+
+def check_web_startup_preflight(runner: CommandRunner = _run_command) -> dict[str, Any]:
+    """Prove the installed web unit retains every ordered fail-closed startup guard."""
+    base = {
+        "name": "web_startup_preflight",
+        "expected_command_count": len(REQUIRED_WEB_EXEC_START_PRE_COMMANDS),
+    }
+    try:
+        result = runner(
+            [
+                "busctl",
+                "--system",
+                "get-property",
+                "org.freedesktop.systemd1",
+                _SYSTEMD_WEB_SERVICE_OBJECT,
+                "org.freedesktop.systemd1.Service",
+                "ExecStartPreEx",
+            ]
+        )
+        if result.returncode != 0:
+            raise RuntimeError("systemd could not read structured ExecStartPreEx for the web service")
+        commands = _parse_systemd_exec_commands(result.stdout.strip())
+        if commands != REQUIRED_WEB_EXEC_START_PRE_COMMANDS:
+            raise RuntimeError("effective web ExecStartPre commands do not match the reviewed ordered contract")
+    except (RuntimeError, ValueError) as exc:
+        return {**base, "status": "fail", "detail": str(exc)}
+    return {
+        **base,
+        "status": "pass",
+        "detail": "all ordered durable-path guards and the strict doctor command are fail closed",
+        "command_count": len(commands),
+        "commands": [list(command) for command in commands],
+        "commands_succeeded": True,
+    }
+
+
+def _systemd_duration_usec(value: str) -> int:
+    normalized = value.strip()
+    if normalized == "0":
+        return 0
+    total = 0
+    cursor = 0
+    matched = False
+    for match in _SYSTEMD_DURATION_TOKEN.finditer(normalized):
+        if normalized[cursor : match.start()].strip():
+            raise ValueError("invalid systemd duration")
+        total += int(match.group("value")) * _SYSTEMD_DURATION_MULTIPLIERS[match.group("unit")]
+        cursor = match.end()
+        matched = True
+    if not matched or normalized[cursor:].strip():
+        raise ValueError("invalid systemd duration")
+    return total
+
+
+def _parse_systemd_timer_schedules(
+    value: str,
+    *,
+    calendar: bool,
+) -> list[dict[str, Any]] | list[str]:
+    if not value.strip():
+        return []
+    schedules: list[Any] = []
+    cursor = 0
+    for match in re.finditer(r"\{\s*(?P<body>[^{}]*)\}", value):
+        if value[cursor : match.start()].strip():
+            raise ValueError("unexpected data in systemd timer schedule array")
+        cursor = match.end()
+        fields: dict[str, str] = {}
+        for raw_field in match.group("body").split(";"):
+            field = raw_field.strip()
+            if not field:
+                continue
+            name, separator, field_value = field.partition("=")
+            if not separator or name.strip() in fields:
+                raise ValueError("invalid systemd timer schedule field")
+            fields[name.strip()] = field_value.strip()
+        if calendar:
+            if "OnCalendar" not in fields:
+                raise ValueError("systemd calendar schedule is missing OnCalendar")
+            spec = " ".join(fields["OnCalendar"].split())
+            if spec in {"daily", "*-*-* 00:00:00"}:
+                spec = "daily"
+            # systemd versions disagree on whether the first minute in a
+            # stepped calendar expression is rendered as 0 or 00.
+            spec = re.sub(r"(?<=:)00/([1-9][0-9]*)(?=:)", r"0/\1", spec)
+            schedules.append(spec)
+            continue
+        bases = [name for name in fields if name.startswith("On") and name.endswith(("Sec", "USec"))]
+        if len(bases) != 1:
+            raise ValueError("systemd monotonic schedule does not contain exactly one trigger")
+        base = bases[0]
+        if base.endswith("Sec") and not base.endswith("USec"):
+            base = base[:-3] + "USec"
+        schedules.append({"base": base, "offset_usec": _systemd_duration_usec(fields[bases[0]])})
+    if value[cursor:].strip():
+        raise ValueError("unexpected trailing data in systemd timer schedule array")
+    if calendar:
+        return sorted(schedules)
+    return sorted(schedules, key=lambda schedule: (schedule["base"], schedule["offset_usec"]))
+
+
+def check_systemd_timer_contracts(runner: CommandRunner = _run_command) -> dict[str, Any]:
+    """Attest the effective service target and schedule for each production timer."""
+    base = {
+        "name": "systemd_timer_contracts",
+        "expected_timer_count": len(REQUIRED_SYSTEMD_TIMER_CONTRACTS),
+    }
+    observed: dict[str, dict[str, Any]] = {}
+    try:
+        for timer, expected in REQUIRED_SYSTEMD_TIMER_CONTRACTS.items():
+            persistent = _systemd_property(runner, timer, "Persistent")
+            if persistent not in {"yes", "no"}:
+                raise RuntimeError(f"systemd returned an invalid Persistent value for {timer}")
+            contract: dict[str, Any] = {
+                "unit": _systemd_property(runner, timer, "Unit"),
+                "persistent": persistent == "yes",
+                "monotonic_schedules": _parse_systemd_timer_schedules(
+                    _systemd_property(runner, timer, "TimersMonotonic", allow_empty=True),
+                    calendar=False,
+                ),
+                "calendar_schedules": _parse_systemd_timer_schedules(
+                    _systemd_property(runner, timer, "TimersCalendar", allow_empty=True),
+                    calendar=True,
+                ),
+            }
+            if "accuracy_usec" in expected:
+                contract["accuracy_usec"] = _systemd_duration_usec(
+                    _systemd_property(runner, timer, "AccuracyUSec")
+                )
+            if "randomized_delay_usec" in expected:
+                contract["randomized_delay_usec"] = _systemd_duration_usec(
+                    _systemd_property(runner, timer, "RandomizedDelayUSec")
+                )
+            if contract != expected:
+                raise RuntimeError(f"effective timer contract does not match the reviewed schedule for {timer}")
+            observed[timer] = contract
+    except (RuntimeError, ValueError) as exc:
+        return {**base, "status": "fail", "detail": str(exc)}
+    return {
+        **base,
+        "status": "pass",
+        "detail": "all production timers have the exact reviewed effective targets and schedules",
+        "timer_count": len(observed),
+        "timers": observed,
+    }
 
 
 def _contains_path_token(value: str, path: Path) -> bool:
     path_text = re.escape(path.as_posix())
     return re.search(rf"(?<![A-Za-z0-9_./-]){path_text}(?![A-Za-z0-9_./-])", value) is not None
+
+
+def _contains_command_option(value: str, option: str, expected: str) -> bool:
+    return re.search(
+        rf"(?:^|[\s;]){re.escape(option)}(?:=|\s+)[\"']?{re.escape(expected)}"
+        r"[\"']?(?=$|[\s;}])",
+        value,
+    ) is not None
+
+
+def _strong_observability_token(token: str) -> bool:
+    try:
+        encoded = token.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    if not 32 <= len(encoded) <= 512 or re.fullmatch(r"[A-Za-z0-9._~+/-]+=*", token) is None:
+        return False
+    token_body = token.rstrip("=")
+    collapsed = re.sub(r"[^a-z0-9]", "", token_body.lower())
+    weak_markers = ("apitoken", "changeme", "exampletoken", "password", "replaceme", "testtoken")
+    repeated = any(
+        len(token_body) % width == 0 and token_body == token_body[:width] * (len(token_body) // width)
+        for width in range(1, min(16, len(token_body) // 2) + 1)
+    )
+    return len(set(token_body)) >= 10 and not repeated and not any(marker in collapsed for marker in weak_markers)
+
+
+def check_health_credential_isolation(
+    runner: CommandRunner = _run_command,
+    environment_reader: Callable[[Path], bytes] = lambda path: path.read_bytes(),
+) -> dict[str, Any]:
+    """Prove the periodic health process receives only its scoped credential."""
+    base = {
+        "name": "health_credential_isolation",
+        "environment_path": DEFAULT_HEALTH_ENVIRONMENT_PATH.as_posix(),
+    }
+    try:
+        for property_name, expected_value in REQUIRED_HEALTH_SERVICE_PROPERTIES.items():
+            actual_value = _systemd_property(
+                runner,
+                "market-sentinel-health.service",
+                property_name,
+            )
+            if actual_value != expected_value:
+                raise RuntimeError(
+                    f"the health service has unsafe effective {property_name}={actual_value!r}; "
+                    f"expected {expected_value!r}"
+                )
+        address_families = frozenset(
+            _systemd_property(
+                runner,
+                "market-sentinel-health.service",
+                "RestrictAddressFamilies",
+            ).split()
+        )
+        if address_families != REQUIRED_HEALTH_ADDRESS_FAMILIES:
+            raise RuntimeError("the health service effective RestrictAddressFamilies is not reviewed")
+
+        environment_files = _systemd_property(runner, "market-sentinel-health.service", "EnvironmentFiles")
+        required_environment = re.compile(
+            rf"^{re.escape(DEFAULT_HEALTH_ENVIRONMENT_PATH.as_posix())}\s+\(ignore_errors=no\)$"
+        )
+        if required_environment.fullmatch(environment_files) is None:
+            raise RuntimeError("the health service does not exclusively load its required credential file")
+
+        unset_environment = set(
+            _systemd_property(runner, "market-sentinel-health.service", "UnsetEnvironment").split()
+        )
+        if "MARKET_SENTINEL_API_TOKEN" not in unset_environment:
+            raise RuntimeError("the health service does not remove the admin API token from its environment")
+        if "MARKET_SENTINEL_OBSERVABILITY_TOKEN" in unset_environment:
+            raise RuntimeError("the health service removes its required observability token")
+
+        for property_name in ("Environment", "PassEnvironment"):
+            result = runner(
+                ["systemctl", "show", "market-sentinel-health.service", f"--property={property_name}", "--value"]
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"systemd could not read {property_name} for market-sentinel-health.service")
+            if result.stdout.strip():
+                raise RuntimeError(
+                    f"the health service has unexpected effective {property_name} credential sources"
+                )
+
+        preflight = runner(
+            ["systemctl", "show", "market-sentinel-health.service", "--property=ExecStartPre", "--value"]
+        )
+        if preflight.returncode != 0:
+            raise RuntimeError("systemd could not read ExecStartPre for market-sentinel-health.service")
+        if preflight.stdout.strip():
+            raise RuntimeError("the health service exposes its observer token through a pre-start command")
+
+        command = _systemd_property(runner, "market-sentinel-health.service", "ExecStart")
+        if not _contains_path_token(command, Path("/opt/market-sentinel/.venv/bin/python")):
+            raise RuntimeError("the health service does not use the reviewed runtime interpreter")
+        if not _contains_path_token(
+            command,
+            Path("/opt/market-sentinel/scripts/verify_service_health.py"),
+        ):
+            raise RuntimeError("the health service does not execute the reviewed health probe")
+        if any(_contains_path_token(command, path) for path in (Path("/bin/sh"), Path("/bin/bash"), Path("/usr/bin/env"))):
+            raise RuntimeError("the health service wraps its probe in an unreviewed command interpreter")
+        if re.search(r"(?:^|[\s;])--require-observability-token(?=$|[\s;}])", command) is None:
+            raise RuntimeError("the health probe is not in fail-closed observability-only mode")
+        if re.search(r"(?:^|[\s;])--token(?:=|\s+)", command) is not None:
+            raise RuntimeError("the health service exposes a bearer token in its command line")
+
+        web_post_start = runner(
+            ["systemctl", "show", "market-sentinel-web.service", "--property=ExecStartPost", "--value"]
+        )
+        if web_post_start.returncode != 0:
+            raise RuntimeError("systemd could not read ExecStartPost for market-sentinel-web.service")
+        if web_post_start.stdout.strip():
+            raise RuntimeError("the web service still launches a health probe with its privileged environment")
+
+        raw_environment = environment_reader(DEFAULT_HEALTH_ENVIRONMENT_PATH)
+        if len(raw_environment) > 8 * 1024:
+            raise RuntimeError("the health credential file exceeds the verifier safety limit")
+        try:
+            environment_text = raw_environment.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise RuntimeError("the health credential file is not UTF-8") from exc
+        assignments: dict[str, str] = {}
+        for raw_line in environment_text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            name, separator, value = line.partition("=")
+            if not separator or re.fullmatch(r"[A-Z][A-Z0-9_]*", name) is None:
+                raise RuntimeError("the health credential file contains an invalid assignment")
+            if name in assignments:
+                raise RuntimeError("the health credential file contains a duplicate assignment")
+            assignments[name] = value
+        if set(assignments) != {"MARKET_SENTINEL_OBSERVABILITY_TOKEN"}:
+            raise RuntimeError("the health credential file must contain only the observability token")
+        if not _strong_observability_token(assignments["MARKET_SENTINEL_OBSERVABILITY_TOKEN"]):
+            raise RuntimeError("the health credential file does not contain a strong observability token")
+    except (OSError, RuntimeError, ValueError) as exc:
+        return {**base, "status": "fail", "detail": str(exc)}
+
+    return {
+        **base,
+        "status": "pass",
+        "detail": "health probe has a private observability-only environment and fail-closed command",
+        "service_user": "market-sentinel-health",
+        "service_group": "market-sentinel-health",
+        "private_user_namespace": True,
+        "process_visibility": "invisible",
+        "verified_service_property_count": len(REQUIRED_HEALTH_SERVICE_PROPERTIES) + 1,
+        "environment_variable_count": 1,
+        "admin_environment_unset": True,
+        "token_preflight_removed": True,
+        "probe_requires_observability": True,
+        "web_startup_probe_removed": True,
+        "inline_environment_empty": True,
+        "manager_environment_not_passed": True,
+    }
 
 
 def _read_process_environment(pid: int) -> bytes:
@@ -344,6 +1119,7 @@ def check_durable_state_wiring(
         "state_directory": DEFAULT_STATE_DIRECTORY.as_posix(),
         "backup_source": DEFAULT_STATE_DIRECTORY.as_posix(),
         "durable_store_count": len(DURABLE_STATE_PATHS),
+        "verified_service_property_count": len(REQUIRED_WEB_SERVICE_PROPERTIES) + 2,
     }
     try:
         environment_files = _systemd_property(runner, "market-sentinel-web.service", "EnvironmentFiles")
@@ -355,6 +1131,45 @@ def check_durable_state_wiring(
         )
         if required_environment_pattern.search(environment_files) is None:
             raise RuntimeError("the web service environment file is optional instead of fail-fast")
+
+        for property_name, expected_value in REQUIRED_WEB_SERVICE_PROPERTIES.items():
+            actual_value = _systemd_property(
+                runner,
+                "market-sentinel-web.service",
+                property_name,
+            )
+            if actual_value != expected_value:
+                raise RuntimeError(
+                    f"the web service has unsafe effective {property_name}={actual_value!r}; "
+                    f"expected {expected_value!r}"
+                )
+
+        address_families = frozenset(
+            _systemd_property(
+                runner,
+                "market-sentinel-web.service",
+                "RestrictAddressFamilies",
+            ).split()
+        )
+        if address_families != REQUIRED_WEB_ADDRESS_FAMILIES:
+            raise RuntimeError(
+                "the web service effective RestrictAddressFamilies is not the reviewed minimal set"
+            )
+
+        web_command = _systemd_property(runner, "market-sentinel-web.service", "ExecStart")
+        required_web_options = {
+            "--host": "127.0.0.1",
+            "--port": "8765",
+            "--config": "/var/lib/market-sentinel/config.json",
+            "--frontend-dir": "/opt/market-sentinel/frontend/dist",
+        }
+        if re.search(r"(?:^|[\s;])-m\s+web_api(?=$|[\s;}])", web_command) is None:
+            raise RuntimeError("the web service does not execute the reviewed web_api module")
+        for option, expected_value in required_web_options.items():
+            if not _contains_command_option(web_command, option, expected_value):
+                raise RuntimeError(
+                    f"the web service effective ExecStart does not contain reviewed {option} {expected_value}"
+                )
 
         writable_paths = _systemd_property(runner, "market-sentinel-web.service", "ReadWritePaths")
         if not _contains_path_token(writable_paths, DEFAULT_STATE_DIRECTORY):
@@ -408,7 +1223,8 @@ def check_durable_state_wiring(
         **base,
         "status": "pass",
         "detail": (
-            "running service paths are exact, sandbox-writable, and beneath the effective backup source"
+            "running service identity, command, sandbox, resource limits, and durable paths are exact "
+            "and beneath the effective backup source"
         ),
     }
 
@@ -459,26 +1275,18 @@ def check_evidence_output_directory(
     return result
 
 
-def check_systemd(
-    runner: CommandRunner = _run_command,
-    clock: Callable[[], float] = time.time,
-) -> list[dict[str, Any]]:
-    checks: list[dict[str, Any]] = []
-    for unit in REQUIRED_UNITS:
-        for command in ("is-active", "is-enabled"):
-            result = runner(["systemctl", command, unit])
-            checks.append(
-                {
-                    "name": f"systemd_{command}_{unit}",
-                    "status": "pass" if result.returncode == 0 else "fail",
-                    "detail": (result.stdout or result.stderr).strip(),
-                }
-            )
+def _recent_systemd_success(
+    unit: str,
+    *,
+    maximum_age_seconds: float,
+    runner: CommandRunner,
+    clock: Callable[[], float],
+) -> dict[str, Any]:
     completion = runner(
         [
             "systemctl",
             "show",
-            "market-sentinel-backup.service",
+            unit,
             "--property=Result",
             "--property=ExecMainStatus",
             "--property=ExecMainExitTimestamp",
@@ -487,30 +1295,647 @@ def check_systemd(
     )
     values = [value.strip() for value in completion.stdout.splitlines()]
     result, exit_status, completed_at = (values + ["", "", ""])[:3]
+    completed_at_unix_seconds: float | None = None
     try:
-        backup_age_seconds = clock() - _systemd_timestamp_seconds(completed_at)
+        completed_at_unix_seconds = _systemd_timestamp_seconds(completed_at)
+        age_seconds = clock() - completed_at_unix_seconds
     except ValueError:
-        backup_age_seconds = float("inf")
+        age_seconds = float("inf")
     completed = (
         completion.returncode == 0
         and result == "success"
         and exit_status == "0"
         and completed_at not in {"", "n/a"}
-        and backup_age_seconds >= -BACKUP_MAX_FUTURE_SKEW_SECONDS
-        and backup_age_seconds <= BACKUP_MAX_AGE_SECONDS
+        and age_seconds >= -BACKUP_MAX_FUTURE_SKEW_SECONDS
+        and age_seconds <= maximum_age_seconds
+    )
+    return {
+        "name": f"systemd_recent_success_{unit}",
+        "status": "pass" if completed else "fail",
+        "detail": (
+            f"result={result or 'unknown'}; exit_status={exit_status or 'unknown'}; "
+            f"completed_at={completed_at or 'unknown'}; age_seconds={age_seconds:.0f}; "
+            f"max_age_seconds={maximum_age_seconds}; "
+            f"max_future_skew_seconds={BACKUP_MAX_FUTURE_SKEW_SECONDS}"
+        ),
+        "unit": unit,
+        "completed_at": completed_at,
+        "completed_at_unix_seconds": completed_at_unix_seconds,
+        "age_seconds": age_seconds if completed_at_unix_seconds is not None else None,
+        "max_age_seconds": maximum_age_seconds,
+    }
+
+
+def check_systemd(
+    runner: CommandRunner = _run_command,
+    clock: Callable[[], float] = time.time,
+) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+    for unit in REQUIRED_UNITS:
+        for command in ("is-active", "is-enabled"):
+            result = runner(["systemctl", command, unit])
+            expected_state = "active" if command == "is-active" else "enabled"
+            reported_state = result.stdout.strip()
+            checks.append(
+                {
+                    "name": f"systemd_{command}_{unit}",
+                    "status": (
+                        "pass"
+                        if result.returncode == 0 and reported_state == expected_state
+                        else "fail"
+                    ),
+                    "detail": (result.stdout or result.stderr).strip(),
+                }
+            )
+    checks.append(check_systemd_timer_contracts(runner))
+    checks.append(
+        _recent_systemd_success(
+            "market-sentinel-health.service",
+            maximum_age_seconds=HEALTH_CHECK_MAX_AGE_SECONDS,
+            runner=runner,
+            clock=clock,
+        )
     )
     checks.append(
-        {
-            "name": "systemd_recent_success_market-sentinel-backup.service",
-            "status": "pass" if completed else "fail",
-            "detail": (
-                f"result={result or 'unknown'}; exit_status={exit_status or 'unknown'}; "
-                f"completed_at={completed_at or 'unknown'}; backup_age_seconds={backup_age_seconds:.0f}; "
-                f"max_age_seconds={BACKUP_MAX_AGE_SECONDS}; max_future_skew_seconds={BACKUP_MAX_FUTURE_SKEW_SECONDS}"
-            ),
-        }
+        _recent_systemd_success(
+            "market-sentinel-backup.service",
+            maximum_age_seconds=BACKUP_MAX_AGE_SECONDS,
+            runner=runner,
+            clock=clock,
+        )
     )
+    for service, identity in UNATTENDED_WORKER_SERVICES.items():
+        checks.append(
+            _recent_systemd_success(
+                service,
+                maximum_age_seconds=UNATTENDED_WORKER_TASK_MAX_AGE_SECONDS[identity["task"]],
+                runner=runner,
+                clock=clock,
+            )
+        )
     return checks
+
+
+def _read_private_regular_file(
+    path: Path,
+    *,
+    maximum_bytes: int,
+    require_root_owner: bool,
+    allow_empty: bool = False,
+) -> tuple[bytes, object]:
+    """Read one bounded file while rejecting links and replacement races."""
+    before = path.lstat()
+    if not S_ISREG(before.st_mode):
+        raise ValueError(f"{path.name} must be a regular, non-symbolic-link file")
+    if os.name == "posix" and S_IMODE(before.st_mode) & 0o077:
+        raise ValueError(f"{path.name} must not grant group or other permissions")
+    if os.name == "posix" and require_root_owner and getattr(before, "st_uid", -1) != 0:
+        raise ValueError(f"{path.name} must be root-owned")
+    descriptor = -1
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            opened = os.fstat(handle.fileno())
+            if not S_ISREG(opened.st_mode):
+                raise ValueError(f"{path.name} must be a regular file")
+            if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+                raise ValueError(f"{path.name} changed identity while opening")
+            raw = handle.read(maximum_bytes + 1)
+            after = os.fstat(handle.fileno())
+    except OSError as exc:
+        raise ValueError(f"{path.name} could not be read safely") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if (not raw and not allow_empty) or len(raw) > maximum_bytes:
+        raise ValueError(f"{path.name} is empty or exceeds its safety limit")
+    final = path.lstat()
+    if (
+        (opened.st_dev, opened.st_ino) != (after.st_dev, after.st_ino)
+        or (opened.st_dev, opened.st_ino) != (final.st_dev, final.st_ino)
+        or not S_ISREG(final.st_mode)
+        or opened.st_size != after.st_size
+        or opened.st_mtime_ns != after.st_mtime_ns
+    ):
+        raise ValueError(f"{path.name} changed while it was being read")
+    if os.name == "posix" and (S_IMODE(after.st_mode) & 0o077 or S_IMODE(final.st_mode) & 0o077):
+        raise ValueError(f"{path.name} must not grant group or other permissions")
+    if os.name == "posix" and require_root_owner and (
+        getattr(after, "st_uid", -1) != 0 or getattr(final, "st_uid", -1) != 0
+    ):
+        raise ValueError(f"{path.name} must be root-owned")
+    return raw, before
+
+
+def _strict_json_bytes(raw: bytes, label: str) -> dict[str, Any]:
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"{label} contains a duplicate JSON key")
+            result[key] = value
+        return result
+
+    def reject_constant(_value: str) -> None:
+        raise ValueError(f"{label} contains a non-finite JSON number")
+
+    try:
+        decoded = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=reject_duplicates,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label} must be strict UTF-8 JSON") from exc
+    if not isinstance(decoded, dict):
+        raise ValueError(f"{label} root must be a JSON object")
+    return decoded
+
+
+def _worker_environment_keys(raw: bytes, *, expected_revision: str) -> list[str]:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("worker environment file must be UTF-8") from exc
+    if "\x00" in text:
+        raise ValueError("worker environment file contains a NUL byte")
+    assignments: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if len(raw_line) > 4096 or raw_line.rstrip().endswith("\\"):
+            raise ValueError("worker environment file contains an unsafe assignment")
+        key, separator, _value = line.partition("=")
+        if (
+            not separator
+            or re.fullmatch(r"[A-Z][A-Z0-9_]*", key) is None
+            or key not in ALLOWED_WORKER_ENVIRONMENT_KEYS
+            or key in assignments
+        ):
+            raise ValueError("worker environment file contains a duplicate or disallowed key")
+        assignments[key] = _value
+    if assignments.get(WORKER_SOURCE_REVISION_ENVIRONMENT_KEY) != expected_revision:
+        raise ValueError("worker environment source revision does not match the deployed release")
+    return sorted(assignments)
+
+
+def _worker_int(value: Any, label: str, *, minimum: int = 0) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(f"{label} must be an integer greater than or equal to {minimum}")
+    return value
+
+
+def _worker_number(value: Any, label: str, *, minimum: float = 0.0) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{label} must be a finite number")
+    number = float(value)
+    if not (number >= minimum and number < float("inf")):
+        raise ValueError(f"{label} must be a finite number greater than or equal to {minimum}")
+    return number
+
+
+def _worker_timestamp_pair(entry: dict[str, Any], stem: str, label: str) -> float:
+    text_key = stem
+    unix_key = f"{stem}_unix"
+    timestamp = _utc_datetime(entry.get(text_key), f"{label} {text_key}").timestamp()
+    unix_timestamp = _worker_number(entry.get(unix_key), f"{label} {unix_key}")
+    if abs(timestamp - unix_timestamp) > 1:
+        raise ValueError(f"{label} {stem} timestamp representations disagree")
+    return unix_timestamp
+
+
+def _worker_service_commands(
+    runner: CommandRunner,
+    service: str,
+    property_name: str,
+) -> tuple[tuple[str, ...], ...]:
+    result = runner(
+        [
+            "busctl",
+            "--system",
+            "get-property",
+            "org.freedesktop.systemd1",
+            _SYSTEMD_WORKER_SERVICE_OBJECTS[service],
+            "org.freedesktop.systemd1.Service",
+            property_name,
+        ]
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"systemd could not read structured {property_name} for {service}")
+    return _parse_systemd_exec_commands(result.stdout.strip())
+
+
+def _worker_service_contract(runner: CommandRunner, service: str) -> dict[str, Any]:
+    identity = UNATTENDED_WORKER_SERVICES[service]
+    properties: dict[str, str] = {}
+    for property_name, expected in REQUIRED_WORKER_SERVICE_PROPERTIES.items():
+        actual = _systemd_property(runner, service, property_name)
+        if actual != expected:
+            raise RuntimeError(f"{service} effective {property_name} is not the reviewed value")
+        properties[property_name] = actual
+
+    address_families = sorted(_systemd_property(runner, service, "RestrictAddressFamilies").split())
+    if address_families != sorted(REQUIRED_WORKER_ADDRESS_FAMILIES):
+        raise RuntimeError(f"{service} has an unsafe address-family sandbox")
+    environment_files = _systemd_property(runner, service, "EnvironmentFiles")
+    expected_environment_file = (
+        f"{DEFAULT_WORKER_ENVIRONMENT_PATH.as_posix()} (ignore_errors=no)"
+    )
+    if environment_files != expected_environment_file:
+        raise RuntimeError(f"{service} does not exclusively load the dedicated worker environment")
+
+    try:
+        environment = shlex.split(_systemd_property(runner, service, "Environment"), posix=True)
+        pass_environment = shlex.split(
+            _systemd_property(runner, service, "PassEnvironment", allow_empty=True),
+            posix=True,
+        )
+        unset_environment = sorted(
+            shlex.split(_systemd_property(runner, service, "UnsetEnvironment"), posix=True)
+        )
+        read_only_paths = shlex.split(_systemd_property(runner, service, "ReadOnlyPaths"), posix=True)
+        read_write_paths = shlex.split(_systemd_property(runner, service, "ReadWritePaths"), posix=True)
+        capability_bounding_set = shlex.split(
+            _systemd_property(runner, service, "CapabilityBoundingSet", allow_empty=True),
+            posix=True,
+        )
+        ambient_capabilities = shlex.split(
+            _systemd_property(runner, service, "AmbientCapabilities", allow_empty=True),
+            posix=True,
+        )
+    except ValueError as exc:
+        raise RuntimeError(f"{service} returned malformed sandbox properties") from exc
+
+    timeout_start_usec = _systemd_duration_usec(_systemd_property(runner, service, "TimeoutStartUSec"))
+    timeout_stop_usec = _systemd_duration_usec(_systemd_property(runner, service, "TimeoutStopUSec"))
+    exec_start_pre = _worker_service_commands(runner, service, "ExecStartPreEx")
+    exec_start = _worker_service_commands(runner, service, "ExecStartEx")
+    contract = {
+        **identity,
+        "exec_start": list(exec_start[0]) if len(exec_start) == 1 else [],
+        "exec_start_pre": [list(command) for command in exec_start_pre],
+        "properties": properties,
+        "address_families": address_families,
+        "environment_file": DEFAULT_WORKER_ENVIRONMENT_PATH.as_posix(),
+        "environment": environment,
+        "unset_environment": unset_environment,
+        "pass_environment": pass_environment,
+        "read_only_paths": read_only_paths,
+        "read_write_paths": read_write_paths,
+        "capability_bounding_set": capability_bounding_set,
+        "ambient_capabilities": ambient_capabilities,
+        "timeout_start_usec": timeout_start_usec,
+        "timeout_stop_usec": timeout_stop_usec,
+    }
+    if contract != REQUIRED_UNATTENDED_SERVICE_CONTRACTS[service]:
+        raise RuntimeError(f"{service} effective command, credential isolation, or sandbox is unsafe")
+    return contract
+
+
+def check_unattended_workers(
+    runner: CommandRunner = _run_command,
+    *,
+    state_path: Path = DEFAULT_WORKER_STATE_PATH,
+    lock_path: Path = DEFAULT_WORKER_LOCK_PATH,
+    environment_path: Path = DEFAULT_WORKER_ENVIRONMENT_PATH,
+    expected_revision: str = "",
+    clock: Callable[[], float] = time.time,
+    recent_service_checks: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Attest safe worker units and their independently parsed durable freshness state."""
+    base = {
+        "name": "unattended_workers",
+        "state_file": Path(state_path).as_posix(),
+        "lock_file": Path(lock_path).as_posix(),
+        "environment_file": Path(environment_path).as_posix(),
+        "expected_service_count": len(UNATTENDED_WORKER_SERVICES),
+    }
+    try:
+        expected_revision = expected_revision.strip().lower()
+        if COMMIT_SHA.fullmatch(expected_revision) is None:
+            raise ValueError("worker evidence requires an exact lowercase source revision")
+        state_path = Path(state_path)
+        lock_path = Path(lock_path)
+        environment_path = Path(environment_path)
+        if any(not path.is_absolute() for path in (state_path, lock_path, environment_path)):
+            raise ValueError("worker state, lock, and environment files must use absolute paths")
+        if state_path == lock_path or state_path.parent != lock_path.parent:
+            raise ValueError("worker state and lock files must be distinct siblings")
+        for path in (state_path, lock_path, environment_path):
+            if any(component.is_symlink() for component in (path, *path.parents)):
+                raise ValueError(f"{path.name} path must not contain symbolic links")
+
+        state_raw, state_metadata = _read_private_regular_file(
+            state_path,
+            maximum_bytes=UNATTENDED_WORKER_STATE_MAX_BYTES,
+            require_root_owner=False,
+        )
+        environment_raw, _environment_metadata = _read_private_regular_file(
+            environment_path,
+            maximum_bytes=UNATTENDED_WORKER_ENVIRONMENT_MAX_BYTES,
+            require_root_owner=True,
+            allow_empty=True,
+        )
+        _lock_raw, lock_metadata = _read_private_regular_file(
+            lock_path,
+            maximum_bytes=4096,
+            require_root_owner=False,
+            allow_empty=True,
+        )
+        if getattr(lock_metadata, "st_uid", None) != getattr(state_metadata, "st_uid", None):
+            raise ValueError("worker state and lock files must have the same owner")
+
+        environment_keys = _worker_environment_keys(
+            environment_raw,
+            expected_revision=expected_revision,
+        )
+        state = _strict_json_bytes(state_raw, "worker state")
+        if set(state) != {"schema_version", "updated_at", "updated_at_unix", "tasks"}:
+            raise ValueError("worker state top-level fields are not exact")
+        if isinstance(state["schema_version"], bool) or state["schema_version"] != 1:
+            raise ValueError("worker state schema_version must equal 1")
+        tasks = state["tasks"]
+        if not isinstance(tasks, dict) or set(tasks) != set(UNATTENDED_WORKER_TASK_MAX_AGE_SECONDS):
+            raise ValueError("worker state must contain exactly both reviewed task entries")
+
+        observed_at = clock()
+        updated_at = _worker_timestamp_pair(state, "updated_at", "worker state")
+        if updated_at > observed_at + UNATTENDED_WORKER_MAX_FUTURE_SKEW_SECONDS:
+            raise ValueError("worker state updated_at is implausibly future-dated")
+
+        service_contracts = {
+            service: _worker_service_contract(runner, service)
+            for service in UNATTENDED_WORKER_SERVICES
+        }
+        supplied_recent = recent_service_checks or {}
+        services: dict[str, dict[str, Any]] = {}
+        normalized_tasks: dict[str, dict[str, Any]] = {}
+        finished_timestamps: list[float] = []
+        required_task_fields = {
+            "state",
+            "run_id",
+            "pid",
+            "last_started_at",
+            "last_started_at_unix",
+            "deadline_seconds",
+            "max_attempts",
+            "source_revision",
+            "service_unit",
+            "unit_contract_sha256",
+            "invocation_sha256",
+            "attempts_completed",
+            "consecutive_failures",
+            "abandoned_runs",
+            "last_attempt_at",
+            "last_attempt_at_unix",
+            "last_attempt_outcome",
+            "last_attempt_processed",
+            "last_attempt_problems",
+            "last_attempt_emitted",
+            "last_finished_at",
+            "last_finished_at_unix",
+            "last_duration_seconds",
+            "last_outcome",
+            "last_processed",
+            "last_problems",
+            "last_emitted",
+            "total_runs",
+            "total_successes",
+            "total_failures",
+            "last_success_at",
+            "last_success_at_unix",
+        }
+        optional_task_fields = {
+            "last_failure_at",
+            "last_failure_at_unix",
+            "previous_run_outcome",
+        }
+        for service, identity in UNATTENDED_WORKER_SERVICES.items():
+            task = identity["task"]
+            entry = tasks[task]
+            if not isinstance(entry, dict):
+                raise ValueError(f"worker state {task} entry must be an object")
+            if not required_task_fields.issubset(entry) or set(entry) - (
+                required_task_fields | optional_task_fields
+            ):
+                raise ValueError(f"worker state {task} fields are incomplete or unknown")
+            if (
+                entry.get("state") != "succeeded"
+                or entry.get("last_outcome") != "succeeded"
+                or entry.get("last_attempt_outcome") != "succeeded"
+            ):
+                raise ValueError(f"worker state {task} does not record a successful terminal run")
+            expected_contract_sha256 = REQUIRED_WORKER_UNIT_CONTRACT_SHA256[service]
+            expected_invocation_sha256 = worker_invocation_sha256(
+                task=task,
+                service_unit=service,
+                source_revision=expected_revision,
+                unit_contract_sha256=expected_contract_sha256,
+            )
+            if (
+                entry.get("source_revision") != expected_revision
+                or entry.get("service_unit") != service
+                or entry.get("unit_contract_sha256") != expected_contract_sha256
+                or entry.get("invocation_sha256") != expected_invocation_sha256
+            ):
+                raise ValueError(
+                    f"worker state {task} is not bound to the reviewed revision and unit invocation"
+                )
+            run_id = entry.get("run_id")
+            if not isinstance(run_id, str):
+                raise ValueError(f"worker state {task} run_id must be a canonical UUIDv4")
+            try:
+                parsed_run_id = uuid.UUID(run_id)
+            except ValueError as exc:
+                raise ValueError(f"worker state {task} run_id must be a canonical UUIDv4") from exc
+            if str(parsed_run_id) != run_id or parsed_run_id.version != 4:
+                raise ValueError(f"worker state {task} run_id must be a canonical UUIDv4")
+
+            _worker_int(entry.get("pid"), f"worker state {task} pid", minimum=1)
+            deadline_seconds = _worker_number(
+                entry.get("deadline_seconds"), f"worker state {task} deadline_seconds"
+            )
+            max_attempts = _worker_int(
+                entry.get("max_attempts"), f"worker state {task} max_attempts", minimum=1
+            )
+            attempts_completed = _worker_int(
+                entry.get("attempts_completed"),
+                f"worker state {task} attempts_completed",
+                minimum=1,
+            )
+            if deadline_seconds != 90 or max_attempts != 3 or attempts_completed > max_attempts:
+                raise ValueError(f"worker state {task} retry/deadline telemetry is not reviewed")
+
+            counters = {
+                key: _worker_int(entry.get(key), f"worker state {task} {key}")
+                for key in (
+                    "last_attempt_processed",
+                    "last_attempt_problems",
+                    "last_attempt_emitted",
+                    "last_processed",
+                    "last_problems",
+                    "last_emitted",
+                    "consecutive_failures",
+                    "abandoned_runs",
+                    "total_runs",
+                    "total_successes",
+                    "total_failures",
+                )
+            }
+            if (
+                counters["last_attempt_problems"] != 0
+                or counters["last_problems"] != 0
+                or counters["consecutive_failures"] != 0
+                or counters["total_runs"] < 1
+                or counters["total_successes"] < 1
+                or counters["total_successes"] + counters["total_failures"] != counters["total_runs"]
+                or counters["last_attempt_processed"] != counters["last_processed"]
+                or counters["last_processed"] < 1
+                or counters["last_attempt_emitted"] != counters["last_emitted"]
+            ):
+                raise ValueError(f"worker state {task} success and counter invariants do not hold")
+
+            started_at = _worker_timestamp_pair(entry, "last_started_at", f"worker state {task}")
+            attempted_at = _worker_timestamp_pair(entry, "last_attempt_at", f"worker state {task}")
+            finished_at = _worker_timestamp_pair(entry, "last_finished_at", f"worker state {task}")
+            success_at = _worker_timestamp_pair(entry, "last_success_at", f"worker state {task}")
+            duration_seconds = _worker_number(
+                entry.get("last_duration_seconds"),
+                f"worker state {task} last_duration_seconds",
+            )
+            if (
+                started_at > attempted_at + 1
+                or attempted_at > finished_at + 1
+                or abs(finished_at - success_at) > 1
+                or abs((finished_at - started_at) - duration_seconds) > 2
+            ):
+                raise ValueError(f"worker state {task} timestamps are inconsistent")
+            if "last_failure_at" in entry or "last_failure_at_unix" in entry:
+                if not {"last_failure_at", "last_failure_at_unix"}.issubset(entry):
+                    raise ValueError(f"worker state {task} failure timestamp pair is incomplete")
+                failure_at = _worker_timestamp_pair(entry, "last_failure_at", f"worker state {task}")
+                if failure_at > started_at + 1:
+                    raise ValueError(f"worker state {task} retained failure timestamp is inconsistent")
+            if "previous_run_outcome" in entry and entry["previous_run_outcome"] != (
+                "abandoned_without_terminal_telemetry"
+            ):
+                raise ValueError(f"worker state {task} previous run outcome is unknown")
+
+            max_age_seconds = UNATTENDED_WORKER_TASK_MAX_AGE_SECONDS[task]
+            freshness_age_seconds = observed_at - success_at
+            if (
+                freshness_age_seconds < -UNATTENDED_WORKER_MAX_FUTURE_SKEW_SECONDS
+                or freshness_age_seconds > max_age_seconds
+            ):
+                raise ValueError(f"worker state {task} success is stale or implausibly future-dated")
+
+            recent_name = f"systemd_recent_success_{service}"
+            recent = supplied_recent.get(recent_name)
+            if recent is None:
+                recent = _recent_systemd_success(
+                    service,
+                    maximum_age_seconds=max_age_seconds,
+                    runner=runner,
+                    clock=lambda: observed_at,
+                )
+            if not isinstance(recent, dict) or recent.get("status") != "pass":
+                raise ValueError(f"{service} does not have a recent successful systemd run")
+            completed_at_unix = _worker_number(
+                recent.get("completed_at_unix_seconds"),
+                f"{service} completed_at_unix_seconds",
+            )
+            service_age_seconds = observed_at - completed_at_unix
+            reported_service_age = _worker_number(
+                recent.get("age_seconds"),
+                f"{service} age_seconds",
+                minimum=-UNATTENDED_WORKER_MAX_FUTURE_SKEW_SECONDS,
+            )
+            if (
+                recent.get("unit") != service
+                or recent.get("max_age_seconds") != max_age_seconds
+                or not isinstance(recent.get("completed_at"), str)
+                or not recent["completed_at"].strip()
+                or service_age_seconds < -UNATTENDED_WORKER_MAX_FUTURE_SKEW_SECONDS
+                or service_age_seconds > max_age_seconds
+                or abs(reported_service_age - service_age_seconds) > 5
+                or completed_at_unix - finished_at < -2
+                or completed_at_unix - finished_at > UNATTENDED_WORKER_COMPLETION_SKEW_SECONDS
+            ):
+                raise ValueError(f"{service} completion is inconsistent with durable worker telemetry")
+
+            services[service] = {
+                **identity,
+                "completed_at": recent["completed_at"],
+                "completed_at_unix_seconds": completed_at_unix,
+                "age_seconds": reported_service_age,
+                "max_age_seconds": max_age_seconds,
+                "source_revision": expected_revision,
+                "unit_contract_sha256": expected_contract_sha256,
+            }
+            normalized_tasks[task] = {
+                "service": service,
+                "timer": identity["timer"],
+                "state": entry["state"],
+                "run_id": run_id,
+                "source_revision": expected_revision,
+                "service_unit": service,
+                "unit_contract_sha256": expected_contract_sha256,
+                "invocation_sha256": expected_invocation_sha256,
+                "last_started_at": entry["last_started_at"],
+                "last_started_at_unix_seconds": started_at,
+                "last_attempt_at": entry["last_attempt_at"],
+                "last_attempt_at_unix_seconds": attempted_at,
+                "last_finished_at": entry["last_finished_at"],
+                "last_finished_at_unix_seconds": finished_at,
+                "last_success_at": entry["last_success_at"],
+                "last_success_at_unix_seconds": success_at,
+                "last_duration_seconds": duration_seconds,
+                "deadline_seconds": deadline_seconds,
+                "max_attempts": max_attempts,
+                "attempts_completed": attempts_completed,
+                "last_attempt_outcome": entry["last_attempt_outcome"],
+                "last_outcome": entry["last_outcome"],
+                "last_attempt_processed": counters["last_attempt_processed"],
+                "last_attempt_problems": counters["last_attempt_problems"],
+                "last_attempt_emitted": counters["last_attempt_emitted"],
+                "processed": counters["last_processed"],
+                "problems": counters["last_problems"],
+                "emitted": counters["last_emitted"],
+                "consecutive_failures": counters["consecutive_failures"],
+                "abandoned_runs": counters["abandoned_runs"],
+                "total_runs": counters["total_runs"],
+                "total_successes": counters["total_successes"],
+                "total_failures": counters["total_failures"],
+                "freshness_age_seconds": round(freshness_age_seconds, 6),
+                "max_age_seconds": max_age_seconds,
+            }
+            finished_timestamps.append(finished_at)
+
+        if abs(updated_at - max(finished_timestamps)) > 1:
+            raise ValueError("worker state updated_at does not identify the latest terminal task update")
+    except (OSError, RuntimeError, ValueError) as exc:
+        return {**base, "status": "fail", "detail": str(exc)}
+
+    return {
+        **base,
+        "status": "pass",
+        "detail": (
+            "both serialized unattended tasks have exact hardened units, scoped environments, "
+            "recent successful runs, and fresh durable terminal telemetry"
+        ),
+        "state_schema_version": state["schema_version"],
+        "state_updated_at": state["updated_at"],
+        "state_updated_at_unix_seconds": updated_at,
+        "state_sha256": hashlib.sha256(state_raw).hexdigest(),
+        "environment_keys": environment_keys,
+        "service_count": len(services),
+        "service_contracts": service_contracts,
+        "services": services,
+        "tasks": normalized_tasks,
+    }
 
 
 def check_backup_evidence(
@@ -1378,9 +2803,24 @@ def main() -> int:
         try:
             checks.append(check_source_revision(expected_source_revision, evidence_source))
             if not args.skip_systemd:
-                checks.extend(check_systemd())
+                systemd_checks = check_systemd()
+                checks.extend(systemd_checks)
                 checks.extend(check_filesystem_permissions(backup_directory=args.backup_directory))
+                checks.append(check_health_credential_isolation())
+                checks.append(check_web_startup_preflight())
                 checks.append(check_durable_state_wiring())
+                checks.append(
+                    check_unattended_workers(
+                        expected_revision=expected_source_revision,
+                        recent_service_checks={
+                            check["name"]: check
+                            for check in systemd_checks
+                            if str(check.get("name", "")).startswith(
+                                "systemd_recent_success_market-sentinel-"
+                            )
+                        }
+                    )
+                )
                 checks.append(check_backup_evidence(args.backup_directory))
                 if public_origin:
                     checks.append(

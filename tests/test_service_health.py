@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import io
 import json
+import os
+import sys
 import unittest
 from unittest.mock import patch
 
-from scripts.verify_service_health import check_health
+from scripts.verify_service_health import check_health, main as service_health_main
 
 
 class _Response:
@@ -64,6 +67,91 @@ class ServiceHealthTests(unittest.TestCase):
             payload = check_health("http://127.0.0.1:8765/api/health", "", 1.0)
 
         self.assertTrue(payload["readiness"]["ready"])
+
+    def test_cli_prefers_least_privilege_observability_token_with_admin_fallback(self) -> None:
+        payload = {"status": "ok", "api_version": "1.0.12", "readiness": {"ready": True}}
+        cases = (
+            ("observer-token", "admin-token", "observer-token"),
+            ("", "admin-token", "admin-token"),
+        )
+        for observability_token, admin_token, expected in cases:
+            with self.subTest(observability_token=bool(observability_token)), patch.dict(
+                os.environ,
+                {
+                    "MARKET_SENTINEL_OBSERVABILITY_TOKEN": observability_token,
+                    "MARKET_SENTINEL_API_TOKEN": admin_token,
+                },
+                clear=False,
+            ), patch.object(sys, "argv", ["verify_service_health.py", "--retries", "1"]), patch(
+                "scripts.verify_service_health.check_health",
+                return_value=payload,
+            ) as check, patch("builtins.print"):
+                self.assertEqual(service_health_main(), 0)
+
+            self.assertEqual(check.call_args.args[1], expected)
+
+    def test_observability_only_mode_rejects_admin_or_missing_observer_credentials(self) -> None:
+        payload = {"status": "ok", "api_version": "1.0.12", "readiness": {"ready": True}}
+        with patch.dict(
+            os.environ,
+            {
+                "MARKET_SENTINEL_OBSERVABILITY_TOKEN": "observer-token",
+            },
+            clear=True,
+        ), patch.object(
+            sys,
+            "argv",
+            ["verify_service_health.py", "--require-observability-token", "--retries", "1"],
+        ), patch(
+            "scripts.verify_service_health.check_health",
+            return_value=payload,
+        ) as check, patch("builtins.print"):
+            self.assertEqual(service_health_main(), 0)
+
+        self.assertEqual(check.call_args.args[1], "observer-token")
+
+        rejected_environments = (
+            {"MARKET_SENTINEL_OBSERVABILITY_TOKEN": "", "MARKET_SENTINEL_API_TOKEN": ""},
+            {"MARKET_SENTINEL_OBSERVABILITY_TOKEN": "observer-token", "MARKET_SENTINEL_API_TOKEN": "admin-token"},
+            {
+                "MARKET_SENTINEL_OBSERVABILITY_TOKEN": "observer-token",
+                "MARKET_SENTINEL_API_TOKEN": "",
+                "POLYMARKET_PRIVATE_KEY": "venue-secret",
+            },
+        )
+        for environment in rejected_environments:
+            with self.subTest(environment=environment), patch.dict(
+                os.environ,
+                environment,
+                clear=True,
+            ), patch.object(
+                sys,
+                "argv",
+                ["verify_service_health.py", "--require-observability-token"],
+            ), patch("sys.stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as ctx:
+                service_health_main()
+            self.assertEqual(ctx.exception.code, 2)
+
+    def test_observability_only_mode_rejects_command_line_token_override(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "MARKET_SENTINEL_OBSERVABILITY_TOKEN": "observer-token",
+            },
+            clear=True,
+        ), patch.object(
+            sys,
+            "argv",
+            [
+                "verify_service_health.py",
+                "--require-observability-token",
+                "--token",
+                "command-line-secret",
+            ],
+        ), patch("sys.stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as ctx:
+            service_health_main()
+
+        self.assertEqual(ctx.exception.code, 2)
 
 
 if __name__ == "__main__":

@@ -24,12 +24,14 @@ class FundedRecoveryJournalTests(unittest.TestCase):
     @staticmethod
     def resolved_record() -> dict:
         return {
-            "schema_version": 1, "market_id": "polymarket", "stage": "cancel_verified",
+            "schema_version": 2, "market_id": "polymarket", "stage": "cancel_verified",
             "resolved": True, "manual_reconciliation_required": False, "zero_fill_verified": True,
             "post_only": True, "tif": "GTC", "side": "BUY", "price": 0.01, "size": 1.0,
             "token_id": "123", "order_id": "0x" + "2" * 64, "account_address": "0x" + "1" * 40,
             "source_revision": "b" * 40, "run_id": "8fa2660a-4a06-4b3a-9f25-6534b07351b5",
             "sequence": 3, "run_started_at": "2026-09-06T10:00:00Z", "updated_at": "2026-09-06T10:00:01Z",
+            "workflow_run_id": 1, "workflow_run_attempt": 1,
+            "evidence_nonce": f"{'b' * 40}:1:1",
         }
 
     def store(self, raw: str) -> None:
@@ -41,7 +43,13 @@ class FundedRecoveryJournalTests(unittest.TestCase):
     def session(self, source_revision: str = "a" * 40):
         # Exercise the file contract on Windows without claiming its ACLs are accepted.
         privacy = patch.object(live, "_enforce_windows_recovery_journal_privacy") if os.name == "nt" else nullcontext()
-        with privacy, live._recovery_journal_session(self.target, source_revision=source_revision) as write:
+        with privacy, live._recovery_journal_session(
+            self.target,
+            source_revision=source_revision,
+            workflow_run_id=1,
+            workflow_run_attempt=1,
+            evidence_nonce=f"{source_revision}:1:1",
+        ) as write:
             yield write
 
     def assert_rejected_without_change(self, raw: str) -> None:
@@ -63,15 +71,16 @@ class FundedRecoveryJournalTests(unittest.TestCase):
                 del record[key]
                 self.assert_rejected_without_change(json.dumps(record))
         changes = (
-            ("resolved", 1), ("resolved", False), ("schema_version", True), ("schema_version", 2),
+            ("resolved", 1), ("resolved", False), ("schema_version", True), ("schema_version", 1),
             ("stage", "cancel_incomplete"), ("zero_fill_verified", False), ("manual_reconciliation_required", True),
             ("post_only", False), ("tif", "FOK"), ("market_id", "another-market"), ("side", "unknown"),
             ("price", 0), ("price", 1), ("price", True), ("price", "0.01"), ("size", -1),
-            ("size", "1"), ("size", 10 ** 500), ("sequence", True), ("sequence", 0),
+            ("size", "1"), ("size", 10 ** 500), ("sequence", True), ("sequence", 0), ("sequence", 2),
             ("token_id", ""), ("order_id", "\n"), ("order_id", "order-1"), ("order_id", "x" * 257),
             ("account_address", "not-an-account"),
             ("source_revision", "main"), ("run_id", "unknown"), ("updated_at", "2026-09-06T09:59:59Z"),
             ("run_started_at", "2026-09-06T10:00:00"),
+            ("workflow_run_id", 0), ("workflow_run_attempt", 0), ("evidence_nonce", "wrong"),
         )
         for key, value in changes:
             with self.subTest(key=key, value=value):
@@ -103,9 +112,17 @@ class FundedRecoveryJournalTests(unittest.TestCase):
             self.assertEqual(saved["source_revision"], "a" * 40)
             self.assertNotEqual(saved["run_id"], pending["run_id"])
             self.assertEqual(saved["sequence"], 1)
+            write(
+                {
+                    **self.resolved_record(),
+                    "stage": "order_placed_reconcile_required",
+                    "resolved": False,
+                    "manual_reconciliation_required": True,
+                }
+            )
             write(self.resolved_record())
             live._read_resolved_recovery_journal(self.target)
-            self.assertEqual(json.loads(self.target.read_text(encoding="utf-8"))["sequence"], 2)
+            self.assertEqual(json.loads(self.target.read_text(encoding="utf-8"))["sequence"], 3)
             if os.name == "posix":
                 self.assertEqual(self.target.stat().st_mode & 0o777, 0o600)
                 self.assertEqual(archives[0].stat().st_mode & 0o777, 0o600)
@@ -191,7 +208,13 @@ class FundedRecoveryJournalTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows-specific ACL policy")
     def test_real_windows_policy_remains_disabled(self) -> None:
         with self.assertRaisesRegex(ValueError, "owner-only directory ACL"):
-            with live._recovery_journal_session(self.target, source_revision="a" * 40):
+            with live._recovery_journal_session(
+                self.target,
+                source_revision="a" * 40,
+                workflow_run_id=1,
+                workflow_run_attempt=1,
+                evidence_nonce=f"{'a' * 40}:1:1",
+            ):
                 self.fail("Windows funded journals must remain disabled.")
 
     @unittest.skipUnless(os.name == "posix", "POSIX permissions")

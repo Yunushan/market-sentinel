@@ -7,7 +7,18 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from core.models import AppConfig, CopyActivityOutboxEntry, CopyTradeSettings, MutationJournalEntry
+from core.models import (
+    AppConfig,
+    CopyActivityOutboxEntry,
+    CopyTradeSettings,
+    MAX_ALERTS,
+    MAX_COPY_ACTIVITY_OUTBOX_ENTRIES,
+    MAX_MARKET_CONFIGS,
+    MAX_MUTATION_JOURNAL_ENTRIES,
+    MAX_PAPER_TRADES,
+    MAX_WALLETS,
+    MutationJournalEntry,
+)
 from core.storage import ConfigLoadError, load_config, save_config
 
 
@@ -178,6 +189,22 @@ class ConfigSemanticsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 save_config(cfg, path)
             self.assertEqual(path.read_bytes(), original)
+
+    def test_all_durable_collection_cardinality_limits_fail_closed(self) -> None:
+        limits = {
+            "alerts": MAX_ALERTS,
+            "paper_trades": MAX_PAPER_TRADES,
+            "wallets": MAX_WALLETS,
+            "copy_activity_outbox": MAX_COPY_ACTIVITY_OUTBOX_ENTRIES,
+            "mutation_journal": MAX_MUTATION_JOURNAL_ENTRIES,
+        }
+        for field, maximum in limits.items():
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "supported capacity"):
+                AppConfig.from_dict({field: [{}] * (maximum + 1)})
+
+        markets = {f"future-market-{index}": {} for index in range(MAX_MARKET_CONFIGS + 1)}
+        with self.assertRaisesRegex(ValueError, "markets exceed the supported capacity"):
+            AppConfig.from_dict({"markets": markets})
 
     def test_internal_http_status_enum_roundtrips_without_accepting_boolean_status(self) -> None:
         entry = MutationJournalEntry.from_dict(self.journal())

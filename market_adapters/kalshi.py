@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import math
+import os
+import stat
 import time
 import uuid
 from datetime import datetime, timezone
@@ -29,6 +31,10 @@ DEFAULT_KALSHI_BASE_URL = "https://external-api.kalshi.com/trade-api/v2"
 KALSHI_ORDER_PATH = "/portfolio/events/orders"
 KALSHI_ORDER_MANAGEMENT_CONFIRMATION = "I_UNDERSTAND_THIS_CHANGES_LIVE_ORDERS"
 KALSHI_ORDER_MANAGEMENT_MAX_BATCH = 50
+# RSA/EC private keys are normally only a few kilobytes.  Keep this large
+# enough for supported PEM encodings while preventing a configured path from
+# turning an authenticated request into an unbounded filesystem read.
+KALSHI_PRIVATE_KEY_FILE_MAX_BYTES = 64 * 1024
 KALSHI_ORDER_MANAGEMENT_REFERENCES = (
     "https://docs.kalshi.com/api-reference/orders/cancel-order-v2",
     "https://docs.kalshi.com/api-reference/orders/batch-cancel-orders-v2",
@@ -1156,10 +1162,54 @@ class KalshiAdapter(MarketAdapter):
             label="KALSHI_PRIVATE_KEY_PATH",
         )
         path = Path(path_credential.value).expanduser()
+        descriptor = -1
         try:
-            return path.read_bytes()
-        except OSError as exc:
-            raise MarketConfigurationError(f"Kalshi private key file could not be read: {path}") from exc
+            path_stat = os.lstat(path)
+            if stat.S_ISLNK(path_stat.st_mode):
+                raise MarketConfigurationError("Kalshi private key path must not be a symbolic link.")
+            if not stat.S_ISREG(path_stat.st_mode):
+                raise MarketConfigurationError("Kalshi private key path must identify a regular file.")
+            if path_stat.st_size > KALSHI_PRIVATE_KEY_FILE_MAX_BYTES:
+                raise MarketConfigurationError(
+                    f"Kalshi private key file exceeds the {KALSHI_PRIVATE_KEY_FILE_MAX_BYTES}-byte limit."
+                )
+
+            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(path, flags)
+            opened_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(opened_stat.st_mode):
+                raise MarketConfigurationError("Kalshi private key path must identify a regular file.")
+            if (path_stat.st_dev, path_stat.st_ino) != (opened_stat.st_dev, opened_stat.st_ino):
+                raise MarketConfigurationError("Kalshi private key file changed while it was being opened.")
+            if opened_stat.st_size > KALSHI_PRIVATE_KEY_FILE_MAX_BYTES:
+                raise MarketConfigurationError(
+                    f"Kalshi private key file exceeds the {KALSHI_PRIVATE_KEY_FILE_MAX_BYTES}-byte limit."
+                )
+
+            chunks = []
+            remaining = KALSHI_PRIVATE_KEY_FILE_MAX_BYTES + 1
+            while remaining:
+                chunk = os.read(descriptor, min(8192, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            private_key_bytes = b"".join(chunks)
+            if len(private_key_bytes) > KALSHI_PRIVATE_KEY_FILE_MAX_BYTES:
+                raise MarketConfigurationError(
+                    f"Kalshi private key file exceeds the {KALSHI_PRIVATE_KEY_FILE_MAX_BYTES}-byte limit."
+                )
+            return private_key_bytes
+        except MarketConfigurationError:
+            raise
+        except (OSError, RuntimeError, ValueError, TypeError) as exc:
+            # Do not echo a potentially sensitive operator filesystem path into
+            # API responses or logs derived from the public error message.
+            raise MarketConfigurationError("Kalshi private key file could not be read safely.") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
 
     def _sign_pss(self, private_key_bytes: bytes, message: str) -> str:
         try:

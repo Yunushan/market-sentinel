@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from market_adapters import KalshiAdapter, PaperOrderRequest
 from market_adapters.errors import MarketConfigurationError
+from market_adapters.kalshi import KALSHI_PRIVATE_KEY_FILE_MAX_BYTES
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "kalshi"
@@ -330,6 +333,44 @@ class KalshiAdapterTests(unittest.TestCase):
             )
 
         self.assertIn("KALSHI_API_KEY_ID", str(ctx.exception))
+
+    def test_private_key_path_reads_only_bounded_regular_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            key_path = root / "private.pem"
+            key_path.write_bytes(b"private-key-bytes")
+            adapter = KalshiAdapter({"kalshi_private_key_path": str(key_path)})
+
+            with patch.dict(os.environ, {"KALSHI_PRIVATE_KEY_PATH": "", "KALSHI_PRIVATE_KEY_PEM": ""}):
+                self.assertEqual(adapter._load_private_key_bytes(), b"private-key-bytes")
+
+                directory_adapter = KalshiAdapter({"kalshi_private_key_path": str(root)})
+                with self.assertRaisesRegex(MarketConfigurationError, "regular file"):
+                    directory_adapter._load_private_key_bytes()
+
+                oversized_path = root / "oversized.pem"
+                oversized_path.write_bytes(b"x" * (KALSHI_PRIVATE_KEY_FILE_MAX_BYTES + 1))
+                oversized_adapter = KalshiAdapter({"kalshi_private_key_path": str(oversized_path)})
+                with self.assertRaisesRegex(MarketConfigurationError, "exceeds"):
+                    oversized_adapter._load_private_key_bytes()
+
+    def test_private_key_path_rejects_symbolic_links_without_disclosing_the_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "private.pem"
+            link = root / "private-link.pem"
+            target.write_bytes(b"private-key-bytes")
+            try:
+                link.symlink_to(target)
+            except (NotImplementedError, OSError):
+                self.skipTest("symbolic links are unavailable for this test user")
+            adapter = KalshiAdapter({"kalshi_private_key_path": str(link)})
+
+            with patch.dict(os.environ, {"KALSHI_PRIVATE_KEY_PATH": "", "KALSHI_PRIVATE_KEY_PEM": ""}):
+                with self.assertRaisesRegex(MarketConfigurationError, "must not be a symbolic link") as ctx:
+                    adapter._load_private_key_bytes()
+
+            self.assertNotIn(str(link), str(ctx.exception))
 
     def test_live_order_signs_and_posts_with_generated_credentials(self) -> None:
         from cryptography.hazmat.primitives import serialization
