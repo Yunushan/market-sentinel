@@ -35,9 +35,18 @@ class VerifierCoverageTests(unittest.TestCase):
     def test_branch_coverage_policy_has_overall_and_backend_floors(self) -> None:
         self.assertGreaterEqual(verify.MIN_TOTAL_BRANCH_COVERAGE, 72.0)
         self.assertGreaterEqual(verify.MIN_BACKEND_BRANCH_COVERAGE, 76.0)
+        self.assertEqual(verify.COMPATIBILITY_BACKEND_BRANCH_COVERAGE, 74.0)
         self.assertIn("web_api.py", verify.BACKEND_COVERAGE_INCLUDE)
         self.assertIn("market_sentinel_cli.py", verify.BACKEND_COVERAGE_INCLUDE)
         self.assertEqual(verify.RESOURCE_WARNING_POLICY, "error::ResourceWarning")
+
+    def test_compatibility_floor_covers_posix_and_python_310_matrix_lanes(self) -> None:
+        with patch.object(verify.os, "name", "posix"):
+            self.assertEqual(verify.effective_backend_coverage_floor(), 74.0)
+        with patch.object(verify.os, "name", "nt"), patch.object(verify.sys, "version_info", (3, 10)):
+            self.assertEqual(verify.effective_backend_coverage_floor(), 74.0)
+        with patch.object(verify.os, "name", "nt"), patch.object(verify.sys, "version_info", (3, 11)):
+            self.assertEqual(verify.effective_backend_coverage_floor(), 76.0)
 
     def test_implemented_adapter_fixture_mapping_matches_the_catalog(self) -> None:
         implemented = set(MARKET_IDS) - set(VERIFIED_BLOCKERS)

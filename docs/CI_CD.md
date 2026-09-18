@@ -26,9 +26,11 @@ Jobs:
 - Full project verification with `python verify.py`.
 - A pinned Ruff static-analysis gate (`F` correctness, `B` bugbear, and `S608`
   dynamic-SQL rules), run by `python verify.py` before the functional test suite.
-- Enforced branch-coverage floors of 72% for the full Python application and
-  76% for the headless/backend surface. The verifier measures both and fails on
-  regression.
+- Enforced combined statement/branch-coverage floors of 72% for the full Python
+  application and 76% for the headless/backend surface on Windows Python
+  3.11+. POSIX and Python 3.10 compatibility lanes use a 74% backend floor
+  because platform-specific release/ACL tests are intentionally skipped; the
+  verifier applies the lane-appropriate floor and fails on regression.
 - React production build with Node.js `24`.
 - Python wheel and source distribution build, explicit artifact-content verification, and an installed-wheel CLI, metadata, registry, and adapter import smoke from a fresh virtual environment outside the source tree. The smoke check verifies that imports resolve under that environment's site-packages rather than the checkout. `MANIFEST.in` keeps the source archive's fixtures, config, docs, frontend source, scripts, workflows, and visual assets while excluding generated frontend/build directories.
 - Short-retention artifacts for the frontend bundle and Python distributions.
