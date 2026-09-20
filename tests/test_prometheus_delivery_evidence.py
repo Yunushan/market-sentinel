@@ -417,61 +417,79 @@ class PrometheusDeliveryEvidenceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.temporary = tempfile.TemporaryDirectory(prefix="market-sentinel-prometheus-evidence-")
-        cls.base = Path(cls.temporary.name)
-        cls.rule_directory = cls.base / "rules"
-        cls.rule_directory.mkdir()
-        cls.output = cls.base / "raw.json"
-        cls.oncall_url_file = cls.base / "oncall-url"
-        cls.oncall_credentials_file = cls.base / "oncall-token"
-        cls.oncall_url_file.write_text(f"{ONCALL_ORIGIN}/v1/market-sentinel/alertmanager", encoding="utf-8")
-        cls.oncall_credentials_file.write_text(ONCALL_TOKEN, encoding="utf-8")
-        cls.oncall_url_file.chmod(0o600)
-        cls.oncall_credentials_file.chmod(0o600)
-        cls.receiver_socket = _reserved_loopback_socket()
-        cls.receiver_port = int(cls.receiver_socket.getsockname()[1])
-        state = _FakeMonitoringState(cls.rule_directory, receiver_url(cls.receiver_port))
-        cls.state = state
-        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(state))
-        cls.server.daemon_threads = True
-        cls.server_thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
-        cls.server_thread.start()
-        cls.origin = f"http://127.0.0.1:{cls.server.server_port}"
-        cls.payload = collect_evidence(
-            CollectorConfig(
-                source_revision=REVISION,
-                deployment_identity_sha256=DEPLOYMENT_IDENTITY,
-                run_id=RUN_ID,
-                run_attempt=RUN_ATTEMPT,
-                nonce=NONCE,
-                rule_directory=cls.rule_directory,
-                prometheus_origin=cls.origin,
-                alertmanager_origin=cls.origin,
-                oncall_receipt_origin=ONCALL_ORIGIN,
-                oncall_receipt_token=ONCALL_TOKEN,
-                oncall_url_file=cls.oncall_url_file,
-                oncall_credentials_file=cls.oncall_credentials_file,
-                expected_alertmanager_gid=123,
-                receiver_name="market-sentinel-attestation",
-                receiver_port=cls.receiver_port,
-                output=cls.output,
-                timeout_seconds=5,
-                poll_interval_seconds=0.01,
-                request_timeout_seconds=1,
-                require_root_owned_oncall_files=False,
-            ),
-            origin_resolver=_public_resolver,
-            receipt_fetcher=state.oncall_receipt,
-            receiver_socket=cls.receiver_socket,
-        )
-        cls.raw_sha256 = hashlib.sha256(cls.output.read_bytes()).hexdigest()
-        cls.callback_error = state.callback_error
+        try:
+            cls.base = Path(cls.temporary.name)
+            cls.rule_directory = cls.base / "rules"
+            cls.rule_directory.mkdir()
+            cls.output = cls.base / "raw.json"
+            cls.oncall_url_file = cls.base / "oncall-url"
+            cls.oncall_credentials_file = cls.base / "oncall-token"
+            cls.oncall_url_file.write_text(f"{ONCALL_ORIGIN}/v1/market-sentinel/alertmanager", encoding="utf-8")
+            cls.oncall_credentials_file.write_text(ONCALL_TOKEN, encoding="utf-8")
+            cls.oncall_url_file.chmod(0o600)
+            cls.oncall_credentials_file.chmod(0o600)
+            cls.receiver_socket = _reserved_loopback_socket()
+            cls.receiver_port = int(cls.receiver_socket.getsockname()[1])
+            state = _FakeMonitoringState(cls.rule_directory, receiver_url(cls.receiver_port))
+            cls.state = state
+            cls.server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(state))
+            cls.server.daemon_threads = True
+            cls.server_thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+            cls.server_thread.start()
+            cls.origin = f"http://127.0.0.1:{cls.server.server_port}"
+            cls.payload = collect_evidence(
+                CollectorConfig(
+                    source_revision=REVISION,
+                    deployment_identity_sha256=DEPLOYMENT_IDENTITY,
+                    run_id=RUN_ID,
+                    run_attempt=RUN_ATTEMPT,
+                    nonce=NONCE,
+                    rule_directory=cls.rule_directory,
+                    prometheus_origin=cls.origin,
+                    alertmanager_origin=cls.origin,
+                    oncall_receipt_origin=ONCALL_ORIGIN,
+                    oncall_receipt_token=ONCALL_TOKEN,
+                    oncall_url_file=cls.oncall_url_file,
+                    oncall_credentials_file=cls.oncall_credentials_file,
+                    expected_alertmanager_gid=123,
+                    receiver_name="market-sentinel-attestation",
+                    receiver_port=cls.receiver_port,
+                    output=cls.output,
+                    timeout_seconds=5,
+                    poll_interval_seconds=0.01,
+                    request_timeout_seconds=1,
+                    require_root_owned_oncall_files=False,
+                ),
+                origin_resolver=_public_resolver,
+                receipt_fetcher=state.oncall_receipt,
+                receiver_socket=cls.receiver_socket,
+            )
+            cls.raw_sha256 = hashlib.sha256(cls.output.read_bytes()).hexdigest()
+            cls.callback_error = state.callback_error
+        except BaseException:
+            server = getattr(cls, "server", None)
+            server_thread = getattr(cls, "server_thread", None)
+            if server is not None and server_thread is not None:
+                server.shutdown()
+            if server is not None:
+                server.server_close()
+            if server_thread is not None:
+                server_thread.join(timeout=3)
+            receiver_socket = getattr(cls, "receiver_socket", None)
+            if receiver_socket is not None:
+                receiver_socket.close()
+            cls.temporary.cleanup()
+            raise
 
     @classmethod
     def tearDownClass(cls) -> None:
-        cls.server.shutdown()
-        cls.server.server_close()
-        cls.server_thread.join(timeout=3)
-        cls.temporary.cleanup()
+        try:
+            cls.server.shutdown()
+            cls.server.server_close()
+            cls.server_thread.join(timeout=3)
+        finally:
+            cls.receiver_socket.close()
+            cls.temporary.cleanup()
 
     def review(self, payload: dict[str, Any] | None = None, **overrides: Any) -> dict[str, Any]:
         values: dict[str, Any] = {

@@ -22,7 +22,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from socketserver import BaseServer
 from typing import Any, Callable
 
 
@@ -1233,11 +1232,20 @@ class _PreboundThreadingHTTPServer(ThreadingHTTPServer):
     """Serve from a validated socket that was bound before the collector started."""
 
     def __init__(self, receiver_socket: socket.socket, handler: type[BaseHTTPRequestHandler]) -> None:
+        if receiver_socket.fileno() < 0:
+            raise DeliveryEvidenceError("controlled receiver socket is closed")
         receiver_address = receiver_socket.getsockname()
-        BaseServer.__init__(self, receiver_address, handler)
         self.socket = receiver_socket
+        self.server_address = receiver_address
+        self.RequestHandlerClass = handler
+        self.allow_reuse_address = False
+        self.daemon_threads = True
+        self.timeout = None
+        self._BaseServer__is_shut_down = threading.Event()
+        self._BaseServer__shutdown_request = False
         self.server_name = socket.getfqdn(receiver_address[0])
         self.server_port = receiver_address[1]
+        self.server_activate()
 
 
 def _build_receiver_server(
