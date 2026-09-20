@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+import hashlib
 import json
 import math
 import os
@@ -33,6 +34,11 @@ from polymarket.constants import (
     POLYMARKET_CLOB_V2_MIGRATION_URL,
 )
 from polymarket.credential_runbook import build_polymarket_credential_runbook
+from polymarket.funded_policy import (
+    FUNDED_TOKEN_ALLOWLIST_VARIABLE,
+    funded_token_allowlist_sha256,
+    parse_funded_token_allowlist,
+)
 from polymarket.live_verification import (
     ABSOLUTE_MAX_VERIFY_NOTIONAL,
     ABSOLUTE_MAX_VERIFY_SIZE,
@@ -83,6 +89,7 @@ PUBLIC_ONLY_FORBIDDEN_OPTIONS = frozenset(
         "--confirm-live-order-cancel",
         "--allow-token-id",
         "--allow-token-file",
+        "--allow-token-environment",
         "--token-id",
         "--side",
         "--price",
@@ -92,6 +99,9 @@ PUBLIC_ONLY_FORBIDDEN_OPTIONS = frozenset(
         "--max-verify-notional",
         "--maker-price-buffer",
         "--recovery-journal",
+        "--evidence-run-id",
+        "--evidence-run-attempt",
+        "--evidence-nonce",
     }
 )
 PUBLIC_ONLY_SAFETY = {
@@ -126,6 +136,32 @@ _GITHUB_REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 STRICT_SOURCE_PROVENANCE_SCHEMA_VERSION = 1
 MAX_RECOVERY_JOURNAL_BYTES = 64 * 1024
+RESOLVED_RECOVERY_JOURNAL_FIELDS = frozenset(
+    {
+        "schema_version",
+        "market_id",
+        "token_id",
+        "side",
+        "price",
+        "size",
+        "tif",
+        "post_only",
+        "account_address",
+        "stage",
+        "order_id",
+        "manual_reconciliation_required",
+        "resolved",
+        "zero_fill_verified",
+        "run_id",
+        "run_started_at",
+        "source_revision",
+        "sequence",
+        "updated_at",
+        "workflow_run_id",
+        "workflow_run_attempt",
+        "evidence_nonce",
+    }
+)
 
 
 def _load_env() -> None:
@@ -505,7 +541,8 @@ def _validate_resolved_recovery_journal(value: Any) -> None:
     if not isinstance(value, Mapping):
         raise ValueError(error)
     if (
-        type(value.get("schema_version")) is not int or value["schema_version"] != 1
+        set(value) != RESOLVED_RECOVERY_JOURNAL_FIELDS
+        or type(value.get("schema_version")) is not int or value["schema_version"] != 2
         or value.get("market_id") != "polymarket"
         or value.get("stage") != "cancel_verified"
         or value.get("resolved") is not True
@@ -514,7 +551,7 @@ def _validate_resolved_recovery_journal(value: Any) -> None:
         or value.get("post_only") is not True
         or value.get("tif") != "GTC"
         or value.get("side") not in ("BUY", "SELL")
-        or type(value.get("sequence")) is not int or value["sequence"] < 1
+        or type(value.get("sequence")) is not int or value["sequence"] < 3
     ):
         raise ValueError(error)
     for name in ("token_id", "order_id"):
@@ -526,6 +563,16 @@ def _validate_resolved_recovery_journal(value: Any) -> None:
     source = value.get("source_revision")
     if not isinstance(source, str) or not _COMMIT_RE.fullmatch(source) or not is_evm_address_like(value.get("account_address")):
         raise ValueError(error)
+    workflow_run_id = value.get("workflow_run_id")
+    workflow_run_attempt = value.get("workflow_run_attempt")
+    if (
+        type(workflow_run_id) is not int
+        or workflow_run_id < 1
+        or type(workflow_run_attempt) is not int
+        or workflow_run_attempt < 1
+        or value.get("evidence_nonce") != f"{source}:{workflow_run_id}:{workflow_run_attempt}"
+    ):
+        raise ValueError(error)
     for name in ("price", "size"):
         number = value.get(name)
         try:
@@ -535,6 +582,8 @@ def _validate_resolved_recovery_journal(value: Any) -> None:
         if not valid:
             raise ValueError(error)
     if value["price"] >= 1:
+        raise ValueError(error)
+    if value["size"] > ABSOLUTE_MAX_VERIFY_SIZE or value["price"] * value["size"] > ABSOLUTE_MAX_VERIFY_NOTIONAL:
         raise ValueError(error)
     run_id = value.get("run_id")
     try:
@@ -548,7 +597,7 @@ def _validate_resolved_recovery_journal(value: Any) -> None:
         raise ValueError(error)
 
 
-def _read_resolved_recovery_journal(target: Path) -> None:
+def _read_resolved_recovery_journal(target: Path) -> Dict[str, Any]:
     try:
         with target.open("rb") as handle:
             raw = handle.read(MAX_RECOVERY_JOURNAL_BYTES + 1)
@@ -558,6 +607,7 @@ def _read_resolved_recovery_journal(target: Path) -> None:
     except (OSError, ValueError, RecursionError) as exc:
         raise ValueError("existing recovery journal is unreadable and must be reconciled manually") from exc
     _validate_resolved_recovery_journal(existing)
+    return dict(existing)
 
 
 @contextmanager
@@ -565,9 +615,18 @@ def _recovery_journal_session(
     value: str | Path,
     *,
     source_revision: str,
+    workflow_run_id: int,
+    workflow_run_attempt: int,
+    evidence_nonce: str,
 ) -> Iterable[Callable[[Mapping[str, Any]], None]]:
     if not isinstance(source_revision, str) or not _COMMIT_RE.fullmatch(source_revision):
         raise ValueError("recovery journal requires the exact source revision")
+    if type(workflow_run_id) is not int or workflow_run_id < 1:
+        raise ValueError("recovery journal requires a positive workflow run id")
+    if type(workflow_run_attempt) is not int or workflow_run_attempt < 1:
+        raise ValueError("recovery journal requires a positive workflow run attempt")
+    if evidence_nonce != f"{source_revision}:{workflow_run_id}:{workflow_run_attempt}":
+        raise ValueError("recovery journal evidence nonce must bind revision, run id, and run attempt")
     target = _validate_recovery_journal_target(value)
     lock_path = target.with_name(f".{target.name}.funded.lock")
     if _is_link_like(lock_path):
@@ -612,6 +671,9 @@ def _recovery_journal_session(
                     "source_revision": source_revision,
                     "sequence": sequence,
                     "updated_at": _utc_now(),
+                    "workflow_run_id": workflow_run_id,
+                    "workflow_run_attempt": workflow_run_attempt,
+                    "evidence_nonce": evidence_nonce,
                 }
             )
             if journal.get("resolved") is True:
@@ -735,6 +797,8 @@ def _validate_clob_order_collection(value: Any) -> Dict[str, Any]:
 def _validate_authenticated_list(value: Any) -> Dict[str, Any]:
     if not isinstance(value, list):
         raise ValueError("authenticated response must be a list")
+    if any(not isinstance(row, Mapping) for row in value):
+        raise ValueError("authenticated response must contain only object records")
     return {"semantic_check": "authenticated_collection", "records_observed": len(value)}
 
 
@@ -945,7 +1009,12 @@ def _funded_order_check(args: argparse.Namespace, *, source_revision: str = "") 
             manual_reconciliation_required=False,
         )
     try:
-        allow_tokens = load_allow_token_ids(args.allow_token_id or (), file_path=args.allow_token_file)
+        environment_allow_tokens = getattr(args, "funded_environment_allow_tokens", None)
+        allow_tokens = (
+            list(environment_allow_tokens)
+            if environment_allow_tokens is not None
+            else load_allow_token_ids(args.allow_token_id or (), file_path=args.allow_token_file)
+        )
         request = LiveOrderCancelRequest(
             token_id=args.token_id or "",
             side=args.side or "",
@@ -963,16 +1032,48 @@ def _funded_order_check(args: argparse.Namespace, *, source_revision: str = "") 
             max_notional=args.max_verify_notional,
             maker_price_buffer=args.maker_price_buffer,
         )
+
+        def attach_policy_receipt(result: Dict[str, Any]) -> Dict[str, Any]:
+            if environment_allow_tokens is not None:
+                result["funded_token_policy_receipt"] = {
+                    "schema_version": 1,
+                    "variable_name": FUNDED_TOKEN_ALLOWLIST_VARIABLE,
+                    "token_ids": list(environment_allow_tokens),
+                    "allowlist_sha256": funded_token_allowlist_sha256(environment_allow_tokens),
+                    "selected_token_id": args.token_id or "",
+                }
+            return result
+
         if not args.allow_funded_order:
-            return run_live_order_cancel_verification(request)
+            return attach_policy_receipt(run_live_order_cancel_verification(request))
         with _recovery_journal_session(
             args.recovery_journal,
             source_revision=source_revision,
+            workflow_run_id=args.evidence_run_id,
+            workflow_run_attempt=args.evidence_run_attempt,
+            evidence_nonce=args.evidence_nonce,
         ) as recovery_writer:
-            return run_live_order_cancel_verification(
+            result = run_live_order_cancel_verification(
                 request,
                 recovery_writer=recovery_writer,
             )
+            attach_policy_receipt(result)
+            if result.get("status") == "ok":
+                target = _validate_recovery_journal_target(args.recovery_journal)
+                journal = _read_resolved_recovery_journal(target)
+                raw = target.read_bytes()
+                result["recovery_journal_receipt"] = {
+                    "schema_version": 1,
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                    "source_revision": journal["source_revision"],
+                    "workflow_run_id": journal["workflow_run_id"],
+                    "workflow_run_attempt": journal["workflow_run_attempt"],
+                    "evidence_nonce": journal["evidence_nonce"],
+                    "order_id": journal["order_id"],
+                    "stage": journal["stage"],
+                    "resolved": journal["resolved"],
+                }
+            return result
     except Exception as exc:
         return _result(
             "failed",
@@ -1088,6 +1189,13 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--confirm-live-order-cancel")
     parser.add_argument("--allow-token-id", action="append", default=[])
     parser.add_argument("--allow-token-file")
+    parser.add_argument(
+        "--allow-token-environment",
+        help=(
+            "Read the canonical funded token allowlist from the protected production environment. "
+            f"The only accepted name is {FUNDED_TOKEN_ALLOWLIST_VARIABLE}."
+        ),
+    )
     parser.add_argument("--token-id")
     parser.add_argument("--side", choices=["BUY", "SELL"])
     parser.add_argument("--price")
@@ -1100,6 +1208,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         "--recovery-journal",
         help="Absolute path to a private, atomically updated funded-order recovery journal.",
     )
+    parser.add_argument("--evidence-run-id", type=int)
+    parser.add_argument("--evidence-run-attempt", type=int)
+    parser.add_argument("--evidence-nonce")
     args = parser.parse_args(raw_argv)
 
     public_only_mode = bool(args.public_only or args.validate_public_only_report)
@@ -1118,17 +1229,46 @@ def main(argv: Iterable[str] | None = None) -> int:
             return _validate_public_only_report_file(args)
         return _run_public_only(args)
 
+    args.funded_environment_allow_tokens = None
+    if args.allow_token_environment:
+        if args.allow_token_environment != FUNDED_TOKEN_ALLOWLIST_VARIABLE:
+            parser.error(
+                f"--allow-token-environment must equal {FUNDED_TOKEN_ALLOWLIST_VARIABLE}"
+            )
+        if args.allow_token_id or args.allow_token_file:
+            parser.error(
+                "--allow-token-environment cannot be combined with dispatcher or file allowlists"
+            )
+        try:
+            args.funded_environment_allow_tokens = parse_funded_token_allowlist(
+                os.getenv(FUNDED_TOKEN_ALLOWLIST_VARIABLE)
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        if args.allow_funded_order and args.token_id not in args.funded_environment_allow_tokens:
+            parser.error(
+                "--token-id is not present in the protected production funded token allowlist"
+            )
+
     if POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED and args.allow_funded_order and not args.recovery_journal:
         parser.error("--allow-funded-order requires --recovery-journal")
     if args.recovery_journal and not args.allow_funded_order:
         parser.error("--recovery-journal is only valid with --allow-funded-order")
     if POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED and args.allow_funded_order:
+        if not isinstance(args.evidence_run_id, int) or args.evidence_run_id < 1:
+            parser.error("--allow-funded-order requires a positive --evidence-run-id")
+        if not isinstance(args.evidence_run_attempt, int) or args.evidence_run_attempt < 1:
+            parser.error("--allow-funded-order requires a positive --evidence-run-attempt")
+        if not isinstance(args.evidence_nonce, str) or not args.evidence_nonce:
+            parser.error("--allow-funded-order requires --evidence-nonce")
         try:
             recovery_target = _validate_recovery_journal_target(args.recovery_journal)
         except ValueError as exc:
             parser.error(str(exc))
         if args.report_file and recovery_target.resolve(strict=False) == Path(args.report_file).resolve(strict=False):
             parser.error("--recovery-journal and --report-file must be different files")
+    elif any((args.evidence_run_id, args.evidence_run_attempt, args.evidence_nonce)):
+        parser.error("--evidence-run-* metadata is only valid with --allow-funded-order")
 
     initial_source_state = _repository_source_state()
     _load_env()

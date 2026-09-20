@@ -1,15 +1,149 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 
-from verify import workflow_action_pin_issues
+from verify import (
+    action_reference_files,
+    locked_requirement_install_policy_issues,
+    source_install_policy_issues,
+    workflow_action_pin_issues,
+    workflow_binary_install_policy_issues,
+    workflow_unpinned_action_issues,
+)
 
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 class CiCdWorkflowTests(unittest.TestCase):
+    def test_every_documented_source_install_uses_the_hash_locked_backend(self) -> None:
+        expected_install_counts = {
+            ROOT / ".github" / "workflows" / "ci.yml": 7,
+            ROOT / ".github" / "workflows" / "release.yml": 3,
+            ROOT / "README.md": 1,
+            ROOT / "docs" / "PRODUCTION_OPERATIONS.md": 2,
+        }
+        hardened_command = "--no-build-isolation --check-build-dependencies --no-deps"
+
+        for path, expected_count in expected_install_counts.items():
+            text = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertEqual([], source_install_policy_issues(text))
+                self.assertEqual(expected_count, text.count(hardened_command))
+
+    def test_source_install_policy_rejects_isolation_and_missing_backend_bootstrap(self) -> None:
+        unsafe = "python -m pip install --no-deps -e .\n"
+        issues = source_install_policy_issues(unsafe)
+        self.assertIn("line 1: source install is missing --no-build-isolation", issues)
+        self.assertIn("line 1: source install is missing --check-build-dependencies", issues)
+        self.assertIn("line 1: source install is not preceded by the hash-locked build backend", issues)
+
+        missing_backend = (
+            "python -m pip install --require-hashes -r requirements.lock\n"
+            "python -m pip install --no-build-isolation --check-build-dependencies --no-deps .\n"
+        )
+        self.assertEqual(
+            ["line 2: source install is not preceded by the hash-locked build backend"],
+            source_install_policy_issues(missing_backend),
+        )
+
+        pip3_bypass = "pip3  install --no-deps .\n"
+        self.assertIn(
+            "line 1: source install is missing --no-build-isolation",
+            source_install_policy_issues(pip3_bypass),
+        )
+
+        for target in ("./", "file:.", '"$GITHUB_WORKSPACE"', "/workspace"):
+            with self.subTest(target=target):
+                bypass = f"python -m pip install --no-deps {target}\n"
+                self.assertIn(
+                    "line 1: source install is missing --no-build-isolation",
+                    source_install_policy_issues(bypass),
+                )
+
+        continued = (
+            "python -m pip install --only-binary=:all: --require-hashes -r requirements-bootstrap.lock\n"
+            "python -m pip install --no-deps \\\n"
+            "  ./\n"
+        )
+        continued_issues = source_install_policy_issues(continued)
+        self.assertIn("line 2: source install is missing --no-build-isolation", continued_issues)
+        self.assertNotIn(
+            "line 2: source install is not preceded by the hash-locked build backend",
+            continued_issues,
+        )
+
+    def test_locked_dependency_installs_cannot_execute_sdists(self) -> None:
+        for path in (ROOT / "README.md", ROOT / "docs" / "PRODUCTION_OPERATIONS.md"):
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertEqual(
+                    [],
+                    locked_requirement_install_policy_issues(path.read_text(encoding="utf-8")),
+                )
+
+        unsafe = "python -m pip install --require-hashes -r requirements.lock\n"
+        issues = locked_requirement_install_policy_issues(unsafe)
+        self.assertIn("line 1: locked dependency install is missing --only-binary=:all:", issues)
+
+        missing_hashes = "python -m pip install \\\n  -r requirements.lock\n"
+        missing_hash_issues = locked_requirement_install_policy_issues(missing_hashes)
+        self.assertIn("line 1: locked dependency install is missing --require-hashes", missing_hash_issues)
+        self.assertIn(
+            "line 1: locked dependency install is missing --only-binary=:all:",
+            missing_hash_issues,
+        )
+
+    def test_workflow_lock_installs_are_wheel_only_including_containers(self) -> None:
+        checked = 0
+        for path in action_reference_files():
+            text = path.read_text(encoding="utf-8")
+            if "--require-hashes" not in text or ".lock" not in text:
+                continue
+            checked += 1
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertEqual([], workflow_binary_install_policy_issues(text))
+        self.assertGreaterEqual(checked, 4)
+
+        unsafe = "python -m pip install --require-hashes -r requirements.lock\n"
+        self.assertIn(
+            "workflow lock installs require PIP_ONLY_BINARY=:all:",
+            workflow_binary_install_policy_issues(unsafe),
+        )
+        self.assertIn(
+            "line 1: workflow lock install is missing --require-hashes",
+            workflow_binary_install_policy_issues("python -m pip install -r requirements.lock\n"),
+        )
+        for runtime in ("docker", "podman"):
+            container_unsafe = f"""
+env:
+  PIP_ONLY_BINARY: ":all:"
+jobs:
+  test:
+    steps:
+      - run: |
+          {runtime} run image sh -lc 'python -m pip install --require-hashes -r requirements.lock'
+"""
+            with self.subTest(runtime=runtime):
+                self.assertIn(
+                    "containerized lock installs must receive PIP_ONLY_BINARY=:all:",
+                    workflow_binary_install_policy_issues(container_unsafe),
+                )
+
+        ci_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn("docker run --rm", ci_text)
+        self.assertIn("-e PIP_ONLY_BINARY=:all:", ci_text)
+
+    def test_wheel_smoke_verifies_prebuilt_artifact_before_install(self) -> None:
+        for relative_path in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+            text = (ROOT / relative_path).read_text(encoding="utf-8")
+            smoke = text.split("      - name: Smoke install built wheel\n", 1)[1]
+            verified = smoke.index("scripts/verify_python_dist_artifacts.py")
+            installed = smoke.index('"${smoke_python}" -m pip install --no-cache-dir --no-index')
+            with self.subTest(path=relative_path):
+                self.assertLess(verified, installed)
+
     def test_browser_workflows_gate_frontend_artifact_publication(self) -> None:
         text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         frontend = text.split("  frontend:\n", 1)[1].split("  mobile-web:\n", 1)[0]
@@ -57,7 +191,7 @@ class CiCdWorkflowTests(unittest.TestCase):
             "python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock",
             "python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock",
             "python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock",
-            "python -m pip install --no-cache-dir --no-deps -e .",
+            "python -m pip install --no-cache-dir --no-build-isolation --check-build-dependencies --no-deps -e .",
             "scripts/ci_enterprise_linux_smoke.py",
             "RHEL 8 UBI / Python 3.12",
             "RHEL 9 UBI / Python 3.12",
@@ -93,8 +227,16 @@ class CiCdWorkflowTests(unittest.TestCase):
             "npm install --no-audit --no-fund",
             "python -m build",
             "python -m build --no-isolation",
+            "Build Python distributions reproducibly",
+            "scripts/normalize_python_sdist.py",
+            "scripts/verify_reproducible_python_dist.py",
+            "--second-dir dist-repro",
             "Smoke install built wheel",
-            "--force-reinstall --no-deps",
+            "python -m venv",
+            '"${smoke_python}" -m pip install --no-cache-dir --no-index',
+            "site.getsitepackages()",
+            "git show -s --format=%ct",
+            "git archive --format=tar",
             "License-Expression",
             "fetch-depth: 0",
             "scripts/verify_python_dist_artifacts.py",
@@ -106,6 +248,7 @@ class CiCdWorkflowTests(unittest.TestCase):
         self.assertNotIn("macos-latest", text)
         self.assertNotIn("windows-latest", text)
         self.assertNotIn("python -m pip install --no-cache-dir build", text)
+        self.assertNotIn('--no-index --no-deps', text)
         enterprise_linux = text.split("  enterprise-linux:\n", 1)[1].split("  windows-11:\n", 1)[0]
         self.assertIn('desktop_validation: "true"', enterprise_linux)
         self.assertIn('desktop_validation: "false"', enterprise_linux)
@@ -201,7 +344,7 @@ class CiCdWorkflowTests(unittest.TestCase):
             "env:",
             "secrets.",
             "requirements-live.lock",
-            "python -m pip install --no-cache-dir --no-deps -e .",
+            "python -m pip install --no-cache-dir --no-build-isolation --check-build-dependencies --no-deps -e .",
             "--skip-authenticated-read-checks",
             "--require-authenticated-read-ok",
             "--include-user-websocket-connect",
@@ -229,7 +372,7 @@ class CiCdWorkflowTests(unittest.TestCase):
             '"v*.*.*"',
             "workflow_dispatch:",
             "release-unsigned",
-            "vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' && 'release' || 'release-unsigned'",
+            "needs.metadata.outputs.windows_signing_required == 'true' && 'release' || 'release-unsigned'",
             "contents: write",
             "python app.py --smoke-test",
             "xvfb-run --auto-servernum python app.py --gui-smoke-test",
@@ -238,9 +381,10 @@ class CiCdWorkflowTests(unittest.TestCase):
             "PIP_NO_CACHE_DIR",
             "python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock",
             "python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock",
-            "python -m pip install --no-cache-dir --no-deps -e .",
+            "python -m pip install --no-cache-dir --no-build-isolation --check-build-dependencies --no-deps -e .",
             "python -m build",
             "python -m build --no-isolation",
+            "Build Python distributions reproducibly",
             "Validate package version matches release tag",
             "Require release tag to resolve to workflow commit on protected main",
             "GITHUB_TOKEN: ${{ github.token }}",
@@ -281,11 +425,13 @@ class CiCdWorkflowTests(unittest.TestCase):
             "windows-dist",
             "Windows x64 MSI installer",
             'node-version: "24"',
-            "sha256sum * > SHA256SUMS.txt",
+            "sha256sum -- * > SHA256SUMS.txt",
             "Generate SPDX SBOM",
             "scripts/generate_release_sbom.py",
             "Verify final release assets",
             "scripts/verify_release_assets.py",
+            "scripts/verify_release_policy.py",
+            "Verify release publication policy",
             "Reconcile and publish GitHub release",
             "--print-stale-remote-asset-ids",
             "--verify-remote-inventory",
@@ -314,7 +460,9 @@ class CiCdWorkflowTests(unittest.TestCase):
             '--input "${asset_path}"',
             "--target \"${GITHUB_SHA}\"",
             "Smoke install built wheel",
-            "--force-reinstall --no-deps",
+            "python -m venv",
+            '"${smoke_python}" -m pip install --no-cache-dir --no-index',
+            "site.getsitepackages()",
             "License-Expression",
             "fetch-depth: 0",
             "scripts/verify_python_dist_artifacts.py",
@@ -325,6 +473,7 @@ class CiCdWorkflowTests(unittest.TestCase):
             "Sign Windows MSI package",
             "Verify signatures in final Windows artifacts",
             "Verify unsigned Windows artifacts",
+            "Record verified Windows signing status",
             "--prepare-only",
             "--package-only",
             "requirements-live.lock",
@@ -333,6 +482,12 @@ class CiCdWorkflowTests(unittest.TestCase):
             "scripts/release_version.py normalize-tag",
             "scripts/release_version.py is-prerelease",
             "scripts/release_version.py validate-project",
+            "scripts/create_reproducible_zip.py",
+            "scripts/normalize_python_sdist.py",
+            "scripts/verify_reproducible_python_dist.py",
+            "--second-dir dist-repro",
+            "git archive --format=tar",
+            "SOURCE_DATE_EPOCH",
             '"--prerelease=${PRERELEASE}"',
             '"--draft=${DRAFT}"',
             "runs-on: ubuntu-24.04",
@@ -370,6 +525,7 @@ class CiCdWorkflowTests(unittest.TestCase):
                 self.assertIn("| jq 'flatten'", command)
                 self.assertNotIn("--jq", command)
         self.assertNotIn("python -m pip install --no-cache-dir build", text)
+        self.assertNotIn('--no-index --no-deps', text)
         self.assertNotIn("cache: pip", text)
         self.assertNotIn("cache-dependency-path", text)
         self.assertNotIn("macos-latest", text)
@@ -381,7 +537,10 @@ class CiCdWorkflowTests(unittest.TestCase):
             text.index("Download frontend bundle"),
         )
         windows_app = text.split("  windows-app:\n", 1)[1].split("  publish:\n", 1)[0]
-        self.assertIn("WINDOWS_SIGNING_REQUIRED: ${{ vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' }}", windows_app)
+        self.assertIn(
+            "WINDOWS_SIGNING_REQUIRED: ${{ needs.metadata.outputs.windows_signing_required }}",
+            windows_app,
+        )
         self.assertIn(
             "python -m pip install --no-cache-dir --require-hashes -r requirements-live.lock",
             windows_app,
@@ -397,6 +556,7 @@ class CiCdWorkflowTests(unittest.TestCase):
         sign_msi_index = windows_app.index("Sign Windows MSI package")
         verify_signatures_index = windows_app.index("Verify signatures in final Windows artifacts")
         verify_unsigned_index = windows_app.index("Verify unsigned Windows artifacts")
+        signing_status_index = windows_app.index("Record verified Windows signing status")
         upload_index = windows_app.index("Upload Windows release packages")
         self.assertLess(prepare_index, smoke_index)
         self.assertLess(smoke_index, sign_exe_index)
@@ -407,6 +567,9 @@ class CiCdWorkflowTests(unittest.TestCase):
         self.assertLess(verify_signatures_index, verify_unsigned_index)
         self.assertLess(verify_signatures_index, upload_index)
         self.assertLess(verify_unsigned_index, upload_index)
+        self.assertLess(verify_signatures_index, signing_status_index)
+        self.assertLess(verify_unsigned_index, signing_status_index)
+        self.assertLess(signing_status_index, upload_index)
         self.assertIn("if: ${{ env.WINDOWS_SIGNING_REQUIRED == 'true' }}", windows_app)
         self.assertIn("if: ${{ env.WINDOWS_SIGNING_REQUIRED != 'true' }}", windows_app)
         self.assertIn("build/windows-release/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64/market-sentinel.exe", windows_app)
@@ -416,7 +579,7 @@ class CiCdWorkflowTests(unittest.TestCase):
         self.assertIn("verify /pa /all $embeddedExecutables[0].FullName", windows_app)
         self.assertIn("verify /pa /all $installer", windows_app)
         self.assertNotIn("Get-ChildItem release-assets -File", windows_app)
-        checksum_index = text.index("sha256sum * > SHA256SUMS.txt")
+        checksum_index = text.index("sha256sum -- * > SHA256SUMS.txt")
         notes_index = text.index("cat > release-assets/RELEASE_NOTES.md")
         self.assertLess(checksum_index, notes_index)
         metadata = text.split("  metadata:\n", 1)[1].split("  python-compatibility:\n", 1)[0]
@@ -424,7 +587,10 @@ class CiCdWorkflowTests(unittest.TestCase):
         self.assertIn("prerelease=\"$(python scripts/release_version.py is-prerelease", metadata)
         self.assertIn('if [ "${{ github.event_name }}" = "workflow_dispatch" ]', metadata)
         self.assertIn('[ "${requested_prerelease}" != "${prerelease}" ]', metadata)
+        self.assertIn("scripts/verify_release_policy.py signing-required", metadata)
+        self.assertIn('source_date_epoch="$(git show -s --format=%ct', metadata)
         publish = text.split("  publish:\n", 1)[1]
+        policy_index = publish.index("Verify release publication policy")
         self.assertEqual(publish.count('"${release_state_flags[@]}"'), 1)
         self.assertNotIn("release_flags+=(--prerelease)", publish)
         self.assertNotIn("release_flags+=(--draft)", publish)
@@ -459,6 +625,7 @@ class CiCdWorkflowTests(unittest.TestCase):
         evidence_attest_index = publish.index("Attest exact published release evidence")
         evidence_upload_index = publish.index("Upload published release evidence")
         evidence_cleanup_index = publish.index("Re-draft release after evidence failure")
+        self.assertLess(policy_index, preflight_index)
         self.assertLess(preflight_index, draft_index)
         self.assertLess(draft_index, upload_recheck_index)
         self.assertLess(upload_recheck_index, upload_index)
@@ -645,6 +812,18 @@ class CiCdWorkflowTests(unittest.TestCase):
             "actions/dependency-review-action",
             "security-events: write",
             "fail-on-severity: high",
+            "Secret history scan",
+            "fetch-depth: 0",
+            "Download pinned actionlint",
+            'archive="actionlint_${version}_linux_amd64.tar.gz"',
+            "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
+            "Install pinned pyflakes",
+            "pyflakes==3.4.0",
+            "Download pinned gitleaks",
+            'archive="gitleaks_${version}_linux_x64.tar.gz"',
+            "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb",
+            "--config .gitleaks.toml",
+            '--log-opts="--all"',
             "Frontend dependency audit",
             "npm ci --ignore-scripts",
             "npm audit --audit-level=high",
@@ -676,6 +855,8 @@ class CiCdWorkflowTests(unittest.TestCase):
                 },
             ),
         )
+        self.assertNotIn("raven-actions/actionlint", security)
+        self.assertNotIn("gitleaks/gitleaks-action", security)
 
         for fragment in (
             "package-ecosystem: github-actions",
@@ -693,7 +874,12 @@ class CiCdWorkflowTests(unittest.TestCase):
         for fragment in (
             "scripts/verify_repository_settings.py",
             "Administration: read",
+            "Environments: read",
             "Actions: read",
+            "Variables: read",
+            "Independent-review prerequisite",
+            "required Code Owner review",
+            "Signed commits",
             "REQUIRE_WINDOWS_CODE_SIGNING=true",
             "nonzero exit status",
         ):
@@ -719,6 +905,50 @@ class CiCdWorkflowTests(unittest.TestCase):
             ["actions/setup-node requires # v7; found # v6"],
             workflow_action_pin_issues(drifted, expected),
         )
+
+    def test_every_workflow_action_requires_an_immutable_documented_pin(self) -> None:
+        for path in action_reference_files(ROOT):
+            with self.subTest(path=path.name):
+                self.assertEqual(
+                    [],
+                    workflow_unpinned_action_issues(path.read_text(encoding="utf-8")),
+                )
+
+        self.assertEqual(
+            [
+                "actions/checkout@v7 must use a lowercase 40-character commit SHA",
+                "actions/checkout@v7 must have a # v<major or semver> review comment",
+            ],
+            workflow_unpinned_action_issues("- uses: actions/checkout@v7\n"),
+        )
+        self.assertEqual(
+            [
+                "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 "
+                "must have a # v<major or semver> review comment"
+            ],
+            workflow_unpinned_action_issues(
+                "- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
+            ),
+        )
+
+    def test_action_inventory_includes_yaml_workflows_and_composite_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflows = root / ".github" / "workflows"
+            composite = root / ".github" / "actions" / "reviewed"
+            workflows.mkdir(parents=True)
+            composite.mkdir(parents=True)
+            expected = {
+                workflows / "one.yml",
+                workflows / "two.yaml",
+                composite / "action.yml",
+                composite / "action.yaml",
+            }
+            for path in expected:
+                path.write_text("runs: {}\n", encoding="utf-8")
+            (workflows / "ignored.txt").write_text("uses: actions/checkout@v7\n", encoding="utf-8")
+
+            self.assertEqual(expected, set(action_reference_files(root)))
 
     def test_actionlint_knows_the_intentional_windows_10_runner_label(self) -> None:
         text = (ROOT / ".github" / "actionlint.yaml").read_text(encoding="utf-8")

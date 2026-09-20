@@ -18,6 +18,15 @@ from core.probe_transport import _RejectRedirects, open_probe  # noqa: F401 - co
 
 
 MAX_PROBE_RESPONSE_BYTES = 1024 * 1024
+OBSERVABILITY_TOKEN_ENV = "MARKET_SENTINEL_OBSERVABILITY_TOKEN"
+SENSITIVE_ENVIRONMENT_MARKERS = (
+    "_API_KEY",
+    "_CREDENTIAL",
+    "_PASSWORD",
+    "_PRIVATE_KEY",
+    "_SECRET",
+    "_TOKEN",
+)
 
 
 def read_probe_body(response) -> bytes:
@@ -72,19 +81,63 @@ def validate_health_payload(payload: object) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check the local MarketSentinel web API health endpoint.")
     parser.add_argument("--url", default="http://127.0.0.1:8765/api/health")
-    parser.add_argument("--token", default=os.environ.get("MARKET_SENTINEL_API_TOKEN", ""))
+    parser.add_argument(
+        "--token",
+        default=None,
+        help=(
+            "Explicit health bearer token. Prefer MARKET_SENTINEL_OBSERVABILITY_TOKEN; "
+            "command-line secrets may be exposed to other users."
+        ),
+    )
+    parser.add_argument(
+        "--require-observability-token",
+        action="store_true",
+        help=(
+            "Fail unless MARKET_SENTINEL_OBSERVABILITY_TOKEN is present and "
+            "MARKET_SENTINEL_API_TOKEN is absent. Used by the production health unit."
+        ),
+    )
     parser.add_argument("--timeout", type=float, default=5.0,
                         help="Overall network deadline in seconds for each health request.")
     parser.add_argument("--retries", type=int, default=12)
     parser.add_argument("--retry-delay", type=float, default=1.0)
     args = parser.parse_args()
+    observability_token = os.environ.get(OBSERVABILITY_TOKEN_ENV, "")
+    admin_token = os.environ.get("MARKET_SENTINEL_API_TOKEN", "")
+    if args.require_observability_token:
+        if args.token is not None:
+            parser.error("--token is not permitted with --require-observability-token")
+        if admin_token:
+            parser.error(
+                "MARKET_SENTINEL_API_TOKEN must be absent in observability-only mode"
+            )
+        unexpected_credentials = [
+            name
+            for name in os.environ
+            if name != OBSERVABILITY_TOKEN_ENV
+            and any(marker in name.upper() for marker in SENSITIVE_ENVIRONMENT_MARKERS)
+        ]
+        if unexpected_credentials:
+            parser.error(
+                "credential-like environment variables other than "
+                "MARKET_SENTINEL_OBSERVABILITY_TOKEN must be absent in observability-only mode"
+            )
+        if not observability_token:
+            parser.error(
+                "MARKET_SENTINEL_OBSERVABILITY_TOKEN is required in observability-only mode"
+            )
+        token = observability_token
+    elif args.token is not None:
+        token = args.token
+    else:
+        token = observability_token or admin_token
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("--timeout must be finite and greater than zero")
 
     last_error: Exception | None = None
     for attempt in range(1, max(1, args.retries) + 1):
         try:
-            payload = check_health(args.url, args.token, args.timeout)
+            payload = check_health(args.url, token, args.timeout)
             print(
                 f"[ok] service health on attempt {attempt}: "
                 f"version={payload['api_version']}; {payload.get('message', 'ok')}"

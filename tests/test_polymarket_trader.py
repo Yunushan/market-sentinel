@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ast
 import math
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from polymarket import trader as trader_module
@@ -214,12 +216,16 @@ class PolymarketTraderTests(unittest.TestCase):
             patch.object(trader_module, "POLYMARKET_LIVE_MUTATIONS_SUPPORTED", True),
             patch.object(trader_module, "POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", False),
         ):
-            audit = trader_module.PolymarketTrader(
-                trader_module.TraderConfig(private_key=PRIVATE_KEY, bounded_audit=True),
+            audit = trader_module.PolymarketTrader.for_bounded_audit(
+                trader_module.TraderConfig(
+                    private_key=PRIVATE_KEY,
+                    bounded_audit=True,
+                    bounded_audit_token_id="token",
+                ),
                 mutation_client=audit_client,
             )
             with self.assertRaisesRegex(RuntimeError, "bounded Polymarket CLOB V2 funded"):
-                audit.place_limit_order(token_id="token", side="BUY", price=0.42, size=1)
+                audit.place_limit_order(token_id="token", side="BUY", price=0.42, size=1, post_only=True)
         self.assertEqual(audit_client.calls, [])
 
         product_client = _V2Client()
@@ -234,6 +240,171 @@ class PolymarketTraderTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "CLOB V2 mutations are disabled"):
                 product.place_limit_order(token_id="token", side="BUY", price=0.42, size=1)
         self.assertEqual(product_client.calls, [])
+
+    def test_bounded_audit_requires_dedicated_factory(self) -> None:
+        config = trader_module.TraderConfig(
+            private_key=PRIVATE_KEY,
+            bounded_audit=True,
+            bounded_audit_token_id="allowed-token",
+        )
+        with self.assertRaisesRegex(ValueError, "dedicated one-shot factory"):
+            trader_module.PolymarketTrader(config, mutation_client=_V2Client())
+
+    def test_checked_in_bounded_construction_is_confined_to_journaled_verifier(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        paths = [*root.glob("*.py")]
+        for directory in ("core", "market_adapters", "polymarket", "scripts", "web"):
+            candidate = root / directory
+            if candidate.is_dir():
+                paths.extend(candidate.rglob("*.py"))
+        bounded_configs: list[str] = []
+        bounded_factories: list[str] = []
+        for path in paths:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                if any(
+                    keyword.arg == "bounded_audit"
+                    and isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value is True
+                    for keyword in node.keywords
+                ):
+                    bounded_configs.append(path.relative_to(root).as_posix())
+                if isinstance(node.func, ast.Attribute) and node.func.attr == "for_bounded_audit":
+                    bounded_factories.append(path.relative_to(root).as_posix())
+        self.assertEqual(bounded_configs, ["polymarket/live_verification.py"])
+        self.assertEqual(bounded_factories, ["polymarket/live_verification.py"])
+
+    def test_bounded_audit_is_one_shot_and_blocks_every_other_mutation(self) -> None:
+        order_id = "0x" + "a" * 64
+        client = _V2Client()
+        config = trader_module.TraderConfig(
+            private_key=PRIVATE_KEY,
+            bounded_audit=True,
+            bounded_audit_token_id="allowed-token",
+            bounded_audit_max_size=2.0,
+            bounded_audit_max_notional=0.5,
+        )
+        with patch.object(trader_module, "POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True):
+            instance = trader_module.PolymarketTrader.for_bounded_audit(config, mutation_client=client)
+            config.host = "https://attacker.invalid"
+            placed = instance.place_limit_order(
+                token_id="allowed-token",
+                side="BUY",
+                price=0.2,
+                size=2.0,
+                tif="GTC",
+                post_only=True,
+            )
+            self.assertEqual(placed["orderID"], order_id)
+            with self.assertRaisesRegex(ValueError, "exact returned order id"):
+                instance.cancel_order("0x" + "b" * 64)
+            self.assertEqual(instance.cancel_order(order_id)["canceled"], [order_id])
+            with self.assertRaisesRegex(RuntimeError, "one placement"):
+                instance.place_limit_order(
+                    token_id="allowed-token", side="BUY", price=0.2, size=1, post_only=True
+                )
+            with self.assertRaisesRegex(RuntimeError, "one cancellation"):
+                instance.cancel_order(order_id)
+            blocked = (
+                lambda: instance.place_market_order_amount(token_id="allowed-token", side="BUY", amount=0.1),
+                lambda: instance.place_multiple_orders([_SignedV2()]),
+                lambda: instance.cancel_orders([order_id]),
+                instance.cancel_all_orders,
+                lambda: instance.cancel_market_orders("market-1"),
+                instance.send_heartbeat,
+            )
+            for call in blocked:
+                with self.assertRaisesRegex(RuntimeError, "bounded-audit mode forbids"):
+                    call()
+        mutation_names = [name for name, _value in client.calls]
+        self.assertEqual(mutation_names.count("post_order"), 1)
+        self.assertEqual(mutation_names.count("cancel_order"), 1)
+        self.assertEqual(
+            [value for name, value in client.calls if name == "_get"],
+            [f"{trader_module.CLOB_API}/version", f"{trader_module.CLOB_API}/version"],
+        )
+        self.assertFalse(
+            {"create_market_order", "post_orders", "cancel_orders", "cancel_all", "cancel_market_orders", "post_heartbeat"}
+            & set(mutation_names)
+        )
+
+    def test_bounded_capability_is_immutable_after_config_mutation(self) -> None:
+        client = _V2Client()
+        config = trader_module.TraderConfig(
+            private_key=PRIVATE_KEY,
+            bounded_audit=True,
+            bounded_audit_token_id="allowed-token",
+            bounded_audit_max_size=1.0,
+            bounded_audit_max_notional=0.25,
+        )
+        with patch.object(trader_module, "POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True):
+            instance = trader_module.PolymarketTrader.for_bounded_audit(config, mutation_client=client)
+            config.bounded_audit = False
+            config.bounded_audit_token_id = "attacker-token"
+            config.bounded_audit_max_size = 1_000_000
+            config.bounded_audit_max_notional = 1_000_000
+            with self.assertRaisesRegex(ValueError, "allow-listed token"):
+                instance.place_limit_order(
+                    token_id="attacker-token", side="BUY", price=0.1, size=1, post_only=True
+                )
+            with self.assertRaisesRegex(ValueError, "configured cap"):
+                instance.place_limit_order(
+                    token_id="allowed-token", side="BUY", price=0.1, size=2, post_only=True
+                )
+            with self.assertRaisesRegex(RuntimeError, "bounded-audit mode forbids"):
+                instance.cancel_all_orders()
+        self.assertEqual(client.calls, [])
+
+    def test_bounded_audit_requires_literal_gtc_without_consuming_attempt(self) -> None:
+        client = _V2Client()
+        config = trader_module.TraderConfig(
+            private_key=PRIVATE_KEY,
+            bounded_audit=True,
+            bounded_audit_token_id="allowed-token",
+        )
+        with patch.object(trader_module, "POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True):
+            instance = trader_module.PolymarketTrader.for_bounded_audit(config, mutation_client=client)
+            with self.assertRaisesRegex(ValueError, "post_only=true and exact TIF=GTC"):
+                instance.place_limit_order(
+                    token_id="allowed-token",
+                    side="BUY",
+                    price=0.1,
+                    size=1,
+                    tif="gtc",
+                    post_only=True,
+                )
+            response = instance.place_limit_order(
+                token_id="allowed-token",
+                side="BUY",
+                price=0.1,
+                size=1,
+                tif="GTC",
+                post_only=True,
+            )
+        self.assertTrue(response["orderID"])
+        self.assertEqual([name for name, _value in client.calls].count("post_order"), 1)
+
+    def test_bounded_injected_client_cannot_bypass_v2_check_or_retry(self) -> None:
+        client = _V2Client(version_response={"version": 1})
+        config = trader_module.TraderConfig(
+            private_key=PRIVATE_KEY,
+            bounded_audit=True,
+            bounded_audit_token_id="allowed-token",
+        )
+        with patch.object(trader_module, "POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True):
+            instance = trader_module.PolymarketTrader.for_bounded_audit(config, mutation_client=client)
+            with self.assertRaisesRegex(RuntimeError, "not V2"):
+                instance.place_limit_order(
+                    token_id="allowed-token", side="BUY", price=0.1, size=1, post_only=True
+                )
+            client.version_response = {"version": 2}
+            with self.assertRaisesRegex(RuntimeError, "one placement"):
+                instance.place_limit_order(
+                    token_id="allowed-token", side="BUY", price=0.1, size=1, post_only=True
+                )
+        self.assertFalse(any(name == "post_order" for name, _value in client.calls))
 
     def test_v2_limit_and_market_orders_use_exact_guarded_types(self) -> None:
         with patch.object(trader_module, "POLYMARKET_LIVE_MUTATIONS_SUPPORTED", True):

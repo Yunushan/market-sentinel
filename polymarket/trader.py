@@ -51,6 +51,9 @@ except Exception:  # pragma: no cover
 _CLOB_V2_VERSION_PATH = "/version"
 _MAX_BATCH_ORDERS = 15
 _MAX_CANCEL_ORDER_IDS = 3000
+_BOUNDED_AUDIT_HARD_MAX_SIZE = 5.0
+_BOUNDED_AUDIT_HARD_MAX_NOTIONAL = 1.0
+_BOUNDED_AUDIT_CONSTRUCTION_CAPABILITY = object()
 _V2_SIGNED_ORDER_FIELDS = (
     "salt",
     "maker",
@@ -82,6 +85,9 @@ class TraderConfig:
     allow_api_key_derivation: bool = False
     authenticated_sdk_reads: bool = False
     bounded_audit: bool = False
+    bounded_audit_token_id: Optional[str] = None
+    bounded_audit_max_size: float = _BOUNDED_AUDIT_HARD_MAX_SIZE
+    bounded_audit_max_notional: float = _BOUNDED_AUDIT_HARD_MAX_NOTIONAL
 
 
 def _order_side(side: str) -> Any:
@@ -218,6 +224,14 @@ class PolymarketTrader:
         "__reader",
         "__reader_is_v2_sdk",
         "__mutation_client",
+        "__mutation_host",
+        "__bounded_audit",
+        "__bounded_token_id",
+        "__bounded_max_size",
+        "__bounded_max_notional",
+        "__bounded_placement_attempted",
+        "__bounded_order_id",
+        "__bounded_cancel_attempted",
     )
 
     def __init__(
@@ -226,11 +240,50 @@ class PolymarketTrader:
         *,
         reader: Optional[Any] = None,
         mutation_client: Optional[Any] = None,
+        _bounded_audit_capability: Any = None,
     ):
         self.cfg = cfg
         self.__reader = reader
         self.__reader_is_v2_sdk = False
         self.__mutation_client = None
+        self.__mutation_host = str(self.cfg.host).rstrip("/")
+        if type(self.cfg.bounded_audit) is not bool:
+            raise ValueError("Polymarket bounded_audit must be a boolean.")
+        if self.cfg.bounded_audit and _bounded_audit_capability is not _BOUNDED_AUDIT_CONSTRUCTION_CAPABILITY:
+            raise ValueError(
+                "Polymarket bounded-audit traders must be constructed through the dedicated one-shot factory."
+            )
+        self.__bounded_audit = self.cfg.bounded_audit
+        self.__bounded_token_id: Optional[str] = None
+        self.__bounded_max_size = _BOUNDED_AUDIT_HARD_MAX_SIZE
+        self.__bounded_max_notional = _BOUNDED_AUDIT_HARD_MAX_NOTIONAL
+        self.__bounded_placement_attempted = False
+        self.__bounded_order_id: Optional[str] = None
+        self.__bounded_cancel_attempted = False
+        if self.__bounded_audit:
+            self.__bounded_token_id = _canonical_identifier(
+                self.cfg.bounded_audit_token_id,
+                "bounded-audit token id",
+            )
+            self.__bounded_max_size = _positive_finite(
+                self.cfg.bounded_audit_max_size,
+                "bounded-audit max size",
+            )
+            self.__bounded_max_notional = _positive_finite(
+                self.cfg.bounded_audit_max_notional,
+                "bounded-audit max notional",
+            )
+            if self.__bounded_max_size > _BOUNDED_AUDIT_HARD_MAX_SIZE:
+                raise ValueError(
+                    f"Polymarket bounded-audit max size cannot exceed {_BOUNDED_AUDIT_HARD_MAX_SIZE:g}."
+                )
+            if self.__bounded_max_notional > _BOUNDED_AUDIT_HARD_MAX_NOTIONAL:
+                raise ValueError(
+                    "Polymarket bounded-audit max notional cannot exceed "
+                    f"{_BOUNDED_AUDIT_HARD_MAX_NOTIONAL:g} USDC."
+                )
+            if self.cfg.allow_api_key_creation:
+                raise ValueError("Polymarket bounded-audit mode forbids API-key creation.")
         if self.cfg.private_key:
             self.auth_readiness = validate_sdk_trading_readiness(
                 private_key=self.cfg.private_key,
@@ -260,6 +313,7 @@ class PolymarketTrader:
             if self.__reader is None and self.cfg.authenticated_sdk_reads:
                 self.__reader = self._init_read_client()
                 self.__reader_is_v2_sdk = True
+
             elif self.__reader is None and self.cfg.l2_headers is not None:
                 self.__reader = _AuthenticatedReadClient(self.cfg.l2_headers)
             return
@@ -278,6 +332,23 @@ class PolymarketTrader:
                 # explicitly reviewed read and mutation methods.
                 self.__reader = self.__mutation_client
                 self.__reader_is_v2_sdk = True
+
+    @classmethod
+    def for_bounded_audit(
+        cls,
+        cfg: TraderConfig,
+        *,
+        reader: Optional[Any] = None,
+        mutation_client: Optional[Any] = None,
+    ) -> "PolymarketTrader":
+        if cfg.bounded_audit is not True:
+            raise ValueError("Polymarket bounded-audit factory requires bounded_audit=true.")
+        return cls(
+            cfg,
+            reader=reader,
+            mutation_client=mutation_client,
+            _bounded_audit_capability=_BOUNDED_AUDIT_CONSTRUCTION_CAPABILITY,
+        )
 
     def _explicit_api_creds(self) -> Any:
         if ApiCreds is None:
@@ -371,14 +442,55 @@ class PolymarketTrader:
         return self.__mutation_client
 
     def _mutations_supported(self) -> bool:
-        if self.cfg.bounded_audit:
+        if self.__bounded_audit:
             return POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED
         return POLYMARKET_LIVE_MUTATIONS_SUPPORTED
 
     def _mutation_blocker(self) -> str:
-        if self.cfg.bounded_audit:
+        if self.__bounded_audit:
             return POLYMARKET_BOUNDED_AUDIT_MUTATION_BLOCKER
         return POLYMARKET_LIVE_MUTATION_BLOCKER
+
+    def _require_product_mutation(self, operation: str) -> None:
+        if self.__bounded_audit:
+            raise RuntimeError(
+                "Polymarket bounded-audit mode forbids "
+                f"{operation}; only one capped post-only GTC limit placement and cancellation "
+                "of its exact returned order id are permitted."
+            )
+
+    def _prepare_bounded_placement(
+        self,
+        *,
+        token_id: str,
+        price: float,
+        size: float,
+        tif: str,
+        post_only: bool,
+    ) -> None:
+        if not self.__bounded_audit:
+            return
+        if self.__bounded_placement_attempted:
+            raise RuntimeError("Polymarket bounded-audit mode permits exactly one placement attempt.")
+        if token_id != self.__bounded_token_id:
+            raise ValueError("Polymarket bounded-audit token id does not match the configured allow-listed token.")
+        if tif != "GTC" or post_only is not True:
+            raise ValueError("Polymarket bounded-audit placement requires post_only=true and exact TIF=GTC.")
+        if size > self.__bounded_max_size:
+            raise ValueError("Polymarket bounded-audit size exceeds its configured cap.")
+        if price * size > self.__bounded_max_notional:
+            raise ValueError("Polymarket bounded-audit notional exceeds its configured cap.")
+        # Consume the capability before any SDK or transport call. An
+        # ambiguous transport failure must never be retried as a new order.
+        self.__bounded_placement_attempted = True
+
+    @staticmethod
+    def _placed_order_id(response: Mapping[str, Any]) -> str:
+        for field in ("orderID", "orderId", "order_id", "id"):
+            value = response.get(field)
+            if isinstance(value, str) and value.strip() == value and value:
+                return _canonical_identifier(value, "returned order id")
+        return ""
 
     def place_limit_order(
         self,
@@ -400,10 +512,17 @@ class PolymarketTrader:
             raise ValueError("Polymarket guarded limit orders require exact TIF=GTC.")
         if not isinstance(post_only, bool):
             raise ValueError("Polymarket post_only must be a boolean.")
+        self._prepare_bounded_placement(
+            token_id=token,
+            price=normalized_price,
+            size=normalized_size,
+            tif=str(tif or ""),
+            post_only=post_only,
+        )
         if OrderArgsV2 is None or OrderType is None:
             raise RuntimeError("py-clob-client-v2 is missing V2 limit-order types.")
         client = self._mutation()
-        _require_v2_server(client, self.cfg.host)
+        _require_v2_server(client, self.__mutation_host)
         order = OrderArgsV2(
             token_id=token,
             price=normalized_price,
@@ -411,13 +530,21 @@ class PolymarketTrader:
             side=side_value,
         )
         signed_order = _require_v2_signed_order(client.create_order(order))
-        response = client.post_order(
+        response = _mapping_response(client.post_order(
             signed_order,
             order_type=OrderType.GTC,
             post_only=post_only,
             defer_exec=False,
-        )
-        return _mapping_response(response, "limit-order placement")
+        ), "limit-order placement")
+        if self.__bounded_audit:
+            order_id = self._placed_order_id(response)
+            if not order_id:
+                raise RuntimeError(
+                    "Polymarket bounded-audit placement response did not contain an exact order id; "
+                    "manual reconciliation is required."
+                )
+            self.__bounded_order_id = order_id
+        return response
 
     def get_trading_balance_allowance(self, *, token_id: str, side: str) -> Dict[str, Any]:
         """Return the official account balance/allowance response for the order asset."""
@@ -461,6 +588,7 @@ class PolymarketTrader:
         amount: float,
         tif: str = "FOK",
     ) -> Dict[str, Any]:
+        self._require_product_mutation("market-order placement")
         token = _canonical_identifier(token_id, "token id")
         side_value = _order_side(side)
         normalized_amount = _positive_finite(amount, "market-order amount")
@@ -469,7 +597,7 @@ class PolymarketTrader:
         if MarketOrderArgsV2 is None or OrderType is None:
             raise RuntimeError("py-clob-client-v2 is missing V2 market-order types.")
         client = self._mutation()
-        _require_v2_server(client, self.cfg.host)
+        _require_v2_server(client, self.__mutation_host)
         order = MarketOrderArgsV2(
             token_id=token,
             amount=normalized_amount,
@@ -547,13 +675,26 @@ class PolymarketTrader:
 
     def cancel_order(self, order_id: str) -> Dict[str, Any]:
         identifier = _canonical_identifier(order_id, "order id")
+        if self.__bounded_audit:
+            if self.__bounded_order_id is None:
+                raise RuntimeError(
+                    "Polymarket bounded-audit cancellation requires the exact order id returned by its placement."
+                )
+            if identifier != self.__bounded_order_id:
+                raise ValueError("Polymarket bounded-audit mode can cancel only its exact returned order id.")
+            if self.__bounded_cancel_attempted:
+                raise RuntimeError("Polymarket bounded-audit mode permits exactly one cancellation attempt.")
+            self.__bounded_cancel_attempted = True
         client = self._mutation()
+        if self.__bounded_audit:
+            _require_v2_server(client, self.__mutation_host)
         if OrderPayload is None:
             raise RuntimeError("py-clob-client-v2 is missing cancellation types.")
         response = client.cancel_order(OrderPayload(orderID=identifier))
         return _mapping_response(response, "single-order cancellation")
 
     def cancel_orders(self, order_ids: Iterable[str]) -> Dict[str, Any]:
+        self._require_product_mutation("multi-order cancellation")
         identifiers = []
         for order_id in order_ids:
             identifier = _canonical_identifier(order_id, "order id")
@@ -569,10 +710,12 @@ class PolymarketTrader:
         return _mapping_response(response, "multi-order cancellation")
 
     def cancel_all_orders(self) -> Dict[str, Any]:
+        self._require_product_mutation("cancel-all")
         response = self._mutation().cancel_all()
         return _mapping_response(response, "cancel-all")
 
     def cancel_market_orders(self, condition_id: str, *, asset_id: Optional[str] = None) -> Dict[str, Any]:
+        self._require_product_mutation("market-wide cancellation")
         market = _canonical_identifier(condition_id, "condition id")
         asset = _canonical_identifier(asset_id, "asset id") if asset_id is not None else None
         client = self._mutation()
@@ -584,6 +727,7 @@ class PolymarketTrader:
         return _mapping_response(response, "market-order cancellation")
 
     def place_multiple_orders(self, signed_orders: Iterable[Any], tif: str = "GTC") -> Any:
+        self._require_product_mutation("batch placement")
         if str(tif or "").strip().upper() != "GTC":
             raise ValueError("Polymarket guarded limit orders require exact TIF=GTC.")
         if PostOrdersV2Args is None or OrderType is None:
@@ -605,7 +749,7 @@ class PolymarketTrader:
         if not payloads:
             raise ValueError("Polymarket batch placement requires at least one signed order.")
         client = self._mutation()
-        _require_v2_server(client, self.cfg.host)
+        _require_v2_server(client, self.__mutation_host)
         response = client.post_orders(payloads, post_only=False, defer_exec=False)
         if not isinstance(response, (Mapping, list)):
             raise RuntimeError("Polymarket batch-order placement response must be an object or list.")
@@ -654,6 +798,7 @@ class PolymarketTrader:
         return self._call_client(("get_order_scoring_status", "get_order_status"), identifier)
 
     def send_heartbeat(self, heartbeat_id: Optional[str] = None) -> Any:
+        self._require_product_mutation("heartbeat mutation")
         identifier = "" if heartbeat_id is None else _canonical_identifier(heartbeat_id, "heartbeat id")
         response = _mapping_response(
             self._mutation().post_heartbeat(identifier),

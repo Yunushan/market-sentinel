@@ -19,6 +19,12 @@ CopyActivityState = Literal["pending", "retryable", "completed", "rejected", "am
 MutationJournalState = Literal["pending", "retryable", "completed", "rejected", "ambiguous"]
 DEFAULT_MARKET_ID = "polymarket"
 DEFAULT_UI_DESIGN: UIDesign = "aurora_2026"
+CONFIG_SCHEMA_VERSION = 1
+MAX_ALERTS = 10_000
+MAX_PAPER_TRADES = 50_000
+MAX_WALLETS = 10_000
+MAX_COPY_ACTIVITY_OUTBOX_ENTRIES = 10_000
+MAX_MARKET_CONFIGS = 512
 MAX_MUTATION_JOURNAL_ENTRIES = 256
 MAX_MUTATION_RESULT_BYTES = 256 * 1024
 MARKET_SAFETY_BOOLEAN_FIELDS = (
@@ -544,10 +550,19 @@ def default_market_configs() -> Dict[str, MarketConfig]:
     }
 
 
-def _config_records(data: Dict[str, Any], key: str) -> List[Dict[str, Any]]:
+def _config_records(
+    data: Dict[str, Any],
+    key: str,
+    *,
+    maximum: int,
+) -> List[Dict[str, Any]]:
     records = data.get(key, [])
     if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
         raise ValueError(f"Configuration field '{key}' must be a list of objects; no records were discarded.")
+    if len(records) > maximum:
+        raise ValueError(
+            f"Configuration field '{key}' exceeds its supported capacity of {maximum}; no records were discarded."
+        )
     return records
 
 
@@ -680,6 +695,7 @@ class AppConfig:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "schema_version": CONFIG_SCHEMA_VERSION,
             "alerts": [a.to_dict() for a in self.alerts],
             "paper_trades": [t.to_dict() for t in self.paper_trades],
             "wallets": [w.to_dict() for w in self.wallets],
@@ -696,15 +712,58 @@ class AppConfig:
     def from_dict(d: Dict[str, Any]) -> "AppConfig":
         if not isinstance(d, dict):
             raise ValueError("Configuration must contain a JSON object.")
-        alerts = [PriceAlert.from_dict(x) for x in _config_records(d, "alerts")]
-        paper_trades = [PaperTradeRecord.from_dict(x) for x in _config_records(d, "paper_trades")]
-        wallets = [WalletWatch.from_dict(x) for x in _config_records(d, "wallets")]
-        copy_activity_outbox = [CopyActivityOutboxEntry.from_dict(x) for x in _config_records(d, "copy_activity_outbox")]
-        raw_mutation_journal = _config_records(d, "mutation_journal")
-        if len(raw_mutation_journal) > MAX_MUTATION_JOURNAL_ENTRIES:
-            # Loading must never evict a pending live operation. Retention is
-            # applied explicitly by append_mutation_journal, not by recovery.
-            raise ValueError("Configuration mutation journal exceeds its supported capacity; no records were discarded.")
+        schema_version = d.get("schema_version", 0)
+        if not isinstance(schema_version, int) or isinstance(schema_version, bool):
+            raise ValueError("Configuration schema_version must be an integer.")
+        if schema_version not in {0, CONFIG_SCHEMA_VERSION}:
+            raise ValueError(
+                "Configuration schema_version is not supported by this release; "
+                "use a compatible release or migrate the state before continuing."
+            )
+        known_fields = {
+            "schema_version",
+            "alerts",
+            "paper_trades",
+            "wallets",
+            "copy_activity_outbox",
+            "mutation_journal",
+            "copytrading",
+            "markets",
+            "selected_market_id",
+            "theme",
+            "ui_design",
+        }
+        unknown_fields = sorted(set(d) - known_fields)
+        if unknown_fields:
+            raise ValueError(
+                "Configuration contains unsupported top-level fields and cannot be rewritten safely: "
+                + ", ".join(str(field) for field in unknown_fields)
+            )
+        alerts = [
+            PriceAlert.from_dict(x)
+            for x in _config_records(d, "alerts", maximum=MAX_ALERTS)
+        ]
+        paper_trades = [
+            PaperTradeRecord.from_dict(x)
+            for x in _config_records(d, "paper_trades", maximum=MAX_PAPER_TRADES)
+        ]
+        wallets = [
+            WalletWatch.from_dict(x)
+            for x in _config_records(d, "wallets", maximum=MAX_WALLETS)
+        ]
+        copy_activity_outbox = [
+            CopyActivityOutboxEntry.from_dict(x)
+            for x in _config_records(
+                d,
+                "copy_activity_outbox",
+                maximum=MAX_COPY_ACTIVITY_OUTBOX_ENTRIES,
+            )
+        ]
+        raw_mutation_journal = _config_records(
+            d,
+            "mutation_journal",
+            maximum=MAX_MUTATION_JOURNAL_ENTRIES,
+        )
         mutation_journal = [MutationJournalEntry.from_dict(x) for x in raw_mutation_journal]
         _unique_record_fields(mutation_journal, ("id",))
         _unique_record_fields(mutation_journal, ("key_hash",))
@@ -717,6 +776,10 @@ class AppConfig:
         raw_markets = d.get("markets", {})
         if not isinstance(raw_markets, dict):
             raise ValueError("Configuration markets must be an object.")
+        if len(raw_markets) > MAX_MARKET_CONFIGS:
+            raise ValueError(
+                f"Configuration markets exceed the supported capacity of {MAX_MARKET_CONFIGS}."
+            )
         for market_id, raw_cfg in raw_markets.items():
             if not isinstance(raw_cfg, dict) or not isinstance(raw_cfg.get("settings", {}), dict):
                 raise ValueError("Configuration market and safety settings must be objects.")

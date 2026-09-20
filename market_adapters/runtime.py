@@ -19,6 +19,7 @@ from requests.utils import select_proxy
 from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 
 from core.request_control import controlled_response, current_request, resolve_with_deadline
+from core.tls import create_verified_client_context
 from .errors import MarketConfigurationError, MarketHTTPError
 from .outbound import (
     OutboundEndpointPolicy,
@@ -240,6 +241,65 @@ class _PinnedHTTPAdapter(HTTPAdapter):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._market_sentinel_active_pins = threading.local()
+        self._platform_ssl_context = create_verified_client_context()
+        self._custom_ssl_contexts: dict[tuple[Any, ...], Any] = {}
+        self._custom_ssl_contexts_lock = threading.Lock()
+
+    @staticmethod
+    def _custom_trust_key(location: str) -> tuple[Any, ...]:
+        resolved = os.path.realpath(os.path.abspath(location))
+        stat = os.stat(resolved)
+        return (
+            resolved,
+            os.path.isdir(resolved),
+            stat.st_dev,
+            stat.st_ino,
+            stat.st_size,
+            stat.st_mtime_ns,
+        )
+
+    def _custom_trust_context(self, location: str):
+        key = self._custom_trust_key(location)
+        with self._custom_ssl_contexts_lock:
+            context = self._custom_ssl_contexts.get(key)
+            if context is None:
+                context = create_verified_client_context(
+                    capath=key[0] if key[1] else None,
+                    cafile=None if key[1] else key[0],
+                )
+                # A changed bundle gets a new key; discard the stale context
+                # for that path so rotations do not grow this cache forever.
+                self._custom_ssl_contexts = {
+                    cached_key: cached_context
+                    for cached_key, cached_context in self._custom_ssl_contexts.items()
+                    if cached_key[0] != key[0]
+                }
+                self._custom_ssl_contexts[key] = context
+            return context
+
+    def build_connection_pool_key_attributes(
+        self,
+        request: PreparedRequest,
+        verify: Any,
+        cert: Any = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        host_params, pool_kwargs = super().build_connection_pool_key_attributes(request, verify, cert)
+        if request.url.lower().startswith("https://") and verify:
+            if verify is True:
+                pool_kwargs["ssl_context"] = self._platform_ssl_context
+            elif isinstance(verify, (str, os.PathLike)) and os.path.exists(verify):
+                pool_kwargs["ssl_context"] = self._custom_trust_context(os.fspath(verify))
+        return host_params, pool_kwargs
+
+    def cert_verify(self, conn: Any, url: str, verify: Any, cert: Any) -> None:
+        super().cert_verify(conn, url, verify, cert)
+        context = getattr(conn, "conn_kw", {}).get("ssl_context")
+        if url.lower().startswith("https://") and verify and context is not None:
+            # The selected context already owns the complete trust policy.
+            # Avoid mutating a shared context again in urllib3 during each
+            # handshake, especially while concurrent requests use the pool.
+            conn.ca_certs = None
+            conn.ca_cert_dir = None
 
     def init_poolmanager(self, connections: int, maxsize: int, block: bool = False, **pool_kwargs: Any) -> None:
         self.poolmanager = _PinnedPoolManager(
