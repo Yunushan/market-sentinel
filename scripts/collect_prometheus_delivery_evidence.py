@@ -66,6 +66,8 @@ RESERVED_HOST_SUFFIXES = (
     ".internal",
 )
 RESERVED_HOSTS = {"example.com", "example.net", "example.org", "localhost"}
+_UTC_CLOCK_LOCK = threading.Lock()
+_LAST_UTC_TIMESTAMP_NS = 0
 
 
 class DeliveryEvidenceError(RuntimeError):
@@ -126,7 +128,17 @@ def strict_json(value: str) -> Any:
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    """Return a UTC timestamp that is strictly ordered within this process."""
+
+    global _LAST_UTC_TIMESTAMP_NS
+    candidate_ns = time.time_ns()
+    with _UTC_CLOCK_LOCK:
+        minimum_ns = _LAST_UTC_TIMESTAMP_NS + 1_000
+        candidate_ns = max(candidate_ns, minimum_ns)
+        _LAST_UTC_TIMESTAMP_NS = candidate_ns
+    seconds, nanoseconds = divmod(candidate_ns, 1_000_000_000)
+    timestamp = datetime.fromtimestamp(seconds, timezone.utc).replace(microsecond=nanoseconds // 1_000)
+    return timestamp.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def canonical_origin(value: str, label: str) -> str:

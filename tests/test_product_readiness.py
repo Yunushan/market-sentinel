@@ -1710,6 +1710,25 @@ class ProductReadinessTests(unittest.TestCase):
         self.assertIn("ToolTrustError", error)
         run.assert_not_called()
 
+    @unittest.skipUnless(os.name == "posix", "symlink resolution is verified on POSIX hosts")
+    def test_trusted_tool_resolves_system_link_before_trust_checks(self) -> None:
+        from scripts.check_product_readiness import _resolve_executable_identity
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "git"
+            target.write_bytes(b"#!/bin/sh\nexit 0\n")
+            target.chmod(0o755)
+            link = root / "path-git"
+            link.symlink_to(target)
+            with (
+                patch("scripts.check_product_readiness.shutil.which", return_value=str(link)),
+                patch("scripts.check_product_readiness._unsafe_executable_roots", return_value=()),
+            ):
+                identity = _resolve_executable_identity("git", require_pin=False)
+
+        self.assertEqual(identity.path, target.resolve())
+
     def test_trusted_gh_uses_absolute_binary_private_cwd_and_scrubbed_environment(self) -> None:
         from scripts.check_product_readiness import (
             ROOT as SCORER_ROOT,

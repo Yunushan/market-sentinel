@@ -608,14 +608,14 @@ def _resolve_executable_identity(name: str, *, require_pin: bool) -> _Executable
     lexical_path = Path(located)
     if not lexical_path.is_absolute():
         lexical_path = Path(os.path.abspath(lexical_path))
-    if _path_has_link_component(lexical_path):
-        raise _ToolTrustError(f"{name} executable path contains a link or junction")
+    # PATH entries may be system-managed symlinks or junctions. Resolve them
+    # before applying the existing ownership, location, and identity checks.
     try:
         path = lexical_path.resolve(strict=True)
     except (OSError, RuntimeError) as exc:
         raise _ToolTrustError(f"{name} executable cannot be resolved") from exc
-    if os.path.normcase(str(path)) != os.path.normcase(str(lexical_path)):
-        raise _ToolTrustError(f"{name} executable is not a canonical path")
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise _ToolTrustError(f"{name} executable is not executable")
     if any(_path_is_within(path, root) for root in _unsafe_executable_roots()):
         raise _ToolTrustError(f"{name} executable is in an untrusted writable location")
     if not _posix_path_is_safely_owned(path):

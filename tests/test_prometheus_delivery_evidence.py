@@ -35,6 +35,7 @@ from scripts.collect_prometheus_delivery_evidence import (
     oncall_receipt_observation,
     oncall_webhook_event_sha256,
     receiver_url,
+    utc_now,
     validate_oncall_receipt,
 )
 from scripts.review_prometheus_delivery_evidence import (
@@ -405,6 +406,12 @@ def _handler(state: _FakeMonitoringState) -> type[BaseHTTPRequestHandler]:
 
 
 class PrometheusDeliveryEvidenceTests(unittest.TestCase):
+    def test_utc_now_is_strictly_monotonic(self) -> None:
+        values = [utc_now() for _ in range(100)]
+
+        self.assertEqual(values, sorted(values))
+        self.assertEqual(len(values), len(set(values)))
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.temporary = tempfile.TemporaryDirectory(prefix="market-sentinel-prometheus-evidence-")
