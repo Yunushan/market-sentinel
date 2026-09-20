@@ -12,7 +12,7 @@ A local multi-market prediction-market command center for:
 > ⚠️ Disclaimer  
 > This is a developer MVP. It is **not financial advice** and it can lose money.  
 > Only use each market in ways that comply with that market's terms and your local laws/regulations.
-> Polymarket public/authenticated reads, alerts, paper trading, and simulation-first copy previews remain available. The official `py-clob-client-v2` mutation wrapper is implemented and offline-tested, but **all Polymarket live mutations remain disabled** until exact-revision credentialed and funded order/cancel evidence is reviewed and the support gate is deliberately promoted. The legacy `py-clob-client`/V1-signed order path must not be used in production.
+> Polymarket public/authenticated reads, alerts, paper trading, and simulation-first copy previews remain available. Normal product live mutations remain disabled. The only enabled mutation capability is the dedicated, one-shot, allow-listed, hard-capped, post-only GTC funded-audit path used by the journaled verifier; it still requires an explicitly approved production workflow run and does not enable application trading. The legacy `py-clob-client`/V1-signed order path must not be used in production.
 
 ## Features (what works today)
 
@@ -53,7 +53,7 @@ A local multi-market prediction-market command center for:
 - `polymarket.data_api` covers activity, positions, closed positions, trades, total value, traded markets, leaderboard, market positions, holders, open interest, live volume, accounting snapshot download, and builder analytics
 - `polymarket.analytics_cache` stores bounded local MDD audit artifacts, lists health/retention metadata, purges selected or expired artifacts, and formats JSON/CSV exports for cached public analytics payloads
 - `polymarket.clob_rest` covers public orderbook/pricing, price history, market parameters, CLOB market lists, rebates, public rewards, and builder trades
-- `polymarket.trader` implements the official `py-clob-client-v2` order, cancellation, balance, batch, and heartbeat contracts with strict offline tests; `polymarket.clob_auth` retains authenticated read/recovery helpers. Every exposure-changing path still rejects before SDK construction or transport until exact-revision credentialed/funded evidence is accepted and the support gate is deliberately promoted
+- `polymarket.trader` implements the official `py-clob-client-v2` order, cancellation, balance, batch, and heartbeat contracts with strict offline tests; `polymarket.clob_auth` retains authenticated read/recovery helpers. Normal product exposure-changing paths reject before transport. A separate one-shot funded-audit factory permits only one allow-listed, capped, post-only GTC placement and exact-ID cancellation through the durable journaled verifier; it is not exposed by the application
 - `polymarket.bridge` covers supported assets, deposit addresses, quotes, status, and withdrawal-address creation
 - `polymarket.relayer` keeps read-only query, nonce, deployment, recent-transaction, and API-key inventory helpers; relayer submission is disabled by the same CLOB V2 mutation blocker
 - `polymarket.ws_market`, `polymarket.ws_user`, and `polymarket.ws_sports` cover market, authenticated user, and sports WebSocket channels
@@ -66,7 +66,7 @@ A local multi-market prediction-market command center for:
 - `polymarket.mdd` also exposes an opt-in CLOB mark-replay mode using `/batch-prices-history`; the default API mode remains fast MDD v2 to avoid heavy price-history calls during normal scans
 - `polymarket.accounting` parses `/v1/accounting/snapshot` ZIP CSVs and can reconcile MDD payloads against equity, positions, deposits, withdrawals, and cash-flow gaps when explicitly requested
 - The GUI exposes the high-level workflows used by this app; the broader official API surface is available to backend code and summarized through `GET /api/polymarket/coverage`
-- Authenticated read/user-WebSocket validation still requires real credentials and eligible account/region state. Funded order/cancel and relayer-mutation validation cannot be performed by the current implementation: it first requires a reviewed CLOB V2 client/signing migration, after which credentials, eligibility, funding, and explicit live-action approval remain separate gates
+- Authenticated read/user-WebSocket validation still requires real credentials and eligible account/region state. The dedicated CLOB V2 funded-audit verifier can perform only the bounded order/immediate-cancel acceptance flow; credentials, eligibility, funding, a protected production environment, and explicit live-action approval remain separate gates. Normal product orders, cancellations, and relayer mutations remain disabled
 
 Polymarket coverage is intentionally reported by verification tier, not as a single "implemented" flag:
 
@@ -77,7 +77,7 @@ Polymarket coverage is intentionally reported by verification tier, not as a sin
 | `offline_tested` | Unit tests cover request construction, parsing, and guardrails. |
 | `public_live_verified` | Safe non-credentialed live probe passed from this machine. |
 | `credential_live_verified` | Real credentialed read/stream verified. Currently blocked without credentials. |
-| `funded_live_verified` | Funded order/cancel or fund-movement flow verified. Unavailable while Polymarket mutations remain disabled pending exact-revision credentialed/funded evidence and deliberate support promotion; credentials and explicit live-action approval are still required. |
+| `funded_live_verified` | Exact-revision bounded order/immediate-cancel flow verified from the protected workflow, including independent review and a resolved durable recovery journal. This evidence tier does not enable normal product mutations; credentials, eligibility, funding, and explicit live-action approval are still required. |
 
 Current truthful status: Gamma/Data/CLOB/Bridge probes are implemented and must be
 re-run from the target network before claiming `public_live_verified`; the latest
@@ -86,18 +86,19 @@ connections were reset. Endpoint contracts are hardened offline against
 documented paths, auth tiers, and batch caps; CLOB authentication readiness and
 the credential runbook are validated locally with redacted payloads;
 authenticated CLOB reads and the user WebSocket remain blocked until credentials
-are supplied. Relayer submissions, Bridge fund movement, live orders,
-cancellations, and funded verification remain unsupported even though the V2
-wrapper is offline-tested; configuration flags cannot bypass the repository-wide
-blocker. Promotion requires trusted exact-revision credentialed evidence plus an
-explicitly approved bounded order/immediate-cancel audit.
+are supplied. Relayer submissions, Bridge fund movement, and normal application
+orders/cancellations remain unsupported. The dedicated journaled verifier can run
+only the one-shot bounded order/immediate-cancel audit from the protected
+production workflow after explicit approval. Promotion still requires trusted
+exact-revision credentialed and funded evidence; the audit capability does not
+promote the normal product mutation gate.
 
 Stored live-validation reports include a promotion guard before they can support production verification claims:
 
 | Promotion tier | Required evidence |
 | --- | --- |
 | `credential_live_verified` | An actual `ok` non-destructive authenticated CLOB L2 order-list read, relayer authenticated read, or authenticated user WebSocket connection in `authenticated_read_checks`. A stage-gate boolean or credential runbook is not enough. |
-| `funded_live_verified` | Promotion is blocked while CLOB V2 mutations are unsupported. After a reviewed migration, an `ok` funded order/cancel result would still need `live_action=true`, an order id, placed/cancel/post-cancel audit sections, and `post_cancel_verified=true`; dry-run transcripts and `ready_to_execute` reports never promote this tier. |
+| `funded_live_verified` | An `ok` result from the dedicated protected-workflow audit must have `live_action=true`, an exact order id, placed/cancel/post-cancel audit sections, `post_cancel_verified=true`, a resolved recovery journal, and hosted review/attestation. Dry-run transcripts and `ready_to_execute` reports never promote this tier or enable normal product mutations. |
 
 Reports with local-only modes such as GUI readiness snapshots, credential runbooks, or browser smoke fixtures are always blocked from promotion even if they contain simulated successful fields.
 
@@ -156,7 +157,7 @@ Authenticated CLOB readiness follows the official Polymarket split between L1/L2
 | Direct L2 read readiness | Requires all explicit `POLY_ADDRESS`, `POLY_API_KEY`, `POLY_PASSPHRASE`, `POLY_SIGNATURE`, and `POLY_TIMESTAMP` headers. |
 | L1 REST readiness | Reports presence of `POLY_ADDRESS`, `POLY_SIGNATURE`, `POLY_TIMESTAMP`, and `POLY_NONCE`; it does not synthesize signatures. |
 | Redaction | Private keys and signed headers are never returned by readiness payloads; addresses are shortened. |
-| Live action boundary | Readiness never derives API credentials, submits orders, or moves funds. `scripts/verify_polymarket_live.py` reports the funded stage as blocked and cannot execute it while the repository-wide CLOB V2 mutation guard is active. |
+| Live action boundary | Readiness checks never derive credentials or move funds. Normal application mutations remain blocked. Only the dedicated protected-workflow audit factory may submit one tightly capped, allow-listed V2 order and cancel its exact returned id; a dry run or readiness snapshot cannot unlock that capability. |
 
 The credential runbook is the first local step before any credentialed live validation. It performs no network calls and only inventories whether required environment variables are present:
 
@@ -176,15 +177,17 @@ python scripts/verify_polymarket_credentials.py --json --report-file polymarket-
 python scripts/verify_polymarket_credentials.py --require-authenticated-read-ready
 ```
 
-`--require-authenticated-read-ready` exits non-zero until at least one non-destructive authenticated read/stream candidate is locally ready. The runbook output includes follow-up commands for public readiness, credentialed reads, user WebSocket probing, and dry-run order/cancel transcripts. Any funded command is retained only as a fail-closed migration diagnostic: the runbook itself cannot execute it, and the verifier rejects it before transport while CLOB V2 mutations are unsupported.
+`--require-authenticated-read-ready` exits non-zero until at least one non-destructive authenticated read/stream candidate is locally ready. The runbook output includes follow-up commands for public readiness, credentialed reads, user WebSocket probing, and dry-run order/cancel transcripts. The runbook itself cannot perform funded actions.
 
-The funded live order/cancel verifier is unavailable in the current implementation. Running
-`python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <PRICE> --size <SIZE> --allow-token-id <TOKEN>`
-returns a dry-run transcript. Supplying `--allow-funded-order` does not enable
-execution; it returns the explicit CLOB V2 migration blocker before any order
-transport. The retained confirmation, allow-list, hard-cap, maker-side,
-immediate-cancel, and post-cancel checks are defense-in-depth for a future
-reviewed V2 implementation, not evidence that the present client can trade.
+Normal product trading remains disabled. A separate, non-application V2 audit
+factory is available only to the protected evidence workflow. It can attempt one
+allow-listed, post-only GTC order within the five-share and one-dollar caps,
+immediately cancel only the exact returned order id, and verify the post-cancel
+state. The capability is consumed before transport and uses a durable recovery
+journal so ambiguous placement or cancellation cannot be retried silently. A
+funded result earns readiness credit only after exact-revision hosted review,
+protected-environment approval, and a resolved journal; merely passing flags or
+producing a dry-run transcript never enables trading or earns that credit.
 
 For live credential validation, use the verifier as a stage gate and keep the JSON report:
 
@@ -291,22 +294,29 @@ source .venv/bin/activate  # (macOS/Linux)
 
 ### 2) Install deps
 ```bash
-pip install --require-hashes -r requirements.lock
-pip install --no-deps -e .
+python -m pip install --only-binary=:all: --require-hashes -r requirements-bootstrap.lock
+python -m pip install --only-binary=:all: --require-hashes -r requirements.lock
+python -m pip install --no-build-isolation --check-build-dependencies --no-deps -e .
 ```
 
-`requirements.lock` is the reviewed, hash-protected runtime dependency set.
+`requirements-bootstrap.lock` hash-pins both pip and the exact setuptools build
+backend declared by `pyproject.toml`. Source and editable installs disable PEP
+517 build isolation and check that backend before executing it, so pip cannot
+download an unreviewed backend. `requirements.lock` is the reviewed,
+hash-protected runtime dependency set. Locked dependencies are installed with
+`--only-binary=:all:` so a platform without a reviewed wheel fails closed
+instead of executing an sdist's separately resolved build backend.
 For authenticated Polymarket CLOB signing and trading, install
-`requirements-live.lock` after the runtime lock. For local verification, install
-`requirements-test.lock` instead; it includes the live SDK plus `pytest` and
+`requirements-live.lock` after the runtime lock using the same binary-only,
+hash-checked policy. For local verification, install `requirements-test.lock`
+instead; it includes the live SDK plus `pytest` and
 `coverage`. Distribution builds also need `requirements-build.lock`. Regenerate
-the locks only as part of an intentional dependency update with
-`python -m piptools compile --generate-hashes --strip-extras --output-file requirements.lock pyproject.toml`,
-`python -m piptools compile --generate-hashes --strip-extras --output-file requirements-live.lock requirements-live.txt`,
-`python -m piptools compile --generate-hashes --strip-extras --output-file requirements-test.lock requirements-test.txt`,
-and `python -m piptools compile --generate-hashes --strip-extras --output-file requirements-build.lock requirements-build.txt`.
-Compile the runtime and test locks with Python 3.10 so their conditional
-`tomli` dependency remains represented for the minimum supported interpreter.
+all six locks only as part of an intentional dependency update. Use Python
+3.14, install the reviewed `requirements-build.lock`, and run
+`python scripts/regenerate_dependency_locks.py --upgrade`. The script pins the
+pip-tools version, applies `--allow-unsafe --generate-hashes --strip-extras` to
+every graph, and validates the results. Omit `--upgrade` when only source
+constraints changed and existing compatible pins should be preserved.
 
 ### 3) (Optional) set up LIVE trading credentials
 Copy `.env.example` to `.env` and fill values:
@@ -804,11 +814,11 @@ This runs:
 - frontend build readiness checks; the build is skipped unless `frontend/node_modules` exists
 - optional Live Safety report-history browser smoke checks when `--frontend-live-smoke` is supplied
 - offline unit tests for config/storage, API wrapper parsing, alert crossing, copy-trade percentage sizing, and wallet activity de-duplication
-- enforced combined statement/branch-coverage floors of 65% across the full Python application and 74% across the headless/backend surface; `python verify.py` fails when either floor regresses
+- enforced combined statement/branch-coverage floors of 72% across the full Python application and 76% across the headless/backend surface on Windows Python 3.11+; POSIX and Python 3.10 compatibility lanes use a 74% backend floor because platform-specific release/ACL tests are intentionally skipped, and `python verify.py` applies the lane-appropriate floor
 
 Install `requirements-test.lock` before running the pytest suite:
 ```bash
-python -m pip install --require-hashes -r requirements-test.lock
+python -m pip install --only-binary=:all: --require-hashes -r requirements-test.lock
 python -m pytest
 ```
 
@@ -889,12 +899,13 @@ crediting its cache recovery correction and passing hosted CI/Security.
 Follow-on transport hardening and its real-TLS acceptance are tracked in the
 readiness document; the baseline pass is not proof of the changed candidate.
 These are local checks, not acceptance of the published release or production
-host. Schema-v2 hosted collectors provide a structural path
-to all 100 formal points, but none of their external points is awarded without
-a clean exact revision, successful trusted workflow/job, uploaded artifact,
-and exact-byte attestation. The funded workflow also remains fail-closed until
-the offline-tested Polymarket V2 mutation support is explicitly promoted after
-credentialed and bounded order/immediate-cancel review.
+host. Schema-v2 hosted collectors provide a structural path to all 100 formal
+points, but none of their external points is awarded without a clean exact
+revision, successful trusted workflow/job, uploaded artifact, and exact-byte
+attestation. Normal product Polymarket mutation remains disabled. The separate
+one-shot, hard-capped V2 order/immediate-cancel audit is available only through
+its protected, journaled evidence workflow and still requires explicit
+approval, eligible credentials/funding, and hosted review.
 
 GitHub Actions workflows live under `.github/workflows`:
 - `ci.yml` runs Python verification across Ubuntu, macOS `14`/`15`/`26`, and hosted Windows with Python `3.10` through `3.14`, runs a moving latest stable `3.x` compatibility lane for future Python releases, constructs and closes the real Tkinter widget tree under Ubuntu Xvfb, smoke checks RHEL UBI 8/9/10, a RHEL 7-era manylinux2014 ABI container, Rocky Linux 8/9/10, hosted Windows 11 ARM with Python `3.12` x64 dependency wheels, mobile web profiles for Android 14/15/16 and iOS 15/16/18/26, includes an opt-in self-hosted Windows 10 job gated by `ENABLE_WINDOWS_10_SELF_HOSTED=true`, builds the React frontend with Node.js `24`, and builds Python distributions.

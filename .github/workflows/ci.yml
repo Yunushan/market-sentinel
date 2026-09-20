@@ -22,6 +22,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PIP_NO_CACHE_DIR: "1"
+  PIP_ONLY_BINARY: ":all:"
   PYTHONUNBUFFERED: "1"
 
 jobs:
@@ -29,6 +30,10 @@ jobs:
     name: Python ${{ matrix.python-version }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -51,6 +56,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Normalize macOS test environment
+        if: startsWith(matrix.os, 'macos-')
+        shell: bash
+        run: |
+          tmp_root="${RUNNER_TEMP}/market-sentinel-tmp"
+          mkdir -p "$tmp_root"
+          chmod 700 "$tmp_root"
+          echo "TMPDIR=$tmp_root" >> "$GITHUB_ENV"
+          if [ -x /usr/bin/git ]; then
+            echo "PATH=/usr/bin:/bin:$PATH" >> "$GITHUB_ENV"
+          fi
+
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -60,7 +77,7 @@ jobs:
         run: |
           python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
           python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
-          python -m pip install --no-cache-dir --no-deps -e .
+          python -m pip install --no-cache-dir --no-build-isolation --check-build-dependencies --no-deps -e .
 
       - name: Tkinter fallback smoke test
         run: python app.py --smoke-test
@@ -68,10 +85,22 @@ jobs:
       - name: Project verification
         run: python verify.py
 
+      - name: Publish cryptographically attested platform receipt
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: ./.github/actions/platform-ci-receipt
+        with:
+          job-key: python
+          matrix-os: ${{ matrix.os }}
+          matrix-python-version: ${{ matrix.python-version }}
+
   future-python:
     name: Future Python ${{ matrix.python-version }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -90,6 +119,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Normalize macOS test environment
+        if: startsWith(matrix.os, 'macos-')
+        shell: bash
+        run: |
+          tmp_root="${RUNNER_TEMP}/market-sentinel-tmp"
+          mkdir -p "$tmp_root"
+          chmod 700 "$tmp_root"
+          echo "TMPDIR=$tmp_root" >> "$GITHUB_ENV"
+          if [ -x /usr/bin/git ]; then
+            echo "PATH=/usr/bin:/bin:$PATH" >> "$GITHUB_ENV"
+          fi
+
       - name: Set up future Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -99,7 +140,7 @@ jobs:
         run: |
           python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
           python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
-          python -m pip install --no-cache-dir --no-deps -e .
+          python -m pip install --no-cache-dir --no-build-isolation --check-build-dependencies --no-deps -e .
 
       - name: Tkinter fallback smoke test
         run: python app.py --smoke-test
@@ -107,10 +148,22 @@ jobs:
       - name: Project verification
         run: python verify.py
 
+      - name: Publish cryptographically attested platform receipt
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: ./.github/actions/platform-ci-receipt
+        with:
+          job-key: future-python
+          matrix-os: ${{ matrix.os }}
+          matrix-python-version: ${{ matrix.python-version }}
+
   tkinter-gui-lifecycle:
     name: Tkinter GUI lifecycle / Ubuntu
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -127,7 +180,7 @@ jobs:
         run: |
           python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
           python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
-          python -m pip install --no-cache-dir --no-deps -e .
+          python -m pip install --no-cache-dir --no-build-isolation --check-build-dependencies --no-deps -e .
 
       - name: Install virtual display
         run: |
@@ -139,10 +192,20 @@ jobs:
           PREDICTION_MARKET_CONFIG_PATH: ${{ runner.temp }}/market-sentinel-gui-smoke.json
         run: xvfb-run --auto-servernum python app.py --gui-smoke-test
 
+      - name: Publish cryptographically attested platform receipt
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: ./.github/actions/platform-ci-receipt
+        with:
+          job-key: tkinter-gui-lifecycle
+
   enterprise-linux:
     name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -229,6 +292,7 @@ jobs:
             -e CI_DESKTOP_VALIDATION="$DESKTOP_VALIDATION" \
             -e PIP_DISABLE_PIP_VERSION_CHECK=1 \
             -e PIP_NO_CACHE_DIR=1 \
+            -e PIP_ONLY_BINARY=:all: \
             "${DOCKER_DISPLAY_ARGS[@]}" \
             -v "$PWD:/workspace" \
             -w /workspace \
@@ -262,7 +326,7 @@ jobs:
               fi
               "$PYTHON_BIN" -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
               "$PYTHON_BIN" -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
-              "$PYTHON_BIN" -m pip install --no-cache-dir --no-deps .
+              "$PYTHON_BIN" -m pip install --no-cache-dir --no-build-isolation --check-build-dependencies --no-deps .
               "$PYTHON_BIN" scripts/ci_enterprise_linux_smoke.py --label "$CI_CONTAINER_NAME"
               if [ "${CI_DESKTOP_VALIDATION:-false}" = "true" ]; then
                 if [ -z "${DISPLAY:-}" ]; then
@@ -277,10 +341,21 @@ jobs:
               fi
             '
 
+      - name: Publish cryptographically attested platform receipt
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: ./.github/actions/platform-ci-receipt
+        with:
+          job-key: enterprise-linux
+          matrix-name: ${{ matrix.name }}
+
   windows-11:
     name: Windows 11 ARM runner / Python 3.12 x64
     runs-on: windows-11-arm
     timeout-minutes: 30
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -298,13 +373,19 @@ jobs:
         run: |
           python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
           python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
-          python -m pip install --no-cache-dir --no-deps -e .
+          python -m pip install --no-cache-dir --no-build-isolation --check-build-dependencies --no-deps -e .
 
       - name: Tkinter fallback smoke test
         run: python app.py --smoke-test
 
       - name: Project verification
         run: python verify.py
+
+      - name: Publish cryptographically attested platform receipt
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: ./.github/actions/platform-ci-receipt
+        with:
+          job-key: windows-11
 
   windows-10-self-hosted:
     name: Windows 10 self-hosted / Python 3.12
@@ -331,7 +412,7 @@ jobs:
         run: |
           python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
           python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
-          python -m pip install --no-cache-dir --no-deps -e .
+          python -m pip install --no-cache-dir --no-build-isolation --check-build-dependencies --no-deps -e .
 
       - name: Tkinter fallback smoke test
         run: python app.py --smoke-test
@@ -343,6 +424,10 @@ jobs:
     name: React build
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
     defaults:
       run:
         working-directory: frontend
@@ -407,10 +492,20 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Publish cryptographically attested platform receipt
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: ./.github/actions/platform-ci-receipt
+        with:
+          job-key: frontend
+
   mobile-web:
     name: Mobile web smoke / ${{ matrix.target }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
     needs:
       - frontend
     strategy:
@@ -446,10 +541,17 @@ jobs:
         run: |
           python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
           python -m pip install --no-cache-dir --require-hashes -r requirements.lock
-          python -m pip install --no-cache-dir --no-deps -e .
+          python -m pip install --no-cache-dir --no-build-isolation --check-build-dependencies --no-deps -e .
 
       - name: Mobile web smoke
         run: python scripts/verify_mobile_web_smoke.py --target "${{ matrix.target }}"
+
+      - name: Publish cryptographically attested platform receipt
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: ./.github/actions/platform-ci-receipt
+        with:
+          job-key: mobile-web
+          matrix-target: ${{ matrix.target }}
 
   public-polymarket-live:
     name: Public Polymarket live / GitHub-hosted
@@ -553,6 +655,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     if: ${{ always() }}
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
     needs:
       - python
       - future-python
@@ -609,12 +715,29 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Build Python distribution
+      - name: Build Python distributions reproducibly
         run: |
+          source_date_epoch="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          export SOURCE_DATE_EPOCH="${source_date_epoch}"
           python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
           python -m pip install --no-cache-dir --require-hashes -r requirements.lock
           python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock
-          python -m build --no-isolation
+          test ! -e dist
+          test ! -e dist-repro
+          build_root="$(mktemp -d "${RUNNER_TEMP}/market-sentinel-python-build.XXXXXX")"
+          first_source="${build_root}/source-1"
+          second_source="${build_root}/source-2"
+          mkdir -p "${first_source}" "${second_source}"
+          git archive --format=tar "${GITHUB_SHA}" | tar -xf - -C "${first_source}"
+          git archive --format=tar "${GITHUB_SHA}" | tar -xf - -C "${second_source}"
+          python -m build --no-isolation --outdir "${GITHUB_WORKSPACE}/dist" "${first_source}"
+          python scripts/normalize_python_sdist.py --path dist/*.tar.gz
+          python -m build --no-isolation --outdir "${GITHUB_WORKSPACE}/dist-repro" "${second_source}"
+          python scripts/normalize_python_sdist.py --path dist-repro/*.tar.gz
+          python scripts/verify_reproducible_python_dist.py \
+            --first-dir dist \
+            --second-dir dist-repro
+          rm -rf -- dist-repro
 
       - name: Smoke install built wheel
         shell: bash
@@ -622,13 +745,21 @@ jobs:
           expected_version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
           expected_market_count="$(python -c 'from market_adapters import MARKET_IDS; print(len(MARKET_IDS))')"
           python scripts/verify_python_dist_artifacts.py --dist-dir dist --expected-version "${expected_version}"
-          python -m pip install --no-cache-dir --force-reinstall --no-deps "dist/market_sentinel-${expected_version}-py3-none-any.whl"
-          smoke_dir="$(mktemp -d)"
+          smoke_dir="$(mktemp -d "${RUNNER_TEMP}/market-sentinel-wheel-smoke.XXXXXX")"
+          python -m venv "${smoke_dir}/venv"
+          smoke_python="${smoke_dir}/venv/bin/python"
+          smoke_cli="${smoke_dir}/venv/bin/market-sentinel"
+          "${smoke_python}" -m pip install --no-cache-dir --require-hashes -r "${GITHUB_WORKSPACE}/requirements.lock"
+          "${smoke_python}" -m pip install --no-cache-dir --no-index \
+            "${GITHUB_WORKSPACE}/dist/market_sentinel-${expected_version}-py3-none-any.whl"
           cd "${smoke_dir}"
-          market-sentinel --help >/dev/null
-          EXPECTED_VERSION="${expected_version}" EXPECTED_MARKET_COUNT="${expected_market_count}" python - <<'PY'
+          "${smoke_cli}" --help >/dev/null
+          EXPECTED_VERSION="${expected_version}" EXPECTED_MARKET_COUNT="${expected_market_count}" "${smoke_python}" -I - <<'PY'
           import os
+          import site
           from importlib.metadata import metadata, version
+          from pathlib import Path
+          import market_adapters
           from market_adapters import CryptoComPredictAdapter, build_default_registry
 
           assert version("market-sentinel") == os.environ["EXPECTED_VERSION"]
@@ -637,6 +768,11 @@ jobs:
           assert package_metadata.get_all("License-File") == ["LICENSE"]
           assert len(build_default_registry().list_market_ids()) == int(os.environ["EXPECTED_MARKET_COUNT"])
           assert CryptoComPredictAdapter().market_id == "crypto_com_predict"
+          package_path = Path(market_adapters.__file__).resolve()
+          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          site_roots = [Path(value).resolve() for value in site.getsitepackages()]
+          assert not package_path.is_relative_to(workspace), package_path
+          assert any(package_path.is_relative_to(root) for root in site_roots), package_path
           PY
 
       - name: Upload Python distributions
@@ -646,3 +782,9 @@ jobs:
           path: dist/*
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish cryptographically attested platform receipt
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: ./.github/actions/platform-ci-receipt
+        with:
+          job-key: package

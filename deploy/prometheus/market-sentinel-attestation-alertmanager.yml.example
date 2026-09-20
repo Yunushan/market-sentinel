@@ -1,0 +1,75 @@
+# Merge these child routes first, in this order, in the deployed root route's
+# child list (before broader non-continuing routes), and merge both receivers
+# into the receivers list. Only run-unique synthetic attestation alerts match.
+#
+# Provision both referenced files before reloading Alertmanager. They must be
+# regular files owned by root, mode 0640 with the numeric Alertmanager GID from
+# the protected MARKET_SENTINEL_ALERTMANAGER_GID environment variable, or mode
+# 0600 for root-only access, with no symlink in the path. Write their exact
+# contents without a trailing newline:
+#
+#   /etc/market-sentinel/alertmanager-oncall-webhook-url
+#     https://<public-receipt-origin>/v1/market-sentinel/alertmanager
+#   /etc/market-sentinel/alertmanager-oncall-bearer-token
+#     <the protected production bearer token>
+#
+# The URL file keeps the bridge endpoint out of the checked-in config. The
+# credentials file is read through Alertmanager's authorization contract; do
+# not put credentials in the URL. The deployment evidence collector requires
+# the same protected origin/token and never records either raw value.
+#
+# Bridge receipt contract (schema version 1): after accepting the POST, the
+# bridge exposes GET /v1/market-sentinel/alert-receipts/<binding> under the
+# configured public receipt origin, authenticated with the same bearer token.
+# It returns only the exact, non-secret JSON fields enforced by the collector:
+# source/deployment/run/binding identity, Alertmanager fingerprint, provider,
+# hashed channel identity, delivery ID, received/dispatched timestamps, human
+# acknowledgement timestamp + hashed acknowledger, webhook receiver, raw
+# webhook SHA-256, and the canonical webhook-event SHA-256. A receipt must not
+# become acknowledged until a person acknowledges the dispatched notification.
+# The receipt bridge is the trusted acknowledgement authority, not a source of
+# provider-signed proof. Alertmanager resolves this URL independently of the
+# evidence collector's DNS-pinned receipt GET, so restrict production-host
+# egress to the bridge's reviewed public addresses or address ranges.
+route:
+  routes:
+    - receiver: market-sentinel-oncall-attestation
+      matchers:
+        - market_sentinel_attestation="true"
+      group_by:
+        - alertname
+        - market_sentinel_binding
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 24h
+      continue: true
+    - receiver: market-sentinel-attestation
+      matchers:
+        - market_sentinel_attestation="true"
+      group_by:
+        - alertname
+        - market_sentinel_binding
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 24h
+      continue: false
+
+receivers:
+  - name: market-sentinel-oncall-attestation
+    webhook_configs:
+      - url_file: /etc/market-sentinel/alertmanager-oncall-webhook-url
+        send_resolved: false
+        max_alerts: 1
+        http_config:
+          follow_redirects: false
+          proxy_from_environment: false
+          tls_config:
+            insecure_skip_verify: false
+          authorization:
+            type: Bearer
+            credentials_file: /etc/market-sentinel/alertmanager-oncall-bearer-token
+  - name: market-sentinel-attestation
+    webhook_configs:
+      - url: http://127.0.0.1:19094/market-sentinel-alertmanager
+        send_resolved: false
+        max_alerts: 1

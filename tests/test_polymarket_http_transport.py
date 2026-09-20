@@ -57,6 +57,32 @@ def response_for(status=200, body=b'{"ok":true}', headers=None):
     return response
 
 
+def require_unintercepted_local_tls(test_case, port, certificate_path, observed) -> None:
+    """Skip real-loopback TLS success cases under a known local interceptor.
+
+    Some Windows endpoint-security products terminate even loopback TLS and
+    substitute a deliberately untrusted certificate. Accepting that certificate
+    would weaken the application. CI and unaffected hosts still execute the
+    real socket tests; the in-memory TLS tests separately exercise certificate
+    and hostname verification without traversing an interceptable socket.
+    """
+    context = ssl._create_unverified_context()  # noqa: S323 - fingerprint-only test preflight
+    with socket.create_connection(("127.0.0.1", port), timeout=2) as raw_socket:
+        with context.wrap_socket(raw_socket, server_hostname="venue.example.test") as tls_socket:
+            presented = x509.load_der_x509_certificate(tls_socket.getpeercert(binary_form=True))
+    expected = x509.load_pem_x509_certificates(Path(certificate_path).read_bytes())[0]
+    if presented.fingerprint(hashes.SHA256()) == expected.fingerprint(hashes.SHA256()):
+        observed["sni"].clear()
+        return
+    issuer = presented.issuer.rfc4514_string()
+    if "Avast Web/Mail Shield" in issuer:
+        test_case.skipTest(
+            "loopback TLS is transparently intercepted by Avast Web/Mail Shield; "
+            "the substituted untrusted certificate was correctly rejected"
+        )
+    test_case.fail(f"loopback TLS peer certificate was unexpectedly replaced by issuer {issuer!r}")
+
+
 @contextmanager
 def local_tls_server(directory, handle_get=None):
     # Trust only an ephemeral CA in the test session. The leaf has a DNS SAN
@@ -170,6 +196,7 @@ class PolymarketHTTPTransportTests(unittest.TestCase):
 
     def test_real_tls_connection_uses_numeric_address_and_preserves_host_and_sni(self) -> None:
         with tempfile.TemporaryDirectory() as directory, local_tls_server(directory) as (port, certificate, observed):
+            require_unintercepted_local_tls(self, port, Path(directory) / "server.pem", observed)
             origin = f"https://venue.example.test:{port}"
             policy = OutboundEndpointPolicy(
                 private_origins=frozenset({origin}), resolver=resolver_for("127.0.0.1")
@@ -230,6 +257,9 @@ class PolymarketHTTPTransportTests(unittest.TestCase):
                     handler.close_connection = True
 
                 with tempfile.TemporaryDirectory() as directory, local_tls_server(directory, handle) as (port, certificate, _):
+                    require_unintercepted_local_tls(
+                        self, port, Path(directory) / "server.pem", {"sni": []}
+                    )
                     origin = f"https://venue.example.test:{port}"
                     policy = OutboundEndpointPolicy(private_origins=frozenset({origin}), resolver=resolver_for("127.0.0.1"))
                     try:
@@ -245,6 +275,7 @@ class PolymarketHTTPTransportTests(unittest.TestCase):
 
     def test_retry_connects_to_newly_validated_dns_address(self) -> None:
         with tempfile.TemporaryDirectory() as directory, local_tls_server(directory) as (port, certificate, observed):
+            require_unintercepted_local_tls(self, port, Path(directory) / "server.pem", observed)
             calls = []
 
             def changing_dns(host, dns_port, *, type):

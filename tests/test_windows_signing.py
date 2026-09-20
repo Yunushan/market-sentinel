@@ -29,7 +29,7 @@ class WindowsSigningTests(unittest.TestCase):
         for value in (
             "http://timestamp.example.test",
             "timestamp.example.test",
-            "https://user:secret@timestamp.example.test",
+            "https://user:secret@timestamp.example.test",  # secret-scan: allow -- rejection fixture
             "https://timestamp.example.test/#fragment",
         ):
             with self.subTest(value=value):

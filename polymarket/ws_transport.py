@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from websocket import (
     WebSocket,
     WebSocketProtocolException,
+    WebSocketTimeoutException,
     continuous_frame,
     create_connection as websocket_create_connection,
     frame_buffer,
@@ -19,7 +20,8 @@ from websocket._socket import DEFAULT_SOCKET_OPTION
 from websocket._url import get_proxy_info
 from urllib3.util.ssltransport import SSLTransport
 
-from core.request_control import RequestControl, request_scope
+from core.request_control import RequestControl, RequestDeadlineExceeded, request_scope
+from core.tls import create_verified_client_context
 
 
 WEBSOCKET_HANDSHAKE_STATUS = 101
@@ -150,7 +152,7 @@ class BoundedWebSocket(WebSocket):
                     finally:
                         control.unwatch_socket(guard)
                 _require_websocket_handshake(self)
-        except BaseException:
+        except BaseException as exc:
             # Scope-exit cancellation can happen after the socket guard is
             # disarmed. Keep ownership until the entire scope exits successfully.
             self.connected = False
@@ -162,6 +164,8 @@ class BoundedWebSocket(WebSocket):
                         pass
             self.sock = None
             self.handshake_response = None
+            if isinstance(exc, (TimeoutError, WebSocketTimeoutException)):
+                raise RequestDeadlineExceeded("WebSocket connection deadline exceeded.") from exc
             raise
 
 
@@ -175,9 +179,6 @@ def _wrap_tls_socket(sock: socket.socket, options: dict[str, Any], hostname: str
     # during handshake. No detached Windows handle can outlive cancellation.
     context = options.get("context")
     if context is None:
-        context = ssl.SSLContext(options.get("ssl_version", ssl.PROTOCOL_TLS_CLIENT))
-        context.verify_mode = ssl.CERT_REQUIRED
-        context.check_hostname = True
         cafile, capath = options.get("ca_certs"), options.get("ca_cert_path")
         bundle = os.environ.get("WEBSOCKET_CLIENT_CA_BUNDLE")
         if bundle:
@@ -185,10 +186,7 @@ def _wrap_tls_socket(sock: socket.socket, options: dict[str, Any], hostname: str
                 cafile = bundle
             elif not capath and Path(bundle).is_dir():
                 capath = bundle
-        if cafile or capath:
-            context.load_verify_locations(cafile=cafile, capath=capath)
-        else:
-            context.load_default_certs(ssl.Purpose.SERVER_AUTH)
+        context = create_verified_client_context(cafile=cafile, capath=capath)
         if options.get("certfile"):
             context.load_cert_chain(options["certfile"], options.get("keyfile"), options.get("password"))
         if "cert_chain" in options:

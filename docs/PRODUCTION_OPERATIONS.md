@@ -57,6 +57,19 @@ regional restrictions.
   publication to the shared runtime configuration. Failed pre-commit saves do
   not install their settings or report successful actions. The config root and
   unchanged journal objects retain their identities for background workers.
+- The installed systemd web service runs only the HTTP API. Separate reviewed
+  timers invoke `core.unattended_worker` for price-alert refreshes and
+  read-only wallet-feed observation. Both tasks share one lock and one atomic status file,
+  reload state before every bounded attempt, and treat partial feed failures as failures rather than fresh success.
+  The alert task uses compare-and-swap configuration commits
+  for its refreshed state; the wallet observer
+  deliberately does not advance the durable wallet-delivery cursor because it
+  has no activity consumer. Desktop/API polling owns cursor advancement and
+  delivery, so an unattended observation cannot discard an event before that
+  consumer sees it. Aggregate and per-attempt deadlines, bounded exponential
+  backoff, process-group termination, and durable last-success telemetry are
+  part of the unit contract. These workers do not execute copy trading or place orders.
+  Do not add ad hoc concurrent polling timers or reuse the privileged web environment.
 - Configuration replacement is the commit point. `ConfigCommitError` means the
   replacement completed but subsequent synchronization or cleanup failed; the
   saved revision remains attached to the candidate. Do not treat that error as
@@ -304,13 +317,32 @@ on one retained report are capped at 256 to keep authenticated retry metadata
 bounded. Browser clients retain one generated key across transport-uncertain
 retries and discard it only after a terminal HTTP response or success.
 
-## Install on RHEL/Rocky/Ubuntu
+## Install on systemd 247+ (RHEL/Rocky 9+ or supported Ubuntu)
+
+The production unit profile requires systemd 247 or newer. In particular, its
+effective sandbox contract uses `ProtectProc=` and `ProcSubset=`, which are not
+available on the systemd 239 shipped by RHEL/Rocky 8. RHEL/Rocky 9+ is the
+supported enterprise baseline; use an Ubuntu release whose packaged systemd is
+also at least 247. Source-level compatibility checks on an older distribution
+do not certify these installed production units. Verify the host before
+installing anything:
+
+```bash
+SYSTEMD_VERSION="$(systemctl --version | awk 'NR == 1 {print $2}')"
+case "${SYSTEMD_VERSION}" in
+  ''|*[!0-9]*) echo "unsupported systemd version: ${SYSTEMD_VERSION:-missing}" >&2; exit 1 ;;
+esac
+test "${SYSTEMD_VERSION}" -ge 247
+```
 
 ```bash
 sudo useradd --system --home /var/lib/market-sentinel --shell /sbin/nologin market-sentinel
+sudo useradd --system --home /nonexistent --shell /sbin/nologin market-sentinel-health
 sudo install -d -o market-sentinel -g market-sentinel -m 0700 /var/lib/market-sentinel
 sudo install -d -o root -g market-sentinel -m 0750 /etc/market-sentinel
 sudo install -m 0600 deploy/systemd/market-sentinel.env.example /etc/market-sentinel/market-sentinel.env
+sudo install -m 0600 deploy/systemd/market-sentinel-health.env.example /etc/market-sentinel/market-sentinel-health.env
+sudo install -m 0600 deploy/systemd/market-sentinel-worker.env.example /etc/market-sentinel/market-sentinel-worker.env
 sudo install -m 0644 deploy/systemd/market-sentinel.conf /etc/tmpfiles.d/market-sentinel.conf
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/market-sentinel.conf
 
@@ -329,25 +361,43 @@ npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
 
 # Validate the checked-out source with the test dependency set before deployment.
 python3 -m venv .verify-venv
-.verify-venv/bin/python -m pip install --require-hashes -r requirements-bootstrap.lock
-.verify-venv/bin/python -m pip install --require-hashes -r requirements-test.lock
-.verify-venv/bin/python -m pip install --no-deps .
+.verify-venv/bin/python -m pip install --only-binary=:all: --require-hashes -r requirements-bootstrap.lock
+.verify-venv/bin/python -m pip install --only-binary=:all: --require-hashes -r requirements-test.lock
+.verify-venv/bin/python -m pip install --no-build-isolation --check-build-dependencies --no-deps .
 .verify-venv/bin/python verify.py --frontend-build --frontend-live-smoke
 rm -rf .verify-venv
 
 # Install the lean runtime dependency set used by the systemd service.
 python3 -m venv .venv
-.venv/bin/python -m pip install --require-hashes -r requirements-bootstrap.lock
-.venv/bin/python -m pip install --require-hashes -r requirements.lock
-.venv/bin/python -m pip install --no-deps .
+.venv/bin/python -m pip install --only-binary=:all: --require-hashes -r requirements-bootstrap.lock
+.venv/bin/python -m pip install --only-binary=:all: --require-hashes -r requirements.lock
+.venv/bin/python -m pip install --no-build-isolation --check-build-dependencies --no-deps .
 ```
+
+The bootstrap lock installs the exact setuptools version declared in
+`pyproject.toml` before either source install. Keep build isolation disabled and
+the build-dependency check enabled: permitting an isolated PEP 517 build would
+allow pip to fetch and execute a backend that is outside the reviewed lock.
+
+Before either unattended-worker timer is enabled, replace
+`MARKET_SENTINEL_SOURCE_REVISION` in
+`/etc/market-sentinel/market-sentinel-worker.env` with the exact value printed
+by `EXPECTED_SOURCE_REVISION`. The 40-hex value is passed by each reviewed
+systemd unit and written into its durable worker state; deployment collection
+fails if it differs from the installed revision. Do not derive or overwrite it
+during evidence collection.
+
+Before enabling either service, replace the blank credential values. Generate
+one admin token for `market-sentinel.env`, then generate a different observer
+token and place that same observer value in both environment files. Do not add
+the admin token or any venue credential to `market-sentinel-health.env`.
 
 An authenticated Polymarket CLOB SDK is intentionally excluded from the
 baseline runtime. Install it only for an explicitly approved signed-trading
 workflow:
 
 ```bash
-.venv/bin/python -m pip install --require-hashes -r requirements-live.lock
+.venv/bin/python -m pip install --only-binary=:all: --require-hashes -r requirements-live.lock
 ```
 
 The strict verifier above built the React frontend. Capture its reviewed
@@ -374,19 +424,31 @@ Install the systemd unit and validate it:
 sudo install -m 0644 deploy/systemd/market-sentinel-web.service /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/market-sentinel-health.service /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/market-sentinel-health.timer /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/market-sentinel-alerts-refresh.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/market-sentinel-alerts-refresh.timer /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/market-sentinel-wallets-poll.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/market-sentinel-wallets-poll.timer /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/market-sentinel-backup.service /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/market-sentinel-backup.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now market-sentinel-web
 sudo systemctl enable --now market-sentinel-health.timer
+sudo systemctl enable --now market-sentinel-alerts-refresh.timer
+sudo systemctl enable --now market-sentinel-wallets-poll.timer
 sudo systemctl enable --now market-sentinel-backup.timer
 sudo systemctl start market-sentinel-backup.service
 sudo systemctl status market-sentinel-web
 sudo systemctl status market-sentinel-health.timer
+sudo systemctl status market-sentinel-alerts-refresh.timer
+sudo systemctl status market-sentinel-wallets-poll.timer
 sudo systemctl status market-sentinel-backup.timer
-sudo journalctl -u market-sentinel-web -f
-/opt/market-sentinel/.venv/bin/python /opt/market-sentinel/scripts/verify_service_health.py
+sudo systemctl start market-sentinel-health.service
+sudo systemctl status market-sentinel-health.service
+sudo journalctl -u market-sentinel-web -n 50 --no-pager
 /opt/market-sentinel/.venv/bin/market-sentinel doctor --strict --config /var/lib/market-sentinel/config.json --frontend-dir /opt/market-sentinel/frontend/dist
+/opt/market-sentinel/.venv/bin/market-sentinel-worker status --task all \
+  --state-file /var/lib/market-sentinel/unattended-worker-state.json \
+  --max-age-seconds 600 --compact
 ```
 
 The CLI `serve --frontend-dir` option is supported for deployment-relative
@@ -397,12 +459,24 @@ The static catalog is built once from that canonical root; each candidate is
 resolved and checked relative to the root before it is read, so request URLs
 never construct filesystem paths.
 
-The web and health units use strict systemd sandboxes, private device and
-hostname/clock namespaces, restricted network address families, and a root-owned
-environment file. Missing that file or changing a required durable path prevents
-the web service from starting. After those path assertions, the web unit has a
-strict read-only `doctor` preflight and a startup health check; the timer runs a
-separate loopback health check every minute. Both units limit start failures to
+The web and health units use distinct Unix accounts, strict systemd sandboxes,
+private user/device and hostname/clock namespaces, restricted process views and
+network address families, and separate
+root-owned mode-`0600` environment files. Put the independently generated
+`MARKET_SENTINEL_OBSERVABILITY_TOKEN` in both files, but keep
+`MARKET_SENTINEL_API_TOKEN` and all venue credentials exclusively in
+`market-sentinel.env`. The health unit explicitly removes the admin variable,
+rejects command-line token overrides, and fails before probing if its dedicated
+observability value is absent. Its `market-sentinel-health` account cannot read
+the web process environment or writable state. Missing either file or changing a required
+durable path prevents the associated production check from starting. After
+those path assertions, the web unit has a strict read-only `doctor` preflight.
+It does not run a post-start probe in the web process environment, because that
+would expose the admin and venue credentials to the probe. The deployment
+procedure starts the isolated health service immediately after the web unit;
+its timer then runs the same loopback health check every minute. Deployment
+evidence independently repeats the authenticated health and metrics checks.
+Both units limit start failures to
 five attempts in five minutes, and the health unit times out after 30 seconds. A
 start-limit hit is an operator action item rather than a signal to retry
 continuously; inspect
@@ -415,6 +489,21 @@ The web unit manages `/var/lib/market-sentinel` with `StateDirectory` and mode
 `0700`, so a normal service start does not depend on a pre-existing writable
 state directory. The initial install command remains useful for inspecting
 ownership before the first start.
+
+The two unattended one-shot services run as `market-sentinel` but load only
+`/etc/market-sentinel/market-sentinel-worker.env`. Keep that root-owned file at
+mode `0600` and add only read-scoped venue credentials explicitly listed in its
+example; never copy `market-sentinel.env`. Its required
+`MARKET_SENTINEL_SOURCE_REVISION` must be the exact clean release commit and is
+not a credential. The units remove admin, observer,
+order-signing, relayer, TLS-keylog, and Python-injection variables again before
+starting their child attempt. They share
+`/var/lib/market-sentinel/.unattended-worker.lock` and
+`/var/lib/market-sentinel/unattended-worker-state.json`, so their schedules can
+never mutate the shared config concurrently. A lock timeout, partial venue
+failure, stale compare-and-swap write, deadline, signal, or durability error is
+recorded as non-success and must not advance freshness. Inspect both service
+journals and the status command above before relying on alert or wallet data.
 
 The backup timer runs a local, network-isolated state backup each day with a
 14-pair retention limit. It writes archives and SHA-256 manifests only to
@@ -456,9 +545,140 @@ MARKET_SENTINEL_ALLOWED_ORIGINS="https://analytics.example.com"
 ```
 
 Use the same `MARKET_SENTINEL_API_TOKEN` in
-`/etc/market-sentinel/market-sentinel.env`. Configure DNS and permit only ports
-80/443 to Caddy. Keep 8765 private. Test the public hostname, the TLS renewal
-path, and authenticated browser flow before enabling any live feature. Set
+`/etc/market-sentinel/market-sentinel.env`. Generate another value with
+`openssl rand -hex 32` and place the result in that file as
+`MARKET_SENTINEL_OBSERVABILITY_TOKEN=<generated-value>`. Never reuse the admin
+token for this least-privilege credential. It is accepted only for
+`GET /api/health` and `GET /metrics`; it cannot read state or invoke mutations.
+Configure the same value in the separate root-owned mode-`0600`
+`/etc/market-sentinel/market-sentinel-health.env` file. That file must contain
+only `MARKET_SENTINEL_OBSERVABILITY_TOKEN`; the health unit does not load the
+admin environment and fails closed if the observer credential is absent. The
+standalone probe retains admin-token fallback only for local backward
+compatibility when observability-only mode is not requested.
+
+The bundled Prometheus scrape configuration reads a third copy from
+`/etc/prometheus/market-sentinel-observability-token`. Unlike the two systemd
+environment files, this `credentials_file` must contain only the raw token and
+one trailing newline -- never a `MARKET_SENTINEL_OBSERVABILITY_TOKEN=`
+assignment. After installing Prometheus so its service group exists, provision
+the file without ever putting the bearer value in a command-line argument:
+
+```bash
+# Enter the exact observer value already stored in both systemd environment files.
+IFS= read -r -s -p "Observability token: " OBSERVABILITY_TOKEN; printf '\n'
+sudo install -o root -g prometheus -m 0640 /dev/null /etc/prometheus/market-sentinel-observability-token
+printf '%s\n' "${OBSERVABILITY_TOKEN}" | sudo tee /etc/prometheus/market-sentinel-observability-token >/dev/null
+sudo chown root:prometheus /etc/prometheus/market-sentinel-observability-token
+sudo chmod 0640 /etc/prometheus/market-sentinel-observability-token
+test "$(sudo stat -c '%U:%G:%a' /etc/prometheus/market-sentinel-observability-token)" = "root:prometheus:640"
+sudo -u prometheus test -r /etc/prometheus/market-sentinel-observability-token
+unset OBSERVABILITY_TOKEN
+```
+
+Install and validate the alert rules, then merge both top-level mappings from
+`deploy/prometheus/market-sentinel-scrape.yml` into the host's main
+`/etc/prometheus/prometheus.yml`; the checked-in file is a reviewed fragment,
+not a standalone include file:
+
+```bash
+sudo install -d -o root -g prometheus -m 0750 /etc/prometheus/rules
+sudo install -o root -g prometheus -m 0640 \
+  deploy/prometheus/market-sentinel-alerts.yml \
+  /etc/prometheus/rules/market-sentinel-alerts.yml
+# Merge scrape_configs and rule_files from the reviewed fragment, preserving
+# any existing top-level entries, then validate the complete deployed config.
+sudo promtool check rules /etc/prometheus/rules/market-sentinel-alerts.yml
+sudo promtool check config /etc/prometheus/prometheus.yml
+sudo systemctl reload prometheus
+sudo systemctl is-active prometheus
+```
+
+For score-eligible delivery evidence, also merge the reviewed top-level
+`rule_files` and `alerting` mappings from
+`deploy/prometheus/market-sentinel-attestation-prometheus.yml.example` into the
+complete Prometheus configuration. Merge the child route and receiver from
+`deploy/prometheus/market-sentinel-attestation-alertmanager.yml.example` into
+the complete Alertmanager configuration. They are merge fragments, not
+standalone configuration files. Keep Prometheus and Alertmanager API listeners
+on loopback, enable Prometheus lifecycle reload only on that loopback listener,
+and provision the run-unique rule directory for root-written,
+Prometheus-readable files. Before reloading Alertmanager, create the two
+regular, non-symlink files named by the fragment:
+
+- `/etc/market-sentinel/alertmanager-oncall-webhook-url` contains exactly
+  `https://<public-receipt-origin>/v1/market-sentinel/alertmanager`, without a
+  trailing newline.
+- `/etc/market-sentinel/alertmanager-oncall-bearer-token` contains exactly the
+  protected production bearer token, without a trailing newline.
+
+Both files must be root-owned and either mode `0600` for root-only access, or
+mode `0640` with a numeric group owner exactly equal to the protected production
+environment variable `MARKET_SENTINEL_ALERTMANAGER_GID`. Resolve the service
+group with `getent group alertmanager` on the production evidence host, record
+its positive numeric GID in that variable, and update the variable whenever the
+host's service-group identity changes. The collector rejects a `0640` file with
+any other group owner. The receipt origin must be a canonical public HTTPS
+origin whose DNS answers are exclusively public; redirects, credentials in the
+URL, private addresses, and reserved example names are rejected. Configure the
+same origin as the protected production environment variable
+`MARKET_SENTINEL_ONCALL_RECEIPT_ORIGIN` and the same token as the protected
+secret `MARKET_SENTINEL_ONCALL_RECEIPT_TOKEN`.
+
+```bash
+sudo install -d -o root -g prometheus -m 0750 /var/lib/prometheus/market-sentinel-attestation
+sudo promtool check config /etc/prometheus/prometheus.yml
+sudo amtool check-config /etc/alertmanager/alertmanager.yml
+sudo systemctl reload prometheus
+sudo systemctl reload alertmanager
+```
+
+The production evidence workflow supplies a GitHub-hosted random challenge and
+runs the checked-in collector on the production host. The collector creates one
+controlled test alert through a challenge-bound `vector(1)` rule, proves the
+exact file was loaded and firing in
+Prometheus, proves the same fingerprint reached Alertmanager's scoped receiver
+and the controlled loopback webhook, validates Alertmanager's live loaded
+configuration for both exact receivers, and polls the separate public receipt
+bridge. The bridge receipt must bind the exact revision, deployment identity,
+workflow run, challenge, Alertmanager fingerprint, canonical webhook event and
+raw webhook digest; it must show dispatch followed by a later human
+acknowledgement with hashed channel and acknowledger identities. The collector
+then removes the rule, reloads, and proves the bound rule is absent. A
+GitHub-hosted reviewer recomputes every binding, configuration/body/event hash,
+and timestamp before the canonical deployment report is attested. A loopback
+delivery, reload response, rule evaluation, bridge-authored success boolean, or
+unacknowledged provider delivery alone earns no alert-delivery point.
+
+The receipt authority must report `received_at` causally after the delivered
+alert's `startsAt`, followed by `dispatched_at` and a strictly later human
+`acknowledged_at`. Because `startsAt` and the receipt timestamps can come from
+different hosts, the collector and reviewer tolerate at most 60 seconds of
+clock skew at that boundary. Collector-host observations are ordered only where
+the collector caused them. Receipt-authority timestamps use the same bounded
+skew against the collector's challenge window; they are not ordered against
+independent Prometheus or Alertmanager HTTP observation completion timestamps.
+
+The collector ignores ambient proxy settings and pins its authenticated receipt
+GET to the public DNS answers it validates before sending the bearer token,
+while preserving TLS hostname verification. Alertmanager resolves the separate
+webhook POST itself, so also restrict the production host's outbound firewall
+to the bridge's reviewed public addresses or address ranges; treat any approved
+DNS/address change as a controlled configuration update. The bridge is an
+explicitly trusted human-acknowledgement authority, not provider-signed
+cryptographic proof, and therefore needs equivalent access controls, audit
+retention, and change review.
+
+On rotation, generate one replacement value,
+write it to both systemd environment files and the raw Prometheus file, then
+restart `market-sentinel-web`, run `market-sentinel-health.service` to verify
+the isolated credential, and reload Prometheus. Updating only one copy causes
+the health timer or metrics scrapes to fail closed with `401`.
+
+Configure DNS and
+permit only ports 80/443 to Caddy.
+Keep 8765 private. Test the public hostname, the TLS renewal path, and
+authenticated browser flow before enabling any live feature. Set
 `MARKET_SENTINEL_ALLOWED_ORIGINS` in that protected environment file to the exact
 public Caddy origin; it must match the replaced Caddy hostname, omit any path,
 and must not use a wildcard. Multiple separately trusted origins are
@@ -467,13 +687,23 @@ comma-separated.
 ## Deployment evidence
 
 After a deployment, collect a read-only verification record from the VPS. It
-checks the systemd web service and health timer, validates the loopback health
+checks the systemd web service, health timer, both unattended worker timers and
+their exact one-shot service contracts, validates the loopback health
 endpoint, authenticated Prometheus metrics endpoint, and release version, and, when given a public URL, proves that an
 unauthenticated request receives `401` before validating the authenticated HTTPS
 proxy response, cache policy, the required browser-security header directives,
 and removal of the public `Server` header.
 It also verifies the root-owned, private service environment file and private
-state/backup directories used by the bundled systemd units.
+health credential file, proves the health unit removes the admin variable and
+runs in mandatory observability-only mode, rejects extra assignments in that
+file, and checks the private state/backup directories used by the bundled
+systemd units. It independently parses the bounded, regular-file-only worker
+status and requires recent successful alert-refresh and wallet-poll entries,
+zero current problem counts, no consecutive failures, exact task/run identity,
+and timestamps consistent with successful systemd completions. The canonical
+hosted report additionally includes the independently reviewed synthetic alert
+delivery transcript. Either missing capability fails the two corresponding
+operations-readiness points closed.
 It extracts only the four non-secret durable-path values from the running web
 process environment for evidence, proves they are the exact paths beneath the
 sandbox-writable state directory, and checks the effective backup command
@@ -575,12 +805,16 @@ SHA-256 digest.
 For score-eligible evidence, manually run the protected-main **Production
 deployment evidence** workflow with the exact stable release tag and production
 HTTPS origin. Its production-labeled self-hosted collector verifies the live
-host; a separate GitHub-hosted job reviews the raw bytes, binds the exact
-release SHA and frontend ZIP digest, and attests canonical
-`deployment-evidence.json`. Download that final artifact and pass it with the
-identical `--deployment-origin`. Raw reports, handwritten wrappers, and reviewer
-summaries remain diagnostic-only. Do not use staging, generic self-hosted
-runners, or placeholder origins for this workflow.
+host; the separate external-probe job attests the exact canonical
+`external-probe.json` bytes before upload. The hosted review verifies that
+source attestation against the exact workflow SHA, run, attempt, protected-main
+ref, and GitHub-hosted runner certificate, then binds the probe object into and
+attests canonical `deployment-evidence.json`. The scorer reconstructs the probe
+bytes from that envelope and independently repeats the semantic and source
+attestation checks. Download the final artifact and pass it with the identical
+`--deployment-origin`. Raw reports, handwritten wrappers, and reviewer summaries
+remain diagnostic-only. Do not use staging, generic self-hosted runners, or
+placeholder origins for this workflow.
 Configure `MARKET_SENTINEL_PRODUCTION_ORIGIN` as a protected `production`
 environment variable. The workflow rejects an input that is not byte-for-byte
 equal to that canonical public origin, rejects private or non-global resolution,
@@ -599,7 +833,11 @@ not production-host evidence.
 ## Monitoring and recovery
 
 - Health: `market-sentinel-health.timer` polls `GET /api/health` through
-  loopback every minute using `scripts/verify_service_health.py`. Ship failures
+  loopback every minute using `scripts/verify_service_health.py` and the
+  distinct `MARKET_SENTINEL_OBSERVABILITY_TOKEN`, rather than sending the
+  admin credential in its health request. Its dedicated environment file
+  contains no admin or venue credential, and the probe rejects an inherited
+  admin variable in production observability-only mode. Ship failures
   of `market-sentinel-health.service` from journald to the selected monitoring
   system and alert after two consecutive failed executions.
   Health, metrics, and authentication probes reject redirects; a response from
@@ -722,12 +960,15 @@ where authenticated CLOB signing is explicitly approved.
 
 ### Funded production acceptance
 
-The CLOB V2 wrapper and bounded audit's recovery-journal path are implemented,
-but both normal product execution and bounded funded-audit gates remain false.
-The bounded audit needs exact-revision implementation/recovery review and
-explicit operator approval before it can run. Normal product execution still
-requires current credentialed and funded order/cancel acceptance. Do not enable
-either gate merely because offline tests pass.
+The CLOB V2 wrapper and bounded audit's recovery-journal path are implemented.
+Normal product execution remains disabled. The separate bounded audit capability
+is enabled only through its dedicated one-shot factory: one allow-listed,
+hard-capped, post-only GTC placement followed by exact-ID cancellation inside the
+journaled verifier. Its checked-in invocation is confined to the protected
+production evidence workflow and still needs explicit operator approval,
+eligible credentials/funding, and exact-revision review before it can run. Do
+not treat that audit capability or offline tests as permission to enable normal
+product execution.
 
 The journal requires a private POSIX directory; Windows funded journals remain
 unavailable because the collector cannot verify an owner-only directory ACL.

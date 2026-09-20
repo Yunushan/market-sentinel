@@ -1,0 +1,57 @@
+groups:
+  - name: market-sentinel
+    interval: 30s
+    rules:
+      - alert: MarketSentinelDown
+        expr: up{job="market-sentinel"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: MarketSentinel is unavailable
+          description: Prometheus has been unable to scrape MarketSentinel for two minutes.
+
+      - alert: MarketSentinelHighServerErrorRatio
+        expr: sum(rate(market_sentinel_http_requests_total{job="market-sentinel",status=~"5.."}[5m])) / clamp_min(sum(rate(market_sentinel_http_requests_total{job="market-sentinel"}[5m])), 0.001) > 0.05
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: MarketSentinel server-error ratio exceeds 5 percent
+          description: More than 5 percent of completed HTTP requests have returned 5xx for ten minutes.
+
+      - alert: MarketSentinelOverloaded
+        expr: increase(market_sentinel_http_overload_rejections_total{job="market-sentinel"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: MarketSentinel is rejecting connections at its worker limit
+          description: At least one connection was rejected because all bounded HTTP workers were occupied.
+
+      - alert: MarketSentinelMutationSaturation
+        expr: increase(market_sentinel_http_mutation_admission_rejections_total{job="market-sentinel"}[5m]) + increase(market_sentinel_http_mutation_lock_timeouts_total{job="market-sentinel"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: MarketSentinel mutation capacity is saturated
+          description: A mutation was rejected at admission or timed out waiting for serialization.
+
+      - alert: MarketSentinelOversizeResponse
+        expr: increase(market_sentinel_http_response_too_large_total{job="market-sentinel"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: MarketSentinel rejected an oversized response
+          description: A response exceeded the configured fail-closed byte limit and was not sent.
+
+      - alert: MarketSentinelRestartLoop
+        expr: changes(market_sentinel_http_server_start_time_seconds{job="market-sentinel"}[15m]) > 2
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: MarketSentinel is restarting repeatedly
+          description: The server start timestamp changed more than twice in fifteen minutes.
