@@ -320,9 +320,10 @@ receivers:
                 with urllib.request.urlopen(request, timeout=3) as response:  # noqa: S310 - fixed loopback test URL.
                     if response.status != 204:
                         raise AssertionError(f"receiver returned {response.status}")
-                self.callback_delivered.set()
             except BaseException as exc:  # Preserve the callback failure for the test assertion.
                 self.callback_error = exc
+            finally:
+                self.callback_delivered.set()
 
         threading.Thread(target=send, daemon=True).start()
 
@@ -393,6 +394,8 @@ def _handler(state: _FakeMonitoringState) -> type[BaseHTTPRequestHandler]:
             if self.path == "/api/v2/status":
                 if not state.callback_delivered.wait(timeout=2):
                     raise AssertionError("controlled callback was not delivered before config observation")
+                if state.callback_error is not None:
+                    raise AssertionError("controlled callback failed") from state.callback_error
                 self._json(
                     {
                         "cluster": {"peers": [], "status": "disabled"},
