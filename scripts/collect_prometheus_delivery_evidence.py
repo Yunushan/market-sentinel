@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socketserver import BaseServer
 from typing import Any, Callable
 
 
@@ -1233,11 +1234,10 @@ class _PreboundThreadingHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, receiver_socket: socket.socket, handler: type[BaseHTTPRequestHandler]) -> None:
         receiver_address = receiver_socket.getsockname()
-        super().__init__(receiver_address, handler, bind_and_activate=False)
-        self.socket.close()
+        BaseServer.__init__(self, receiver_address, handler)
         self.socket = receiver_socket
-        self.server_address = receiver_address
-        self.server_activate()
+        self.server_name = socket.getfqdn(receiver_address[0])
+        self.server_port = receiver_address[1]
 
 
 def _build_receiver_server(
