@@ -456,35 +456,42 @@ class PrometheusDeliveryEvidenceTests(unittest.TestCase):
             cls.server_thread.start()
             _wait_for_http_server(cls.server)
             cls.origin = f"http://127.0.0.1:{cls.server.server_port}"
-            cls.payload = collect_evidence(
-                CollectorConfig(
-                    source_revision=REVISION,
-                    deployment_identity_sha256=DEPLOYMENT_IDENTITY,
-                    run_id=RUN_ID,
-                    run_attempt=RUN_ATTEMPT,
-                    nonce=NONCE,
-                    rule_directory=cls.rule_directory,
-                    prometheus_origin=cls.origin,
-                    alertmanager_origin=cls.origin,
-                    oncall_receipt_origin=ONCALL_ORIGIN,
-                    oncall_receipt_token=ONCALL_TOKEN,
-                    oncall_url_file=cls.oncall_url_file,
-                    oncall_credentials_file=cls.oncall_credentials_file,
-                    expected_alertmanager_gid=123,
-                    receiver_name="market-sentinel-attestation",
-                    receiver_port=cls.receiver_port,
-                    output=cls.output,
-                    # Containerized macOS and Enterprise Linux runners can need more than fifteen seconds
-                    # for the complete rule, callback, receipt, and cleanup round trip.
-                    timeout_seconds=30,
-                    poll_interval_seconds=0.01,
-                    request_timeout_seconds=1.5,
-                    require_root_owned_oncall_files=False,
-                ),
-                origin_resolver=_public_resolver,
-                receipt_fetcher=state.oncall_receipt,
-                receiver_socket=cls.receiver_socket,
-            )
+            try:
+                cls.payload = collect_evidence(
+                    CollectorConfig(
+                        source_revision=REVISION,
+                        deployment_identity_sha256=DEPLOYMENT_IDENTITY,
+                        run_id=RUN_ID,
+                        run_attempt=RUN_ATTEMPT,
+                        nonce=NONCE,
+                        rule_directory=cls.rule_directory,
+                        prometheus_origin=cls.origin,
+                        alertmanager_origin=cls.origin,
+                        oncall_receipt_origin=ONCALL_ORIGIN,
+                        oncall_receipt_token=ONCALL_TOKEN,
+                        oncall_url_file=cls.oncall_url_file,
+                        oncall_credentials_file=cls.oncall_credentials_file,
+                        expected_alertmanager_gid=123,
+                        receiver_name="market-sentinel-attestation",
+                        receiver_port=cls.receiver_port,
+                        output=cls.output,
+                        # Containerized macOS and Enterprise Linux runners can need more than fifteen seconds
+                        # for the complete rule, callback, receipt, and cleanup round trip.
+                        timeout_seconds=30,
+                        poll_interval_seconds=0.01,
+                        request_timeout_seconds=1.5,
+                        require_root_owned_oncall_files=False,
+                    ),
+                    origin_resolver=_public_resolver,
+                    receipt_fetcher=state.oncall_receipt,
+                    receiver_socket=cls.receiver_socket,
+                )
+            except BaseException as exc:
+                raise AssertionError(
+                    "collect_evidence failed during Prometheus delivery setup "
+                    f"(origin={cls.origin}, receiver_port={cls.receiver_port}, "
+                    f"rule_directory={cls.rule_directory})"
+                ) from exc
             cls.raw_sha256 = hashlib.sha256(cls.output.read_bytes()).hexdigest()
             cls.callback_error = state.callback_error
         except BaseException:
