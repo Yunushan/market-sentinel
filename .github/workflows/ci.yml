@@ -56,6 +56,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Normalize macOS test environment
+        if: startsWith(matrix.os, 'macos-')
+        shell: bash
+        run: |
+          tmp_root="${RUNNER_TEMP}/market-sentinel-tmp"
+          mkdir -p "$tmp_root"
+          chmod 700 "$tmp_root"
+          echo "TMPDIR=$tmp_root" >> "$GITHUB_ENV"
+          if [ -x /usr/bin/git ]; then
+            echo "PATH=/usr/bin:/bin:$PATH" >> "$GITHUB_ENV"
+          fi
+
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -106,6 +118,18 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Normalize macOS test environment
+        if: startsWith(matrix.os, 'macos-')
+        shell: bash
+        run: |
+          tmp_root="${RUNNER_TEMP}/market-sentinel-tmp"
+          mkdir -p "$tmp_root"
+          chmod 700 "$tmp_root"
+          echo "TMPDIR=$tmp_root" >> "$GITHUB_ENV"
+          if [ -x /usr/bin/git ]; then
+            echo "PATH=/usr/bin:/bin:$PATH" >> "$GITHUB_ENV"
+          fi
 
       - name: Set up future Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
