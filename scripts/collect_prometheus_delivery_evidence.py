@@ -1228,6 +1228,39 @@ def _receiver_handler(
     return Handler
 
 
+class _PreboundThreadingHTTPServer(ThreadingHTTPServer):
+    """Serve from a validated socket that was bound before the collector started."""
+
+    def __init__(self, receiver_socket: socket.socket, handler: type[BaseHTTPRequestHandler]) -> None:
+        receiver_address = receiver_socket.getsockname()
+        super().__init__(receiver_address, handler, bind_and_activate=False)
+        self.socket.close()
+        self.socket = receiver_socket
+        self.server_address = receiver_address
+        self.server_activate()
+
+
+def _build_receiver_server(
+    receiver_port: int,
+    handler: type[BaseHTTPRequestHandler],
+    receiver_socket: socket.socket | None,
+) -> ThreadingHTTPServer:
+    if receiver_socket is None:
+        return ThreadingHTTPServer(("127.0.0.1", receiver_port), handler)
+    try:
+        if receiver_socket.family != socket.AF_INET or receiver_socket.type & socket.SOCK_STREAM != socket.SOCK_STREAM:
+            raise DeliveryEvidenceError("controlled receiver socket must be an IPv4 stream socket")
+        address = receiver_socket.getsockname()
+        if address != ("127.0.0.1", receiver_port):
+            raise DeliveryEvidenceError("controlled receiver socket is not bound to the configured loopback port")
+        if receiver_socket.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN) != 1:
+            raise DeliveryEvidenceError("controlled receiver socket must already be listening")
+        return _PreboundThreadingHTTPServer(receiver_socket, handler)
+    except BaseException:
+        receiver_socket.close()
+        raise
+
+
 def _validate_config(
     config: CollectorConfig,
     *,
@@ -1407,6 +1440,7 @@ def collect_evidence(
     sleeper: Callable[[float], None] = time.sleep,
     origin_resolver: Callable[..., Any] = socket.getaddrinfo,
     receipt_fetcher: Callable[..., dict[str, Any]] = oncall_receipt_observation,
+    receiver_socket: socket.socket | None = None,
 ) -> dict[str, Any]:
     revision, deployment, nonce, rule_directory, oncall_target, oncall_token = _validate_config(
         config,
@@ -1449,9 +1483,10 @@ def collect_evidence(
     )
     rule_path = rule_directory / rule_filename(binding)
     receipts: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=4)
-    server = ThreadingHTTPServer(
-        ("127.0.0.1", config.receiver_port),
+    server = _build_receiver_server(
+        config.receiver_port,
         _receiver_handler(receipts, labels, config.receiver_name),
+        receiver_socket,
     )
     server.daemon_threads = True
     receiver_thread = threading.Thread(target=server.serve_forever, name="alertmanager-attestation-receiver", daemon=True)

@@ -62,10 +62,12 @@ def _public_resolver(host: str, port: int, **_: Any) -> list[tuple[Any, ...]]:
     return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", port))]
 
 
-def _free_loopback_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as candidate:
-        candidate.bind(("127.0.0.1", 0))
-        return int(candidate.getsockname()[1])
+def _reserved_loopback_socket() -> socket.socket:
+    candidate = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    candidate.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    candidate.bind(("127.0.0.1", 0))
+    candidate.listen()
+    return candidate
 
 
 class _FakeMonitoringState:
@@ -425,7 +427,8 @@ class PrometheusDeliveryEvidenceTests(unittest.TestCase):
         cls.oncall_credentials_file.write_text(ONCALL_TOKEN, encoding="utf-8")
         cls.oncall_url_file.chmod(0o600)
         cls.oncall_credentials_file.chmod(0o600)
-        cls.receiver_port = _free_loopback_port()
+        cls.receiver_socket = _reserved_loopback_socket()
+        cls.receiver_port = int(cls.receiver_socket.getsockname()[1])
         state = _FakeMonitoringState(cls.rule_directory, receiver_url(cls.receiver_port))
         cls.state = state
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(state))
@@ -458,6 +461,7 @@ class PrometheusDeliveryEvidenceTests(unittest.TestCase):
             ),
             origin_resolver=_public_resolver,
             receipt_fetcher=state.oncall_receipt,
+            receiver_socket=cls.receiver_socket,
         )
         cls.raw_sha256 = hashlib.sha256(cls.output.read_bytes()).hexdigest()
         cls.callback_error = state.callback_error
