@@ -717,7 +717,8 @@ jobs:
 
       - name: Build Python distributions reproducibly
         run: |
-          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          source_date_epoch="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          export SOURCE_DATE_EPOCH="${source_date_epoch}"
           python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
           python -m pip install --no-cache-dir --require-hashes -r requirements.lock
           python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock

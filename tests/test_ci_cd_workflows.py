@@ -425,7 +425,7 @@ jobs:
             "windows-dist",
             "Windows x64 MSI installer",
             'node-version: "24"',
-            "sha256sum * > SHA256SUMS.txt",
+            "sha256sum -- * > SHA256SUMS.txt",
             "Generate SPDX SBOM",
             "scripts/generate_release_sbom.py",
             "Verify final release assets",
@@ -579,7 +579,7 @@ jobs:
         self.assertIn("verify /pa /all $embeddedExecutables[0].FullName", windows_app)
         self.assertIn("verify /pa /all $installer", windows_app)
         self.assertNotIn("Get-ChildItem release-assets -File", windows_app)
-        checksum_index = text.index("sha256sum * > SHA256SUMS.txt")
+        checksum_index = text.index("sha256sum -- * > SHA256SUMS.txt")
         notes_index = text.index("cat > release-assets/RELEASE_NOTES.md")
         self.assertLess(checksum_index, notes_index)
         metadata = text.split("  metadata:\n", 1)[1].split("  python-compatibility:\n", 1)[0]
@@ -822,6 +822,7 @@ jobs:
             "Download pinned gitleaks",
             'archive="gitleaks_${version}_linux_x64.tar.gz"',
             "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb",
+            "--config .gitleaks.toml",
             '--log-opts="--all"',
             "Frontend dependency audit",
             "npm ci --ignore-scripts",

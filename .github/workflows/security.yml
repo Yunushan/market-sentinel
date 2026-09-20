@@ -114,6 +114,7 @@ jobs:
         run: |
           set -euo pipefail
           "${RUNNER_TEMP}/gitleaks/gitleaks" detect \
+            --config .gitleaks.toml \
             --source . \
             --log-opts="--all" \
             --redact \

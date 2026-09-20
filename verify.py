@@ -1685,7 +1685,7 @@ def run_ci_cd_workflow_check() -> None:
             "--second-dir dist-repro",
             "git archive --format=tar",
             "windows-dist",
-            "sha256sum * > SHA256SUMS.txt",
+            "sha256sum -- * > SHA256SUMS.txt",
             "Generate SPDX SBOM",
             "scripts/generate_release_sbom.py",
             "runs-on: ubuntu-24.04",
@@ -1736,6 +1736,7 @@ def run_ci_cd_workflow_check() -> None:
             "Download pinned gitleaks",
             'archive="gitleaks_${version}_linux_x64.tar.gz"',
             "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb",
+            "--config .gitleaks.toml",
             '--log-opts="--all"',
         ),
         ROOT / ".github" / "dependabot.yml": (

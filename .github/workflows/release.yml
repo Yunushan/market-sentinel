@@ -96,12 +96,14 @@ jobs:
             --draft "${draft}" \
             --configured-required "${WINDOWS_SIGNING_CONFIGURED}")"
 
-          echo "tag_name=${tag_name}" >> "${GITHUB_OUTPUT}"
-          echo "version=${version}" >> "${GITHUB_OUTPUT}"
-          echo "prerelease=${prerelease}" >> "${GITHUB_OUTPUT}"
-          echo "draft=${draft}" >> "${GITHUB_OUTPUT}"
-          echo "source_date_epoch=${source_date_epoch}" >> "${GITHUB_OUTPUT}"
-          echo "windows_signing_required=${windows_signing_required}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "tag_name=${tag_name}"
+            echo "version=${version}"
+            echo "prerelease=${prerelease}"
+            echo "draft=${draft}"
+            echo "source_date_epoch=${source_date_epoch}"
+            echo "windows_signing_required=${windows_signing_required}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Validate package version matches release tag
         env:
@@ -661,7 +663,6 @@ jobs:
         shell: bash
         run: |
           tag="${{ needs.metadata.outputs.tag_name }}"
-          version="${{ needs.metadata.outputs.version }}"
           if [ "${WINDOWS_SIGNED}" = "true" ]; then
             windows_signing_note='- Windows EXE/MSI packages Authenticode-signed and verified'
           else
@@ -669,7 +670,7 @@ jobs:
           fi
           (
             cd release-assets
-            sha256sum * > SHA256SUMS.txt
+            sha256sum -- * > SHA256SUMS.txt
           )
           cat > release-assets/RELEASE_NOTES.md <<EOF
           ## ${APP_NAME} ${tag}
