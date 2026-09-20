@@ -40,10 +40,12 @@ governance contract and must not claim 100/100 readiness.
 2. Enable private vulnerability reporting.
 3. Review and merge or close the active Dependabot pull requests after CI.
 4. In `Actions` -> `General`, allow selected actions only, permit GitHub-owned
-   actions, explicitly allow the reviewed `gitleaks/gitleaks-action` and
-   `raven-actions/actionlint` actions, and keep SHA pinning required. Every
-   checked-in action reference is pinned to a full commit SHA; do not broaden
-   the allowlist without reviewing the new action's provenance and permissions.
+   actions, and keep SHA pinning required. The `Security` workflow downloads
+   the reviewed actionlint and gitleaks release binaries directly and verifies
+   their SHA-256 digests before execution, so no third-party GitHub Actions need
+   to be added to the allowlist. Every checked-in action reference is pinned to
+   a full commit SHA; do not broaden the allowlist without reviewing the new
+   action's provenance and permissions.
 5. Enable non-provider secret-pattern scanning when GitHub makes that control
    available for the repository plan. It complements, but does not replace,
    secret scanning push protection and the source-level secret hygiene gate.

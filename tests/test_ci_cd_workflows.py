@@ -812,6 +812,17 @@ jobs:
             "actions/dependency-review-action",
             "security-events: write",
             "fail-on-severity: high",
+            "Secret history scan",
+            "fetch-depth: 0",
+            "Download pinned actionlint",
+            'archive="actionlint_${version}_linux_amd64.tar.gz"',
+            "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
+            "Install pinned pyflakes",
+            "pyflakes==3.4.0",
+            "Download pinned gitleaks",
+            'archive="gitleaks_${version}_linux_x64.tar.gz"',
+            "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb",
+            '--log-opts="--all"',
             "Frontend dependency audit",
             "npm ci --ignore-scripts",
             "npm audit --audit-level=high",
@@ -843,6 +854,8 @@ jobs:
                 },
             ),
         )
+        self.assertNotIn("raven-actions/actionlint", security)
+        self.assertNotIn("gitleaks/gitleaks-action", security)
 
         for fragment in (
             "package-ecosystem: github-actions",
