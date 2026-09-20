@@ -407,6 +407,21 @@ def _handler(state: _FakeMonitoringState) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
+def _wait_for_http_server(server: ThreadingHTTPServer) -> None:
+    url = f"http://127.0.0.1:{server.server_port}/api/v1/rules?type=alerting"
+    deadline = time.monotonic() + 5
+    last_error: OSError | None = None
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=0.5) as response:  # noqa: S310 - fixed loopback test URL.
+                if response.status == 200:
+                    return
+        except OSError as exc:
+            last_error = exc
+        time.sleep(0.01)
+    raise AssertionError(f"fake monitoring server did not become ready: {last_error}")
+
+
 class PrometheusDeliveryEvidenceTests(unittest.TestCase):
     def test_utc_now_is_strictly_monotonic(self) -> None:
         values = [utc_now() for _ in range(100)]
@@ -436,6 +451,7 @@ class PrometheusDeliveryEvidenceTests(unittest.TestCase):
             cls.server.daemon_threads = True
             cls.server_thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
             cls.server_thread.start()
+            _wait_for_http_server(cls.server)
             cls.origin = f"http://127.0.0.1:{cls.server.server_port}"
             cls.payload = collect_evidence(
                 CollectorConfig(
