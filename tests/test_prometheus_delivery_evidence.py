@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import errno
 import hashlib
 import json
 import os
@@ -26,6 +27,7 @@ from scripts.collect_prometheus_delivery_evidence import (
     DeliveryEvidenceError,
     ONCALL_RECEIPT_TYPE,
     _PinnedHTTPSConnection,
+    _assert_listening_socket,
     _resolve_public_https_origin,
     _validate_private_config_metadata,
     canonical_public_https_origin,
@@ -431,6 +433,18 @@ class PrometheusDeliveryEvidenceTests(unittest.TestCase):
 
         self.assertEqual(values, sorted(values))
         self.assertEqual(len(values), len(set(values)))
+
+    def test_listener_validation_falls_back_when_acceptconn_is_unavailable(self) -> None:
+        receiver_socket = _reserved_loopback_socket()
+        try:
+            with mock.patch.object(
+                socket.socket,
+                "getsockopt",
+                side_effect=OSError(errno.ENOPROTOOPT, "protocol option unavailable"),
+            ):
+                _assert_listening_socket(receiver_socket)
+        finally:
+            receiver_socket.close()
 
     @classmethod
     def setUpClass(cls) -> None:

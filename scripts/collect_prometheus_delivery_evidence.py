@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import http.client
 import ipaddress
@@ -1248,6 +1249,46 @@ class _PreboundThreadingHTTPServer(ThreadingHTTPServer):
         self.server_activate()
 
 
+def _assert_listening_socket(receiver_socket: socket.socket) -> None:
+    """Validate a TCP listener without relying on Darwin-only socket behavior."""
+
+    acceptconn = getattr(socket, "SO_ACCEPTCONN", None)
+    if acceptconn is not None:
+        try:
+            if receiver_socket.getsockopt(socket.SOL_SOCKET, acceptconn) == 1:
+                return
+            raise DeliveryEvidenceError("controlled receiver socket must already be listening")
+        except OSError as exc:
+            unsupported = {
+                errno.EINVAL,
+                errno.ENOPROTOOPT,
+                errno.EOPNOTSUPP,
+                getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+            }
+            if exc.errno not in unsupported:
+                raise DeliveryEvidenceError(
+                    "unable to validate controlled receiver socket listener state"
+                ) from exc
+
+    previous_timeout = receiver_socket.gettimeout()
+    accepted: socket.socket | None = None
+    try:
+        receiver_socket.setblocking(False)
+        try:
+            accepted, _ = receiver_socket.accept()
+        except BlockingIOError:
+            return
+        except OSError as exc:
+            if exc.errno in {errno.EAGAIN, errno.EWOULDBLOCK}:
+                return
+            raise DeliveryEvidenceError("controlled receiver socket must already be listening") from exc
+        return
+    finally:
+        if accepted is not None:
+            accepted.close()
+        receiver_socket.settimeout(previous_timeout)
+
+
 def _build_receiver_server(
     receiver_port: int,
     handler: type[BaseHTTPRequestHandler],
@@ -1261,8 +1302,7 @@ def _build_receiver_server(
         address = receiver_socket.getsockname()
         if address != ("127.0.0.1", receiver_port):
             raise DeliveryEvidenceError("controlled receiver socket is not bound to the configured loopback port")
-        if receiver_socket.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN) != 1:
-            raise DeliveryEvidenceError("controlled receiver socket must already be listening")
+        _assert_listening_socket(receiver_socket)
         return _PreboundThreadingHTTPServer(receiver_socket, handler)
     except BaseException:
         receiver_socket.close()
