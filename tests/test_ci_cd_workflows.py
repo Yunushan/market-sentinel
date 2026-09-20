@@ -10,6 +10,22 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class CiCdWorkflowTests(unittest.TestCase):
+    def test_browser_workflows_gate_frontend_artifact_publication(self) -> None:
+        text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        frontend = text.split("  frontend:\n", 1)[1].split("  mobile-web:\n", 1)[0]
+        for fragment in (
+            "npx playwright install --with-deps chromium firefox webkit",
+            "python scripts/verify_browser_workflows.py",
+            "--require-hashes -r requirements-test.lock",
+            "frontend/test-results/",
+            "frontend/playwright-report/",
+            "if: always()",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, frontend)
+        self.assertNotIn("continue-on-error", frontend)
+        self.assertLess(frontend.index("Verify browser workflows"), frontend.index("Upload built frontend"))
+
     def test_ci_workflow_covers_python_frontend_and_artifacts(self) -> None:
         text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
@@ -655,8 +671,8 @@ class CiCdWorkflowTests(unittest.TestCase):
                     "actions/setup-python": (7, "5fda3b95a4ea91299a34e894583c3862153e4b97"),
                     "actions/setup-node": (7, "820762786026740c76f36085b0efc47a31fe5020"),
                     "actions/dependency-review-action": (5, "a1d282b36b6f3519aa1f3fc636f609c47dddb294"),
-                    "github/codeql-action/init": (4, "db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28"),
-                    "github/codeql-action/analyze": (4, "db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28"),
+                    "github/codeql-action/init": (4, "cdf488f595d80d6e07e03d4674febd5ab45fa938"),
+                    "github/codeql-action/analyze": (4, "cdf488f595d80d6e07e03d4674febd5ab45fa938"),
                 },
             ),
         )
