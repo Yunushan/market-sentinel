@@ -471,7 +471,9 @@ class PrometheusDeliveryEvidenceTests(unittest.TestCase):
                     receiver_name="market-sentinel-attestation",
                     receiver_port=cls.receiver_port,
                     output=cls.output,
-                    timeout_seconds=5,
+                    # Containerized macOS and Enterprise Linux runners can need more than five seconds
+                    # for the complete rule, callback, receipt, and cleanup round trip.
+                    timeout_seconds=15,
                     poll_interval_seconds=0.01,
                     request_timeout_seconds=1,
                     require_root_owned_oncall_files=False,
