@@ -1376,7 +1376,7 @@ def _create_rule(path: Path, content: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         if os.name == "posix":
-            os.chmod(path, 0o644, follow_symlinks=False)
+            os.fchmod(descriptor, 0o644)
     finally:
         os.close(descriptor)
 
