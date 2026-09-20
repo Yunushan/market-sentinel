@@ -33,8 +33,8 @@ class VerifierCoverageTests(unittest.TestCase):
                 verify.run_static_analysis()
 
     def test_branch_coverage_policy_has_overall_and_backend_floors(self) -> None:
-        self.assertGreaterEqual(verify.MIN_TOTAL_BRANCH_COVERAGE, 65.0)
-        self.assertGreaterEqual(verify.MIN_BACKEND_BRANCH_COVERAGE, 74.0)
+        self.assertGreaterEqual(verify.MIN_TOTAL_BRANCH_COVERAGE, 72.0)
+        self.assertGreaterEqual(verify.MIN_BACKEND_BRANCH_COVERAGE, 76.0)
         self.assertIn("web_api.py", verify.BACKEND_COVERAGE_INCLUDE)
         self.assertIn("market_sentinel_cli.py", verify.BACKEND_COVERAGE_INCLUDE)
         self.assertEqual(verify.RESOURCE_WARNING_POLICY, "error::ResourceWarning")

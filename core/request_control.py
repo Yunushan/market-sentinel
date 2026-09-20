@@ -19,6 +19,11 @@ except ModuleNotFoundError as exc:
 
 
 POLL_SECONDS = 0.05
+# A socket timeout can be reported just before the monotonic deadline because
+# operating-system timers have coarser precision.  Wait only this small final
+# slice before deciding whether the *overall* deadline, rather than a shorter
+# transport phase timeout, actually expired.
+TRANSPORT_TIMEOUT_DEADLINE_TOLERANCE_SECONDS = 0.01
 MAX_DNS_LOOKUPS = 16
 _dns_slots = threading.BoundedSemaphore(MAX_DNS_LOOKUPS)
 _current: ContextVar[Optional["RequestControl"]] = ContextVar("http_request_control", default=None)
@@ -293,13 +298,38 @@ def controlled_response(_timeout: float, call: Callable[..., Any], *args: Any, *
             response = call(*args, **kwargs)
             control.check()
             return _attach_response(response, control, owned=existing is None)
-    except BaseException:
+    except BaseException as exc:
         try:
             if response is not None:
                 close = getattr(response, "close", None)
                 if callable(close):
                     close()
             control.check()
+            # Scalar transport timeouts normally share this overall budget,
+            # but Requests also accepts shorter connect/read phase values in a
+            # tuple. Preserve those intentional phase timeouts. Only wait out
+            # a narrow OS-timer rounding gap, then let check() confirm that the
+            # monotonic overall deadline truly expired.
+            transport_timeout = kwargs.get("timeout")
+            phase_timeout_configured = isinstance(transport_timeout, tuple)
+            if (
+                existing is None
+                and isinstance(exc, _Timeout)
+                and not isinstance(exc, RequestDeadlineExceeded)
+                and not phase_timeout_configured
+            ):
+                remaining = control.deadline - time.monotonic()
+                if 0 < remaining <= TRANSPORT_TIMEOUT_DEADLINE_TOLERANCE_SECONDS:
+                    try:
+                        # Windows waits can themselves return a fraction early;
+                        # re-check until the monotonic deadline is reached or
+                        # the clock shows this was not merely the final slice.
+                        while 0 < remaining <= TRANSPORT_TIMEOUT_DEADLINE_TOLERANCE_SECONDS:
+                            control._finished.wait(remaining)
+                            control.check()
+                            remaining = control.deadline - time.monotonic()
+                    except RequestDeadlineExceeded as deadline:
+                        raise deadline from exc
         finally:
             if existing is None:
                 control.close()

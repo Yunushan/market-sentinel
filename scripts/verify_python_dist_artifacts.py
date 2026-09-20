@@ -13,17 +13,21 @@ except ModuleNotFoundError:  # Direct execution adds scripts/, rather than the r
 
 
 REQUIRED_WHEEL_MEMBERS = {
+    "core/unattended_worker.py",
     "market_sentinel_cli.py",
     "market_adapters/crypto_com_predict.py",
     "market_adapters/registry.py",
+    "polymarket/funded_policy.py",
     "polymarket/leaderboard_state.py",
 }
 
 REQUIRED_SDIST_MEMBERS = {
     ".github/actionlint.yaml",
     ".github/workflows/ci.yml",
+    ".github/workflows/security.yml",
     ".github/workflows/release.yml",
     ".github/workflows/deployment-evidence.yml",
+    ".github/workflows/polymarket-evidence.yml",
     "CONTRIBUTING.md",
     "LICENSE",
     "MANIFEST.in",
@@ -31,10 +35,22 @@ REQUIRED_SDIST_MEMBERS = {
     "assets/marketsentinel.svg",
     "data/config.example.json",
     "deploy/caddy/Caddyfile.example",
+    "deploy/prometheus/market-sentinel-alerts.yml",
+    "deploy/prometheus/market-sentinel-attestation-alertmanager.yml.example",
+    "deploy/prometheus/market-sentinel-attestation-prometheus.yml.example",
+    "deploy/prometheus/market-sentinel-scrape.yml",
+    "deploy/systemd/market-sentinel-alerts-refresh.service",
+    "deploy/systemd/market-sentinel-alerts-refresh.timer",
     "deploy/systemd/market-sentinel-backup.service",
     "deploy/systemd/market-sentinel-backup.timer",
     "deploy/systemd/market-sentinel-health.service",
     "deploy/systemd/market-sentinel-health.timer",
+    "deploy/systemd/market-sentinel-health.env.example",
+    "deploy/systemd/market-sentinel-wallets-poll.service",
+    "deploy/systemd/market-sentinel-wallets-poll.timer",
+    "deploy/systemd/market-sentinel-worker.env.example",
+    "deploy/systemd/market-sentinel.env.example",
+    "deploy/systemd/market-sentinel.conf",
     "deploy/systemd/market-sentinel-web.service",
     "docs/BLOCKERS.md",
     "docs/PRODUCTION_OPERATIONS.md",
@@ -60,16 +76,25 @@ REQUIRED_SDIST_MEMBERS = {
     "scripts/verify_dependency_lock.py",
     "scripts/verify_browser_workflows.py",
     "scripts/collect_platform_evidence.py",
+    "scripts/collect_prometheus_delivery_evidence.py",
     "scripts/run_platform_evidence.py",
     "scripts/review_platform_evidence.py",
+    "scripts/review_prometheus_delivery_evidence.py",
     "scripts/review_deployment_evidence.py",
     "scripts/generate_deployment_evidence.py",
     "scripts/backup_state.py",
+    "scripts/build_windows_release.py",
+    "scripts/create_reproducible_zip.py",
+    "scripts/normalize_python_sdist.py",
+    "scripts/regenerate_dependency_locks.py",
     "scripts/verify_polymarket_live.py",
     "scripts/restore_state_backup.py",
     "scripts/verify_production_deployment.py",
     "scripts/verify_release_provenance.py",
     "scripts/verify_release_assets.py",
+    "scripts/verify_release_policy.py",
+    "scripts/verify_reproducible_python_dist.py",
+    "scripts/verify_service_health.py",
     "scripts/release_version.py",
     "tests/fixtures/crypto_com_predict/events.json",
     "tests/fixtures/crypto_com_predict/contracts.json",
@@ -78,6 +103,9 @@ REQUIRED_SDIST_MEMBERS = {
     "tests/fixtures/hypermind/prices.csv",
     "tests/fixtures/iowa_electronic_markets/powell_price_data.txt",
     "tests/test_crypto_com_predict_adapter.py",
+    "tests/test_prometheus_delivery_evidence.py",
+    "tests/test_funded_token_policy.py",
+    "tests/test_unattended_worker.py",
 }
 
 EXPECTED_LICENSE_EXPRESSION = "0BSD"
@@ -162,8 +190,17 @@ def verify_wheel(path: Path, expected_version: str) -> None:
                 f"Wheel {path.name} must expose py-clob-client-v2 only through the live extra."
             )
         _verify_license_text(archive.read(license_name).decode("utf-8"), f"Wheel {path.name} LICENSE")
-        if "market-sentinel = market_sentinel_cli:main" not in archive.read(entry_points_name).decode("utf-8"):
-            raise SystemExit(f"Wheel {path.name} is missing the market-sentinel CLI entry point.")
+        entry_points = archive.read(entry_points_name).decode("utf-8")
+        required_entry_points = {
+            "market-sentinel = market_sentinel_cli:main",
+            "market-sentinel-worker = core.unattended_worker:main",
+        }
+        missing_entry_points = sorted(item for item in required_entry_points if item not in entry_points)
+        if missing_entry_points:
+            raise SystemExit(
+                f"Wheel {path.name} is missing required CLI entry points: "
+                + ", ".join(missing_entry_points)
+            )
 
 
 def verify_sdist(path: Path, expected_version: str) -> None:

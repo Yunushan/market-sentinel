@@ -78,7 +78,7 @@ class ProjectMetadataTests(unittest.TestCase):
         frontend_package = (ROOT / "frontend" / "package.json").read_text(encoding="utf-8")
         name = data["project"]["name"]
 
-        self.assertEqual(data["build-system"]["requires"], ["setuptools>=77"])
+        self.assertEqual(data["build-system"]["requires"], ["setuptools==84.0.0"])
         self.assertEqual(name, PROJECT_NAME)
         self.assertNotIn("_", name)
         self.assertEqual(data["project"]["requires-python"], ">=3.10")
@@ -159,6 +159,21 @@ class ProjectMetadataTests(unittest.TestCase):
                 "requirements-build.txt",
                 "requirements-security.lock",
                 "requirements-security.txt",
+                "deploy/prometheus/market-sentinel-alerts.yml",
+                "deploy/prometheus/market-sentinel-attestation-alertmanager.yml.example",
+                "deploy/prometheus/market-sentinel-attestation-prometheus.yml.example",
+                "deploy/prometheus/market-sentinel-scrape.yml",
+                "deploy/systemd/market-sentinel-alerts-refresh.service",
+                "deploy/systemd/market-sentinel-alerts-refresh.timer",
+                "deploy/systemd/market-sentinel-health.env.example",
+                "deploy/systemd/market-sentinel-wallets-poll.service",
+                "deploy/systemd/market-sentinel-wallets-poll.timer",
+                "deploy/systemd/market-sentinel-worker.env.example",
+                "scripts/collect_prometheus_delivery_evidence.py",
+                "scripts/regenerate_dependency_locks.py",
+                "scripts/review_prometheus_delivery_evidence.py",
+                "tests/test_prometheus_delivery_evidence.py",
+                "tests/test_unattended_worker.py",
                 "tests/fixtures/hypermind/outcomes.txt",
                 "tests/fixtures/hypermind/prices.csv",
                 "tests/fixtures/iowa_electronic_markets/powell_price_data.txt",

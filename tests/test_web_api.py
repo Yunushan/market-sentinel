@@ -117,7 +117,9 @@ from web_api import (
     refresh_alert_price,
     ReactGuiHandler,
     ReactGuiServer,
+    _read_api_token_file,
     _normalize_allowed_origin,
+    _validated_remote_api_token,
     _safe_attachment_filename,
     _safe_http_header_value,
     static_cache_control,
@@ -363,6 +365,7 @@ class WebApiTests(unittest.TestCase):
         frontend_dir: Path,
         *,
         api_token: str = "",
+        observability_token: str = "",
         max_http_workers: int = MAX_HTTP_WORKERS,
         max_mutation_workers: int | None = None,
         mutation_lock_timeout_seconds: float = 5.0,
@@ -375,6 +378,7 @@ class WebApiTests(unittest.TestCase):
                 frontend_dir=frontend_dir,
                 adapter_registry=FakeRegistry(FakePaperAdapter()),
                 api_token=api_token,
+                observability_token=observability_token,
                 max_http_workers=max_http_workers,
                 max_mutation_workers=max_mutation_workers,
                 mutation_lock_timeout_seconds=mutation_lock_timeout_seconds,
@@ -456,6 +460,43 @@ class WebApiTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "non-loopback"):
             ReactGuiServer(("0.0.0.0", 0), ReactGuiHandler)
+
+        weak_tokens = (
+            "short-token",
+            "a" * 64,
+            "test-token-1234567890-test-token-1234567890",
+            "0123456789abcdef" * 2,
+        )
+        for token in weak_tokens:
+            with self.subTest(token=token), self.assertRaisesRegex(ValueError, "non-loopback API token|predictable"):
+                ReactGuiServer(("0.0.0.0", 0), ReactGuiHandler, api_token=token)
+
+        strong_token = "c9770e51b95ed9c8fa36e0b105bb751c1cf3bc37a7ed53497d2776566652286f"
+        self.assertEqual(_validated_remote_api_token(strong_token), strong_token)
+
+        with self.assertRaisesRegex(ValueError, "observability API token.*admin API token"):
+            ReactGuiServer(("127.0.0.1", 0), ReactGuiHandler, observability_token=strong_token)
+        with self.assertRaisesRegex(ValueError, "observability API token.*distinct"):
+            ReactGuiServer(
+                ("127.0.0.1", 0),
+                ReactGuiHandler,
+                api_token=strong_token,
+                observability_token=strong_token,
+            )
+        with self.assertRaisesRegex(ValueError, "admin API token.*at least"):
+            ReactGuiServer(
+                ("127.0.0.1", 0),
+                ReactGuiHandler,
+                api_token="loopback-admin",
+                observability_token="0b63a94c51e7d8f26430a91cbe75f36c48e1290b7a65dcf321a94760e8bd532f",
+            )
+        with self.assertRaisesRegex(ValueError, "observability API token.*at least"):
+            ReactGuiServer(
+                ("127.0.0.1", 0),
+                ReactGuiHandler,
+                api_token=strong_token,
+                observability_token="weak-observer",
+            )
 
     def test_server_uses_bounded_connection_and_shutdown_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1576,6 +1617,132 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(server.call_args.args, ("127.0.0.1", 9876, Path("state.json")))
         self.assertEqual(server.call_args.kwargs["frontend_dir"], frontend_dir)
 
+    def test_web_cli_reads_token_from_private_file_and_deprecates_argv_secret(self) -> None:
+        strong_token = "c9770e51b95ed9c8fa36e0b105bb751c1cf3bc37a7ed53497d2776566652286f"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            token_file = Path(tmpdir) / "api-token"
+            token_file.write_text(f"{strong_token}\n", encoding="utf-8")
+            if os.name != "nt":
+                token_file.chmod(0o600)
+            with patch(
+                "sys.argv",
+                ["web_api.py", "--api-token-file", str(token_file)],
+            ), patch("web_api.run_server") as server:
+                web_api_main()
+
+            self.assertEqual(server.call_args.kwargs["api_token"], strong_token)
+            self.assertEqual(_read_api_token_file(token_file), strong_token)
+
+        warning = io.StringIO()
+        with patch(
+            "sys.argv",
+            ["web_api.py", "--api-token", strong_token],
+        ), patch("web_api.run_server") as server, patch("sys.stderr", warning):
+            web_api_main()
+
+        self.assertEqual(server.call_args.kwargs["api_token"], strong_token)
+        self.assertIn("deprecated", warning.getvalue())
+
+        error = io.StringIO()
+        with patch(
+            "sys.argv",
+            ["web_api.py", "--host", "0.0.0.0", "--allow-remote", "--api-token", strong_token],
+        ), patch("web_api.run_server") as server, patch("sys.stderr", error), self.assertRaises(SystemExit) as ctx:
+            web_api_main()
+
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("not permitted for a non-loopback bind", error.getvalue())
+        server.assert_not_called()
+
+    def test_web_cli_reads_distinct_observability_token_from_file_and_environment(self) -> None:
+        admin_token = "c9770e51b95ed9c8fa36e0b105bb751c1cf3bc37a7ed53497d2776566652286f"
+        observability_token = "0b63a94c51e7d8f26430a91cbe75f36c48e1290b7a65dcf321a94760e8bd532f"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            admin_file = root / "admin-token"
+            observability_file = root / "observability-token"
+            admin_file.write_text(f"{admin_token}\n", encoding="utf-8")
+            observability_file.write_text(f"{observability_token}\n", encoding="utf-8")
+            if os.name != "nt":
+                admin_file.chmod(0o600)
+                observability_file.chmod(0o600)
+            with patch(
+                "sys.argv",
+                [
+                    "web_api.py",
+                    "--api-token-file",
+                    str(admin_file),
+                    "--observability-token-file",
+                    str(observability_file),
+                ],
+            ), patch("web_api.run_server") as server:
+                web_api_main()
+
+            self.assertEqual(server.call_args.kwargs["api_token"], admin_token)
+            self.assertEqual(server.call_args.kwargs["observability_token"], observability_token)
+
+        with patch.dict(
+            os.environ,
+            {
+                "MARKET_SENTINEL_API_TOKEN": admin_token,
+                "MARKET_SENTINEL_OBSERVABILITY_TOKEN": observability_token,
+            },
+            clear=False,
+        ), patch("sys.argv", ["web_api.py"]), patch("web_api.run_server") as server:
+            web_api_main()
+
+        self.assertEqual(server.call_args.kwargs["api_token"], admin_token)
+        self.assertEqual(server.call_args.kwargs["observability_token"], observability_token)
+
+        error = io.StringIO()
+        with patch.dict(
+            os.environ,
+            {"MARKET_SENTINEL_API_TOKEN": admin_token},
+            clear=False,
+        ), patch(
+            "sys.argv",
+            [
+                "web_api.py",
+                "--host",
+                "0.0.0.0",
+                "--allow-remote",
+                "--observability-token",
+                observability_token,
+            ],
+        ), patch("web_api.run_server") as server, patch("sys.stderr", error), self.assertRaises(SystemExit) as ctx:
+            web_api_main()
+
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("--observability-token is not permitted", error.getvalue())
+        server.assert_not_called()
+
+    def test_api_token_file_rejects_non_regular_and_oversized_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with self.assertRaisesRegex(ValueError, "regular, non-symlink"):
+                _read_api_token_file(root)
+
+            oversized = root / "oversized-token"
+            oversized.write_bytes(b"x" * 4097)
+            if os.name != "nt":
+                oversized.chmod(0o600)
+            with self.assertRaisesRegex(ValueError, "must not exceed"):
+                _read_api_token_file(oversized)
+
+    def test_api_token_file_rejects_symbolic_links(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "token"
+            link = root / "token-link"
+            target.write_text("not-used", encoding="utf-8")
+            try:
+                link.symlink_to(target)
+            except (NotImplementedError, OSError):
+                self.skipTest("symbolic links are unavailable for this test user")
+
+            with self.assertRaisesRegex(ValueError, "regular, non-symlink"):
+                _read_api_token_file(link)
+
     def test_dynamic_http_header_values_cannot_inject_response_headers(self) -> None:
         injected = 'report.csv\r\nSet-Cookie: compromised=true\n'
 
@@ -1648,7 +1815,70 @@ class WebApiTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=5)
 
-    def test_api_token_failures_are_rate_limited_and_valid_token_resets_limit(self) -> None:
+    def test_observability_token_is_limited_to_health_and_metrics(self) -> None:
+        admin_token = "c9770e51b95ed9c8fa36e0b105bb751c1cf3bc37a7ed53497d2776566652286f"
+        observability_token = "0b63a94c51e7d8f26430a91cbe75f36c48e1290b7a65dcf321a94760e8bd532f"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "frontend"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            server, thread, base_url = self._serve_api(
+                root / "config.json",
+                frontend_dir,
+                api_token=admin_token,
+                observability_token=observability_token,
+            )
+            observer_headers = {"Authorization": f"Bearer {observability_token}"}
+            admin_headers = {"Authorization": f"Bearer {admin_token}"}
+            try:
+                status, payload = self._request_json(base_url, "/api/health", headers=observer_headers)
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(payload["status"], "ok")
+
+                status, _headers, body = self._request_raw(
+                    base_url,
+                    "/metrics",
+                    headers={"X-Market-Sentinel-Token": observability_token},
+                )
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertIn(b"market_sentinel_http_requests_total", body)
+
+                for path in ("/api/state", "/api/config", "/"):
+                    with self.subTest(method="GET", path=path):
+                        status, payload = self._request_json(base_url, path, headers=observer_headers)
+                        self.assertEqual(status, HTTPStatus.UNAUTHORIZED)
+                        self.assertEqual(payload["error"]["code"], "api_token_required")
+
+                for method in ("POST", "PATCH", "DELETE"):
+                    with self.subTest(method=method):
+                        status, _headers, body = self._request_raw(
+                            base_url,
+                            "/api/config",
+                            method=method,
+                            headers=observer_headers,
+                        )
+                        self.assertEqual(status, HTTPStatus.UNAUTHORIZED)
+                        payload = json.loads(body.decode("utf-8"))
+                        self.assertEqual(payload["error"]["code"], "api_token_required")
+
+                status, payload = self._request_json(base_url, "/api/state", headers=admin_headers)
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertIn("config", payload)
+
+                status, payload = self._request_json(
+                    base_url,
+                    "/api/state",
+                    headers={"Authorization": "Bearer \u00ff"},
+                )
+                self.assertEqual(status, HTTPStatus.UNAUTHORIZED)
+                self.assertEqual(payload["error"]["code"], "api_token_required")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+    def test_valid_admin_token_does_not_clear_shared_peer_failure_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             frontend_dir = root / "frontend"
@@ -1673,8 +1903,51 @@ class WebApiTests(unittest.TestCase):
                 )
                 self.assertEqual(status, HTTPStatus.OK)
                 status, payload = self._request_json(base_url, "/api/health", headers={"Authorization": "Bearer wrong"})
-                self.assertEqual(status, HTTPStatus.UNAUTHORIZED)
-                self.assertEqual(payload["error"]["code"], "api_token_required")
+                self.assertEqual(status, HTTPStatus.TOO_MANY_REQUESTS)
+                self.assertEqual(payload["error"]["code"], "api_token_rate_limited")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+    def test_observability_scrape_does_not_clear_shared_peer_failure_limit(self) -> None:
+        admin_token = "c9770e51b95ed9c8fa36e0b105bb751c1cf3bc37a7ed53497d2776566652286f"
+        observability_token = "0b63a94c51e7d8f26430a91cbe75f36c48e1290b7a65dcf321a94760e8bd532f"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            frontend_dir = root / "frontend"
+            frontend_dir.mkdir()
+            (frontend_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            server, thread, base_url = self._serve_api(
+                root / "config.json",
+                frontend_dir,
+                api_token=admin_token,
+                observability_token=observability_token,
+            )
+            try:
+                for _ in range(10):
+                    status, _payload = self._request_json(
+                        base_url,
+                        "/api/health",
+                        headers={"Authorization": "Bearer wrong"},
+                    )
+                    self.assertEqual(status, HTTPStatus.UNAUTHORIZED)
+
+                status, _headers, body = self._request_raw(
+                    base_url,
+                    "/metrics",
+                    headers={"Authorization": f"Bearer {observability_token}"},
+                )
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertIn(b"market_sentinel_http_requests_total", body)
+
+                status, payload = self._request_json(
+                    base_url,
+                    "/api/health",
+                    headers={"Authorization": "Bearer wrong"},
+                )
+                self.assertEqual(status, HTTPStatus.TOO_MANY_REQUESTS)
+                self.assertEqual(payload["error"]["code"], "api_token_rate_limited")
             finally:
                 server.shutdown()
                 server.server_close()

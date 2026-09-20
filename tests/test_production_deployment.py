@@ -13,26 +13,41 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from pathlib import Path
 from stat import S_IFREG
+from typing import Callable
 from unittest.mock import call, patch
 from urllib.error import HTTPError
 from urllib.request import Request
 
 from core.deployment_identity import frontend_tree_sha256
+from core.unattended_worker import worker_invocation_sha256
 from scripts.backup_state import create_backup
 from scripts import verify_production_deployment as deployment
 from scripts.verify_production_deployment import (
+    ALLOWED_WORKER_ENVIRONMENT_KEYS,
     DURABLE_STATE_PATHS,
     PUBLIC_PROXY_AUTH_PROBES,
+    REQUIRED_HEALTH_SERVICE_PROPERTIES,
+    REQUIRED_UNATTENDED_SERVICE_CONTRACTS,
+    REQUIRED_SYSTEMD_TIMER_CONTRACTS,
+    REQUIRED_WORKER_EXEC_START_COMMANDS,
+    REQUIRED_WORKER_EXEC_START_PRE_COMMANDS,
+    REQUIRED_WORKER_SERVICE_PROPERTIES,
+    REQUIRED_WORKER_UNIT_CONTRACT_SHA256,
+    REQUIRED_WEB_EXEC_START_PRE_COMMANDS,
     check_backup_evidence,
     check_durable_state_wiring,
     check_evidence_output_directory,
     check_filesystem_permissions,
+    check_health_credential_isolation,
     check_loopback,
     check_loopback_metrics,
     check_loopback_token_auth,
     check_public_proxy,
     check_source_revision,
     check_systemd,
+    check_systemd_timer_contracts,
+    check_unattended_workers,
+    check_web_startup_preflight,
     _fsync_parent_directory,
     _validated_public_origin,
     build_evidence,
@@ -44,6 +59,243 @@ from scripts.verify_service_health import _RejectRedirects
 
 TEST_SOURCE_REVISION = "a" * 40
 TEST_FRONTEND_SHA256 = "b" * 64
+
+
+def _busctl_exec_start_pre(
+    commands: tuple[tuple[str, ...], ...] = REQUIRED_WEB_EXEC_START_PRE_COMMANDS,
+    *,
+    first_flags: tuple[str, ...] = (),
+    first_runtime: tuple[int, ...] = (1, 1, 2, 2, 42, 1, 0),
+) -> str:
+    parts = ["a(sasasttttuii)", str(len(commands))]
+    for index, command in enumerate(commands):
+        flags = first_flags if index == 0 else ()
+        runtime = first_runtime if index == 0 else (1, 1, 2, 2, 42, 1, 0)
+        parts.extend((json.dumps(command[0]), str(len(command))))
+        parts.extend(json.dumps(argument) for argument in command)
+        parts.append(str(len(flags)))
+        parts.extend(json.dumps(flag) for flag in flags)
+        parts.extend(str(value) for value in runtime)
+    return " ".join(parts)
+
+
+TEST_WEB_EXEC_START_PRE = _busctl_exec_start_pre()
+TEST_TIMER_PROPERTIES = {
+    ("market-sentinel-health.timer", "Unit"): "market-sentinel-health.service",
+    ("market-sentinel-health.timer", "Persistent"): "yes",
+    ("market-sentinel-health.timer", "TimersMonotonic"): (
+        "{ OnUnitActiveUSec=1min ; next_elapse=n/a } "
+        "{ OnBootSec=2min ; next_elapse=n/a }"
+    ),
+    ("market-sentinel-health.timer", "TimersCalendar"): "",
+    ("market-sentinel-health.timer", "AccuracyUSec"): "10s",
+    ("market-sentinel-backup.timer", "Unit"): "market-sentinel-backup.service",
+    ("market-sentinel-backup.timer", "Persistent"): "yes",
+    ("market-sentinel-backup.timer", "TimersMonotonic"): "",
+    ("market-sentinel-backup.timer", "TimersCalendar"): (
+        "{ OnCalendar=*-*-* 00:00:00 ; next_elapse=Fri 2026-09-18 00:00:00 UTC }"
+    ),
+    ("market-sentinel-backup.timer", "RandomizedDelayUSec"): "15min",
+    ("market-sentinel-alerts-refresh.timer", "Unit"): "market-sentinel-alerts-refresh.service",
+    ("market-sentinel-alerts-refresh.timer", "Persistent"): "yes",
+    ("market-sentinel-alerts-refresh.timer", "TimersMonotonic"): "",
+    ("market-sentinel-alerts-refresh.timer", "TimersCalendar"): (
+        "{ OnCalendar=*-*-* *:00/2:15 ; next_elapse=Thu 2026-09-17 12:02:15 UTC }"
+    ),
+    ("market-sentinel-alerts-refresh.timer", "AccuracyUSec"): "10s",
+    ("market-sentinel-alerts-refresh.timer", "RandomizedDelayUSec"): "10s",
+    ("market-sentinel-wallets-poll.timer", "Unit"): "market-sentinel-wallets-poll.service",
+    ("market-sentinel-wallets-poll.timer", "Persistent"): "yes",
+    ("market-sentinel-wallets-poll.timer", "TimersMonotonic"): "",
+    ("market-sentinel-wallets-poll.timer", "TimersCalendar"): (
+        "{ OnCalendar=*-*-* *:0/5:45 ; next_elapse=Thu 2026-09-17 12:05:45 UTC }"
+    ),
+    ("market-sentinel-wallets-poll.timer", "AccuracyUSec"): "10s",
+    ("market-sentinel-wallets-poll.timer", "RandomizedDelayUSec"): "10s",
+}
+TEST_WEB_SERVICE_PROPERTIES = {
+    ("market-sentinel-web.service", "User"): "market-sentinel",
+    ("market-sentinel-web.service", "Group"): "market-sentinel",
+    ("market-sentinel-web.service", "WorkingDirectory"): "/opt/market-sentinel",
+    ("market-sentinel-web.service", "Restart"): "on-failure",
+    ("market-sentinel-web.service", "PermissionsStartOnly"): "no",
+    ("market-sentinel-web.service", "RootDirectoryStartOnly"): "no",
+    ("market-sentinel-web.service", "UMask"): "0077",
+    ("market-sentinel-web.service", "NoNewPrivileges"): "yes",
+    ("market-sentinel-web.service", "PrivateTmp"): "yes",
+    ("market-sentinel-web.service", "PrivateDevices"): "yes",
+    ("market-sentinel-web.service", "ProtectClock"): "yes",
+    ("market-sentinel-web.service", "ProtectHostname"): "yes",
+    ("market-sentinel-web.service", "ProtectSystem"): "strict",
+    ("market-sentinel-web.service", "ProtectHome"): "yes",
+    ("market-sentinel-web.service", "ProtectKernelTunables"): "yes",
+    ("market-sentinel-web.service", "ProtectKernelModules"): "yes",
+    ("market-sentinel-web.service", "ProtectKernelLogs"): "yes",
+    ("market-sentinel-web.service", "ProtectControlGroups"): "yes",
+    ("market-sentinel-web.service", "ProtectProc"): "invisible",
+    ("market-sentinel-web.service", "ProcSubset"): "pid",
+    ("market-sentinel-web.service", "RestrictSUIDSGID"): "yes",
+    ("market-sentinel-web.service", "RestrictRealtime"): "yes",
+    ("market-sentinel-web.service", "RestrictNamespaces"): "yes",
+    ("market-sentinel-web.service", "SystemCallArchitectures"): "native",
+    ("market-sentinel-web.service", "LockPersonality"): "yes",
+    ("market-sentinel-web.service", "MemoryDenyWriteExecute"): "yes",
+    ("market-sentinel-web.service", "MemoryMax"): "1073741824",
+    ("market-sentinel-web.service", "TasksMax"): "128",
+    ("market-sentinel-web.service", "LimitNOFILE"): "4096",
+    ("market-sentinel-web.service", "RestrictAddressFamilies"): "AF_UNIX AF_INET AF_INET6",
+    ("market-sentinel-web.service", "ExecStart"): (
+        "{ path=/opt/market-sentinel/.venv/bin/python ; "
+        "argv[]=/opt/market-sentinel/.venv/bin/python -m web_api --host 127.0.0.1 "
+        "--port 8765 --config /var/lib/market-sentinel/config.json "
+        "--frontend-dir /opt/market-sentinel/frontend/dist ; }"
+    ),
+}
+
+
+def _worker_service_properties() -> dict[tuple[str, str], str]:
+    properties: dict[tuple[str, str], str] = {}
+    for service, contract in REQUIRED_UNATTENDED_SERVICE_CONTRACTS.items():
+        properties.update(
+            {
+                (service, name): value
+                for name, value in REQUIRED_WORKER_SERVICE_PROPERTIES.items()
+            }
+        )
+        properties.update(
+            {
+                (service, "RestrictAddressFamilies"): " ".join(contract["address_families"]),
+                (service, "EnvironmentFiles"): (
+                    f"{contract['environment_file']} (ignore_errors=no)"
+                ),
+                (service, "Environment"): "PYTHONUNBUFFERED=1",
+                (service, "PassEnvironment"): "",
+                (service, "UnsetEnvironment"): " ".join(contract["unset_environment"]),
+                (service, "ReadOnlyPaths"): " ".join(contract["read_only_paths"]),
+                (service, "ReadWritePaths"): " ".join(contract["read_write_paths"]),
+                (service, "CapabilityBoundingSet"): "",
+                (service, "AmbientCapabilities"): "",
+                (service, "TimeoutStartUSec"): "1min 45s",
+                (service, "TimeoutStopUSec"): "10s",
+            }
+        )
+    return properties
+
+
+TEST_WORKER_SERVICE_PROPERTIES = _worker_service_properties()
+TEST_WORKER_OBJECT_SERVICES = {
+    "/org/freedesktop/systemd1/unit/market_2dsentinel_2dalerts_2drefresh_2eservice": (
+        "market-sentinel-alerts-refresh.service"
+    ),
+    "/org/freedesktop/systemd1/unit/market_2dsentinel_2dwallets_2dpoll_2eservice": (
+        "market-sentinel-wallets-poll.service"
+    ),
+}
+
+
+def _iso_timestamp(value: float) -> str:
+    return datetime.fromtimestamp(value, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _successful_worker_state(now: float) -> tuple[dict[str, object], dict[str, float]]:
+    # Preserve fractional worker telemetry while the systemd fixture below
+    # intentionally exposes only whole-second completion timestamps.
+    finishes = {"alerts-refresh": now - 30.75, "wallets-poll": now - 45.25}
+    run_ids = {
+        "alerts-refresh": "00000000-0000-4000-8000-000000000101",
+        "wallets-poll": "00000000-0000-4000-8000-000000000102",
+    }
+    tasks: dict[str, object] = {}
+    for task, finished in finishes.items():
+        started = finished - 2
+        attempted = finished - 1
+        tasks[task] = {
+            "state": "succeeded",
+            "run_id": run_ids[task],
+            "pid": 4242,
+            "last_started_at": _iso_timestamp(started),
+            "last_started_at_unix": started,
+            "deadline_seconds": 90.0,
+            "max_attempts": 3,
+            "source_revision": TEST_SOURCE_REVISION,
+            "service_unit": next(
+                service
+                for service, identity in deployment.UNATTENDED_WORKER_SERVICES.items()
+                if identity["task"] == task
+            ),
+            "attempts_completed": 1,
+            "consecutive_failures": 0,
+            "abandoned_runs": 0,
+            "last_attempt_at": _iso_timestamp(attempted),
+            "last_attempt_at_unix": attempted,
+            "last_attempt_outcome": "succeeded",
+            "last_attempt_processed": 2,
+            "last_attempt_problems": 0,
+            "last_attempt_emitted": 1,
+            "last_finished_at": _iso_timestamp(finished),
+            "last_finished_at_unix": finished,
+            "last_duration_seconds": 2.0,
+            "last_outcome": "succeeded",
+            "last_processed": 2,
+            "last_problems": 0,
+            "last_emitted": 1,
+            "total_runs": 4,
+            "total_successes": 3,
+            "total_failures": 1,
+            "last_success_at": _iso_timestamp(finished),
+            "last_success_at_unix": finished,
+        }
+        service = tasks[task]["service_unit"]
+        contract_sha256 = REQUIRED_WORKER_UNIT_CONTRACT_SHA256[service]
+        tasks[task]["unit_contract_sha256"] = contract_sha256
+        tasks[task]["invocation_sha256"] = worker_invocation_sha256(
+            task=task,
+            service_unit=service,
+            source_revision=TEST_SOURCE_REVISION,
+            unit_contract_sha256=contract_sha256,
+        )
+    latest = max(finishes.values())
+    return (
+        {
+            "schema_version": 1,
+            "updated_at": _iso_timestamp(latest),
+            "updated_at_unix": latest,
+            "tasks": tasks,
+        },
+        finishes,
+    )
+
+
+def _worker_runner(
+    finishes: dict[str, float],
+    *,
+    property_overrides: dict[tuple[str, str], str] | None = None,
+    command_overrides: dict[tuple[str, str], tuple[tuple[str, ...], ...]] | None = None,
+) -> Callable[[list[str]], subprocess.CompletedProcess[str]]:
+    properties = {**TEST_WORKER_SERVICE_PROPERTIES, **(property_overrides or {})}
+    commands = command_overrides or {}
+
+    def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+        if args[0] == "busctl":
+            service = TEST_WORKER_OBJECT_SERVICES[args[4]]
+            property_name = args[6]
+            expected = (
+                (REQUIRED_WORKER_EXEC_START_COMMANDS[service],)
+                if property_name == "ExecStartEx"
+                else REQUIRED_WORKER_EXEC_START_PRE_COMMANDS
+            )
+            output = _busctl_exec_start_pre(commands.get((service, property_name), expected))
+            return subprocess.CompletedProcess(args, 0, output + "\n", "")
+        service = args[2]
+        if "--property=Result" in args:
+            task = REQUIRED_UNATTENDED_SERVICE_CONTRACTS[service]["task"]
+            completed = datetime.fromtimestamp(int(finishes[task]), timezone.utc)
+            timestamp = completed.strftime("%a %Y-%m-%d %H:%M:%S UTC")
+            return subprocess.CompletedProcess(args, 0, f"success\n0\n{timestamp}\n", "")
+        property_name = args[3].removeprefix("--property=")
+        return subprocess.CompletedProcess(args, 0, properties[(service, property_name)] + "\n", "")
+
+    return runner
 
 
 class _Response:
@@ -261,12 +513,413 @@ class ProductionDeploymentTests(unittest.TestCase):
     def test_systemd_checks_require_active_enabled_and_recent_backup(self) -> None:
         def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
             if args[1] == "show":
+                property_name = args[3].removeprefix("--property=")
+                timer_property = TEST_TIMER_PROPERTIES.get((args[2], property_name))
+                if timer_property is not None or (args[2], property_name) in TEST_TIMER_PROPERTIES:
+                    return subprocess.CompletedProcess(args, 0, timer_property + "\n", "")
                 return subprocess.CompletedProcess(args, 0, "success\n0\nThu 1970-01-01 00:16:39 UTC\n", "")
-            return subprocess.CompletedProcess(args, 0, "active\n", "")
+            state = "active" if args[1] == "is-active" else "enabled"
+            return subprocess.CompletedProcess(args, 0, state + "\n", "")
 
         checks = check_systemd(runner, clock=lambda: 1000.0)
-        self.assertEqual(len(checks), 7)
+        self.assertEqual(len(checks), 15)
         self.assertTrue(all(check["status"] == "pass" for check in checks))
+        recent_names = {
+            check["name"]
+            for check in checks
+            if check["name"].startswith("systemd_recent_success_")
+        }
+        self.assertEqual(
+            recent_names,
+            {
+                "systemd_recent_success_market-sentinel-health.service",
+                "systemd_recent_success_market-sentinel-backup.service",
+                "systemd_recent_success_market-sentinel-alerts-refresh.service",
+                "systemd_recent_success_market-sentinel-wallets-poll.service",
+            },
+        )
+
+    def test_systemd_checks_reject_runtime_only_enablement(self) -> None:
+        def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+            if args[1] == "show":
+                property_name = args[3].removeprefix("--property=")
+                timer_property = TEST_TIMER_PROPERTIES.get((args[2], property_name))
+                if timer_property is not None or (args[2], property_name) in TEST_TIMER_PROPERTIES:
+                    return subprocess.CompletedProcess(args, 0, timer_property + "\n", "")
+                return subprocess.CompletedProcess(args, 0, "success\n0\nThu 1970-01-01 00:16:39 UTC\n", "")
+            state = "active" if args[1] == "is-active" else "enabled-runtime"
+            return subprocess.CompletedProcess(args, 0, state + "\n", "")
+
+        checks = check_systemd(runner, clock=lambda: 1000.0)
+
+        enabled = [check for check in checks if check["name"].startswith("systemd_is-enabled_")]
+        self.assertEqual(len(enabled), 5)
+        self.assertTrue(all(check["status"] == "fail" for check in enabled))
+
+    def test_web_startup_preflight_attests_exact_ordered_commands(self) -> None:
+        def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+            self.assertEqual(
+                args,
+                [
+                    "busctl",
+                    "--system",
+                    "get-property",
+                    "org.freedesktop.systemd1",
+                    "/org/freedesktop/systemd1/unit/market_2dsentinel_2dweb_2eservice",
+                    "org.freedesktop.systemd1.Service",
+                    "ExecStartPreEx",
+                ],
+            )
+            return subprocess.CompletedProcess(args, 0, TEST_WEB_EXEC_START_PRE + "\n", "")
+
+        check = check_web_startup_preflight(runner)
+
+        self.assertEqual(check["status"], "pass", check)
+        self.assertEqual(check["command_count"], len(REQUIRED_WEB_EXEC_START_PRE_COMMANDS))
+        self.assertEqual(check["commands"], [list(command) for command in REQUIRED_WEB_EXEC_START_PRE_COMMANDS])
+        self.assertTrue(check["commands_succeeded"])
+
+    def test_web_startup_preflight_rejects_semantic_near_matches(self) -> None:
+        expected = REQUIRED_WEB_EXEC_START_PRE_COMMANDS
+        doctor = expected[-1]
+        wrong_config = tuple("/tmp/config.json" if value.endswith("/config.json") else value for value in doctor)
+        one_argument_guard = (expected[0][0], " ".join(expected[0][1:]))
+        mutated_commands = {
+            "missing strict": _busctl_exec_start_pre((*expected[:-1], tuple(value for value in doctor if value != "--strict"))),
+            "strictly": _busctl_exec_start_pre(
+                (*expected[:-1], tuple("--strictly" if value == "--strict" else value for value in doctor))
+            ),
+            "wrong config": _busctl_exec_start_pre((*expected[:-1], wrong_config)),
+            "shell wrapper": _busctl_exec_start_pre(
+                (("/bin/sh", "-c", " ".join(expected[0])), *expected[1:])
+            ),
+            "extra command": _busctl_exec_start_pre((*expected, ("/usr/bin/true",))),
+            "privileged flag": _busctl_exec_start_pre(first_flags=("privileged",)),
+            "no environment expansion flag": _busctl_exec_start_pre(first_flags=("no-env-expand",)),
+            "daemon reloaded but not run": _busctl_exec_start_pre(
+                first_runtime=(0, 0, 0, 0, 0, 0, 0)
+            ),
+            "missing completion timestamp": _busctl_exec_start_pre(
+                first_runtime=(1, 1, 0, 0, 42, 1, 0)
+            ),
+            "wrong command count": TEST_WEB_EXEC_START_PRE.replace(
+                "a(sasasttttuii) 5",
+                "a(sasasttttuii) 6",
+                1,
+            ),
+            "quoted single guard argument": _busctl_exec_start_pre((one_argument_guard, *expected[1:])),
+        }
+        for label, value in mutated_commands.items():
+            with self.subTest(label=label):
+                check = check_web_startup_preflight(
+                    lambda args, output=value: subprocess.CompletedProcess(args, 0, output + "\n", "")
+                )
+                self.assertEqual(check["status"], "fail", check)
+
+    def test_systemd_timer_contracts_attest_effective_targets_and_schedules(self) -> None:
+        health_serializations = (
+            TEST_TIMER_PROPERTIES[("market-sentinel-health.timer", "TimersMonotonic")],
+            "{ OnBootUSec=2min ; next_elapse=n/a } "
+            "{ OnUnitActiveUSec=1min ; next_elapse=n/a }",
+        )
+        for health_schedules in health_serializations:
+            with self.subTest(health_schedules=health_schedules):
+                properties = {
+                    **TEST_TIMER_PROPERTIES,
+                    ("market-sentinel-health.timer", "TimersMonotonic"): health_schedules,
+                }
+
+                def runner(
+                    args: list[str],
+                    values: dict[tuple[str, str], str] = properties,
+                ) -> subprocess.CompletedProcess[str]:
+                    key = (args[2], args[3].removeprefix("--property="))
+                    return subprocess.CompletedProcess(args, 0, values[key] + "\n", "")
+
+                check = check_systemd_timer_contracts(runner)
+
+                self.assertEqual(check["status"], "pass", check)
+                self.assertEqual(check["timer_count"], len(REQUIRED_SYSTEMD_TIMER_CONTRACTS))
+                self.assertEqual(check["timers"], REQUIRED_SYSTEMD_TIMER_CONTRACTS)
+
+    def test_systemd_timer_contracts_reject_changed_semantics(self) -> None:
+        mutations = {
+            "wrong unit": {
+                ("market-sentinel-health.timer", "Unit"): "market-sentinel-web.service",
+            },
+            "nonpersistent": {
+                ("market-sentinel-backup.timer", "Persistent"): "no",
+            },
+            "extra trigger": {
+                ("market-sentinel-health.timer", "TimersMonotonic"): (
+                    TEST_TIMER_PROPERTIES[("market-sentinel-health.timer", "TimersMonotonic")]
+                    + " { OnActiveUSec=30s ; next_elapse=n/a }"
+                ),
+            },
+            "duplicate trigger": {
+                ("market-sentinel-health.timer", "TimersMonotonic"): (
+                    TEST_TIMER_PROPERTIES[("market-sentinel-health.timer", "TimersMonotonic")]
+                    + " { OnBootUSec=2min ; next_elapse=n/a }"
+                ),
+            },
+            "wrong calendar": {
+                ("market-sentinel-backup.timer", "TimersCalendar"): (
+                    "{ OnCalendar=weekly ; next_elapse=Mon 2026-09-21 00:00:00 UTC }"
+                ),
+            },
+            "wrong accuracy": {
+                ("market-sentinel-health.timer", "AccuracyUSec"): "1min",
+            },
+            "wrong jitter": {
+                ("market-sentinel-backup.timer", "RandomizedDelayUSec"): "1h",
+            },
+        }
+        for label, changes in mutations.items():
+            with self.subTest(label=label):
+                properties = {**TEST_TIMER_PROPERTIES, **changes}
+
+                def runner(
+                    args: list[str],
+                    values: dict[tuple[str, str], str] = properties,
+                ) -> subprocess.CompletedProcess[str]:
+                    key = (args[2], args[3].removeprefix("--property="))
+                    return subprocess.CompletedProcess(args, 0, values[key] + "\n", "")
+
+                self.assertEqual(check_systemd_timer_contracts(runner)["status"], "fail")
+
+    def test_unattended_workers_attest_exact_units_scoped_environment_and_fresh_state(self) -> None:
+        now = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc).timestamp()
+        state, finishes = _successful_worker_state(now)
+        allowed_key = sorted(ALLOWED_WORKER_ENVIRONMENT_KEYS)[0]
+        secret_value = "read-scoped-value-not-for-evidence"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = root / "unattended-worker-state.json"
+            lock_path = root / ".unattended-worker.lock"
+            environment_path = root / "market-sentinel-worker.env"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            lock_path.write_text("0", encoding="ascii")
+            environment_path.write_text(
+                f"MARKET_SENTINEL_SOURCE_REVISION={TEST_SOURCE_REVISION}\n"
+                f"{allowed_key}={secret_value}\n",
+                encoding="utf-8",
+            )
+            check = check_unattended_workers(
+                _worker_runner(finishes),
+                state_path=state_path,
+                lock_path=lock_path,
+                environment_path=environment_path,
+                expected_revision=TEST_SOURCE_REVISION,
+                clock=lambda: now,
+            )
+
+        self.assertEqual(check["status"], "pass", check)
+        self.assertEqual(
+            check["environment_keys"],
+            sorted({allowed_key, "MARKET_SENTINEL_SOURCE_REVISION"}),
+        )
+        self.assertNotIn(secret_value, json.dumps(check, sort_keys=True))
+        self.assertEqual(check["service_contracts"], REQUIRED_UNATTENDED_SERVICE_CONTRACTS)
+        self.assertEqual(set(check["tasks"]), {"alerts-refresh", "wallets-poll"})
+        self.assertTrue(all(task["state"] == "succeeded" for task in check["tasks"].values()))
+
+    def test_unattended_workers_reject_unsafe_effective_service_contracts(self) -> None:
+        now = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc).timestamp()
+        state, finishes = _successful_worker_state(now)
+        alerts_service = "market-sentinel-alerts-refresh.service"
+        expected_alert_command = REQUIRED_WORKER_EXEC_START_COMMANDS[alerts_service]
+        mutations = {
+            "sandbox disabled": (
+                {(alerts_service, "NoNewPrivileges"): "no"},
+                {},
+            ),
+            "web environment loaded": (
+                {
+                    (alerts_service, "EnvironmentFiles"): (
+                        "/etc/market-sentinel/market-sentinel.env (ignore_errors=no)"
+                    )
+                },
+                {},
+            ),
+            "command has unreviewed argument": (
+                {},
+                {
+                    (alerts_service, "ExecStartEx"): (
+                        (*expected_alert_command, "--wallet-limit", "99"),
+                    )
+                },
+            ),
+        }
+        for label, (property_overrides, command_overrides) in mutations.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                state_path = root / "unattended-worker-state.json"
+                lock_path = root / ".unattended-worker.lock"
+                environment_path = root / "market-sentinel-worker.env"
+                state_path.write_text(json.dumps(state), encoding="utf-8")
+                lock_path.write_text("0", encoding="ascii")
+                environment_path.write_text(
+                    f"MARKET_SENTINEL_SOURCE_REVISION={TEST_SOURCE_REVISION}\n",
+                    encoding="utf-8",
+                )
+                check = check_unattended_workers(
+                    _worker_runner(
+                        finishes,
+                        property_overrides=property_overrides,
+                        command_overrides=command_overrides,
+                    ),
+                    state_path=state_path,
+                    lock_path=lock_path,
+                    environment_path=environment_path,
+                    expected_revision=TEST_SOURCE_REVISION,
+                    clock=lambda: now,
+                )
+            self.assertEqual(check["status"], "fail", check)
+
+    def test_unattended_worker_future_skew_is_bounded_to_five_seconds(self) -> None:
+        now = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc).timestamp()
+        for offset, expected_status in ((5.0, "pass"), (5.001, "fail")):
+            with self.subTest(offset=offset), tempfile.TemporaryDirectory() as tmp:
+                state, finishes = _successful_worker_state(now)
+                finished = now + offset
+                started = finished - 2
+                attempted = finished - 1
+                entry = state["tasks"]["alerts-refresh"]
+                entry.update(
+                    {
+                        "last_started_at": _iso_timestamp(started),
+                        "last_started_at_unix": started,
+                        "last_attempt_at": _iso_timestamp(attempted),
+                        "last_attempt_at_unix": attempted,
+                        "last_finished_at": _iso_timestamp(finished),
+                        "last_finished_at_unix": finished,
+                        "last_success_at": _iso_timestamp(finished),
+                        "last_success_at_unix": finished,
+                    }
+                )
+                finishes["alerts-refresh"] = finished
+                state["updated_at"] = _iso_timestamp(finished)
+                state["updated_at_unix"] = finished
+                root = Path(tmp)
+                state_path = root / "unattended-worker-state.json"
+                lock_path = root / ".unattended-worker.lock"
+                environment_path = root / "market-sentinel-worker.env"
+                state_path.write_text(json.dumps(state), encoding="utf-8")
+                lock_path.write_text("0", encoding="ascii")
+                environment_path.write_text(
+                    f"MARKET_SENTINEL_SOURCE_REVISION={TEST_SOURCE_REVISION}\n",
+                    encoding="utf-8",
+                )
+                check = check_unattended_workers(
+                    _worker_runner({**finishes, "alerts-refresh": finished - 2}),
+                    state_path=state_path,
+                    lock_path=lock_path,
+                    environment_path=environment_path,
+                    expected_revision=TEST_SOURCE_REVISION,
+                    clock=lambda: now,
+                )
+            self.assertEqual(check["status"], expected_status, check)
+
+    def test_unattended_workers_reject_disallowed_environment_keys_without_leaking_values(self) -> None:
+        now = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc).timestamp()
+        state, finishes = _successful_worker_state(now)
+        secret_value = "must-never-appear-in-evidence"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = root / "unattended-worker-state.json"
+            lock_path = root / ".unattended-worker.lock"
+            environment_path = root / "market-sentinel-worker.env"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            lock_path.write_text("0", encoding="ascii")
+            environment_path.write_text(
+                f"MARKET_SENTINEL_SOURCE_REVISION={TEST_SOURCE_REVISION}\n"
+                f"PRIVATE_KEY={secret_value}\n",
+                encoding="utf-8",
+            )
+            check = check_unattended_workers(
+                _worker_runner(finishes),
+                state_path=state_path,
+                lock_path=lock_path,
+                environment_path=environment_path,
+                expected_revision=TEST_SOURCE_REVISION,
+                clock=lambda: now,
+            )
+
+        self.assertEqual(check["status"], "fail")
+        self.assertNotIn(secret_value, json.dumps(check, sort_keys=True))
+
+    def test_unattended_workers_reject_stale_partial_and_type_confused_state(self) -> None:
+        now = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc).timestamp()
+        base_state, finishes = _successful_worker_state(now)
+
+        def remove_wallet(payload: dict[str, object]) -> None:
+            tasks = payload["tasks"]
+            assert isinstance(tasks, dict)
+            tasks.pop("wallets-poll")
+
+        def stringify_problem_count(payload: dict[str, object]) -> None:
+            tasks = payload["tasks"]
+            assert isinstance(tasks, dict)
+            tasks["alerts-refresh"]["last_problems"] = "0"
+
+        def stale_success(payload: dict[str, object]) -> None:
+            tasks = payload["tasks"]
+            assert isinstance(tasks, dict)
+            tasks["alerts-refresh"]["last_success_at_unix"] = now - 1_000
+            tasks["alerts-refresh"]["last_success_at"] = _iso_timestamp(now - 1_000)
+
+        def nonfinite_duration(payload: dict[str, object]) -> None:
+            tasks = payload["tasks"]
+            assert isinstance(tasks, dict)
+            tasks["alerts-refresh"]["last_duration_seconds"] = float("nan")
+
+        def stale_source_revision(payload: dict[str, object]) -> None:
+            tasks = payload["tasks"]
+            assert isinstance(tasks, dict)
+            tasks["alerts-refresh"]["source_revision"] = "b" * 40
+
+        def invocation_mismatch(payload: dict[str, object]) -> None:
+            tasks = payload["tasks"]
+            assert isinstance(tasks, dict)
+            tasks["alerts-refresh"]["invocation_sha256"] = "0" * 64
+
+        def zero_processed(payload: dict[str, object]) -> None:
+            tasks = payload["tasks"]
+            assert isinstance(tasks, dict)
+            tasks["alerts-refresh"]["last_attempt_processed"] = 0
+            tasks["alerts-refresh"]["last_processed"] = 0
+
+        for label, mutate in (
+            ("partial", remove_wallet),
+            ("type confused", stringify_problem_count),
+            ("stale", stale_success),
+            ("nonfinite", nonfinite_duration),
+            ("stale prior revision", stale_source_revision),
+            ("invocation mismatch", invocation_mismatch),
+            ("zero processed", zero_processed),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                state = json.loads(json.dumps(base_state))
+                mutate(state)
+                root = Path(tmp)
+                state_path = root / "unattended-worker-state.json"
+                lock_path = root / ".unattended-worker.lock"
+                environment_path = root / "market-sentinel-worker.env"
+                state_path.write_text(json.dumps(state), encoding="utf-8")
+                lock_path.write_text("0", encoding="ascii")
+                environment_path.write_text(
+                    f"MARKET_SENTINEL_SOURCE_REVISION={TEST_SOURCE_REVISION}\n",
+                    encoding="utf-8",
+                )
+                check = check_unattended_workers(
+                    _worker_runner(finishes),
+                    state_path=state_path,
+                    lock_path=lock_path,
+                    environment_path=environment_path,
+                    expected_revision=TEST_SOURCE_REVISION,
+                    clock=lambda: now,
+                )
+            self.assertEqual(check["status"], "fail", check)
 
     def test_backup_evidence_opens_and_cryptographically_verifies_a_recent_pair(self) -> None:
         now = datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc)
@@ -344,6 +997,8 @@ class ProductionDeploymentTests(unittest.TestCase):
     def test_filesystem_check_requires_private_paths_and_root_owned_environment(self) -> None:
         paths = {
             "market-sentinel.env": SimpleNamespace(st_mode=0o100600, st_uid=0),
+            "market-sentinel-health.env": SimpleNamespace(st_mode=0o100600, st_uid=0),
+            "market-sentinel-worker.env": SimpleNamespace(st_mode=0o100600, st_uid=0),
             "market-sentinel": SimpleNamespace(st_mode=0o040700, st_uid=123),
             "market-sentinel-backups": SimpleNamespace(st_mode=0o040700, st_uid=123),
         }
@@ -354,8 +1009,144 @@ class ProductionDeploymentTests(unittest.TestCase):
         environment = check_filesystem_permissions(lambda path: paths[path.name])[0]
         self.assertEqual(environment["status"], "fail")
 
+    def test_health_credential_isolation_requires_a_single_scoped_secret(self) -> None:
+        properties = {
+            **{
+                ("market-sentinel-health.service", name): value
+                for name, value in REQUIRED_HEALTH_SERVICE_PROPERTIES.items()
+            },
+            ("market-sentinel-health.service", "RestrictAddressFamilies"): "AF_UNIX AF_INET AF_INET6",
+            ("market-sentinel-health.service", "EnvironmentFiles"): (
+                "/etc/market-sentinel/market-sentinel-health.env (ignore_errors=no)"
+            ),
+            ("market-sentinel-health.service", "UnsetEnvironment"): "MARKET_SENTINEL_API_TOKEN",
+            ("market-sentinel-health.service", "Environment"): "",
+            ("market-sentinel-health.service", "PassEnvironment"): "",
+            ("market-sentinel-health.service", "ExecStartPre"): "",
+            ("market-sentinel-health.service", "ExecStart"): (
+                "{ path=/opt/market-sentinel/.venv/bin/python ; "
+                "argv[]=/opt/market-sentinel/.venv/bin/python "
+                "/opt/market-sentinel/scripts/verify_service_health.py "
+                "--require-observability-token --retries 2 --retry-delay 5 ; }"
+            ),
+            ("market-sentinel-web.service", "ExecStartPost"): "",
+        }
+
+        def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+            key = (args[2], args[3].removeprefix("--property="))
+            return subprocess.CompletedProcess(args, 0, properties[key] + "\n", "")
+
+        health_environment = (
+            b"# observer only\n"
+            b"MARKET_SENTINEL_OBSERVABILITY_TOKEN="
+            b"0b63a94c51e7d8f26430a91cbe75f36c48e1290b7a65dcf321a94760e8bd532f\n"
+        )
+        check = check_health_credential_isolation(runner, lambda _path: health_environment)
+
+        self.assertEqual(check["status"], "pass")
+        self.assertEqual(check["service_user"], "market-sentinel-health")
+        self.assertEqual(check["service_group"], "market-sentinel-health")
+        self.assertTrue(check["private_user_namespace"])
+        self.assertEqual(check["environment_variable_count"], 1)
+        self.assertTrue(check["admin_environment_unset"])
+        self.assertTrue(check["token_preflight_removed"])
+        self.assertTrue(check["probe_requires_observability"])
+        self.assertTrue(check["web_startup_probe_removed"])
+        self.assertTrue(check["inline_environment_empty"])
+        self.assertTrue(check["manager_environment_not_passed"])
+
+    def test_health_credential_isolation_fails_for_admin_exposure_or_weak_observer(self) -> None:
+        safe_properties = {
+            **{
+                ("market-sentinel-health.service", name): value
+                for name, value in REQUIRED_HEALTH_SERVICE_PROPERTIES.items()
+            },
+            ("market-sentinel-health.service", "RestrictAddressFamilies"): "AF_UNIX AF_INET AF_INET6",
+            ("market-sentinel-health.service", "EnvironmentFiles"): (
+                "/etc/market-sentinel/market-sentinel-health.env (ignore_errors=no)"
+            ),
+            ("market-sentinel-health.service", "UnsetEnvironment"): "MARKET_SENTINEL_API_TOKEN",
+            ("market-sentinel-health.service", "Environment"): "",
+            ("market-sentinel-health.service", "PassEnvironment"): "",
+            ("market-sentinel-health.service", "ExecStartPre"): "",
+            ("market-sentinel-health.service", "ExecStart"): (
+                "/opt/market-sentinel/.venv/bin/python "
+                "/opt/market-sentinel/scripts/verify_service_health.py "
+                "--require-observability-token --retries 2"
+            ),
+            ("market-sentinel-web.service", "ExecStartPost"): "",
+        }
+
+        def result(properties: dict[tuple[str, str], str], environment: bytes) -> dict[str, object]:
+            def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+                key = (args[2], args[3].removeprefix("--property="))
+                return subprocess.CompletedProcess(args, 0, properties[key] + "\n", "")
+
+            return check_health_credential_isolation(runner, lambda _path: environment)
+
+        admin_environment = (
+            b"MARKET_SENTINEL_OBSERVABILITY_TOKEN="
+            b"0b63a94c51e7d8f26430a91cbe75f36c48e1290b7a65dcf321a94760e8bd532f\n"
+            b"MARKET_SENTINEL_API_TOKEN=must-not-be-present\n"
+        )
+        exposed = result(safe_properties, admin_environment)
+        self.assertEqual(exposed["status"], "fail")
+        self.assertIn("only the observability token", exposed["detail"])
+
+        weak = result(
+            safe_properties,
+            b"MARKET_SENTINEL_OBSERVABILITY_TOKEN=weak-observer\n",
+        )
+        self.assertEqual(weak["status"], "fail")
+        self.assertIn("strong observability token", weak["detail"])
+
+        inherited_properties = dict(safe_properties)
+        inherited_properties[("market-sentinel-health.service", "UnsetEnvironment")] = "UNRELATED"
+        inherited = result(
+            inherited_properties,
+            b"MARKET_SENTINEL_OBSERVABILITY_TOKEN="
+            b"0b63a94c51e7d8f26430a91cbe75f36c48e1290b7a65dcf321a94760e8bd532f\n",
+        )
+        self.assertEqual(inherited["status"], "fail")
+        self.assertIn("admin API token", inherited["detail"])
+
+        shared_principal_properties = dict(safe_properties)
+        shared_principal_properties[("market-sentinel-health.service", "User")] = "market-sentinel"
+        shared_principal = result(
+            shared_principal_properties,
+            b"MARKET_SENTINEL_OBSERVABILITY_TOKEN="
+            b"0b63a94c51e7d8f26430a91cbe75f36c48e1290b7a65dcf321a94760e8bd532f\n",
+        )
+        self.assertEqual(shared_principal["status"], "fail")
+        self.assertIn("unsafe effective User", shared_principal["detail"])
+
+        privileged_probe_properties = dict(safe_properties)
+        privileged_probe_properties[("market-sentinel-web.service", "ExecStartPost")] = (
+            "/opt/market-sentinel/scripts/verify_service_health.py"
+        )
+        privileged_probe = result(
+            privileged_probe_properties,
+            b"MARKET_SENTINEL_OBSERVABILITY_TOKEN="
+            b"0b63a94c51e7d8f26430a91cbe75f36c48e1290b7a65dcf321a94760e8bd532f\n",
+        )
+        self.assertEqual(privileged_probe["status"], "fail")
+        self.assertIn("privileged environment", privileged_probe["detail"])
+
+        argv_exposure_properties = dict(safe_properties)
+        argv_exposure_properties[("market-sentinel-health.service", "ExecStartPre")] = (
+            "/usr/bin/test -n ${MARKET_SENTINEL_OBSERVABILITY_TOKEN}"
+        )
+        argv_exposure = result(
+            argv_exposure_properties,
+            b"MARKET_SENTINEL_OBSERVABILITY_TOKEN="
+            b"0b63a94c51e7d8f26430a91cbe75f36c48e1290b7a65dcf321a94760e8bd532f\n",
+        )
+        self.assertEqual(argv_exposure["status"], "fail")
+        self.assertIn("pre-start command", argv_exposure["detail"])
+
     def test_durable_state_wiring_proves_running_paths_and_backup_source(self) -> None:
         properties = {
+            **TEST_WEB_SERVICE_PROPERTIES,
             ("market-sentinel-web.service", "EnvironmentFiles"): (
                 "/etc/market-sentinel/market-sentinel.env (ignore_errors=no)"
             ),
@@ -389,15 +1180,21 @@ class ProductionDeploymentTests(unittest.TestCase):
         self.assertNotIn("must-not-appear", check["detail"])
 
     def test_durable_state_wiring_fails_closed_for_an_unsafe_runtime_path(self) -> None:
+        properties = {
+            **TEST_WEB_SERVICE_PROPERTIES,
+            ("market-sentinel-web.service", "EnvironmentFiles"): (
+                "/etc/market-sentinel/market-sentinel.env (ignore_errors=no)"
+            ),
+            ("market-sentinel-web.service", "ReadWritePaths"): "/var/lib/market-sentinel",
+            ("market-sentinel-backup.service", "ExecStart"): (
+                "--source /var/lib/market-sentinel --destination /var/lib/backups"
+            ),
+            ("market-sentinel-web.service", "MainPID"): "17",
+        }
+
         def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
-            property_name = args[3].removeprefix("--property=")
-            values = {
-                "EnvironmentFiles": "/etc/market-sentinel/market-sentinel.env (ignore_errors=no)",
-                "ReadWritePaths": "/var/lib/market-sentinel",
-                "ExecStart": "--source /var/lib/market-sentinel --destination /var/lib/backups",
-                "MainPID": "17",
-            }
-            return subprocess.CompletedProcess(args, 0, values[property_name] + "\n", "")
+            key = (args[2], args[3].removeprefix("--property="))
+            return subprocess.CompletedProcess(args, 0, properties[key] + "\n", "")
 
         process_environment = b"\0".join(
             [
@@ -413,20 +1210,58 @@ class ProductionDeploymentTests(unittest.TestCase):
         self.assertIn("unsafe POLYMARKET_ANALYTICS_CACHE_PATH", check["detail"])
 
     def test_durable_state_wiring_fails_when_backup_does_not_cover_state_root(self) -> None:
+        properties = {
+            **TEST_WEB_SERVICE_PROPERTIES,
+            ("market-sentinel-web.service", "EnvironmentFiles"): (
+                "/etc/market-sentinel/market-sentinel.env (ignore_errors=no)"
+            ),
+            ("market-sentinel-web.service", "ReadWritePaths"): "/var/lib/market-sentinel",
+            ("market-sentinel-backup.service", "ExecStart"): (
+                "--source /opt/market-sentinel/data --destination /var/lib/backups"
+            ),
+            ("market-sentinel-web.service", "MainPID"): "17",
+        }
+
         def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
-            property_name = args[3].removeprefix("--property=")
-            values = {
-                "EnvironmentFiles": "/etc/market-sentinel/market-sentinel.env (ignore_errors=no)",
-                "ReadWritePaths": "/var/lib/market-sentinel",
-                "ExecStart": "--source /opt/market-sentinel/data --destination /var/lib/backups",
-                "MainPID": "17",
-            }
-            return subprocess.CompletedProcess(args, 0, values[property_name] + "\n", "")
+            key = (args[2], args[3].removeprefix("--property="))
+            return subprocess.CompletedProcess(args, 0, properties[key] + "\n", "")
 
         check = check_durable_state_wiring(runner, lambda pid: b"")
 
         self.assertEqual(check["status"], "fail")
         self.assertIn("does not capture the durable state directory", check["detail"])
+
+    def test_durable_state_wiring_fails_for_weakened_effective_sandbox(self) -> None:
+        properties = {
+            **TEST_WEB_SERVICE_PROPERTIES,
+            ("market-sentinel-web.service", "EnvironmentFiles"): (
+                "/etc/market-sentinel/market-sentinel.env (ignore_errors=no)"
+            ),
+            ("market-sentinel-web.service", "ReadWritePaths"): "/var/lib/market-sentinel",
+            ("market-sentinel-backup.service", "ExecStart"): (
+                "--source /var/lib/market-sentinel --destination /var/lib/backups"
+            ),
+            ("market-sentinel-web.service", "MainPID"): "17",
+        }
+        properties[("market-sentinel-web.service", "NoNewPrivileges")] = "no"
+
+        def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+            key = (args[2], args[3].removeprefix("--property="))
+            return subprocess.CompletedProcess(args, 0, properties[key] + "\n", "")
+
+        check = check_durable_state_wiring(runner, lambda pid: b"")
+
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("unsafe effective NoNewPrivileges", check["detail"])
+
+        properties[("market-sentinel-web.service", "NoNewPrivileges")] = "yes"
+        for property_name in ("PermissionsStartOnly", "RootDirectoryStartOnly"):
+            with self.subTest(property_name=property_name):
+                properties[("market-sentinel-web.service", property_name)] = "yes"
+                check = check_durable_state_wiring(runner, lambda pid: b"")
+                self.assertEqual(check["status"], "fail")
+                self.assertIn(f"unsafe effective {property_name}", check["detail"])
+                properties[("market-sentinel-web.service", property_name)] = "no"
 
     def test_durable_state_wiring_rejects_an_optional_service_environment(self) -> None:
         def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -504,9 +1339,33 @@ class ProductionDeploymentTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, "active\n", "")
 
         checks = check_systemd(runner, clock=lambda: 1_000_000.0)
-        backup = checks[-1]
+        backup = next(
+            check
+            for check in checks
+            if check["name"] == "systemd_recent_success_market-sentinel-backup.service"
+        )
         self.assertEqual(backup["status"], "fail")
-        self.assertIn("backup_age_seconds=999999", backup["detail"])
+        self.assertIn("age_seconds=999999", backup["detail"])
+
+    def test_systemd_check_rejects_a_stale_health_probe(self) -> None:
+        def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+            if args[1] == "show":
+                completed_at = (
+                    "Thu 1970-01-01 00:00:01 UTC"
+                    if args[2] == "market-sentinel-health.service"
+                    else "Thu 1970-01-01 00:16:39 UTC"
+                )
+                return subprocess.CompletedProcess(args, 0, f"success\n0\n{completed_at}\n", "")
+            return subprocess.CompletedProcess(args, 0, "active\n", "")
+
+        checks = check_systemd(runner, clock=lambda: 1000.0)
+        health = next(
+            check
+            for check in checks
+            if check["name"] == "systemd_recent_success_market-sentinel-health.service"
+        )
+        self.assertEqual(health["status"], "fail")
+        self.assertIn("age_seconds=999", health["detail"])
 
     def test_systemd_check_rejects_an_impossibly_future_backup_timestamp(self) -> None:
         def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -515,9 +1374,13 @@ class ProductionDeploymentTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, "active\n", "")
 
         checks = check_systemd(runner, clock=lambda: 1000.0)
-        backup = checks[-1]
+        backup = next(
+            check
+            for check in checks
+            if check["name"] == "systemd_recent_success_market-sentinel-backup.service"
+        )
         self.assertEqual(backup["status"], "fail")
-        self.assertIn("backup_age_seconds=-400", backup["detail"])
+        self.assertIn("age_seconds=-400", backup["detail"])
 
     def test_loopback_checks_expected_version(self) -> None:
         with patch("scripts.verify_production_deployment.check_health", return_value={"api_version": "1.0.10"}):
@@ -814,6 +1677,8 @@ class ProductionDeploymentTests(unittest.TestCase):
             patch("scripts.verify_production_deployment.check_source_revision", return_value={"name": "source_revision", "status": "pass"}) as source_revision_check,
             patch("scripts.verify_production_deployment.check_systemd") as systemd_check,
             patch("scripts.verify_production_deployment.check_filesystem_permissions") as filesystem_check,
+            patch("scripts.verify_production_deployment.check_health_credential_isolation") as health_credential_check,
+            patch("scripts.verify_production_deployment.check_web_startup_preflight") as startup_preflight_check,
             patch("scripts.verify_production_deployment.check_loopback", return_value={"name": "loopback_health", "status": "pass"}),
             patch("scripts.verify_production_deployment.check_loopback_metrics", return_value={"name": "loopback_metrics", "status": "pass"}),
             contextlib.redirect_stdout(stdout),
@@ -827,6 +1692,8 @@ class ProductionDeploymentTests(unittest.TestCase):
         self.assertTrue(all(len(call.args) == 2 for call in source_revision_check.call_args_list))
         systemd_check.assert_not_called()
         filesystem_check.assert_not_called()
+        health_credential_check.assert_not_called()
+        startup_preflight_check.assert_not_called()
 
     def test_host_verifier_checks_the_explicit_backup_directory(self) -> None:
         stdout = io.StringIO()
@@ -874,9 +1741,21 @@ class ProductionDeploymentTests(unittest.TestCase):
                 return_value={"name": "verified_recent_state_backup", "status": "pass"},
             ) as backup_check,
             patch(
+                "scripts.verify_production_deployment.check_health_credential_isolation",
+                return_value={"name": "health_credential_isolation", "status": "pass"},
+            ) as health_credential_check,
+            patch(
+                "scripts.verify_production_deployment.check_web_startup_preflight",
+                return_value={"name": "web_startup_preflight", "status": "pass"},
+            ) as startup_preflight_check,
+            patch(
                 "scripts.verify_production_deployment.check_durable_state_wiring",
                 return_value={"name": "durable_state_wiring", "status": "pass"},
             ) as durable_state_check,
+            patch(
+                "scripts.verify_production_deployment.check_unattended_workers",
+                return_value={"name": "unattended_workers", "status": "pass"},
+            ) as unattended_worker_check,
             patch(
                 "scripts.verify_production_deployment.check_loopback",
                 return_value={"name": "loopback_health", "status": "pass"},
@@ -892,7 +1771,13 @@ class ProductionDeploymentTests(unittest.TestCase):
         self.assertEqual(json.loads(stdout.getvalue())["status"], "ok")
         systemd_check.assert_called_once_with()
         filesystem_check.assert_called_once_with(backup_directory=backup_directory)
+        health_credential_check.assert_called_once_with()
+        startup_preflight_check.assert_called_once_with()
         durable_state_check.assert_called_once_with()
+        unattended_worker_check.assert_called_once_with(
+            expected_revision=TEST_SOURCE_REVISION,
+            recent_service_checks={},
+        )
         backup_check.assert_called_once_with(backup_directory)
 
     def test_verifier_requires_an_expected_source_revision(self) -> None:

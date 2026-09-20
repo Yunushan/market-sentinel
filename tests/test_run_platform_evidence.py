@@ -40,8 +40,12 @@ class IsolatedPlatformEvidenceTests(unittest.TestCase):
 
         self.assertEqual(Path("temporary-venv") / ("Scripts/python.exe" if os.name == "nt" else "bin/python"), python)
         self.assertEqual(["python3", "-m", "venv", "temporary-venv"], calls[0])
+        self.assertIn("--only-binary=:all:", calls[1])
         self.assertIn("--require-hashes", calls[1])
+        self.assertIn("requirements-bootstrap.lock", calls[1])
         self.assertIn("requirements-test.lock", calls[1])
+        self.assertIn("--no-build-isolation", calls[2])
+        self.assertIn("--check-build-dependencies", calls[2])
         self.assertIn("--no-deps", calls[2])
 
     def test_bootstrap_failure_does_not_include_command_output(self) -> None:

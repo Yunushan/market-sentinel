@@ -12,12 +12,133 @@ from scripts.review_deployment_evidence import (
     required_check_names,
     review_deployment_report,
 )
+from core.unattended_worker import worker_invocation_sha256
+from scripts.verify_production_deployment import (
+    DEFAULT_WORKER_ENVIRONMENT_PATH,
+    DEFAULT_WORKER_LOCK_PATH,
+    DEFAULT_WORKER_STATE_PATH,
+    HEALTH_CHECK_MAX_AGE_SECONDS,
+    REQUIRED_HEALTH_SERVICE_PROPERTIES,
+    REQUIRED_UNATTENDED_SERVICE_CONTRACTS,
+    REQUIRED_WORKER_UNIT_CONTRACT_SHA256,
+    REQUIRED_SYSTEMD_TIMER_CONTRACTS,
+    REQUIRED_WEB_EXEC_START_PRE_COMMANDS,
+    UNATTENDED_WORKER_SERVICES,
+    UNATTENDED_WORKER_TASK_MAX_AGE_SECONDS,
+)
 
 
 REVISION = "a" * 40
 FRONTEND_SHA256 = "b" * 64
 VERSION = "1.0.11"
 NOW = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
+
+
+def _iso(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _unattended_worker_check(collected_at: datetime) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+    finish_times = {
+        "alerts-refresh": collected_at - timedelta(seconds=30.75),
+        "wallets-poll": collected_at - timedelta(seconds=90.25),
+    }
+    run_ids = {
+        "alerts-refresh": "00000000-0000-4000-8000-000000000201",
+        "wallets-poll": "00000000-0000-4000-8000-000000000202",
+    }
+    tasks: dict[str, dict[str, object]] = {}
+    services: dict[str, dict[str, object]] = {}
+    recent: dict[str, dict[str, object]] = {}
+    for service, identity in UNATTENDED_WORKER_SERVICES.items():
+        task = identity["task"]
+        finished = finish_times[task]
+        started = finished - timedelta(seconds=2)
+        attempted = finished - timedelta(seconds=1)
+        # systemctl commonly renders this property only to whole seconds;
+        # tolerate that representation without weakening either timestamp pair.
+        completed = finished.replace(microsecond=0)
+        max_age = UNATTENDED_WORKER_TASK_MAX_AGE_SECONDS[task]
+        tasks[task] = {
+            "service": service,
+            "timer": identity["timer"],
+            "state": "succeeded",
+            "run_id": run_ids[task],
+            "source_revision": REVISION,
+            "service_unit": service,
+            "unit_contract_sha256": REQUIRED_WORKER_UNIT_CONTRACT_SHA256[service],
+            "invocation_sha256": worker_invocation_sha256(
+                task=task,
+                service_unit=service,
+                source_revision=REVISION,
+                unit_contract_sha256=REQUIRED_WORKER_UNIT_CONTRACT_SHA256[service],
+            ),
+            "last_started_at": _iso(started),
+            "last_started_at_unix_seconds": started.timestamp(),
+            "last_attempt_at": _iso(attempted),
+            "last_attempt_at_unix_seconds": attempted.timestamp(),
+            "last_finished_at": _iso(finished),
+            "last_finished_at_unix_seconds": finished.timestamp(),
+            "last_success_at": _iso(finished),
+            "last_success_at_unix_seconds": finished.timestamp(),
+            "last_duration_seconds": 2.0,
+            "deadline_seconds": 90.0,
+            "max_attempts": 3,
+            "attempts_completed": 1,
+            "last_attempt_outcome": "succeeded",
+            "last_outcome": "succeeded",
+            "last_attempt_processed": 2,
+            "last_attempt_problems": 0,
+            "last_attempt_emitted": 1,
+            "processed": 2,
+            "problems": 0,
+            "emitted": 1,
+            "consecutive_failures": 0,
+            "abandoned_runs": 0,
+            "total_runs": 4,
+            "total_successes": 3,
+            "total_failures": 1,
+            "freshness_age_seconds": (collected_at - finished).total_seconds(),
+            "max_age_seconds": max_age,
+        }
+        completed_text = completed.strftime("%a %Y-%m-%d %H:%M:%S UTC")
+        service_evidence = {
+            "task": task,
+            "timer": identity["timer"],
+            "completed_at": completed_text,
+            "completed_at_unix_seconds": completed.timestamp(),
+            "age_seconds": (collected_at - completed).total_seconds(),
+            "max_age_seconds": max_age,
+            "source_revision": REVISION,
+            "unit_contract_sha256": REQUIRED_WORKER_UNIT_CONTRACT_SHA256[service],
+        }
+        services[service] = service_evidence
+        recent[f"systemd_recent_success_{service}"] = {
+            "unit": service,
+            "completed_at": completed_text,
+            "completed_at_unix_seconds": completed.timestamp(),
+            "age_seconds": (collected_at - completed).total_seconds(),
+            "max_age_seconds": max_age,
+        }
+    latest = max(finish_times.values())
+    return (
+        {
+            "state_file": DEFAULT_WORKER_STATE_PATH.as_posix(),
+            "state_schema_version": 1,
+            "state_updated_at": _iso(latest),
+            "state_updated_at_unix_seconds": latest.timestamp(),
+            "state_sha256": "9" * 64,
+            "lock_file": DEFAULT_WORKER_LOCK_PATH.as_posix(),
+            "environment_file": DEFAULT_WORKER_ENVIRONMENT_PATH.as_posix(),
+            "environment_keys": ["MARKET_SENTINEL_SOURCE_REVISION"],
+            "expected_service_count": len(UNATTENDED_WORKER_SERVICES),
+            "service_count": len(UNATTENDED_WORKER_SERVICES),
+            "service_contracts": copy.deepcopy(REQUIRED_UNATTENDED_SERVICE_CONTRACTS),
+            "services": services,
+            "tasks": tasks,
+        },
+        recent,
+    )
 
 
 def _report() -> dict[str, object]:
@@ -52,6 +173,53 @@ def _report() -> dict[str, object]:
             "backup_source": "/var/lib/market-sentinel",
         }
     )
+    indexed["health_credential_isolation"].update(
+        {
+            "environment_path": "/etc/market-sentinel/market-sentinel-health.env",
+            "service_user": "market-sentinel-health",
+            "service_group": "market-sentinel-health",
+            "private_user_namespace": True,
+            "process_visibility": "invisible",
+            "verified_service_property_count": len(REQUIRED_HEALTH_SERVICE_PROPERTIES) + 1,
+            "environment_variable_count": 1,
+            "admin_environment_unset": True,
+            "token_preflight_removed": True,
+            "probe_requires_observability": True,
+            "web_startup_probe_removed": True,
+            "inline_environment_empty": True,
+            "manager_environment_not_passed": True,
+        }
+    )
+    indexed["web_startup_preflight"].update(
+        {
+            "expected_command_count": len(REQUIRED_WEB_EXEC_START_PRE_COMMANDS),
+            "command_count": len(REQUIRED_WEB_EXEC_START_PRE_COMMANDS),
+            "commands": [list(command) for command in REQUIRED_WEB_EXEC_START_PRE_COMMANDS],
+            "commands_succeeded": True,
+        }
+    )
+    indexed["systemd_timer_contracts"].update(
+        {
+            "expected_timer_count": len(REQUIRED_SYSTEMD_TIMER_CONTRACTS),
+            "timer_count": len(REQUIRED_SYSTEMD_TIMER_CONTRACTS),
+            "timers": copy.deepcopy(REQUIRED_SYSTEMD_TIMER_CONTRACTS),
+        }
+    )
+    monitoring_completed_at = datetime(2026, 8, 26, 11, 29, tzinfo=timezone.utc)
+    indexed["systemd_recent_success_market-sentinel-health.service"].update(
+        {
+            "unit": "market-sentinel-health.service",
+            "completed_at": "Wed 2026-08-26 11:29:00 UTC",
+            "completed_at_unix_seconds": monitoring_completed_at.timestamp(),
+            "age_seconds": 60,
+            "max_age_seconds": HEALTH_CHECK_MAX_AGE_SECONDS,
+        }
+    )
+    collected_at = datetime(2026, 8, 26, 11, 30, tzinfo=timezone.utc)
+    worker_check, recent_worker_checks = _unattended_worker_check(collected_at)
+    indexed["unattended_workers"].update(worker_check)
+    for name, recent_check in recent_worker_checks.items():
+        indexed[name].update(recent_check)
     indexed["verified_recent_state_backup"].update(
         {
             "created_at": "2026-08-26T11:00:00Z",
@@ -173,6 +341,34 @@ class DeploymentEvidenceReviewTests(unittest.TestCase):
         self.assertEqual(result["source_revision"], REVISION)
         self.assertEqual(result["check_count"], len(required_check_names()))
         self.assertEqual(len(str(result["raw_report_sha256"])), 64)
+        workers = result["unattended_workers"]
+        self.assertEqual(workers["state_file"], DEFAULT_WORKER_STATE_PATH.as_posix())
+        self.assertEqual(workers["lock_file"], DEFAULT_WORKER_LOCK_PATH.as_posix())
+        self.assertEqual(set(workers["services"]), set(UNATTENDED_WORKER_SERVICES))
+        self.assertEqual(set(workers["tasks"]), set(UNATTENDED_WORKER_TASK_MAX_AGE_SECONDS))
+        self.assertEqual(
+            set(workers["tasks"]["alerts-refresh"]),
+            {
+                "service",
+                "timer",
+                "run_id",
+                "source_revision",
+                "service_unit",
+                "unit_contract_sha256",
+                "invocation_sha256",
+                "last_success_at",
+                "last_success_at_unix_seconds",
+                "freshness_age_seconds",
+                "max_age_seconds",
+                "attempts_completed",
+                "processed",
+                "emitted",
+                "total_runs",
+                "total_successes",
+                "total_failures",
+                "abandoned_runs",
+            },
+        )
 
     def test_rejects_local_smoke_or_missing_public_proxy(self) -> None:
         for field, value in (("mode", "local_smoke"), ("systemd_requested", False), ("public_proxy_requested", False)):
@@ -190,6 +386,62 @@ class DeploymentEvidenceReviewTests(unittest.TestCase):
 
         with self.assertRaisesRegex(DeploymentEvidenceError, "stale"):
             self._review(report)
+
+    def test_worker_future_skew_accepts_five_seconds_and_rejects_more(self) -> None:
+        collected_at = datetime(2026, 8, 26, 11, 30, tzinfo=timezone.utc)
+        for offset, accepted in ((5.0, True), (5.001, False)):
+            with self.subTest(offset=offset):
+                report = _report()
+                checks = report["checks"]
+                assert isinstance(checks, list)
+                worker = next(item for item in checks if item["name"] == "unattended_workers")
+                task = worker["tasks"]["alerts-refresh"]
+                success = collected_at + timedelta(seconds=offset)
+                started = success - timedelta(seconds=2)
+                attempted = success - timedelta(seconds=1)
+                task.update(
+                    {
+                        "last_started_at": _iso(started),
+                        "last_started_at_unix_seconds": started.timestamp(),
+                        "last_attempt_at": _iso(attempted),
+                        "last_attempt_at_unix_seconds": attempted.timestamp(),
+                        "last_finished_at": _iso(success),
+                        "last_finished_at_unix_seconds": success.timestamp(),
+                        "last_success_at": _iso(success),
+                        "last_success_at_unix_seconds": success.timestamp(),
+                        "freshness_age_seconds": -offset,
+                    }
+                )
+                worker["state_updated_at"] = _iso(success)
+                worker["state_updated_at_unix_seconds"] = success.timestamp()
+                service_name = "market-sentinel-alerts-refresh.service"
+                service = worker["services"][service_name]
+                completed = success - timedelta(seconds=2)
+                completed_text = completed.strftime("%a %Y-%m-%d %H:%M:%S.%f UTC")
+                service.update(
+                    {
+                        "completed_at": completed_text,
+                        "completed_at_unix_seconds": completed.timestamp(),
+                        "age_seconds": (collected_at - completed).total_seconds(),
+                    }
+                )
+                recent = next(
+                    item
+                    for item in checks
+                    if item["name"] == f"systemd_recent_success_{service_name}"
+                )
+                recent.update(
+                    {
+                        "completed_at": completed_text,
+                        "completed_at_unix_seconds": completed.timestamp(),
+                        "age_seconds": (collected_at - completed).total_seconds(),
+                    }
+                )
+                if accepted:
+                    self.assertEqual(self._review(report)["status"], "ok")
+                else:
+                    with self.assertRaises(DeploymentEvidenceError):
+                        self._review(report)
 
     def test_rejects_source_or_runtime_identity_tampering(self) -> None:
         mutations = (
@@ -241,6 +493,167 @@ class DeploymentEvidenceReviewTests(unittest.TestCase):
         for label, report in (("missing", missing), ("unknown", unknown), ("duplicate", duplicate), ("failed", failed)):
             with self.subTest(label=label), self.assertRaises(DeploymentEvidenceError):
                 self._review(report)
+
+    def test_rejects_forged_startup_preflight_or_timer_contract_evidence(self) -> None:
+        mutations = (
+            (
+                "missing strict doctor flag",
+                "web_startup_preflight",
+                lambda check: check["commands"][-1].remove("--strict"),
+            ),
+            (
+                "preflight count mismatch",
+                "web_startup_preflight",
+                lambda check: check.update(command_count=4),
+            ),
+            (
+                "preflight never completed",
+                "web_startup_preflight",
+                lambda check: check.update(commands_succeeded=False),
+            ),
+            (
+                "timer target mismatch",
+                "systemd_timer_contracts",
+                lambda check: check["timers"]["market-sentinel-health.timer"].update(
+                    unit="market-sentinel-web.service"
+                ),
+            ),
+            (
+                "timer persistence type confusion",
+                "systemd_timer_contracts",
+                lambda check: check["timers"]["market-sentinel-backup.timer"].update(persistent=1),
+            ),
+            (
+                "timer count mismatch",
+                "systemd_timer_contracts",
+                lambda check: check.update(timer_count=1),
+            ),
+        )
+        for label, check_name, mutate in mutations:
+            with self.subTest(label=label):
+                report = _report()
+                checks = report["checks"]
+                assert isinstance(checks, list)
+                check = next(item for item in checks if item["name"] == check_name)
+                mutate(check)
+                with self.assertRaises(DeploymentEvidenceError):
+                    self._review(report)
+
+    def test_rejects_forged_or_unsafe_unattended_worker_service_evidence(self) -> None:
+        alerts_service = "market-sentinel-alerts-refresh.service"
+        mutations = (
+            (
+                "shell wrapped command",
+                lambda check: check["service_contracts"][alerts_service].update(
+                    exec_start=["/bin/sh", "-c", "python -m core.unattended_worker"]
+                ),
+            ),
+            (
+                "weakened sandbox",
+                lambda check: check["service_contracts"][alerts_service]["properties"].update(
+                    NoNewPrivileges="no"
+                ),
+            ),
+            (
+                "privileged environment",
+                lambda check: check.update(environment_file="/etc/market-sentinel/market-sentinel.env"),
+            ),
+            (
+                "disallowed environment key",
+                lambda check: check.update(environment_keys=["PRIVATE_KEY"]),
+            ),
+            (
+                "forged systemd completion",
+                lambda check: check["services"][alerts_service].update(
+                    completed_at_unix_seconds=check["services"][alerts_service][
+                        "completed_at_unix_seconds"
+                    ]
+                    + 1
+                ),
+            ),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                report = _report()
+                checks = report["checks"]
+                assert isinstance(checks, list)
+                worker = next(item for item in checks if item["name"] == "unattended_workers")
+                mutate(worker)
+                with self.assertRaises(DeploymentEvidenceError):
+                    self._review(report)
+
+    def test_rejects_partial_stale_failed_or_type_confused_worker_state_evidence(self) -> None:
+        def remove_task(check: dict[str, object]) -> None:
+            check["tasks"].pop("wallets-poll")
+
+        def stale_task(check: dict[str, object]) -> None:
+            check["tasks"]["alerts-refresh"]["freshness_age_seconds"] = 10_000
+
+        def failed_task(check: dict[str, object]) -> None:
+            check["tasks"]["alerts-refresh"]["state"] = "failed"
+
+        def stringified_problem_count(check: dict[str, object]) -> None:
+            check["tasks"]["alerts-refresh"]["problems"] = "0"
+
+        def non_v4_run_id(check: dict[str, object]) -> None:
+            check["tasks"]["alerts-refresh"]["run_id"] = "00000000-0000-1000-8000-000000000201"
+
+        def nonfinite_timestamp(check: dict[str, object]) -> None:
+            check["tasks"]["alerts-refresh"]["last_success_at_unix_seconds"] = float("inf")
+
+        def future_timestamp(check: dict[str, object]) -> None:
+            future = datetime(2026, 8, 26, 12, 30, tzinfo=timezone.utc)
+            task = check["tasks"]["alerts-refresh"]
+            task["last_success_at"] = _iso(future)
+            task["last_success_at_unix_seconds"] = future.timestamp()
+
+        def stale_source_revision(check: dict[str, object]) -> None:
+            check["tasks"]["alerts-refresh"]["source_revision"] = "d" * 40
+
+        def invocation_mismatch(check: dict[str, object]) -> None:
+            check["tasks"]["alerts-refresh"]["invocation_sha256"] = "0" * 64
+
+        def zero_processed(check: dict[str, object]) -> None:
+            task = check["tasks"]["alerts-refresh"]
+            task["last_attempt_processed"] = 0
+            task["processed"] = 0
+
+        for label, mutate in (
+            ("missing task", remove_task),
+            ("stale task", stale_task),
+            ("failed task", failed_task),
+            ("stringified problem count", stringified_problem_count),
+            ("non-v4 run id", non_v4_run_id),
+            ("nonfinite timestamp", nonfinite_timestamp),
+            ("future timestamp", future_timestamp),
+            ("stale prior revision", stale_source_revision),
+            ("invocation mismatch", invocation_mismatch),
+            ("zero processed", zero_processed),
+        ):
+            with self.subTest(label=label):
+                report = _report()
+                checks = report["checks"]
+                assert isinstance(checks, list)
+                worker = next(item for item in checks if item["name"] == "unattended_workers")
+                mutate(worker)
+                with self.assertRaises(DeploymentEvidenceError):
+                    self._review(report)
+
+    def test_rejects_stale_isolated_health_probe(self) -> None:
+        report = _report()
+        checks = report["checks"]
+        assert isinstance(checks, list)
+        recent = next(
+            check
+            for check in checks
+            if check["name"] == "systemd_recent_success_market-sentinel-health.service"
+        )
+        completed = NOW - timedelta(minutes=10)
+        recent["completed_at_unix_seconds"] = completed.timestamp()
+        recent["age_seconds"] = 10 * 60
+
+        with self.assertRaisesRegex(DeploymentEvidenceError, "observability-token probe"):
+            self._review(report)
 
     def test_rejects_stale_or_inconsistent_backup(self) -> None:
         report = _report()

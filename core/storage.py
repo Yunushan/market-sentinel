@@ -18,6 +18,7 @@ from .models import AppConfig
 
 
 CONFIG_PATH_ENV = "PREDICTION_MARKET_CONFIG_PATH"
+MAX_CONFIG_BYTES = 16 * 1024 * 1024
 
 
 class ConfigLoadError(RuntimeError):
@@ -58,7 +59,31 @@ def _read_config_bytes(path: Path) -> bytes | None:
         return None
     if not S_ISREG(info.st_mode):
         raise ValueError("Configuration must be a regular file, not a symbolic link or special file.")
-    return path.read_bytes()
+    if info.st_size > MAX_CONFIG_BYTES:
+        raise ValueError(
+            f"Configuration exceeds the supported size limit of {MAX_CONFIG_BYTES} bytes."
+        )
+    # Read at most one byte beyond the limit so concurrent growth cannot turn
+    # a previously acceptable stat result into an unbounded allocation.
+    with path.open("rb") as stream:
+        opened = os.fstat(stream.fileno())
+        if not S_ISREG(opened.st_mode):
+            raise ValueError("Configuration must be a regular file, not a symbolic link or special file.")
+        if (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
+            raise ValueError("Configuration changed identity while it was being opened; retry the read.")
+        raw = stream.read(MAX_CONFIG_BYTES + 1)
+        finished = os.fstat(stream.fileno())
+        if (
+            (opened.st_dev, opened.st_ino) != (finished.st_dev, finished.st_ino)
+            or opened.st_size != finished.st_size
+            or opened.st_mtime_ns != finished.st_mtime_ns
+        ):
+            raise ValueError("Configuration changed while it was being read; retry the read.")
+    if len(raw) > MAX_CONFIG_BYTES:
+        raise ValueError(
+            f"Configuration exceeds the supported size limit of {MAX_CONFIG_BYTES} bytes."
+        )
+    return raw
 
 
 def load_config(path: Path = DEFAULT_CONFIG_PATH) -> AppConfig:
@@ -93,6 +118,10 @@ def save_config(cfg: AppConfig, path: Path = DEFAULT_CONFIG_PATH) -> None:
         # Do not publish a snapshot that the strict loader will reject.
         AppConfig.from_dict(raw_data)
         data = (json.dumps(raw_data, indent=2, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
+        if len(data) > MAX_CONFIG_BYTES:
+            raise ValueError(
+                f"Serialized configuration exceeds the supported size limit of {MAX_CONFIG_BYTES} bytes."
+            )
         committed_revision = hashlib.sha256(data).hexdigest()
         path.parent.mkdir(parents=True, exist_ok=True)
         committed = False

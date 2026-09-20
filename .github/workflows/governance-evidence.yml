@@ -87,6 +87,25 @@ jobs:
             --evidence-type release-environment \
             --expected-revision "${GITHUB_SHA}"
 
+      - name: Recollect and compare live governance state
+        shell: bash
+        env:
+          READINESS_ADMIN_TOKEN: ${{ secrets.READINESS_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "${READINESS_ADMIN_TOKEN}"
+          output="${RUNNER_TEMP}/governance-evidence"
+          python scripts/verify_repository_settings.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --branch main \
+            --token-env READINESS_ADMIN_TOKEN \
+            --api-url "${GITHUB_API_URL}" \
+            > "${RUNNER_TEMP}/governance-current.json"
+          python scripts/trusted_readiness_evidence.py compare-governance \
+            --input "${RUNNER_TEMP}/governance-current.json" \
+            --manifest "${output}/repository-settings-evidence.json" \
+            --manifest "${output}/release-environment-evidence.json"
+
       - name: Reverify exact clean source after collection
         shell: bash
         run: |

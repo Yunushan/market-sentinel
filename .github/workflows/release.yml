@@ -36,6 +36,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PIP_NO_CACHE_DIR: "1"
+  PIP_ONLY_BINARY: ":all:"
   PYTHONUNBUFFERED: "1"
 
 jobs:
@@ -48,6 +49,8 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       prerelease: ${{ steps.release.outputs.prerelease }}
       draft: ${{ steps.release.outputs.draft }}
+      source_date_epoch: ${{ steps.release.outputs.source_date_epoch }}
+      windows_signing_required: ${{ steps.release.outputs.windows_signing_required }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -61,6 +64,7 @@ jobs:
           DISPATCH_TAG_NAME: ${{ inputs.tag_name }}
           DISPATCH_PRERELEASE: ${{ inputs.prerelease }}
           DISPATCH_DRAFT: ${{ inputs.draft }}
+          WINDOWS_SIGNING_CONFIGURED: ${{ vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' }}
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -82,10 +86,22 @@ jobs:
             exit 1
           fi
 
+          source_date_epoch="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          if [[ ! "${source_date_epoch}" =~ ^[0-9]+$ ]]; then
+            echo "Could not resolve a reproducible source timestamp for ${GITHUB_SHA}." >&2
+            exit 1
+          fi
+          windows_signing_required="$(python scripts/verify_release_policy.py signing-required \
+            --tag "${tag_name}" \
+            --draft "${draft}" \
+            --configured-required "${WINDOWS_SIGNING_CONFIGURED}")"
+
           echo "tag_name=${tag_name}" >> "${GITHUB_OUTPUT}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "prerelease=${prerelease}" >> "${GITHUB_OUTPUT}"
           echo "draft=${draft}" >> "${GITHUB_OUTPUT}"
+          echo "source_date_epoch=${source_date_epoch}" >> "${GITHUB_OUTPUT}"
+          echo "windows_signing_required=${windows_signing_required}" >> "${GITHUB_OUTPUT}"
 
       - name: Validate package version matches release tag
         env:
@@ -145,7 +161,7 @@ jobs:
         run: |
           python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
           python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
-          python -m pip install --no-cache-dir --no-deps -e .
+          python -m pip install --no-cache-dir --no-build-isolation --check-build-dependencies --no-deps -e .
 
       - name: Verify Python and Tkinter fallback
         run: |
@@ -157,6 +173,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: metadata
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.metadata.outputs.source_date_epoch }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -173,7 +191,7 @@ jobs:
         run: |
           python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
           python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock
-          python -m pip install --no-cache-dir --no-deps -e .
+          python -m pip install --no-cache-dir --no-build-isolation --check-build-dependencies --no-deps -e .
           python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock
           python -m pip install --no-cache-dir --require-hashes -r requirements-security.lock
 
@@ -199,8 +217,25 @@ jobs:
         env:
           PREDICTION_MARKET_CONFIG_PATH: ${{ runner.temp }}/market-sentinel-gui-smoke.json
 
-      - name: Build Python distributions
-        run: python -m build --no-isolation
+      - name: Build Python distributions reproducibly
+        shell: bash
+        run: |
+          test ! -e dist
+          test ! -e dist-repro
+          build_root="$(mktemp -d "${RUNNER_TEMP}/market-sentinel-python-build.XXXXXX")"
+          first_source="${build_root}/source-1"
+          second_source="${build_root}/source-2"
+          mkdir -p "${first_source}" "${second_source}"
+          git archive --format=tar "${GITHUB_SHA}" | tar -xf - -C "${first_source}"
+          git archive --format=tar "${GITHUB_SHA}" | tar -xf - -C "${second_source}"
+          python -m build --no-isolation --outdir "${GITHUB_WORKSPACE}/dist" "${first_source}"
+          python scripts/normalize_python_sdist.py --path dist/*.tar.gz
+          python -m build --no-isolation --outdir "${GITHUB_WORKSPACE}/dist-repro" "${second_source}"
+          python scripts/normalize_python_sdist.py --path dist-repro/*.tar.gz
+          python scripts/verify_reproducible_python_dist.py \
+            --first-dir dist \
+            --second-dir dist-repro
+          rm -rf -- dist-repro
 
       - name: Smoke install built wheel
         shell: bash
@@ -209,13 +244,21 @@ jobs:
         run: |
           expected_market_count="$(python -c 'from market_adapters import MARKET_IDS; print(len(MARKET_IDS))')"
           python scripts/verify_python_dist_artifacts.py --dist-dir dist --expected-version "${EXPECTED_VERSION}"
-          python -m pip install --no-cache-dir --force-reinstall --no-deps "dist/market_sentinel-${EXPECTED_VERSION}-py3-none-any.whl"
-          smoke_dir="$(mktemp -d)"
+          smoke_dir="$(mktemp -d "${RUNNER_TEMP}/market-sentinel-wheel-smoke.XXXXXX")"
+          python -m venv "${smoke_dir}/venv"
+          smoke_python="${smoke_dir}/venv/bin/python"
+          smoke_cli="${smoke_dir}/venv/bin/market-sentinel"
+          "${smoke_python}" -m pip install --no-cache-dir --require-hashes -r "${GITHUB_WORKSPACE}/requirements.lock"
+          "${smoke_python}" -m pip install --no-cache-dir --no-index \
+            "${GITHUB_WORKSPACE}/dist/market_sentinel-${EXPECTED_VERSION}-py3-none-any.whl"
           cd "${smoke_dir}"
-          market-sentinel --help >/dev/null
-          EXPECTED_MARKET_COUNT="${expected_market_count}" python - <<'PY'
+          "${smoke_cli}" --help >/dev/null
+          EXPECTED_MARKET_COUNT="${expected_market_count}" "${smoke_python}" -I - <<'PY'
           import os
+          import site
           from importlib.metadata import metadata, version
+          from pathlib import Path
+          import market_adapters
           from market_adapters import CryptoComPredictAdapter, build_default_registry
 
           assert version("market-sentinel") == os.environ["EXPECTED_VERSION"]
@@ -224,6 +267,11 @@ jobs:
           assert package_metadata.get_all("License-File") == ["LICENSE"]
           assert len(build_default_registry().list_market_ids()) == int(os.environ["EXPECTED_MARKET_COUNT"])
           assert CryptoComPredictAdapter().market_id == "crypto_com_predict"
+          package_path = Path(market_adapters.__file__).resolve()
+          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          site_roots = [Path(value).resolve() for value in site.getsitepackages()]
+          assert not package_path.is_relative_to(workspace), package_path
+          assert any(package_path.is_relative_to(root) for root in site_roots), package_path
           PY
 
       - name: Upload Python distributions
@@ -239,6 +287,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: metadata
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.metadata.outputs.source_date_epoch }}
     defaults:
       run:
         working-directory: frontend
@@ -272,17 +322,9 @@ jobs:
       - name: Create frontend zip
         shell: bash
         run: |
-          python - <<'PY'
-          from pathlib import Path
-          from zipfile import ZIP_DEFLATED, ZipFile
-
-          root = Path("dist")
-          out = Path("../release-frontend-dist.zip")
-          with ZipFile(out, "w", ZIP_DEFLATED) as archive:
-              for path in sorted(root.rglob("*")):
-                  if path.is_file():
-                      archive.write(path, path.relative_to(root).as_posix())
-          PY
+          python ../scripts/create_reproducible_zip.py \
+            --source-dir dist \
+            --output ../release-frontend-dist.zip
 
       - name: Upload frontend distribution
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -296,16 +338,16 @@ jobs:
     name: Build Windows EXE and MSI
     runs-on: windows-2025-vs2026
     timeout-minutes: 45
-    # Protected environments are branch-scoped and can reject tag-triggered
-    # jobs before a runner starts. Use the protected environment for signed
-    # production releases, and an unprotected environment for explicitly
-    # unsigned testing/development artifacts.
+    # Every stable tag, including a draft, is forced through the protected
+    # signing environment. Only prerelease tags may use the unsigned
+    # environment when repository policy does not independently require signing.
     environment:
-      name: ${{ vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' && 'release' || 'release-unsigned' }}
+      name: ${{ needs.metadata.outputs.windows_signing_required == 'true' && 'release' || 'release-unsigned' }}
+    outputs:
+      windows_signed: ${{ steps.windows_signing_status.outputs.windows_signed }}
     env:
-      # Keep signed releases fail-closed when explicitly required, while
-      # allowing an explicitly unsigned ZIP/MSI for development or testing.
-      WINDOWS_SIGNING_REQUIRED: ${{ vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' }}
+      SOURCE_DATE_EPOCH: ${{ needs.metadata.outputs.source_date_epoch }}
+      WINDOWS_SIGNING_REQUIRED: ${{ needs.metadata.outputs.windows_signing_required }}
     needs:
       - metadata
       - frontend-dist
@@ -323,7 +365,6 @@ jobs:
 
       - name: Verify Windows signing configuration
         env:
-          WINDOWS_SIGNING_REQUIRED: ${{ vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' }}
           WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64 }}
           WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD }}
           WINDOWS_CODE_SIGNING_TIMESTAMP_URL: ${{ vars.WINDOWS_CODE_SIGNING_TIMESTAMP_URL }}
@@ -392,7 +433,7 @@ jobs:
         run: |
           python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock
           python -m pip install --no-cache-dir --require-hashes -r requirements-live.lock
-          python -m pip install --no-cache-dir --no-deps -e .
+          python -m pip install --no-cache-dir --no-build-isolation --check-build-dependencies --no-deps -e .
           python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock
 
       - name: Install WiX Toolset
@@ -518,6 +559,16 @@ jobs:
           }
           Write-Warning "Windows EXE/MSI artifacts are intentionally unsigned; do not treat this release as production-trusted."
 
+      - name: Record verified Windows signing status
+        id: windows_signing_status
+        shell: pwsh
+        run: |
+          if ($env:WINDOWS_SIGNING_REQUIRED -eq "true") {
+            "windows_signed=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          } else {
+            "windows_signed=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          }
+
       - name: Upload Windows release packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -536,12 +587,12 @@ jobs:
       - python-dist
       - frontend-dist
       - windows-app
-    # Keep signed production publication behind the reviewed release
-    # environment. Unsigned testing/development publication uses the
-    # unprotected release-unsigned environment so tag-triggered runs can
-    # complete without unavailable signing secrets or self-review.
+    # Every stable tag is protected and signed before any release assets are
+    # uploaded. Only prerelease tags may reach the unsigned environment.
     environment:
-      name: ${{ vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' && 'release' || 'release-unsigned' }}
+      name: ${{ needs.metadata.outputs.windows_signing_required == 'true' && 'release' || 'release-unsigned' }}
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.metadata.outputs.source_date_epoch }}
     permissions:
       attestations: write
       contents: write
@@ -557,6 +608,20 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
+
+      - name: Verify release publication policy
+        env:
+          TAG_NAME: ${{ needs.metadata.outputs.tag_name }}
+          PRERELEASE: ${{ needs.metadata.outputs.prerelease }}
+          DRAFT: ${{ needs.metadata.outputs.draft }}
+          WINDOWS_SIGNED: ${{ needs.windows-app.outputs.windows_signed }}
+        shell: bash
+        run: |
+          python scripts/verify_release_policy.py verify-publication \
+            --tag "${TAG_NAME}" \
+            --prerelease "${PRERELEASE}" \
+            --draft "${DRAFT}" \
+            --windows-signed "${WINDOWS_SIGNED}"
 
       - name: Download Python distributions
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -592,12 +657,12 @@ jobs:
 
       - name: Generate checksums and release notes
         env:
-          WINDOWS_SIGNING_REQUIRED: ${{ vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' }}
+          WINDOWS_SIGNED: ${{ needs.windows-app.outputs.windows_signed }}
         shell: bash
         run: |
           tag="${{ needs.metadata.outputs.tag_name }}"
           version="${{ needs.metadata.outputs.version }}"
-          if [ "${WINDOWS_SIGNING_REQUIRED}" = "true" ]; then
+          if [ "${WINDOWS_SIGNED}" = "true" ]; then
             windows_signing_note='- Windows EXE/MSI packages Authenticode-signed and verified'
           else
             windows_signing_note='- Windows EXE/MSI packages intentionally unsigned (testing/development distribution only)'
@@ -869,35 +934,47 @@ jobs:
             cmp -- "${local_asset}" "${downloaded_assets}/$(basename "${local_asset}")"
           done
 
-          # Publish only after the remote inventory and downloaded bytes match locally.
-          echo "release_prepared=true" >> "${GITHUB_OUTPUT}"
+          # Set all non-volatile release metadata while the release is still a
+          # draft. Record the cleanup identity before the only publication
+          # mutation, so a lost response after a successful publish can still
+          # be recovered by the fail-closed cleanup step.
           gh release edit "${TAG_NAME}" \
             --title "${TAG_NAME}" \
             --notes-file release-assets/RELEASE_NOTES.md \
-            "${release_state_flags[@]}"
+            "--prerelease=${PRERELEASE}" \
+            --draft=true
           final_release_json="${RUNNER_TEMP}/market-sentinel-final-release.json"
           gh api "repos/${GITHUB_REPOSITORY}/releases/${prepared_release_id}" > "${final_release_json}"
           if ! jq -e \
             --argjson release_id "${prepared_release_id}" \
             --arg tag "${TAG_NAME}" \
             --arg target "${GITHUB_SHA}" \
-            --argjson expected_draft "${DRAFT}" \
             --argjson expected_prerelease "${PRERELEASE}" \
             '.id == $release_id and
              .tag_name == $tag and
              .target_commitish == $target and
-             .draft == $expected_draft and
+             .draft == true and
              .prerelease == $expected_prerelease' \
             "${final_release_json}" >/dev/null; then
-            echo "Final release identity or state does not match the publish request." >&2
+            echo "Prepared release identity or state does not match the publish request." >&2
             exit 1
           fi
           release_fingerprint="$(
-            jq -cS '{id,tag_name,target_commitish,draft,prerelease,name,body,published_at,updated_at}' \
+            jq -cS '{id,tag_name,target_commitish,prerelease,name,body}' \
               "${final_release_json}" | sha256sum | cut -d ' ' -f 1
           )"
           echo "release_id=${prepared_release_id}" >> "${GITHUB_OUTPUT}"
           echo "release_fingerprint=${release_fingerprint}" >> "${GITHUB_OUTPUT}"
+          if [ "${DRAFT}" = "true" ]; then
+            echo "release_prepared=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "release_prepared=true" >> "${GITHUB_OUTPUT}"
+
+          # This is deliberately the last command in the step. Even if the
+          # client loses the response after GitHub applies the mutation, the
+          # identity above is already available to the cleanup step.
+          gh release edit "${TAG_NAME}" "${release_state_flags[@]}"
 
       - name: Generate exact published release evidence
         if: needs.metadata.outputs.prerelease == 'false' && needs.metadata.outputs.draft == 'false'
@@ -970,7 +1047,7 @@ jobs:
           redrafted_release_json="${RUNNER_TEMP}/market-sentinel-cleanup-redrafted-release.json"
           gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" > "${current_release_json}"
           current_fingerprint="$(
-            jq -cS '{id,tag_name,target_commitish,draft,prerelease,name,body,published_at,updated_at}' \
+            jq -cS '{id,tag_name,target_commitish,prerelease,name,body}' \
               "${current_release_json}" | sha256sum | cut -d ' ' -f 1
           )"
           if [ "${current_fingerprint}" != "${RELEASE_FINGERPRINT}" ]; then
