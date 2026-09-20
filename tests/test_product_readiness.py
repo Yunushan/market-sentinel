@@ -1724,6 +1724,7 @@ class ProductReadinessTests(unittest.TestCase):
             with (
                 patch("scripts.check_product_readiness.shutil.which", return_value=str(link)),
                 patch("scripts.check_product_readiness._unsafe_executable_roots", return_value=()),
+                patch("scripts.check_product_readiness._posix_path_is_safely_owned", return_value=True),
             ):
                 identity = _resolve_executable_identity("git", require_pin=False)
 
