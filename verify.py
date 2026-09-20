@@ -73,8 +73,6 @@ WORKFLOW_ACTION_PINS = {
         "actions/checkout": (7, "3d3c42e5aac5ba805825da76410c181273ba90b1"),
         "actions/setup-python": (7, "5fda3b95a4ea91299a34e894583c3862153e4b97"),
         "actions/dependency-review-action": (5, "a1d282b36b6f3519aa1f3fc636f609c47dddb294"),
-        "gitleaks/gitleaks-action": (3, "e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e"),
-        "raven-actions/actionlint": (2, "3d39aea434753780c3b3d4a1a31c854b4dbf49d7"),
         "github/codeql-action/init": (4, "b96794f015dfd88f77b49b1c93e0fa7110f94c63"),
         "github/codeql-action/analyze": (4, "b96794f015dfd88f77b49b1c93e0fa7110f94c63"),
     },
