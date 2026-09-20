@@ -1,8 +1,16 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
+from scripts.regenerate_dependency_locks import (
+    LOCK_INPUTS,
+    REQUIRED_PIP_TOOLS,
+    REQUIRED_PYTHON,
+    compile_command,
+    validate_toolchain,
+)
 from scripts.verify_dependency_lock import lock_issues
 
 try:
@@ -15,6 +23,46 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class DependencyLockTests(unittest.TestCase):
+    def test_regeneration_covers_every_reviewed_lock_with_hardening_flags(self) -> None:
+        expected_locks = {
+            "requirements.lock",
+            "requirements-live.lock",
+            "requirements-test.lock",
+            "requirements-build.lock",
+            "requirements-bootstrap.lock",
+            "requirements-security.lock",
+        }
+        self.assertEqual(expected_locks, {lock for lock, _source in LOCK_INPUTS})
+        for lock_name, source_name in LOCK_INPUTS:
+            with self.subTest(lock=lock_name):
+                command = compile_command(lock_name, source_name, upgrade=False)
+                self.assertIn("--allow-unsafe", command)
+                self.assertIn("--generate-hashes", command)
+                self.assertIn("--strip-extras", command)
+                self.assertIn(f"--output-file={lock_name}", command)
+                self.assertEqual(source_name, command[-1])
+                self.assertNotIn("--upgrade", command)
+
+    def test_regeneration_upgrade_is_explicit(self) -> None:
+        command = compile_command("requirements.lock", "pyproject.toml", upgrade=True)
+        self.assertEqual("--upgrade", command[-2])
+
+    def test_regeneration_rejects_unreviewed_toolchain(self) -> None:
+        with (
+            patch("scripts.regenerate_dependency_locks.sys.version_info", (3, 13)),
+            self.assertRaisesRegex(SystemExit, "requires Python 3.14"),
+        ):
+            validate_toolchain()
+        with (
+            patch("scripts.regenerate_dependency_locks.sys.version_info", (*REQUIRED_PYTHON, 0)),
+            patch(
+                "scripts.regenerate_dependency_locks.importlib.metadata.version",
+                return_value="0.0.0",
+            ),
+            self.assertRaisesRegex(SystemExit, REQUIRED_PIP_TOOLS),
+        ):
+            validate_toolchain()
+
     def test_repository_lock_covers_direct_dependencies_with_hashes(self) -> None:
         project = ROOT / "pyproject.toml"
         lock = ROOT / "requirements.lock"
@@ -98,11 +146,11 @@ class DependencyLockTests(unittest.TestCase):
         self.assertEqual("pip-audit==2.10.1\n", source)
         self.assertEqual([], lock_issues(lock, ["pip-audit==2.10.1"]))
 
-    def test_bootstrap_pip_lock_is_hash_protected(self) -> None:
+    def test_bootstrap_installer_and_build_backend_are_hash_protected(self) -> None:
         source = (ROOT / "requirements-bootstrap.txt").read_text(encoding="utf-8")
         lock = (ROOT / "requirements-bootstrap.lock").read_text(encoding="utf-8")
-        self.assertEqual("pip==26.2.1\n", source)
-        self.assertEqual([], lock_issues(lock, ["pip==26.2.1"]))
+        self.assertEqual("pip==26.2.1\nsetuptools==84.0.0\n", source)
+        self.assertEqual([], lock_issues(lock, ["pip==26.2.1", "setuptools==84.0.0"]))
 
     def test_standalone_lock_verifier_covers_security_audit_lock(self) -> None:
         verifier = (ROOT / "scripts" / "verify_dependency_lock.py").read_text(encoding="utf-8")
@@ -116,6 +164,31 @@ class DependencyLockTests(unittest.TestCase):
         issues = lock_issues(lock, ["requests>=2", "truststore>=1"])
         self.assertIn("requests is not hash protected", issues)
         self.assertIn("direct dependency truststore is missing from requirements.lock", issues)
+
+    def test_lock_validation_rejects_pip_control_directives(self) -> None:
+        pinned = "requests==2.32.5 \\\n    --hash=sha256:" + "a" * 64 + "\n"
+        for directive in (
+            "--no-binary=:all:",
+            "--only-binary=:none:",
+            "--index-url https://packages.example.invalid/simple",
+            "--extra-index-url https://packages.example.invalid/simple",
+            "--find-links https://packages.example.invalid/wheels",
+            "--trusted-host packages.example.invalid",
+            "-r injected-requirements.lock",
+        ):
+            with self.subTest(directive=directive):
+                issues = lock_issues(pinned + directive + "\n", ["requests>=2"])
+                self.assertIn(
+                    f"line 3: pip control directive is not allowed in a lock file: {directive.split()[0]}",
+                    issues,
+                )
+
+    def test_lock_validation_rejects_unrecognized_executable_content(self) -> None:
+        pinned = "requests==2.32.5 \\\n    --hash=sha256:" + "a" * 64 + "\n"
+
+        issues = lock_issues(pinned + "https://packages.example.invalid/archive.whl\n", ["requests>=2"])
+
+        self.assertIn("line 3: unrecognized lock-file content", issues)
 
     def test_lock_validation_rejects_ruff_version_outside_source_pin(self) -> None:
         lock = "ruff==0.16.3 \\\n    --hash=sha256:" + "a" * 64 + "\n"

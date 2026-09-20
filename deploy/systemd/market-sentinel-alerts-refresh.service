@@ -1,0 +1,54 @@
+[Unit]
+Description=MarketSentinel serialized price-alert refresh
+Wants=network-online.target
+After=network-online.target
+ConditionPathIsRegular=/var/lib/market-sentinel/config.json
+StartLimitIntervalSec=5min
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=market-sentinel
+Group=market-sentinel
+WorkingDirectory=/opt/market-sentinel
+StateDirectory=market-sentinel
+StateDirectoryMode=0700
+EnvironmentFile=/etc/market-sentinel/market-sentinel-worker.env
+UnsetEnvironment=MARKET_SENTINEL_API_TOKEN MARKET_SENTINEL_OBSERVABILITY_TOKEN PRIVATE_KEY POLYMARKET_PRIVATE_KEY POLY_API_SECRET POLY_SECRET POLY_PASSPHRASE POLY_SIGNATURE POLY_BUILDER_API_KEY POLY_BUILDER_SECRET POLY_BUILDER_PASSPHRASE POLY_BUILDER_SIGNATURE RELAYER_API_KEY RELAYER_API_KEY_ADDRESS KALSHI_PRIVATE_KEY_PATH KALSHI_PRIVATE_KEY_PEM KALSHI_PRIVATE_KEY_PASSWORD OPINION_PRIVATE_KEY SX_BET_PRIVATE_KEY GEMINI_API_SECRET XO_API_SECRET PROB_API_SECRET PROBABLE_API_SECRET PROB_PASSPHRASE PROBABLE_API_PASSPHRASE LIMITLESS_TOKEN_SECRET PROPHET_EXCHANGE_SECRET_KEY SSLKEYLOGFILE PYTHONHOME PYTHONINSPECT PYTHONSTARTUP PYTHONBREAKPOINT
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/usr/bin/test -f /var/lib/market-sentinel/config.json
+ExecStartPre=/usr/bin/test ! -L /var/lib/market-sentinel/config.json
+ExecStart=/opt/market-sentinel/.venv/bin/python -m core.unattended_worker run --task alerts-refresh --source-revision ${MARKET_SENTINEL_SOURCE_REVISION} --service-unit market-sentinel-alerts-refresh.service --unit-contract-sha256 17734591aa72f7fc9d6ef6ba43019c9a778e5afc2b64723078c7c38d39cb63d5 --config /var/lib/market-sentinel/config.json --state-file /var/lib/market-sentinel/unattended-worker-state.json --lock-file /var/lib/market-sentinel/.unattended-worker.lock --deadline-seconds 90 --attempt-timeout-seconds 40 --lock-timeout-seconds 5 --max-attempts 3 --initial-backoff-seconds 2 --max-backoff-seconds 8
+TimeoutStartSec=105
+TimeoutStopSec=10
+KillMode=mixed
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectClock=true
+ProtectHostname=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+MemoryMax=512M
+TasksMax=64
+LimitNOFILE=1024
+ReadOnlyPaths=/etc/market-sentinel
+ReadWritePaths=/var/lib/market-sentinel
+StandardOutput=journal
+StandardError=journal

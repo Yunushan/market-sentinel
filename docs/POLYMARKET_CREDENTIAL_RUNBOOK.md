@@ -49,34 +49,31 @@ Dry-run order/cancel transcript, still with no funded actions:
 python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <PRICE> --size <SIZE> --allow-token-id <TOKEN> --report-file live-dry-run-report.json
 ```
 
-Funded order/cancel verification is separate from this runbook and unavailable
-in the current support state. The official `py-clob-client-v2` mutation wrapper
-is implemented and offline-tested, while the legacy V1 path is forbidden, but
-`--allow-funded-order` still returns the live-support blocker before SDK
-construction or transport. No credential, config flag, confirmation, or
-operating system can bypass that guard. After exact-revision credentialed review
-and deliberate support promotion, the retained harness would still require
-`--allow-funded-order`, `--cancel-immediately`, an
-allow-listed token, hard size/notional caps, a clean stable source revision
-bound to the canonical repository origin and rechecked immediately before
-execution, geographic eligibility, a same-client authenticated read,
-sufficient balance and allowance, post-only maker placement, exact
+Funded order/cancel verification is separate from this runbook. Normal product
+mutation remains disabled, while the official `py-clob-client-v2` wrapper has a
+dedicated one-shot audit factory that is not exposed to the application. The
+audit is available only from the protected evidence workflow and requires
+explicit production-environment approval, `--allow-funded-order`,
+`--cancel-immediately`, an independently configured allow-listed token, hard
+five-share/one-dollar caps, a clean stable source revision bound to the
+canonical repository origin, geographic eligibility, same-client authenticated
+reads, sufficient balance and allowance, post-only maker placement, exact
 zero-fill/cancel proof, and an absolute `--recovery-journal` path in a private
-directory. The journal is atomically updated and locked; an unresolved or
-interrupted run must be manually reconciled before its lock/journal can be
-cleared. Native Windows funded mode would also fail closed because this tool
-cannot prove an owner-only journal-directory ACL there. Public and
-credential-only probes remain available on Windows. A future migrated funded
-run would additionally require:
+directory. The capability is consumed before transport. The journal is
+atomically updated and locked; an ambiguous or interrupted run cannot be
+retried and must be manually reconciled before the evidence can qualify.
+Native Windows funded mode fails closed because the tool cannot prove an
+owner-only journal-directory ACL there. Public and credential-only probes
+remain available on Windows. A funded run additionally requires:
 
 ```text
 --confirm-live-order-cancel I_UNDERSTAND_THIS_PLACES_A_REAL_POLYMARKET_ORDER
 ```
 
-Fail-closed diagnostic shape (expected to report the live-support blocker today;
+Fail-closed diagnostic shape (expected without the protected workflow approval,
+exact allow-list policy, credentials, and private recovery journal;
 replace every placeholder only in an explicitly approved acceptance environment):
 
 ```powershell
 python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <MAKER_PRICE> --size <SIZE> --allow-token-id <TOKEN> --cancel-immediately --allow-funded-order --recovery-journal <ABSOLUTE_PRIVATE_JOURNAL_PATH> --confirm-live-order-cancel I_UNDERSTAND_THIS_PLACES_A_REAL_POLYMARKET_ORDER --report-file live-funded-report.json
 ```
-

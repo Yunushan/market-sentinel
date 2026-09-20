@@ -29,7 +29,10 @@ from .live_verification import (
     order_state_is_cancelled,
     order_zero_fill_evidence,
 )
-from .constants import POLYMARKET_LIVE_MUTATION_BLOCKER, POLYMARKET_LIVE_MUTATIONS_SUPPORTED
+from .constants import (
+    POLYMARKET_BOUNDED_AUDIT_MUTATION_BLOCKER,
+    POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -2790,8 +2793,8 @@ def live_validation_report_promotion(report: Mapping[str, Any]) -> Dict[str, Any
             "Funded live verification also requires accepted non-mutating authenticated-read evidence "
             "in the same report."
         )
-    if not POLYMARKET_LIVE_MUTATIONS_SUPPORTED:
-        blockers.append(POLYMARKET_LIVE_MUTATION_BLOCKER)
+    if not POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED:
+        blockers.append(POLYMARKET_BOUNDED_AUDIT_MUTATION_BLOCKER)
 
     return {
         "credential_live_verified": "candidate_only" if can_promote_credential else "blocked",
@@ -2906,9 +2909,9 @@ def _funded_promotion_evidence(
     *,
     expected_source_revision: str,
 ) -> List[Dict[str, Any]]:
-    # A historical/local report cannot establish a supported CLOB V2 mutation
-    # while the repository intentionally exposes no V2 order client.
-    if not POLYMARKET_LIVE_MUTATIONS_SUPPORTED:
+    # A historical/local report cannot establish the separately gated bounded
+    # audit while that reviewed capability is disabled.
+    if not POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED:
         return []
     audit = funded_check.get("audit") if isinstance(funded_check.get("audit"), Mapping) else {}
     account_read = (

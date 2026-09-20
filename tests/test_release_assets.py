@@ -209,7 +209,7 @@ class ReleaseAssetVerificationTests(unittest.TestCase):
         workflow = (Path(__file__).resolve().parent.parent / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
-        checksum = "sha256sum * > SHA256SUMS.txt"
+        checksum = "sha256sum -- * > SHA256SUMS.txt"
         notes = "cat > release-assets/RELEASE_NOTES.md"
         self.assertIn(notes, workflow)
         self.assertLess(workflow.index(checksum), workflow.index(notes))

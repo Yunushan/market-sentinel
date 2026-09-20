@@ -12,6 +12,7 @@ from unittest.mock import patch
 from core.config_security import ConfigSecurityError, is_sensitive_config_key, is_sensitive_display_key
 from core.models import (
     AppConfig,
+    CONFIG_SCHEMA_VERSION,
     CopyActivityOutboxEntry,
     CopyTradeSettings,
     MarketConfig,
@@ -23,6 +24,7 @@ from core.models import (
 )
 from core.storage import (
     CONFIG_PATH_ENV,
+    MAX_CONFIG_BYTES,
     ConfigConflictError,
     ConfigLoadError,
     _fsync_parent_directory,
@@ -112,6 +114,18 @@ class CoreModelTests(unittest.TestCase):
         self.assertFalse(loaded.copytrading.live)
         self.assertEqual(loaded.copytrading.normalized_follow_wallets(), [WALLET])
         self.assertEqual(loaded.copytrading.to_dict()["copy_percentage"], 50.0)
+
+    def test_config_schema_version_is_written_and_future_versions_fail_closed(self) -> None:
+        self.assertEqual(AppConfig().to_dict()["schema_version"], CONFIG_SCHEMA_VERSION)
+        legacy = AppConfig.from_dict({"theme": "dark"})
+        self.assertEqual(legacy.theme, "dark")
+        for value in (True, "1", CONFIG_SCHEMA_VERSION + 1):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                AppConfig.from_dict({"schema_version": value})
+
+    def test_unknown_top_level_config_fields_fail_closed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cannot be rewritten safely"):
+            AppConfig.from_dict({"schema_version": CONFIG_SCHEMA_VERSION, "future_state": {"value": 1}})
 
     def test_copy_settings_load_percentage_and_valid_legacy_scale(self) -> None:
         from_percentage = CopyTradeSettings.from_dict({"copy_percentage": 25})
@@ -334,8 +348,8 @@ class CoreModelTests(unittest.TestCase):
     def test_config_persistence_rejects_invalid_environment_references_and_embedded_key_material(self) -> None:
         invalid_values = (
             {"credential_env_vars": ["not-an-environment-name"]},
-            {"private_key_path": "-----BEGIN PRIVATE KEY-----\nsecret"},
-            {"callback_url": "https://user:password@example.com/path"},
+            {"private_key_path": "-----BEGIN PRIVATE KEY-----\nsecret"},  # secret-scan: allow; gitleaks:allow -- rejection fixture
+            {"callback_url": "https://user:password@example.com/path"},  # secret-scan: allow -- rejection fixture
             {"credential_sources": ["actual-secret-value"]},
             {"auth_headers": [["Authorization", "Bearer secret"]]},
             {"notes": ["abcdefgh.ijklmnop.qrstuvwx"]},
@@ -483,7 +497,7 @@ class CoreModelTests(unittest.TestCase):
             path.write_text("{}", encoding="utf-8")
             with (
                 patch.object(Path, "exists", return_value=False),
-                patch.object(Path, "read_bytes", side_effect=PermissionError("unreadable")),
+                patch.object(Path, "open", side_effect=PermissionError("unreadable")),
                 self.assertRaises(ConfigLoadError),
             ):
                 load_config(path)
@@ -495,13 +509,27 @@ class CoreModelTests(unittest.TestCase):
             path.write_text("{}", encoding="utf-8")
             with (
                 patch.object(Path, "exists", return_value=False),
-                patch.object(Path, "read_bytes", side_effect=PermissionError("unreadable")),
+                patch.object(Path, "open", side_effect=PermissionError("unreadable")),
                 patch("core.storage.replace_file") as replace,
             ):
                 with self.assertRaises(PermissionError):
                     save_config(AppConfig(), path)
                 replace.assert_not_called()
             self.assertEqual(path.read_text(encoding="utf-8"), "{}")
+
+    def test_oversized_configuration_is_rejected_without_reading_or_rewriting_it(self) -> None:
+        path = Path("oversized-config.json")
+        with (
+            patch.object(
+                Path,
+                "lstat",
+                return_value=SimpleNamespace(st_mode=0o100600, st_size=MAX_CONFIG_BYTES + 1),
+            ),
+            patch.object(Path, "open") as open_file,
+            self.assertRaises(ConfigLoadError),
+        ):
+            load_config(path)
+        open_file.assert_not_called()
 
     def test_nonregular_configuration_is_rejected_before_opening(self) -> None:
         for mode in (S_IFDIR, S_IFIFO, S_IFLNK):
@@ -513,6 +541,38 @@ class CoreModelTests(unittest.TestCase):
             ):
                 load_config(Path("nonregular-config"))
             read.assert_not_called()
+
+    def test_configuration_identity_swap_is_rejected_without_rewriting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text("{}", encoding="utf-8")
+            info = path.lstat()
+            swapped = SimpleNamespace(
+                st_mode=info.st_mode,
+                st_dev=info.st_dev,
+                st_ino=info.st_ino + 1,
+            )
+            with (
+                patch("core.storage.os.fstat", return_value=swapped),
+                self.assertRaises(ConfigLoadError),
+            ):
+                load_config(path)
+            self.assertEqual("{}", path.read_text(encoding="utf-8"))
+
+    def test_oversized_serialized_configuration_never_replaces_valid_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            original = AppConfig(theme="dark")
+            save_config(original, path)
+            before = path.read_bytes()
+            replacement = load_config(path)
+            replacement.theme = "light"
+            with (
+                patch("core.storage.MAX_CONFIG_BYTES", 128),
+                self.assertRaisesRegex(ValueError, "Serialized configuration exceeds"),
+            ):
+                save_config(replacement, path)
+            self.assertEqual(before, path.read_bytes())
 
     def test_default_config_path_can_use_environment_override(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Mapping, Optional
 
 from .endpoints import RELAYER_ENDPOINTS
-from .http_client import request_json
+from .http_client import PolymarketResponseError, as_list, request_json
 from .constants import POLYMARKET_LIVE_MUTATION_BLOCKER
 
 
@@ -57,7 +57,10 @@ def get_transaction(transaction_id: str, *, timeout: float = 15.0) -> Any:
 
 def get_recent_transactions(headers: Mapping[str, str], *, timeout: float = 15.0) -> List[Dict[str, Any]]:
     data = _get_json("transactions", headers=headers, auth_required=True, timeout=timeout)
-    return data if isinstance(data, list) else []
+    rows = as_list(data, endpoint_name="relayer transactions")
+    if any(not isinstance(row, dict) for row in rows):
+        raise PolymarketResponseError("relayer transactions expected every array item to be an object.")
+    return rows
 
 
 def get_current_nonce(address: str, nonce_type: str, *, timeout: float = 15.0) -> Dict[str, Any]:
@@ -77,4 +80,7 @@ def is_wallet_deployed(address: str, wallet_type: str = "SAFE", *, timeout: floa
 
 def get_all_api_keys(headers: Mapping[str, str], *, timeout: float = 15.0) -> List[Dict[str, Any]]:
     data = _get_json("api_keys", headers=headers, auth_required=True, timeout=timeout)
-    return data if isinstance(data, list) else []
+    rows = as_list(data, endpoint_name="relayer API keys")
+    if any(not isinstance(row, dict) for row in rows):
+        raise PolymarketResponseError("relayer API keys expected every array item to be an object.")
+    return rows

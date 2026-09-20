@@ -30,6 +30,10 @@ A platform can move to fully supported only when all of these are true:
 - The React frontend build path is documented for that platform or explicitly declared shared.
 - Release artifacts or source-install expectations are documented.
 - Known platform-specific limitations are documented.
+- Every point-bearing protected-main push CI job emits a fresh canonical receipt
+  whose exact bytes have GitHub build-provenance from a `github-hosted`
+  certificate and whose run, attempt, revision, job, and matrix identity match
+  current GitHub API state.
 
 Android and iOS need additional gates because Tkinter desktop UI and a local Python process are not native mobile application models. Full mobile support requires a separate mobile packaging strategy, such as a mobile web client backed by a reachable server or a native wrapper with a supported backend deployment model.
 
@@ -53,8 +57,10 @@ The strict gate is expected to fail until Windows 10, RHEL/Rocky desktop runners
 
 When a required hosted, VM, or self-hosted target is available, use the
 isolated runner from a clean checkout. It creates a disposable virtual
-environment, installs `requirements-test.lock` with hashes, installs the
-checkout without dependency resolution, then runs
+environment, installs `requirements-bootstrap.lock` and
+`requirements-test.lock` with hashes and a binary-only policy, verifies the
+already installed pinned backend while installing the checkout without build
+isolation or dependency resolution, then runs
 `collect_platform_evidence.py`. This avoids accidentally treating host-global
 packages as clean-install evidence. It discards command output so the JSON
 record cannot contain environment values or credential-bearing logs:
@@ -67,7 +73,9 @@ python scripts/run_platform_evidence.py \
 ```
 
 The runner returns nonzero without writing an evidence record if the target
-cannot create a virtual environment or install the locked dependencies. On
+cannot create a virtual environment or lacks a compatible reviewed wheel for
+any locked dependency. It never falls back to executing an sdist build backend.
+On
 minimal operating systems, install that Python version's `venv` package first.
 After bootstrap, the collector returns nonzero when any check fails and writes
 the result atomically. Its record includes the project version and, when Git
@@ -76,6 +84,11 @@ Evidence records are review inputs only: do not change a support claim or enable
 `--require-full` based on an unreviewed record. A platform can be promoted only
 after an operator verifies the host identity, source revision, clean dependency
 installation, command results, and applicable release/install path.
+
+The standalone host-evidence format is distinct from score-bearing CI
+provenance. Platform readiness points require the per-job receipts produced by
+`.github/workflows/ci.yml`, their source-run artifacts, and their independent
+Sigstore verification through `.github/workflows/platform-evidence.yml`.
 
 ### Reviewing Host Evidence
 

@@ -4,12 +4,12 @@ import http.client
 import ipaddress
 import math
 import socket
-import ssl
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPHandler, HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from core.request_control import RequestControl, RequestDeadlineExceeded, resolve_with_deadline
+from core.tls import create_verified_client_context
 
 
 class _RejectRedirects(HTTPRedirectHandler):
@@ -103,7 +103,7 @@ class _ProbeHTTPHandler(HTTPHandler):
 
 class _ProbeHTTPSHandler(HTTPSHandler):
     def __init__(self, control: RequestControl, public_only: bool):
-        super().__init__(context=ssl.create_default_context())
+        super().__init__(context=create_verified_client_context())
         self.control = control
         self.public_only = public_only
 

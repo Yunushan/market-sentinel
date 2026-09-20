@@ -12,16 +12,24 @@ GitHub run/job state, an uploaded artifact, and exact-byte artifact attestation.
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urlparse
+from uuid import UUID, uuid4
 
 try:
     import tomllib
@@ -30,9 +38,15 @@ except ModuleNotFoundError:  # Python 3.10 compatibility.
 
 try:
     from scripts.release_version import normalize_release_tag, normalize_release_version
-    from scripts.review_deployment_evidence import DeploymentEvidenceError, review_deployment_report
+    from scripts.review_deployment_evidence import (
+        DeploymentEvidenceError,
+        review_deployment_report,
+        review_external_probe_report,
+    )
     from scripts.verify_restored_state import application_check_valid
     from scripts.trusted_readiness_evidence import (
+        PLATFORM_RECEIPT_SUBJECT_NAME,
+        PLATFORM_SOURCE_WORKFLOW,
         REPORT_TYPE as TRUSTED_EVIDENCE_REPORT_TYPE,
         WORKFLOW_CONTRACTS as TRUSTED_EVIDENCE_WORKFLOW_CONTRACTS,
         canonical_json_bytes as trusted_evidence_canonical_bytes,
@@ -40,11 +54,22 @@ try:
         validate_manifest as validate_trusted_evidence_manifest,
     )
     from scripts.verify_release_assets import publishable_assets
+    from scripts.verify_repository_settings import collect_governance_evidence
+    from scripts.verify_production_deployment import (
+        REQUIRED_WORKER_UNIT_CONTRACT_SHA256 as DEPLOYMENT_WORKER_UNIT_CONTRACT_SHA256,
+        worker_invocation_sha256,
+    )
 except ModuleNotFoundError:  # Direct execution adds scripts/, rather than the repository root, to sys.path.
     from release_version import normalize_release_tag, normalize_release_version
-    from review_deployment_evidence import DeploymentEvidenceError, review_deployment_report
+    from review_deployment_evidence import (
+        DeploymentEvidenceError,
+        review_deployment_report,
+        review_external_probe_report,
+    )
     from verify_restored_state import application_check_valid
     from trusted_readiness_evidence import (
+        PLATFORM_RECEIPT_SUBJECT_NAME,
+        PLATFORM_SOURCE_WORKFLOW,
         REPORT_TYPE as TRUSTED_EVIDENCE_REPORT_TYPE,
         WORKFLOW_CONTRACTS as TRUSTED_EVIDENCE_WORKFLOW_CONTRACTS,
         canonical_json_bytes as trusted_evidence_canonical_bytes,
@@ -52,6 +77,11 @@ except ModuleNotFoundError:  # Direct execution adds scripts/, rather than the r
         validate_manifest as validate_trusted_evidence_manifest,
     )
     from verify_release_assets import publishable_assets
+    from verify_repository_settings import collect_governance_evidence
+    from verify_production_deployment import (  # type: ignore[no-redef]
+        REQUIRED_WORKER_UNIT_CONTRACT_SHA256 as DEPLOYMENT_WORKER_UNIT_CONTRACT_SHA256,
+        worker_invocation_sha256,
+    )
 
 from polymarket.live_report_schema import validate_live_validation_report
 from polymarket.live_reports import live_validation_report_promotion
@@ -59,6 +89,9 @@ from core.deployment_identity import canonical_https_origin
 
 
 ROOT = Path(__file__).resolve().parents[1]
+EXTERNAL_TOOL_STDOUT_MAX_BYTES = 4 * 1024 * 1024
+EXTERNAL_TOOL_STDERR_MAX_BYTES = 64 * 1024
+GIT_INDEX_OUTPUT_MAX_BYTES = 16 * 1024 * 1024
 PUBLIC_LIVE_ATTEMPTS = 2
 PUBLIC_LIVE_RETRY_DELAY_SECONDS = 1.0
 EVIDENCE_MAX_AGE_DAYS = 30
@@ -132,6 +165,7 @@ DEPLOYMENT_WORKFLOW_NAME = "Production deployment evidence"
 DEPLOYMENT_TRUSTED_MAIN_REF = "refs/heads/main"
 DEPLOYMENT_REPORT_NAME = "deployment-evidence.json"
 DEPLOYMENT_REPORT_TYPE = "market-sentinel-deployment-evidence"
+DEPLOYMENT_EXTERNAL_PROBE_REPORT_NAME = "external-probe.json"
 DEPLOYMENT_PREPARE_JOB = "Prepare trusted deployment identity"
 DEPLOYMENT_COLLECTOR_JOB = "Collect production deployment evidence"
 DEPLOYMENT_EXTERNAL_PROBE_JOB = "Probe production externally from GitHub-hosted runner"
@@ -140,6 +174,9 @@ DEPLOYMENT_COLLECTOR_LABELS = frozenset(
     {"self-hosted", "linux", "x64", "market-sentinel-production"}
 )
 REQUIRED_DEPLOYMENT_PREPARE_STEPS = (
+    "Generate run-unique monitoring challenge",
+    "Require exact protected production origin",
+    "Require protected public on-call receipt service",
     "Resolve exact release coordinates",
     "Verify release tag on protected main",
     "Download exact published release frontend asset",
@@ -149,20 +186,62 @@ REQUIRED_DEPLOYMENT_PREPARE_STEPS = (
 REQUIRED_DEPLOYMENT_COLLECTOR_STEPS = (
     "Download trusted deployment identity",
     "Collect raw production deployment evidence",
+    "Collect raw Prometheus alert-delivery evidence",
     "Upload raw production deployment evidence",
 )
 REQUIRED_DEPLOYMENT_EXTERNAL_PROBE_STEPS = (
     "Probe exact public deployment from GitHub-hosted runner",
+    "Attest exact GitHub-hosted external probe",
     "Upload raw GitHub-hosted external probe",
 )
 REQUIRED_DEPLOYMENT_REVIEW_STEPS = (
     "Download trusted deployment identity",
     "Download raw production deployment evidence",
     "Download raw GitHub-hosted external probe",
+    "Verify exact external-probe source attestation",
+    "Review raw Prometheus alert-delivery evidence",
     "Review raw report and bind exact release identity",
     "Attest exact deployment evidence",
     "Upload attested deployment evidence",
 )
+DEPLOYMENT_ALERT_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{16,64}$")
+DEPLOYMENT_ALERT_ONCALL_PROVIDER_RE = re.compile(r"^[a-z][a-z0-9_-]{1,62}$")
+DEPLOYMENT_ALERT_DISALLOWED_PROVIDERS = frozenset({"local", "loopback", "mock", "none", "test"})
+DEPLOYMENT_ALERT_MAX_CLOCK_SKEW_SECONDS = 60
+DEPLOYMENT_UNATTENDED_STATE_FILE = "/var/lib/market-sentinel/unattended-worker-state.json"
+DEPLOYMENT_UNATTENDED_LOCK_FILE = "/var/lib/market-sentinel/.unattended-worker.lock"
+DEPLOYMENT_UNATTENDED_ENVIRONMENT_FILE = "/etc/market-sentinel/market-sentinel-worker.env"
+DEPLOYMENT_UNATTENDED_MAX_FUTURE_SKEW_SECONDS = 5
+DEPLOYMENT_UNATTENDED_ENVIRONMENT_KEYS = frozenset(
+    {
+        "MARKET_SENTINEL_SOURCE_REVISION",
+        "CONTEXT_API_KEY",
+        "CRYPTO_COM_PREDICTIONS_API_KEY",
+        "DFLOW_API_KEY",
+        "DRAFTKINGS_PREDICTIONS_API_KEY",
+        "FANDUEL_PREDICTS_API_KEY",
+        "GJOPEN_API_TOKEN",
+        "MANIFOLD_API_KEY",
+        "METACULUS_API_TOKEN",
+        "NADEX_PREDICTIONS_API_KEY",
+        "OPINION_API_KEY",
+        "PREDICT_FUN_API_KEY",
+        "SCICAST_API_KEY",
+        "XMARKET_API_KEY",
+    }
+)
+DEPLOYMENT_UNATTENDED_SERVICES = {
+    "market-sentinel-alerts-refresh.service": {
+        "task": "alerts-refresh",
+        "timer": "market-sentinel-alerts-refresh.timer",
+        "max_age_seconds": 5 * 60,
+    },
+    "market-sentinel-wallets-poll.service": {
+        "task": "wallets-poll",
+        "timer": "market-sentinel-wallets-poll.timer",
+        "max_age_seconds": 10 * 60,
+    },
+}
 REQUIRED_RELEASE_METADATA_STEPS = (
     "Validate package version matches release tag",
     "Require release tag to resolve to workflow commit on protected main",
@@ -250,6 +329,7 @@ REQUIRED_SECURITY_FILES = (
 REQUIRED_CI_FILES = (
     ".github/actionlint.yaml",
     ".github/workflows/ci.yml",
+    ".github/workflows/security.yml",
     ".github/workflows/governance-evidence.yml",
     ".github/workflows/platform-evidence.yml",
     ".github/workflows/polymarket-evidence.yml",
@@ -261,24 +341,46 @@ REQUIRED_CI_FILES = (
     "scripts/generate_release_evidence.py",
     "scripts/trusted_readiness_evidence.py",
     "scripts/verify_python_dist_artifacts.py",
+    "scripts/verify_release_policy.py",
+    "scripts/verify_reproducible_python_dist.py",
 )
 
 REQUIRED_OPERATIONS_FILES = (
+    "core/unattended_worker.py",
     "docs/PRODUCTION_OPERATIONS.md",
     ".github/workflows/deployment-evidence.yml",
+    "deploy/systemd/market-sentinel-health.env.example",
+    "deploy/systemd/market-sentinel.env.example",
+    "deploy/systemd/market-sentinel.conf",
     "deploy/systemd/market-sentinel-web.service",
     "deploy/systemd/market-sentinel-health.service",
+    "deploy/systemd/market-sentinel-health.timer",
     "deploy/systemd/market-sentinel-backup.service",
+    "deploy/systemd/market-sentinel-backup.timer",
+    "deploy/systemd/market-sentinel-alerts-refresh.service",
+    "deploy/systemd/market-sentinel-alerts-refresh.timer",
+    "deploy/systemd/market-sentinel-wallets-poll.service",
+    "deploy/systemd/market-sentinel-wallets-poll.timer",
+    "deploy/systemd/market-sentinel-worker.env.example",
+    "deploy/prometheus/market-sentinel-alerts.yml",
+    "deploy/prometheus/market-sentinel-scrape.yml",
+    "deploy/prometheus/market-sentinel-attestation-prometheus.yml.example",
+    "deploy/prometheus/market-sentinel-attestation-alertmanager.yml.example",
+    "scripts/collect_prometheus_delivery_evidence.py",
+    "scripts/review_prometheus_delivery_evidence.py",
     "scripts/verify_production_deployment.py",
     "scripts/review_deployment_evidence.py",
     "scripts/generate_deployment_evidence.py",
     "scripts/backup_state.py",
     "scripts/restore_state_backup.py",
+    "scripts/verify_service_health.py",
 )
 
 REQUIRED_PLATFORM_FILES = (
     "docs/PLATFORM_SUPPORT.md",
+    ".github/actions/platform-ci-receipt/action.yml",
     ".github/workflows/platform-evidence.yml",
+    "scripts/platform_ci_receipt.py",
     "scripts/trusted_readiness_evidence.py",
     "scripts/verify_platform_support.py",
     ".github/workflows/ci.yml",
@@ -319,6 +421,433 @@ def _category(
         "basis": basis,
         "missing": list(missing or []),
     }
+
+
+class _ToolTrustError(RuntimeError):
+    """Raised when an external executable cannot be used as a trusted authority."""
+
+
+class _ToolOutputLimitError(RuntimeError):
+    """Raised when an external executable exceeds its bounded output contract."""
+
+
+@dataclass(frozen=True)
+class _ExecutableIdentity:
+    path: Path
+    sha256: str
+    size: int
+    device: int
+    inode: int
+    mtime_ns: int
+    ctime_ns: int
+
+
+@dataclass
+class _ToolTrustContext:
+    external_awards_requested: bool = False
+    pins: dict[str, str] = dataclass_field(default_factory=dict)
+    identities: dict[str, _ExecutableIdentity] = dataclass_field(default_factory=dict)
+    errors: dict[str, str] = dataclass_field(default_factory=dict)
+
+
+_TOOL_TRUST_CONTEXT: ContextVar[_ToolTrustContext | None] = ContextVar(
+    "market_sentinel_readiness_tool_trust",
+    default=None,
+)
+_TOOL_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_EXTERNAL_EVIDENCE_ARGUMENTS = (
+    "public_live_report",
+    "deployment_evidence",
+    "platform_ci_evidence",
+    "platform_evidence",
+    "repository_settings_evidence",
+    "release_environment_evidence",
+    "release_history_evidence",
+    "release_evidence",
+    "credentialed_evidence",
+    "funded_evidence",
+)
+
+
+def _current_tool_trust_context() -> _ToolTrustContext:
+    context = _TOOL_TRUST_CONTEXT.get()
+    if context is None:
+        context = _ToolTrustContext()
+        _TOOL_TRUST_CONTEXT.set(context)
+    return context
+
+
+def _normalized_tool_pin(value: Any) -> str:
+    if not isinstance(value, str) or value != value.strip():
+        return ""
+    normalized = value.casefold()
+    return normalized if _TOOL_SHA256_RE.fullmatch(normalized) else ""
+
+
+@contextmanager
+def _configured_tool_trust(args: argparse.Namespace) -> Iterator[None]:
+    external_requested = any(
+        isinstance(getattr(args, name, None), str) and bool(getattr(args, name).strip())
+        for name in _EXTERNAL_EVIDENCE_ARGUMENTS
+    )
+    context = _ToolTrustContext(
+        external_awards_requested=external_requested,
+        pins={
+            "git": _normalized_tool_pin(getattr(args, "git_sha256", "")),
+            "gh": _normalized_tool_pin(getattr(args, "gh_sha256", "")),
+        },
+    )
+    token = _TOOL_TRUST_CONTEXT.set(context)
+    try:
+        yield
+    finally:
+        _TOOL_TRUST_CONTEXT.reset(token)
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        return os.path.commonpath((os.path.normcase(str(path)), os.path.normcase(str(root)))) == os.path.normcase(
+            str(root)
+        )
+    except ValueError:
+        return False
+
+
+def _path_has_link_component(path: Path) -> bool:
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        try:
+            metadata = os.lstat(current)
+        except OSError:
+            return True
+        if stat.S_ISLNK(metadata.st_mode):
+            return True
+        is_junction = getattr(current, "is_junction", None)
+        if callable(is_junction):
+            try:
+                if is_junction():
+                    return True
+            except OSError:
+                return True
+    return False
+
+
+def _unsafe_executable_roots() -> tuple[Path, ...]:
+    candidates: list[Path] = [ROOT, Path.cwd(), Path(tempfile.gettempdir())]
+    for name in ("TEMP", "TMP", "TMPDIR"):
+        value = os.environ.get(name)
+        if value:
+            candidates.append(Path(value))
+    roots: list[Path] = []
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if resolved not in roots:
+            roots.append(resolved)
+    return tuple(roots)
+
+
+def _posix_path_is_safely_owned(path: Path) -> bool:
+    if os.name != "posix":
+        return True
+    permitted_owners = {0, os.geteuid()}
+    current = path
+    while True:
+        try:
+            metadata = os.lstat(current)
+        except OSError:
+            return False
+        if metadata.st_uid not in permitted_owners or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            return False
+        if current.parent == current:
+            return True
+        current = current.parent
+
+
+def _sha256_regular_file(path: Path) -> tuple[str, os.stat_result]:
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode):
+        raise _ToolTrustError("external tool is not a regular file")
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    after = os.lstat(path)
+    identity_before = (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    )
+    identity_after = (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+    if identity_before != identity_after or not stat.S_ISREG(after.st_mode):
+        raise _ToolTrustError("external tool changed while it was hashed")
+    return digest.hexdigest(), after
+
+
+def _resolve_executable_identity(name: str, *, require_pin: bool) -> _ExecutableIdentity:
+    if name not in {"git", "gh"}:
+        raise _ToolTrustError("unsupported external tool")
+    context = _current_tool_trust_context()
+    pin = context.pins.get(name, "")
+    if require_pin and not pin:
+        raise _ToolTrustError(f"a valid operator-pinned {name} SHA-256 is required")
+    located = shutil.which(name)
+    if not located:
+        raise _ToolTrustError(f"{name} executable was not found")
+    lexical_path = Path(located)
+    if not lexical_path.is_absolute():
+        lexical_path = Path(os.path.abspath(lexical_path))
+    # PATH entries may be system-managed symlinks or junctions. Resolve them
+    # before applying the existing ownership, location, and identity checks.
+    try:
+        path = lexical_path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise _ToolTrustError(f"{name} executable cannot be resolved") from exc
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise _ToolTrustError(f"{name} executable is not executable")
+    if any(_path_is_within(path, root) for root in _unsafe_executable_roots()):
+        raise _ToolTrustError(f"{name} executable is in an untrusted writable location")
+    if not _posix_path_is_safely_owned(path):
+        raise _ToolTrustError(f"{name} executable ownership or mode is unsafe")
+    digest, metadata = _sha256_regular_file(path)
+    if require_pin and digest != pin:
+        raise _ToolTrustError(f"{name} executable does not match the operator pin")
+    return _ExecutableIdentity(
+        path=path,
+        sha256=digest,
+        size=metadata.st_size,
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+        mtime_ns=metadata.st_mtime_ns,
+        ctime_ns=metadata.st_ctime_ns,
+    )
+
+
+def _trusted_executable_identity(name: str, *, require_pin: bool) -> _ExecutableIdentity:
+    context = _current_tool_trust_context()
+    cached = context.identities.get(name)
+    if cached is not None:
+        if require_pin and context.pins.get(name) != cached.sha256:
+            raise _ToolTrustError(f"{name} executable does not match the operator pin")
+        return cached
+    if name in context.errors:
+        raise _ToolTrustError(context.errors[name])
+    try:
+        identity = _resolve_executable_identity(name, require_pin=require_pin)
+    except _ToolTrustError as exc:
+        context.errors[name] = str(exc)
+        raise
+    if require_pin and context.pins.get(name) != identity.sha256:
+        context.errors[name] = f"{name} executable does not match the operator pin"
+        raise _ToolTrustError(context.errors[name])
+    context.identities[name] = identity
+    return identity
+
+
+def _recheck_executable_identity(identity: _ExecutableIdentity) -> None:
+    if _path_has_link_component(identity.path) or not _posix_path_is_safely_owned(identity.path):
+        raise _ToolTrustError("external tool path trust changed")
+    digest, metadata = _sha256_regular_file(identity.path)
+    observed = (
+        digest,
+        metadata.st_size,
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+    expected = (
+        identity.sha256,
+        identity.size,
+        identity.device,
+        identity.inode,
+        identity.mtime_ns,
+        identity.ctime_ns,
+    )
+    if observed != expected:
+        raise _ToolTrustError("external tool identity changed")
+
+
+@contextmanager
+def _private_tool_work_directory() -> Iterator[Path]:
+    windows_path: Path | None = None
+    temporary_directory: tempfile.TemporaryDirectory[str] | None = None
+    if os.name == "nt":
+        temporary_root = Path(tempfile.gettempdir()).resolve(strict=True)
+        for _attempt in range(10):
+            candidate = temporary_root / f"market-sentinel-tool-{uuid4().hex}"
+            try:
+                os.mkdir(candidate, 0o777)
+            except FileExistsError:
+                continue
+            windows_path = candidate
+            break
+        if windows_path is None:
+            raise _ToolTrustError("private tool working directory is unavailable")
+        path = windows_path
+    else:
+        temporary_directory = tempfile.TemporaryDirectory(prefix="market-sentinel-tool-")
+        path = Path(temporary_directory.name)
+    try:
+        try:
+            if os.name == "posix":
+                os.chmod(path, 0o700)
+            metadata = os.lstat(path)
+        except OSError as exc:
+            raise _ToolTrustError("private tool working directory is unavailable") from exc
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            raise _ToolTrustError("private tool working directory is unsafe")
+        if os.name == "posix" and (metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077):
+            raise _ToolTrustError("private tool working directory permissions are unsafe")
+        yield path
+    finally:
+        if temporary_directory is not None:
+            temporary_directory.cleanup()
+        elif windows_path is not None:
+            shutil.rmtree(windows_path)
+
+
+def _base_sanitized_environment() -> dict[str, str]:
+    return {"LANG": "C", "LC_ALL": "C", "NO_COLOR": "1"}
+
+
+def _trusted_tool_environment(name: str, work_directory: Path) -> dict[str, str]:
+    environment = _base_sanitized_environment()
+    if name == "git":
+        environment.update(
+            {
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_OPTIONAL_LOCKS": "0",
+                "GIT_PAGER": "cat",
+                "PAGER": "cat",
+            }
+        )
+        return environment
+    if name != "gh":
+        raise _ToolTrustError("unsupported external tool")
+    for token_name in ("GH_TOKEN", "GITHUB_TOKEN"):
+        token = os.environ.get(token_name)
+        if token:
+            environment[token_name] = token
+    config_directory = work_directory / "gh-config"
+    config_directory.mkdir(mode=0o700 if os.name == "posix" else 0o777)
+    environment.update(
+        {
+            "GH_HOST": "github.com",
+            "GH_CONFIG_DIR": str(config_directory),
+            "GH_PROMPT_DISABLED": "1",
+            "GH_NO_UPDATE_NOTIFIER": "1",
+            "GH_PAGER": "cat",
+            "PAGER": "cat",
+            "HOME": str(work_directory),
+            "USERPROFILE": str(work_directory),
+        }
+    )
+    return environment
+
+
+def _run_bounded_process(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout: int,
+    maximum_stdout_bytes: int,
+    maximum_stderr_bytes: int,
+) -> subprocess.CompletedProcess[bytes]:
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=False,
+        shell=False,
+        close_fds=True,
+    )
+    stdout = bytearray()
+    stderr = bytearray()
+    overflow = threading.Event()
+
+    def drain(stream: Any, output: bytearray, limit: int) -> None:
+        try:
+            while True:
+                chunk = stream.read(64 * 1024)
+                if not chunk:
+                    break
+                remaining = max(0, limit - len(output))
+                if remaining:
+                    output.extend(chunk[:remaining])
+                if len(chunk) > remaining:
+                    overflow.set()
+        finally:
+            stream.close()
+
+    stdout_thread = threading.Thread(target=drain, args=(process.stdout, stdout, maximum_stdout_bytes), daemon=True)
+    stderr_thread = threading.Thread(target=drain, args=(process.stderr, stderr, maximum_stderr_bytes), daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+    deadline = time.monotonic() + timeout
+    timed_out = False
+    while process.poll() is None:
+        if overflow.is_set():
+            process.kill()
+            break
+        if time.monotonic() >= deadline:
+            timed_out = True
+            process.kill()
+            break
+        overflow.wait(0.02)
+    process.wait()
+    stdout_thread.join(timeout=5)
+    stderr_thread.join(timeout=5)
+    output_bytes = bytes(stdout)
+    error_bytes = bytes(stderr)
+    if timed_out:
+        raise subprocess.TimeoutExpired(command, timeout, output=output_bytes, stderr=error_bytes)
+    if overflow.is_set():
+        raise _ToolOutputLimitError("external tool output exceeded its size limit")
+    return subprocess.CompletedProcess(command, process.returncode, output_bytes, error_bytes)
+
+
+def _invoke_trusted_tool(
+    name: str,
+    arguments: list[str],
+    *,
+    timeout: int,
+    require_pin: bool,
+    maximum_stdout_bytes: int = EXTERNAL_TOOL_STDOUT_MAX_BYTES,
+) -> subprocess.CompletedProcess[bytes]:
+    identity = _trusted_executable_identity(name, require_pin=require_pin)
+    _recheck_executable_identity(identity)
+    command = [str(identity.path), *arguments]
+    try:
+        with _private_tool_work_directory() as work_directory:
+            result = _run_bounded_process(
+                command,
+                cwd=work_directory,
+                env=_trusted_tool_environment(name, work_directory),
+                timeout=timeout,
+                maximum_stdout_bytes=maximum_stdout_bytes,
+                maximum_stderr_bytes=EXTERNAL_TOOL_STDERR_MAX_BYTES,
+            )
+    finally:
+        _recheck_executable_identity(identity)
+    return result
 
 
 def _run_local_gates(full: bool) -> dict[str, Any]:
@@ -485,16 +1014,20 @@ def _recent_timestamp(
 def _run_gh_json(command: list[str], *, timeout: int = 30) -> tuple[Any | None, str]:
     """Run a fixed-shape GitHub CLI query and parse its bounded JSON response."""
 
+    if (
+        not command
+        or command[0] != "gh"
+        or any(not isinstance(argument, str) or "\x00" in argument or "\r" in argument or "\n" in argument for argument in command)
+    ):
+        return None, "GitHub CLI command contract is invalid"
     try:
-        result = subprocess.run(
-            command,
-            cwd=ROOT,
-            capture_output=True,
-            text=False,
-            check=False,
+        result = _invoke_trusted_tool(
+            "gh",
+            command[1:],
             timeout=timeout,
+            require_pin=True,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, subprocess.TimeoutExpired, _ToolOutputLimitError, _ToolTrustError) as exc:
         return None, f"{type(exc).__name__} while invoking GitHub CLI"
     if result.returncode != 0:
         return None, "GitHub CLI verification failed"
@@ -965,18 +1498,14 @@ def _attested_public_live_report(
             "detail": "GitHub Actions public-live job contains malformed or duplicate step names.",
             "report": {"sha256": report_hash},
         }
-    required_step_results = {
-        step.get("name"): (step.get("status"), step.get("conclusion"))
-        for step in steps
-        if isinstance(step, dict) and step.get("name") in REQUIRED_PUBLIC_LIVE_JOB_STEPS
-    }
-    if set(required_step_results) != set(REQUIRED_PUBLIC_LIVE_JOB_STEPS) or any(
-        result != ("completed", "success") for result in required_step_results.values()
-    ):
+    if not _release_job_steps_are_trusted(public_job, REQUIRED_PUBLIC_LIVE_JOB_STEPS):
         return {
             "status": "fail",
             "mode": "attested",
-            "detail": "GitHub Actions public-live job did not successfully complete every reviewed safety step.",
+            "detail": (
+                "GitHub Actions public-live job did not successfully complete every reviewed "
+                "safety step in order."
+            ),
             "report": {"sha256": report_hash},
         }
     job_times: dict[str, datetime] = {}
@@ -1992,7 +2521,9 @@ REQUIRED_REPOSITORY_SETTINGS_CHECKS = (
     "branch_require_pull_request",
     "branch_minimum_approvals",
     "branch_dismiss_stale_reviews",
+    "branch_require_code_owner_reviews",
     "branch_require_last_push_approval",
+    "branch_require_signed_commits",
     "branch_conversation_resolution",
     "branch_linear_history",
     "branch_force_pushes_disabled",
@@ -2002,7 +2533,7 @@ REQUIRED_RELEASE_ENVIRONMENT_CHECKS = (
     "release_required_reviewers",
     "release_independent_reviewers",
     "release_prevent_self_review",
-    "release_protected_branches",
+    "release_deployment_refs",
     "release_signing_secrets",
     "release_windows_code_signing_required",
     "production_required_reviewers",
@@ -2010,6 +2541,7 @@ REQUIRED_RELEASE_ENVIRONMENT_CHECKS = (
     "production_prevent_self_review",
     "production_protected_branches",
     "production_secrets",
+    "production_variables",
 )
 REQUIRED_RELEASE_HISTORY_CHECKS = (
     "published_release_exists",
@@ -2153,18 +2685,13 @@ def _repository_revision() -> str:
     try:
         if not _repository_root_is_exact():
             return ""
-        result = subprocess.run(
-            _trusted_git_command("rev-parse", "--verify", "HEAD^{commit}"),
-            cwd=ROOT,
-            env=_trusted_git_environment(),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+        result = _run_trusted_git("rev-parse", "--verify", "HEAD^{commit}")
+    except (OSError, subprocess.TimeoutExpired, _ToolOutputLimitError, _ToolTrustError):
         return ""
-    revision = result.stdout.strip().lower()
+    try:
+        revision = result.stdout.decode("ascii").strip().lower()
+    except UnicodeDecodeError:
+        return ""
     return revision if result.returncode == 0 and _COMMIT_RE.fullmatch(revision) else ""
 
 
@@ -2174,62 +2701,68 @@ def _repository_is_clean() -> bool:
     try:
         if not _repository_root_is_exact():
             return False
-        result = subprocess.run(
-            _trusted_git_command("status", "--porcelain=v1", "--untracked-files=all"),
-            cwd=ROOT,
-            env=_trusted_git_environment(),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=10,
+        status_result = _run_trusted_git("status", "--porcelain=v1", "-z", "--untracked-files=all")
+        sparse_result = _run_trusted_git("config", "--bool", "--get", "core.sparseCheckout")
+        unmerged_result = _run_trusted_git("ls-files", "--unmerged", "-z", "--")
+        index_result = _run_trusted_git(
+            "ls-files",
+            "-v",
+            "-z",
+            "--",
+            maximum_stdout_bytes=GIT_INDEX_OUTPUT_MAX_BYTES,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, _ToolOutputLimitError, _ToolTrustError):
         return False
-    return result.returncode == 0 and not result.stdout.strip()
+    if status_result.returncode != 0 or status_result.stdout:
+        return False
+    if sparse_result.returncode not in {0, 1}:
+        return False
+    if sparse_result.returncode == 0:
+        try:
+            sparse_value = sparse_result.stdout.decode("ascii").strip().casefold()
+        except UnicodeDecodeError:
+            return False
+        if sparse_value != "false":
+            return False
+    elif sparse_result.stdout:
+        return False
+    if unmerged_result.returncode != 0 or unmerged_result.stdout:
+        return False
+    if index_result.returncode != 0:
+        return False
+    entries = [entry for entry in index_result.stdout.split(b"\x00") if entry]
+    return all(entry.startswith(b"H ") for entry in entries)
 
 
-def _trusted_git_environment() -> dict[str, str]:
-    """Return a non-interactive Git environment without caller-controlled Git state."""
-
-    allowed = {
-        "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR",
-        "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "PROGRAMDATA",
-    }
-    environment = {key: value for key, value in os.environ.items() if key.upper() in allowed}
-    environment.update(
-        {
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_CONFIG_GLOBAL": os.devnull,
-            "GIT_TERMINAL_PROMPT": "0",
-            "GIT_OPTIONAL_LOCKS": "0",
-        }
-    )
-    return environment
-
-
-def _trusted_git_command(*arguments: str) -> list[str]:
-    return [
+def _run_trusted_git(
+    *arguments: str,
+    maximum_stdout_bytes: int = EXTERNAL_TOOL_STDOUT_MAX_BYTES,
+) -> subprocess.CompletedProcess[bytes]:
+    context = _current_tool_trust_context()
+    return _invoke_trusted_tool(
         "git",
-        "-c", f"safe.directory={ROOT.resolve()}",
-        "-c", "core.fsmonitor=false",
-        "-c", "core.hooksPath=",
-        *arguments,
-    ]
+        [
+            "-C",
+            str(ROOT.resolve()),
+            "-c",
+            f"safe.directory={ROOT.resolve()}",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=",
+            *arguments,
+        ],
+        timeout=10,
+        require_pin=context.external_awards_requested,
+        maximum_stdout_bytes=maximum_stdout_bytes,
+    )
 
 
 def _repository_root_is_exact() -> bool:
     try:
-        result = subprocess.run(
-            _trusted_git_command("rev-parse", "--show-toplevel"),
-            cwd=ROOT,
-            env=_trusted_git_environment(),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=10,
-        )
-        reported = Path(result.stdout.strip()).resolve()
-    except (OSError, ValueError, subprocess.TimeoutExpired):
+        result = _run_trusted_git("rev-parse", "--show-toplevel")
+        reported = Path(os.fsdecode(result.stdout.strip())).resolve(strict=True)
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired, _ToolOutputLimitError, _ToolTrustError):
         return False
     return result.returncode == 0 and os.path.normcase(str(reported)) == os.path.normcase(str(ROOT.resolve()))
 
@@ -2368,6 +2901,205 @@ def _trusted_evidence_result(
     if report_hash:
         result["report"] = {"sha256": report_hash}
     return result
+
+
+def _verify_platform_source_receipt_attestations(
+    receipts: Any,
+    jobs_payload: Any,
+    *,
+    expected_revision: str,
+    source_run_id: int,
+    source_run_attempt: int,
+    now: datetime,
+) -> tuple[bool, str]:
+    """Verify every signed source-job receipt against its exact hosted invocation."""
+
+    jobs = jobs_payload.get("jobs") if isinstance(jobs_payload, dict) else None
+    if not isinstance(receipts, list) or not receipts or not isinstance(jobs, list):
+        return False, "Platform source receipts or source-job metadata are malformed."
+    jobs_by_name: dict[str, dict[str, Any]] = {}
+    for job in jobs:
+        if not isinstance(job, dict) or not isinstance(job.get("name"), str):
+            return False, "Platform source-job metadata contains a malformed job."
+        name = str(job["name"])
+        if name in jobs_by_name:
+            return False, "Platform source-job metadata contains a duplicate job identity."
+        jobs_by_name[name] = job
+    seen_identities: set[str] = set()
+    seen_hashes: set[str] = set()
+    skew = timedelta(seconds=EVIDENCE_MAX_FUTURE_SKEW_SECONDS)
+    try:
+        for receipt in receipts:
+            if not isinstance(receipt, dict):
+                return False, "Platform source-job receipt is malformed."
+            job_name = receipt.get("job_name")
+            identity = receipt.get("identity_sha256")
+            job = jobs_by_name.get(str(job_name))
+            if (
+                not isinstance(job_name, str)
+                or not isinstance(identity, str)
+                or not _TOOL_SHA256_RE.fullmatch(identity)
+                or identity in seen_identities
+                or job is None
+            ):
+                return False, "Platform source-job receipt identity is missing, duplicated, or unbound."
+            raw = trusted_evidence_canonical_bytes(receipt)
+            report_hash = hashlib.sha256(raw).hexdigest()
+            if report_hash in seen_hashes:
+                return False, "A platform source-job receipt was replayed under another job identity."
+            seen_identities.add(identity)
+            seen_hashes.add(report_hash)
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix="market-sentinel-platform-receipt-",
+                suffix=".json",
+            )
+            target = Path(temporary_name)
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(raw)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                attestation, attestation_error = _run_gh_json(
+                    [
+                        "gh",
+                        "attestation",
+                        "verify",
+                        str(target),
+                        "--repo",
+                        PUBLIC_LIVE_REPOSITORY,
+                        "--format",
+                        "json",
+                    ],
+                    timeout=60,
+                )
+            finally:
+                target.unlink(missing_ok=True)
+            matching = (
+                [
+                    item
+                    for item in attestation
+                    if _attestation_result_matches(
+                        item,
+                        report_hash=report_hash,
+                        revision=expected_revision,
+                        workflow_ref=str(receipt.get("workflow_ref") or ""),
+                        run_id=source_run_id,
+                        run_attempt=source_run_attempt,
+                        now=now,
+                        subject_name=PLATFORM_RECEIPT_SUBJECT_NAME,
+                        repository=PUBLIC_LIVE_REPOSITORY,
+                        workflow_path=PLATFORM_SOURCE_WORKFLOW,
+                        event=str(receipt.get("event") or ""),
+                    )
+                ]
+                if isinstance(attestation, list)
+                else []
+            )
+            if len(matching) != 1:
+                return False, (
+                    f"Platform source-job receipt attestation was rejected for {job_name}: "
+                    f"{attestation_error or 'expected exactly one hosted certificate-bound result'}."
+                )
+            generated_at, generated_error = _recent_timestamp(receipt.get("generated_at"), now=now)
+            started_at, started_error = _recent_timestamp(job.get("started_at"), now=now)
+            completed_at, completed_error = _recent_timestamp(job.get("completed_at"), now=now)
+            if generated_at is None or started_at is None or completed_at is None:
+                return False, (
+                    f"Platform source-job receipt timing is invalid for {job_name}: "
+                    f"{generated_error or started_error or completed_error}."
+                )
+            verification = matching[0].get("verificationResult")
+            timestamps = verification.get("verifiedTimestamps") if isinstance(verification, dict) else None
+            parsed_timestamps: list[datetime] = []
+            if isinstance(timestamps, list):
+                for timestamp in timestamps:
+                    parsed, _error = _recent_timestamp(
+                        timestamp.get("timestamp") if isinstance(timestamp, dict) else None,
+                        now=now,
+                    )
+                    if parsed is not None:
+                        parsed_timestamps.append(parsed)
+            lower_bound = max(started_at, generated_at) - skew
+            upper_bound = completed_at + skew
+            if (
+                not parsed_timestamps
+                or len(parsed_timestamps) != len(timestamps or [])
+                or any(timestamp < lower_bound or timestamp > upper_bound for timestamp in parsed_timestamps)
+            ):
+                return False, f"Platform source-job attestation timestamp is outside the {job_name} job window."
+    except OSError as exc:
+        return False, f"Platform source-job receipt could not be staged safely: {type(exc).__name__}."
+    return True, "Every point-bearing platform source job has a unique fresh GitHub-hosted attestation."
+
+
+def _verify_live_governance_state(expected_sha256: str) -> tuple[bool, str]:
+    """Re-read administration-only controls and match the attested state digest."""
+
+    if not isinstance(expected_sha256, str) or _HASH_RE.fullmatch(expected_sha256) is None:
+        return False, "Attested governance-state digest is missing or malformed."
+
+    prefix = f"/repos/{PUBLIC_LIVE_REPOSITORY}"
+    expected_paths = (
+        f"{prefix}/branches/main/protection",
+        f"{prefix}/branches/main/protection/required_signatures",
+        f"{prefix}/environments/release",
+        f"{prefix}/environments/release/deployment-branch-policies?per_page=100",
+        f"{prefix}/environments/release/secrets?per_page=100",
+        f"{prefix}/environments/production",
+        f"{prefix}/environments/production/secrets?per_page=100",
+        f"{prefix}/environments/production/variables?per_page=100",
+        f"{prefix}/actions/variables/REQUIRE_WINDOWS_CODE_SIGNING",
+    )
+    requested_paths: list[str] = []
+
+    def request_json(path: str, token: str, timeout: float) -> Any:
+        if token or path not in expected_paths:
+            raise RuntimeError("governance API request contract is invalid")
+        requested_paths.append(path)
+        payload, error = _run_gh_json(
+            ["gh", "api", "--method", "GET", path.removeprefix("/")],
+            timeout=max(1, min(60, math.ceil(timeout))),
+        )
+        if not isinstance(payload, dict):
+            raise RuntimeError(error or "GitHub API returned a malformed governance document")
+        return payload
+
+    try:
+        checks, _state, observed_sha256 = collect_governance_evidence(
+            PUBLIC_LIVE_REPOSITORY,
+            "main",
+            "",
+            30.0,
+            request_json,
+        )
+    except (KeyError, RuntimeError, TypeError, ValueError) as exc:
+        return False, f"Live governance state could not be re-read: {exc}."
+
+    if tuple(requested_paths) != expected_paths:
+        return False, "Live governance collection did not read each required API document exactly once."
+    expected_check_names = {
+        *REQUIRED_REPOSITORY_SETTINGS_CHECKS,
+        *REQUIRED_RELEASE_ENVIRONMENT_CHECKS,
+    }
+    observed_check_names = [
+        check.get("name") for check in checks if isinstance(check, dict)
+    ]
+    if (
+        len(observed_check_names) != len(checks)
+        or len(observed_check_names) != len(expected_check_names)
+        or set(observed_check_names) != expected_check_names
+    ):
+        return False, "Live governance state returned an incomplete or unexpected control set."
+    failed = sorted(
+        str(check["name"])
+        for check in checks
+        if isinstance(check, dict) and check.get("status") != "pass"
+    )
+    if failed:
+        return False, f"Live governance controls currently fail: {', '.join(failed)}."
+    if observed_sha256 != expected_sha256:
+        return False, "Live governance state has drifted from the attested canonical snapshot."
+    return True, "Fresh administrator-authorized governance state matches the attested digest."
 
 
 def _attested_trusted_evidence(
@@ -2653,17 +3385,10 @@ def _attested_trusted_evidence(
             report_hash=report_hash,
         )
     required_steps = tuple(contract["required_steps"])
-    required_results = {
-        step.get("name"): (step.get("status"), step.get("conclusion"))
-        for step in steps
-        if isinstance(step, dict) and step.get("name") in required_steps
-    }
-    if set(required_results) != set(required_steps) or any(
-        result != ("completed", "success") for result in required_results.values()
-    ):
+    if not _release_job_steps_are_trusted(job, required_steps):
         return _trusted_evidence_result(
             "fail",
-            f"{label} hosted review job did not complete every required collection, review, and attestation step.",
+            f"{label} hosted review job did not complete every required collection, review, and attestation step in order.",
             evidence_type=evidence_type,
             report_hash=report_hash,
         )
@@ -2747,6 +3472,19 @@ def _attested_trusted_evidence(
                 report_hash=report_hash,
             )
 
+    governance_state_verified = False
+    if evidence_type in {"repository-settings", "release-environment"}:
+        governance_state_verified, governance_detail = _verify_live_governance_state(
+            str(validation.get("governance_state_sha256") or "")
+        )
+        if not governance_state_verified:
+            return _trusted_evidence_result(
+                "fail",
+                f"{label} live governance revalidation was rejected: {governance_detail}",
+                evidence_type=evidence_type,
+                report_hash=report_hash,
+            )
+
     if evidence_type in {"platform-ci", "platform"}:
         source_run_id = int(validation["source_run_id"])
         source_run_payload, source_run_error = _run_gh_json(
@@ -2761,20 +3499,47 @@ def _attested_trusted_evidence(
                 f"repos/{PUBLIC_LIVE_REPOSITORY}/actions/runs/{source_run_id}/jobs?filter=latest&per_page=100",
             ]
         )
+        source_artifacts_payload, source_artifacts_error = _run_gh_json(
+            [
+                "gh",
+                "api",
+                "--method",
+                "GET",
+                f"repos/{PUBLIC_LIVE_REPOSITORY}/actions/runs/{source_run_id}/artifacts?per_page=100",
+            ]
+        )
         try:
             derived_ci, derived_platform = derive_platform_checks(
                 source_run_payload,
                 source_jobs_payload,
+                source_artifacts_payload,
+                validation["source_receipts"],
                 expected_revision=expected_revision,
                 source_run_id=source_run_id,
+                now=current_time,
             )
         except ValueError as exc:
             return _trusted_evidence_result(
                 "fail",
                 (
                     f"{label} referenced CI run could not be independently verified: "
-                    f"{source_run_error or source_jobs_error or str(exc)}."
+                    f"{source_run_error or source_jobs_error or source_artifacts_error or str(exc)}."
                 ),
+                evidence_type=evidence_type,
+                report_hash=report_hash,
+            )
+        receipts_attested, receipts_detail = _verify_platform_source_receipt_attestations(
+            validation["source_receipts"],
+            source_jobs_payload,
+            expected_revision=expected_revision,
+            source_run_id=source_run_id,
+            source_run_attempt=int(validation["source_run_attempt"]),
+            now=current_time,
+        )
+        if not receipts_attested:
+            return _trusted_evidence_result(
+                "fail",
+                f"{label} source-job provenance was rejected: {receipts_detail}",
                 evidence_type=evidence_type,
                 report_hash=report_hash,
             )
@@ -2790,13 +3555,19 @@ def _attested_trusted_evidence(
                 report_hash=report_hash,
             )
 
+    verification_suffix = ""
+    if governance_state_verified:
+        verification_suffix = ", and a fresh matching administrator-authorized governance-state re-read"
+    elif evidence_type in {"platform-ci", "platform"}:
+        verification_suffix = ", and unique per-source-job hosted attestations"
+
     return {
         "status": "pass",
         "mode": "attested",
         "evidence_type": evidence_type,
         "detail": (
             f"Fresh canonical {label} evidence, exact hosted workflow/job, uploaded artifact, "
-            "and exact-byte artifact attestation were verified."
+            f"and exact-byte artifact attestation{verification_suffix} were verified."
         ),
         "report": {"sha256": report_hash},
         "evidence": {
@@ -2810,6 +3581,16 @@ def _attested_trusted_evidence(
             "github_run": "verified",
             "github_job": "verified",
             "github_artifact": "verified",
+            **(
+                {"github_governance_state": "verified"}
+                if governance_state_verified
+                else {}
+            ),
+            **(
+                {"platform_source_receipts": "verified"}
+                if evidence_type in {"platform-ci", "platform"}
+                else {}
+            ),
         },
     }
 
@@ -2902,6 +3683,348 @@ def _canonical_deployment_origin(value: Any) -> str:
     return origin
 
 
+def _deployment_timestamp(value: Any, *, now: datetime) -> datetime | None:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00").astimezone(timezone.utc)
+    except ValueError:
+        return None
+    age = now.astimezone(timezone.utc) - parsed
+    if age < -timedelta(seconds=EVIDENCE_MAX_FUTURE_SKEW_SECONDS):
+        return None
+    if age > timedelta(hours=DEPLOYMENT_EVIDENCE_MAX_AGE_HOURS):
+        return None
+    return parsed
+
+
+def _deployment_systemd_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    for pattern in ("%a %Y-%m-%d %H:%M:%S UTC", "%a %Y-%m-%d %H:%M:%S.%f UTC"):
+        try:
+            return datetime.strptime(value.strip(), pattern).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _deployment_finite_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    result = float(value)
+    return result if math.isfinite(result) else None
+
+
+def _validate_deployment_operations(
+    value: Any,
+    *,
+    expected_revision: str,
+    run_id: int,
+    run_attempt: int,
+    collected_at: datetime,
+    now: datetime,
+) -> tuple[dict[str, bool] | None, dict[str, datetime], str]:
+    """Validate the two independently reviewed operational capability summaries."""
+
+    if not isinstance(value, dict) or set(value) != {"alert_delivery", "unattended_workers"}:
+        return None, {}, "Deployment operations do not match the exact capability schema."
+
+    alert = value.get("alert_delivery")
+    alert_fields = {
+        "acknowledged_at",
+        "acknowledger_sha256",
+        "alert_fingerprint",
+        "alertmanager_config_sha256",
+        "alertmanager_status_sha256",
+        "binding_sha256",
+        "deployment_identity_sha256",
+        "delivery_id_sha256",
+        "nonce_sha256",
+        "oncall_channel_sha256",
+        "oncall_provider",
+        "raw_report_sha256",
+        "receipt_origin_sha256",
+        "receipt_sha256",
+        "review_report_sha256",
+        "run_attempt",
+        "run_id",
+        "source_revision",
+        "status",
+        "timeline",
+        "transcript_sha256",
+        "webhook_body_sha256",
+        "webhook_event_sha256",
+    }
+    digest_fields = {
+        "acknowledger_sha256",
+        "alertmanager_config_sha256",
+        "alertmanager_status_sha256",
+        "binding_sha256",
+        "deployment_identity_sha256",
+        "delivery_id_sha256",
+        "nonce_sha256",
+        "oncall_channel_sha256",
+        "raw_report_sha256",
+        "receipt_origin_sha256",
+        "receipt_sha256",
+        "review_report_sha256",
+        "transcript_sha256",
+        "webhook_body_sha256",
+        "webhook_event_sha256",
+    }
+    if (
+        not isinstance(alert, dict)
+        or set(alert) != alert_fields
+        or alert.get("status") != "ok"
+        or alert.get("source_revision") != expected_revision
+        or alert.get("run_id") != run_id
+        or alert.get("run_attempt") != run_attempt
+        or any(not isinstance(alert.get(field), str) or not _HASH_RE.fullmatch(alert[field]) for field in digest_fields)
+        or not isinstance(alert.get("alert_fingerprint"), str)
+        or not DEPLOYMENT_ALERT_FINGERPRINT_RE.fullmatch(alert["alert_fingerprint"])
+        or not isinstance(alert.get("oncall_provider"), str)
+        or not DEPLOYMENT_ALERT_ONCALL_PROVIDER_RE.fullmatch(alert["oncall_provider"])
+        or alert["oncall_provider"] in DEPLOYMENT_ALERT_DISALLOWED_PROVIDERS
+    ):
+        return None, {}, "Deployment alert-delivery capability identity or digest binding is invalid."
+    timeline = alert.get("timeline")
+    timeline_fields = {
+        "alertmanager_observed_at",
+        "alertmanager_config_observed_at",
+        "cleanup_rule_absent_at",
+        "completed_at",
+        "oncall_acknowledged_at",
+        "oncall_dispatched_at",
+        "oncall_receipt_observed_at",
+        "oncall_received_at",
+        "prometheus_alert_observed_at",
+        "prometheus_rule_observed_at",
+        "receiver_observed_at",
+        "started_at",
+    }
+    if not isinstance(timeline, dict) or set(timeline) != timeline_fields:
+        return None, {}, "Deployment alert-delivery timeline does not match the exact schema."
+    parsed_timeline = {
+        field: _deployment_timestamp(timeline.get(field), now=now)
+        for field in timeline_fields
+    }
+    if any(timestamp is None for timestamp in parsed_timeline.values()):
+        return None, {}, "Deployment alert-delivery timeline contains an invalid or stale timestamp."
+    alert_started = parsed_timeline["started_at"]
+    rule_seen = parsed_timeline["prometheus_rule_observed_at"]
+    prometheus_seen = parsed_timeline["prometheus_alert_observed_at"]
+    alertmanager_seen = parsed_timeline["alertmanager_observed_at"]
+    alertmanager_config_seen = parsed_timeline["alertmanager_config_observed_at"]
+    receiver_seen = parsed_timeline["receiver_observed_at"]
+    oncall_received = parsed_timeline["oncall_received_at"]
+    oncall_dispatched = parsed_timeline["oncall_dispatched_at"]
+    oncall_acknowledged = parsed_timeline["oncall_acknowledged_at"]
+    oncall_observed = parsed_timeline["oncall_receipt_observed_at"]
+    cleanup_seen = parsed_timeline["cleanup_rule_absent_at"]
+    alert_completed = parsed_timeline["completed_at"]
+    acknowledged_at = _deployment_timestamp(alert.get("acknowledged_at"), now=now)
+    if not all(
+        isinstance(item, datetime)
+        for item in (
+            alert_started,
+            rule_seen,
+            prometheus_seen,
+            alertmanager_seen,
+            alertmanager_config_seen,
+            receiver_seen,
+            oncall_received,
+            oncall_dispatched,
+            oncall_acknowledged,
+            oncall_observed,
+            cleanup_seen,
+            alert_completed,
+            acknowledged_at,
+        )
+    ):
+        return None, {}, "Deployment alert-delivery timeline is incomplete."
+    alert_clock_skew = timedelta(seconds=DEPLOYMENT_ALERT_MAX_CLOCK_SKEW_SECONDS)
+    if not (
+        alert_started
+        <= rule_seen
+        <= prometheus_seen
+        <= alertmanager_seen
+        <= alertmanager_config_seen
+        <= cleanup_seen
+        <= alert_completed
+        and alert_started <= receiver_seen <= oncall_observed <= cleanup_seen
+        and alertmanager_config_seen <= oncall_observed
+        and oncall_received <= oncall_dispatched < oncall_acknowledged
+        and oncall_received >= alert_started - alert_clock_skew
+        and oncall_acknowledged <= oncall_observed + alert_clock_skew
+        and acknowledged_at == oncall_acknowledged
+        and alert_started >= collected_at - timedelta(seconds=EVIDENCE_MAX_FUTURE_SKEW_SECONDS)
+    ):
+        return None, {}, "Deployment alert-delivery observations are out of order or misbound."
+
+    workers = value.get("unattended_workers")
+    worker_fields = {
+        "environment_file",
+        "environment_keys",
+        "lock_file",
+        "services",
+        "state_file",
+        "state_sha256",
+        "tasks",
+    }
+    if (
+        not isinstance(workers, dict)
+        or set(workers) != worker_fields
+        or workers.get("state_file") != DEPLOYMENT_UNATTENDED_STATE_FILE
+        or workers.get("lock_file") != DEPLOYMENT_UNATTENDED_LOCK_FILE
+        or workers.get("environment_file") != DEPLOYMENT_UNATTENDED_ENVIRONMENT_FILE
+        or not isinstance(workers.get("state_sha256"), str)
+        or not _HASH_RE.fullmatch(workers["state_sha256"])
+    ):
+        return None, {}, "Deployment unattended-worker paths or durable state identity are invalid."
+    environment_keys = workers.get("environment_keys")
+    if (
+        not isinstance(environment_keys, list)
+        or any(not isinstance(item, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]*", item) for item in environment_keys)
+        or environment_keys != sorted(set(environment_keys))
+        or not set(environment_keys).issubset(DEPLOYMENT_UNATTENDED_ENVIRONMENT_KEYS)
+        or "MARKET_SENTINEL_SOURCE_REVISION" not in environment_keys
+    ):
+        return None, {}, "Deployment unattended-worker environment inventory is unsafe."
+
+    services = workers.get("services")
+    tasks = workers.get("tasks")
+    expected_services = set(DEPLOYMENT_UNATTENDED_SERVICES)
+    expected_tasks = {identity["task"] for identity in DEPLOYMENT_UNATTENDED_SERVICES.values()}
+    if (
+        not isinstance(services, dict)
+        or set(services) != expected_services
+        or not isinstance(tasks, dict)
+        or set(tasks) != expected_tasks
+    ):
+        return None, {}, "Deployment unattended-worker service or task inventory is incomplete."
+
+    service_fields = {
+        "completed_at",
+        "completed_at_unix_seconds",
+        "source_revision",
+        "task",
+        "timer",
+        "unit_contract_sha256",
+    }
+    task_fields = {
+        "abandoned_runs",
+        "attempts_completed",
+        "emitted",
+        "freshness_age_seconds",
+        "last_success_at",
+        "last_success_at_unix_seconds",
+        "max_age_seconds",
+        "processed",
+        "run_id",
+        "service",
+        "service_unit",
+        "source_revision",
+        "timer",
+        "total_failures",
+        "total_runs",
+        "total_successes",
+        "unit_contract_sha256",
+        "invocation_sha256",
+    }
+    for service_name, identity in DEPLOYMENT_UNATTENDED_SERVICES.items():
+        service = services.get(service_name)
+        task_name = str(identity["task"])
+        timer_name = str(identity["timer"])
+        maximum_age = int(identity["max_age_seconds"])
+        task = tasks.get(task_name)
+        expected_contract_sha256 = DEPLOYMENT_WORKER_UNIT_CONTRACT_SHA256[service_name]
+        expected_invocation_sha256 = worker_invocation_sha256(
+            task=task_name,
+            service_unit=service_name,
+            source_revision=expected_revision,
+            unit_contract_sha256=expected_contract_sha256,
+        )
+        if (
+            not isinstance(service, dict)
+            or set(service) != service_fields
+            or service.get("task") != task_name
+            or service.get("timer") != timer_name
+            or service.get("source_revision") != expected_revision
+            or service.get("unit_contract_sha256") != expected_contract_sha256
+            or not isinstance(task, dict)
+            or set(task) != task_fields
+            or task.get("service") != service_name
+            or task.get("timer") != timer_name
+            or task.get("source_revision") != expected_revision
+            or task.get("service_unit") != service_name
+            or task.get("unit_contract_sha256") != expected_contract_sha256
+            or task.get("invocation_sha256") != expected_invocation_sha256
+        ):
+            return None, {}, "Deployment unattended-worker service linkage is invalid."
+
+        completed = _deployment_systemd_timestamp(service.get("completed_at"))
+        completed_unix = _deployment_finite_number(service.get("completed_at_unix_seconds"))
+        success = _deployment_timestamp(task.get("last_success_at"), now=now)
+        success_unix = _deployment_finite_number(task.get("last_success_at_unix_seconds"))
+        freshness = _deployment_finite_number(task.get("freshness_age_seconds"))
+        if (
+            completed is None
+            or completed_unix is None
+            or abs(completed.timestamp() - completed_unix) > 1
+            or success is None
+            or success_unix is None
+            or abs(success.timestamp() - success_unix) > 1
+            or freshness is None
+            or freshness < -DEPLOYMENT_UNATTENDED_MAX_FUTURE_SKEW_SECONDS
+            or task.get("max_age_seconds") != maximum_age
+            or freshness > maximum_age
+            or abs((collected_at - success).total_seconds() - freshness) > 5
+            or (now - success).total_seconds() < -DEPLOYMENT_UNATTENDED_MAX_FUTURE_SKEW_SECONDS
+            or (now - success).total_seconds() > maximum_age
+            or not -2 <= (completed - success).total_seconds() <= 60
+        ):
+            return None, {}, "Deployment unattended-worker completion or freshness evidence is invalid."
+
+        run_identifier = task.get("run_id")
+        try:
+            parsed_run_identifier = UUID(run_identifier) if isinstance(run_identifier, str) else None
+        except ValueError:
+            parsed_run_identifier = None
+        if (
+            parsed_run_identifier is None
+            or parsed_run_identifier.version != 4
+            or str(parsed_run_identifier) != run_identifier
+        ):
+            return None, {}, "Deployment unattended-worker run identity is invalid."
+
+        integer_fields = {
+            "abandoned_runs",
+            "attempts_completed",
+            "emitted",
+            "processed",
+            "total_failures",
+            "total_runs",
+            "total_successes",
+        }
+        if any(type(task.get(field)) is not int or task[field] < 0 for field in integer_fields):
+            return None, {}, "Deployment unattended-worker counters are invalid."
+        if (
+            not 1 <= task["attempts_completed"] <= 3
+            or task["processed"] < 1
+            or task["total_runs"] < 1
+            or task["total_successes"] < 1
+            or task["total_successes"] + task["total_failures"] != task["total_runs"]
+        ):
+            return None, {}, "Deployment unattended-worker success accounting is invalid."
+
+    return (
+        {"alert_delivery": True, "unattended_workers": True},
+        {"alert_started": alert_started, "alert_completed": alert_completed},
+        "",
+    )
+
+
 def _attested_deployment_report(
     path_value: str | None,
     *,
@@ -2934,6 +4057,8 @@ def _attested_deployment_report(
         "schema_version",
         "report_type",
         "deployment",
+        "operations",
+        "external_probe_report",
         "evidence",
     }:
         return _deployment_result(
@@ -2950,6 +4075,8 @@ def _attested_deployment_report(
         )
 
     deployment = payload.get("deployment")
+    operations = payload.get("operations")
+    external_probe_report = payload.get("external_probe_report")
     evidence = payload.get("evidence")
     if not isinstance(deployment, dict) or set(deployment) != {
         "environment",
@@ -3047,6 +4174,17 @@ def _attested_deployment_report(
             "fail", "Deployment environment, origin, raw digest, or review summary is invalid.", report_hash=report_hash
         )
 
+    operation_capabilities, operation_times, operations_error = _validate_deployment_operations(
+        operations,
+        expected_revision=expected_revision,
+        run_id=run_id,
+        run_attempt=run_attempt,
+        collected_at=collected_at,
+        now=current_time,
+    )
+    if operation_capabilities is None:
+        return _deployment_result("fail", operations_error, report_hash=report_hash)
+
     restore_drill = deployment.get("restore_drill")
     rollback_drill = deployment.get("rollback_drill")
     external_probe = deployment.get("external_probe")
@@ -3114,6 +4252,114 @@ def _attested_deployment_report(
                 report_hash=report_hash,
             )
         drill_times[label] = parsed
+
+    if not isinstance(external_probe_report, dict):
+        return _deployment_result(
+            "fail",
+            "Deployment external-probe source report is missing from the attested envelope.",
+            report_hash=report_hash,
+        )
+    try:
+        external_probe_raw = (
+            json.dumps(external_probe_report, sort_keys=True, allow_nan=False) + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        return _deployment_result(
+            "fail",
+            "Deployment external-probe source report cannot be reconstructed canonically.",
+            report_hash=report_hash,
+        )
+    external_probe_hash = hashlib.sha256(external_probe_raw).hexdigest()
+    if external_probe_hash != external_probe.get("raw_report_sha256"):
+        return _deployment_result(
+            "fail",
+            "Deployment external-probe source bytes do not match the reviewed digest.",
+            report_hash=report_hash,
+        )
+    try:
+        with tempfile.TemporaryDirectory(prefix="market-sentinel-external-probe-") as directory:
+            external_probe_path = Path(directory, DEPLOYMENT_EXTERNAL_PROBE_REPORT_NAME)
+            external_probe_path.write_bytes(external_probe_raw)
+            independent_external_review = review_external_probe_report(
+                external_probe_path,
+                expected_version=expected_version,
+                expected_revision=expected_revision,
+                expected_frontend_sha256=deployment["frontend_sha256"],
+                expected_origin=canonical_origin,
+                expected_run_id=run_id,
+                expected_run_attempt=run_attempt,
+                expected_nonce=f"{expected_revision}:{run_id}:{run_attempt}",
+                now=current_time,
+            )
+            source_attestation, source_attestation_error = _run_gh_json(
+                [
+                    "gh",
+                    "attestation",
+                    "verify",
+                    str(external_probe_path),
+                    "--repo",
+                    DEPLOYMENT_REPOSITORY,
+                    "--source-repo",
+                    DEPLOYMENT_REPOSITORY,
+                    "--source-digest",
+                    expected_revision,
+                    "--source-ref",
+                    DEPLOYMENT_TRUSTED_MAIN_REF,
+                    "--predicate-type",
+                    "https://slsa.dev/provenance/v1",
+                    "--digest-alg",
+                    "sha256",
+                    "--deny-self-hosted-runners",
+                    "--format",
+                    "json",
+                ],
+                timeout=60,
+            )
+    except (OSError, DeploymentEvidenceError, ValueError) as exc:
+        return _deployment_result(
+            "fail",
+            f"Deployment external-probe source review failed: {type(exc).__name__}.",
+            report_hash=report_hash,
+        )
+    expected_external_review = {
+        "status": "ok",
+        "probed_at": external_probe["probed_at"],
+        "report_sha256": external_probe_hash,
+        "public_origin": canonical_origin,
+        "api_version": expected_version,
+        "source_revision": expected_revision,
+        "frontend_sha256": deployment["frontend_sha256"],
+        "unauthenticated_probes": 5,
+    }
+    if independent_external_review != expected_external_review:
+        return _deployment_result(
+            "fail",
+            "Deployment external-probe source review disagrees with the hosted envelope summary.",
+            report_hash=report_hash,
+        )
+    matching_source_attestations = [
+        item
+        for item in source_attestation
+        if _attestation_result_matches(
+            item,
+            report_hash=external_probe_hash,
+            revision=expected_revision,
+            workflow_ref=workflow_ref,
+            run_id=run_id,
+            run_attempt=run_attempt,
+            now=current_time,
+            subject_name=DEPLOYMENT_EXTERNAL_PROBE_REPORT_NAME,
+            repository=DEPLOYMENT_REPOSITORY,
+            workflow_path=DEPLOYMENT_WORKFLOW,
+        )
+    ] if isinstance(source_attestation, list) else []
+    if len(matching_source_attestations) != 1:
+        return _deployment_result(
+            "fail",
+            "Deployment external-probe source attestation was not accepted: "
+            f"{source_attestation_error or 'no unique matching result'}.",
+            report_hash=report_hash,
+        )
 
     release = deployment.get("release")
     if not isinstance(release, dict) or set(release) != {
@@ -3243,6 +4489,8 @@ def _attested_deployment_report(
         or drill_times["external probe"] < run_times["run_started_at"] - skew
         or drill_times["external probe"] > run_times["updated_at"] + skew
         or drill_times["rollback drill"] > collected_at + skew
+        or operation_times["alert_started"] < run_times["run_started_at"] - skew
+        or operation_times["alert_completed"] > run_times["updated_at"] + skew
     ):
         return _deployment_result("fail", "Deployment timestamps fall outside the workflow run.", report_hash=report_hash)
 
@@ -3400,8 +4648,9 @@ def _attested_deployment_report(
         "mode": "attested",
         "detail": (
             "Fresh canonical deployment evidence, exact release asset/frontend identity, production host lane, "
-            "host-bound restore/rollback drills, independent GitHub-hosted public probing, hosted review, "
-            "attestation, artifact, protected-main ancestry, and live release were verified."
+            "host-bound restore/rollback drills, exact-byte-attested GitHub-hosted public probing, hosted review, "
+            "challenge-bound alert delivery, serialized worker freshness, final attestation, artifact, "
+            "protected-main ancestry, and live release were verified."
         ),
         "report": {
             "sha256": report_hash,
@@ -3412,6 +4661,7 @@ def _attested_deployment_report(
             "frontend_sha256": deployment["frontend_sha256"],
             "run_id": run_id,
         },
+        "capabilities": operation_capabilities,
     }
 
 
@@ -3550,6 +4800,20 @@ def _parser() -> argparse.ArgumentParser:
         "--funded-evidence",
         help="Fresh trusted-workflow, exact-byte-attested funded order/cancel evidence.",
     )
+    parser.add_argument(
+        "--gh-sha256",
+        help=(
+            "Operator-pinned SHA-256 of the canonical GitHub CLI executable. "
+            "Required whenever external evidence could award points."
+        ),
+    )
+    parser.add_argument(
+        "--git-sha256",
+        help=(
+            "Operator-pinned SHA-256 of the canonical Git executable. "
+            "Required whenever external evidence could award points."
+        ),
+    )
     parser.add_argument("--minimum-score", type=int, default=0, help="Return failure when the score is below this value.")
     parser.add_argument("--require-100", action="store_true", help="Return failure unless every point is proven.")
     parser.add_argument(
@@ -3560,7 +4824,7 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_report(args: argparse.Namespace) -> dict[str, Any]:
+def _build_report_with_configured_tools(args: argparse.Namespace) -> dict[str, Any]:
     repository_clean_initial = _repository_is_clean()
     repository_revision_initial = _repository_revision() if repository_clean_initial else ""
     local_result = (
@@ -3702,17 +4966,46 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     )
     operations = _category(
         "operations_recovery",
-        12 if operations_ok else 0,
+        10 if operations_ok else 0,
         "Systemd, backup/restore, health, and production deployment verification artifacts are present."
         if operations_ok
         else "Required operations and recovery artifacts are missing.",
         [] if operations_ok else [path for path in REQUIRED_OPERATIONS_FILES if not (ROOT / path).is_file()],
     )
+    deployment_capabilities = (
+        deployment_result.get("capabilities")
+        if deployment_ok and isinstance(deployment_result.get("capabilities"), dict)
+        else {}
+    )
+    alert_delivery_ok = deployment_capabilities.get("alert_delivery") is True
+    unattended_workers_ok = deployment_capabilities.get("unattended_workers") is True
     if deployment_ok:
         operations["earned"] += 3
         operations["basis"] += " " + deployment_detail
     else:
         operations["missing"].append(deployment_detail)
+    if alert_delivery_ok:
+        operations["earned"] += 1
+        operations["basis"] += (
+            " The attested deployment proved a challenge-bound Prometheus rule traversed Alertmanager "
+            "to the controlled receiver and external on-call bridge, received a bound human "
+            "acknowledgement, and was removed cleanly."
+        )
+    else:
+        operations["missing"].append(
+            "Provide fresh attested end-to-end Prometheus rule loading, Alertmanager routing, external "
+            "on-call receipt and human acknowledgement, and cleanup evidence."
+        )
+    if unattended_workers_ok:
+        operations["earned"] += 1
+        operations["basis"] += (
+            " The attested deployment proved both serialized unattended workers completed successfully "
+            "with fresh durable telemetry and the reviewed least-privilege unit contracts."
+        )
+    else:
+        operations["missing"].append(
+            "Provide fresh attested execution and durable freshness evidence for both serialized unattended workers."
+        )
 
     platform_ok = _paths_exist(REQUIRED_PLATFORM_FILES)
     platform_ci_result = _attested_trusted_evidence(
@@ -3815,6 +5108,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             (release_history_ok, ci_cd, 1, "release history"),
             (release_ok, ci_cd, 1, "release"),
             (deployment_ok, operations, 3, "deployment"),
+            (alert_delivery_ok, operations, 1, "alert delivery"),
+            (unattended_workers_ok, operations, 1, "unattended workers"),
             (platform_ci_ok, platform, 3, "platform CI"),
             (platform_evidence_ok, platform, 2, "platform"),
             (public_ok, live, 3, "public Polymarket"),
@@ -3863,12 +5158,22 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def build_report(args: argparse.Namespace) -> dict[str, Any]:
+    """Build a report under an invocation-scoped external-tool trust policy."""
+
+    with _configured_tool_trust(args):
+        return _build_report_with_configured_tools(args)
+
+
 _PUBLIC_REPORT_MISSING_MESSAGES = {
     "architecture_scope": "Required architecture or capability documentation is missing.",
     "tests_correctness": "Run the full local verification profile before claiming a ready result.",
     "security_safety": "Fresh trusted repository-settings evidence is required.",
     "ci_cd_release": "Attested release evidence is required for the current release.",
-    "operations_recovery": "Attested production deployment evidence is required.",
+    "operations_recovery": (
+        "Attested production deployment, end-to-end alert delivery, and safe unattended polling "
+        "evidence are required."
+    ),
     "platform_evidence": "Hosted platform CI and platform evidence are required; evidence_type='platform-ci' must be declared.",
     "live_acceptance": "Attested public, credentialed, and funded live evidence is required.",
 }
@@ -3937,7 +5242,21 @@ def _safe_report_for_output(report: dict[str, Any]) -> dict[str, Any]:
         ):
             check = raw_checks.get(name)
             if isinstance(check, dict):
-                safe_checks[name] = {"status": _safe_status(check.get("status"))}
+                if name == "release_evidence":
+                    nested_statuses = [
+                        item.get("status")
+                        for key in ("history", "release")
+                        if isinstance((item := check.get(key)), dict)
+                    ]
+                    if len(nested_statuses) == 2 and all(status == "pass" for status in nested_statuses):
+                        status = "pass"
+                    elif any(status == "fail" for status in nested_statuses):
+                        status = "fail"
+                    else:
+                        status = "not_run"
+                    safe_checks[name] = {"status": status}
+                else:
+                    safe_checks[name] = {"status": _safe_status(check.get("status"))}
         repository = raw_checks.get("repository")
         if isinstance(repository, dict):
             safe_checks["repository"] = {

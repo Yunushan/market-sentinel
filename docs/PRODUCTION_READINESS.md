@@ -30,13 +30,16 @@ not physical-device, installed native GUI, release or financial acceptance.
 The local Windows full verifier still had seven failure/error records caused
 by TLS trust rejection; hosted success does not relabel that local run as a pass.
 
-The CLOB V2 wrapper and bounded audit journal are implemented, but both funded
-execution gates remain disabled pending their separate review/approval and
-acceptance requirements. A resolved journal must now contain consistent identity,
-cancellation and zero-fill evidence; duplicate keys, malformed or oversized JSON
-and contradictory state cannot authorize another audit. Offline regression
-coverage does not authenticate venue outcomes or supply operator approval.
-No additional readiness points are assigned merely for adding these guards.
+The CLOB V2 wrapper and bounded audit journal are implemented. Normal product
+execution remains disabled; the only enabled mutation capability is the
+dedicated, one-shot, allow-listed and hard-capped funded-audit factory used by
+the journaled verifier. It still requires explicit production-workflow approval
+and exact-revision credentialed/funded acceptance. A resolved journal must
+contain consistent identity, cancellation and zero-fill evidence; duplicate
+keys, malformed or oversized JSON and contradictory state cannot authorize
+another audit. Offline regression coverage does not authenticate venue outcomes
+or supply operator approval. No additional readiness points are assigned merely
+for adding these guards.
 
 ## Historical Assessment Notes
 
@@ -400,9 +403,14 @@ check does not receive local test or security points.
 | Tests and correctness | 18 | 18 | No additional formal points; independent financial correctness and user-workflow acceptance remain required |
 | Security and safety | 17 | 16 | Dispatch the implemented governance collector on a clean protected-main revision with the required admin-read token and supply its exact attested artifact |
 | CI/CD and release | 17 | 14 | Exact live release-environment evidence plus a fresh GitHub-attested release report |
-| Operations and recovery | 15 | 12 | Run and supply cryptographically attested real-host deployment evidence for the final current-version release; none was supplied to this local assessment |
+| Operations and recovery | 15 | 10 | Run and supply cryptographically attested real-host deployment evidence for the final current-version release, including independently reviewed alert-delivery and exact-revision unattended-worker execution; none was supplied to this local assessment |
 | Platform evidence | 10 | 5 | Dispatch the implemented platform collector against a successful exact-revision CI run and supply both exact attested artifacts |
-| Live acceptance | 5 | 0 | Reachable public endpoints plus the implemented credentialed/funded collectors' exact attested artifacts; funded execution also requires deliberate promotion of the offline-tested V2 mutation gate |
+| Live acceptance | 5 | 0 | Reachable public endpoints plus the implemented credentialed/funded collectors' exact attested artifacts; normal product mutation remains disabled and the bounded audit still requires explicit approval |
+
+The current model therefore awards **81/100** after a passing full local profile
+when no external evidence is supplied. That is the current repository-only
+score, not a deployment claim. The older 83-point result below is retained as a
+historical baseline and used a prior operations rubric.
 
 The recorded full local audit of baseline `b068de1` on 2026-09-05 was
 **83/100 (not ready)** when no external
@@ -492,10 +500,11 @@ re-awarded; source version `1.0.12` has no published, installed release proof an
 previous release attempt failed its Windows-signing policy; no real host has
 proved deployment, restore, backup age, monitoring, or rollback; no current
 platform matrix evidence is bound to this tree; and public, credentialed, and
-funded live acceptance remain at zero. Polymarket live orders, cancellations,
-relayer submissions, and funded verification are additionally disabled until a
-durable external recovery journal and exact credentialed/funded acceptance make
-the reviewed V2-only implementation safe to promote.
+funded live acceptance remain at zero. Normal Polymarket application orders,
+cancellations, and relayer submissions remain disabled. The separate bounded
+funded-audit verifier is available only through the protected, explicitly
+approved production workflow and does not count as acceptance until its durable
+recovery journal and hosted exact-revision evidence pass review.
 The architecture is still a monolithic,
 single-node application. Direct HTTP connections in the shared adapter runtime
 and Polymarket HTTP client pin validated destination addresses, but
@@ -506,12 +515,20 @@ ambiguous outcomes deliberately require manual venue-history reconciliation,
 and the in-memory conflict cache is not a global durable deduplication system.
 The historical governance snapshot required one approving review, dismissed stale
 approvals, required approval after the last push, enforced the rules for
-administrators, and did not require signed commits. Revalidate current settings
-before using that snapshot. Signed-commit enforcement
-and independent review evidence remain separate controls before external
-evidence can support a 100/100 decision.
+administrators, and did not require signed commits. That snapshot cannot support
+a 100/100 decision. Current governance evidence must revalidate required Code
+Owner review and signed-commit enforcement together with the other protected
+branch controls before it can receive readiness credit.
 
-The scorer never treats a workflow matrix as proof that a runner completed.
+The scorer never treats a workflow matrix, requested runner label, or aggregate
+success status as proof that a hosted runner completed. Every point-bearing
+source job from a protected-`main` push must emit its own canonical receipt after validation, attest those
+exact bytes from the source invocation, and upload the uniquely named receipt
+artifact. The reviewer and scorer independently require the certificate's
+`runnerEnvironment=github-hosted`, exact workflow/revision/run/attempt, signed
+job and matrix identity, fresh in-job timestamp, successful matching API job,
+and one current-attempt artifact. Missing, duplicated, stale, replayed, or
+cross-attempt receipts award no platform points.
 It also does not promote Polymarket credentialed or funded tiers from a local
 runbook, browser smoke test, or dry-run transcript.
 
@@ -530,35 +547,44 @@ credentialed access, account eligibility, or funded trading safety.
 
 ## External Evidence Manifests
 
-Some external points require a JSON manifest supplied with the corresponding
-option. Every reviewed manifest must contain `schema_version: 1`, the exact
-`evidence_type` for the scorer option that consumes it, a non-empty `source`,
-`verified: true`, non-empty `reviewed_by` and ISO-8601 `reviewed_at` values,
-and a non-empty `checks` array with unique names whose entries all have
-`status` equal to `pass` or `ok`. Tier-specific fields are also validated so a
-deployment, platform, or Polymarket report cannot be relabeled to
-award another category. `reviewed_at` must include a timezone, be no more than
-30 days old, and not be more than five minutes in the future. Revision-bound
-evidence must identify the exact current `git rev-parse HEAD`. The scorer rejects all
-revision-bound evidence while the worktree has tracked or untracked changes,
-because a CI run or release for `HEAD` cannot prove uncommitted files.
+External points require canonical artifacts generated by the checked-in trusted
+workflows; hand-authored review manifests are diagnostic only. Governance,
+platform, credentialed, and funded artifacts use the exact-field trusted schema
+v2: `schema_version: 2`,
+`report_type: market-sentinel-trusted-readiness-evidence`, the exact
+`evidence_type`, `verified: true`, exact source/scope/revision/check fields, and
+a nested schema-v1 `evidence` object binding repository, workflow, protected-main
+ref, run, attempt, job, artifact name, hosted-runner identity, and generation
+time. Repository-settings and release-environment artifacts additionally bind a
+canonical, secret-free `governance_state_sha256`. Their workflow re-collects the
+live state immediately before attestation, and the scorer independently re-reads
+the same administration-only GitHub API documents at evaluation time. A digest
+mismatch, a newly failing control, or unavailable administration-read access
+fails closed. Supply that scorer access through an administration-read
+`GH_TOKEN` or `GITHUB_TOKEN`; stored interactive `gh` credentials are ignored by
+the scorer's isolated tool environment. Deployment, release, and public-live artifacts use their own strict
+canonical schemas. Unknown, missing, duplicate, stale, relabeled, manually
+authored, or non-canonical fields fail closed. All revision-bound evidence must
+identify the exact current `git rev-parse HEAD`; the scorer rejects it while the
+worktree has tracked or untracked changes because a workflow run or release for
+`HEAD` cannot prove uncommitted files.
 
 | Scorer option | Required evidence kind | Required identity fields |
 | --- | --- | --- |
-| `--repository-settings-evidence` | `repository-settings` | `source` |
-| `--deployment-evidence` + `--deployment-origin` | Canonical deployment report from the protected-main production workflow | Exact release/tag/SHA, production origin, release frontend asset digest, production collector labels, hosted review, successful jobs/steps, unique fresh artifact, attestation, and protected-main ancestry must all verify; raw reports remain diagnostic-only |
-| `--platform-ci-evidence` | `platform-ci` | `scope`, `run_id`, `source_revision=current HEAD` |
-| `--platform-evidence` | `platform` | `scope`, `targets`, `source_revision=current HEAD` |
-| `--release-environment-evidence` | `release-environment` | `source` |
+| `--repository-settings-evidence` | `repository-settings` | `source`, canonical governance-state digest, and a matching fresh administrator-authorized API re-read |
+| `--deployment-evidence` + `--deployment-origin` | Canonical deployment report from the protected-main production workflow | Exact release/tag/SHA, production origin, release frontend asset digest, production collector labels, exact-byte GitHub-hosted source attestation for the embedded external probe, hosted review, successful jobs/steps, unique fresh artifact, final attestation, protected-main ancestry, challenge-bound Prometheus-to-Alertmanager delivery/cleanup, and both serialized workers' fresh durable success must all verify; raw reports remain diagnostic-only |
+| `--platform-ci-evidence` | `platform-ci` | `scope`, `source_run_id`, `source_run_attempt`, `source_revision=current HEAD`, and the complete unique set of fresh per-job signed receipts |
+| `--platform-evidence` | `platform` | `scope`, `targets`, `source_run_id`, `source_run_attempt`, `source_revision=current HEAD`, and the same complete signed receipt inventory |
+| `--release-environment-evidence` | `release-environment` | `source`, canonical governance-state digest, and a matching fresh administrator-authorized API re-read |
 | `--release-history-evidence` | Cryptographically attested `release-evidence.json` | Exact current tag/version/SHA, complete published history, successful trusted release run |
 | `--release-evidence` | Cryptographically attested `release-evidence.json` | Exact eight asset names/sizes/SHA-256 values, current live release/tag, successful trusted release run |
 | `--public-live-report` | Cryptographically attested public-only report | `evidence.repository=Yunushan/market-sentinel`, `source_revision=current HEAD`, successful workflow run/job, exact four public checks, no credentialed or mutating actions |
-| `--credentialed-evidence` | Diagnostic-only strict Polymarket live report | Schema, clean source, cumulative public/read evidence, and promotion gates are reviewed; no points are awarded without trusted attestation |
-| `--funded-evidence` | Diagnostic-only strict Polymarket funded audit | Same-account read, source gate, geoblock, balance/allowance, post-only, zero-fill, cancel, and resolved-journal evidence are reviewed; no points are awarded without trusted attestation |
+| `--credentialed-evidence` | Trusted-workflow, exact-byte-attested Polymarket live report | Schema, clean source, cumulative public/read evidence, promotion gates, hosted review, artifact, and attestation must all verify |
+| `--funded-evidence` | Trusted-workflow, exact-byte-attested bounded Polymarket audit | Explicit protected-environment approval, exact production collector job, same-account read, source gate, geoblock, balance/allowance, post-only capped order, immediate cancel, zero-fill, durable resolved journal, hosted review, artifact, and attestation must all verify |
 
 Release-environment evidence must include passing checks named exactly
 `release_required_reviewers`, `release_prevent_self_review`,
-`release_protected_branches`, `release_signing_secrets`, and
+`release_deployment_refs`, `release_signing_secrets`, and
 `release_windows_code_signing_required`. Missing, unknown, or renamed checks
 fail closed. The repository currently includes
 `evidence/release-environment.json`, a historical snapshot that intentionally
@@ -588,26 +614,48 @@ Deployment points are available only from the canonical report produced by the
 protected-main production workflow and independently verified against its
 GitHub-hosted review job, artifact, attestation, release asset, origin, and
 current protected-main ancestry. A handwritten wrapper or raw collector report
-still awards zero. Schema-v1 credentialed and funded inputs remain
-diagnostic-only. The implemented protected-main Polymarket workflow can produce
-score-eligible schema-v2 artifacts, but its credentialed tier requires real
-secrets and eligible-account reads, and its funded tier intentionally fails
-closed until the offline-tested V2 mutation support is deliberately promoted
-and a bounded post-only order/immediate-cancel audit is explicitly approved.
-The scorer has no remaining structural ceiling below 100. The historical
-83-point result lacked external evidence; every new candidate must revalidate
-local checks and supply its own qualifying external evidence.
+still awards zero. The production workflow now generates a GitHub-hosted random
+challenge, proves that its exact synthetic Prometheus rule loaded and fired,
+traversed Alertmanager to both the controlled loopback receiver and a
+DNS-validated external on-call bridge, and received a later human
+acknowledgement bound to the exact alert fingerprint before the rule was absent
+after cleanup. It also validates the live Alertmanager route/receiver contract,
+then independently re-reviews every raw response, configuration, webhook event,
+receipt and digest on a hosted runner. The same canonical report includes an
+independently reviewed summary of the exact least-privilege worker units plus
+recent successful systemd and durable state evidence for both serialized alert
+refresh and wallet polling. Those two
+capabilities earn the final two operations points only as part of the accepted,
+exact-revision deployment artifact; adding files or supplying a generic passing
+deployment object earns neither point.
+
+This evidence treats the receipt bridge as the explicitly trusted authority for
+the human acknowledgement; it is not provider-signed proof. The collector pins
+its authenticated receipt GET to its prevalidated public DNS answers, but
+Alertmanager resolves the webhook POST independently, so production egress must
+be allowlisted to the bridge's reviewed public addresses or address ranges.
+
+The implemented protected-main Polymarket workflow can produce score-eligible
+trusted artifacts, but its credentialed tier still requires real secrets and
+eligible-account reads. Its funded tier uses a separate persistent production
+collector and hosted reviewer, and requires deliberate protected-environment
+approval for a hard-capped, post-only V2 order followed by immediate exact-ID
+cancellation, zero-fill proof, and a durable resolved recovery journal. Normal
+product mutation remains disabled. The historical 83-point result lacked this
+external evidence; every candidate must revalidate local checks and supply its
+own fresh qualifying artifacts. The formal path can now reach 100/100, but
+`--require-100` must continue to fail until every local, hosted, production-host,
+release, platform, governance, credentialed, and explicitly approved funded
+check has actually succeeded for the same clean protected-main revision.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "report_type": "market-sentinel-trusted-readiness-evidence",
   "evidence_type": "platform-ci",
   "verified": true,
-  "reviewed_by": "operator-or-reviewer",
-  "reviewed_at": "2026-08-03T18:00:00Z",
-  "source": "GitHub Actions run URL or redacted host report",
-  "scope": "hosted-ci",
-  "run_id": 123,
+  "source": "https://github.com/Yunushan/market-sentinel/actions/runs/456",
+  "scope": "Successful exact-revision hosted CI compatibility lanes",
   "source_revision": "0123456789abcdef0123456789abcdef01234567",
   "checks": [
     {"name": "aggregate_python_package_build", "status": "pass"},
@@ -620,12 +668,56 @@ local checks and supply its own qualifying external evidence.
     {"name": "react_build", "status": "pass"},
     {"name": "mobile_web_smoke_android_and_ios", "status": "pass"},
     {"name": "tkinter_gui_lifecycle", "status": "pass"}
+  ],
+  "evidence": {
+    "schema_version": 1,
+    "repository": "Yunushan/market-sentinel",
+    "source_revision": "0123456789abcdef0123456789abcdef01234567",
+    "run_id": 123,
+    "run_attempt": 1,
+    "workflow": ".github/workflows/platform-evidence.yml",
+    "workflow_name": "Platform evidence",
+    "workflow_ref": "Yunushan/market-sentinel/.github/workflows/platform-evidence.yml@refs/heads/main",
+    "event": "workflow_dispatch",
+    "runner_environment": "github-hosted",
+    "job": "Review and attest platform evidence",
+    "artifact_name": "platform-ci-evidence-0123456789abcdef0123456789abcdef01234567-123-1",
+    "generated_at": "2026-09-17T12:00:00Z"
+  },
+  "source_run_id": 456,
+  "source_run_attempt": 1,
+  "source_receipts": [
+    {
+      "schema_version": 1,
+      "report_type": "market-sentinel-platform-ci-job-receipt",
+      "repository": "Yunushan/market-sentinel",
+      "source_revision": "0123456789abcdef0123456789abcdef01234567",
+      "run_id": 456,
+      "run_attempt": 1,
+      "workflow": ".github/workflows/ci.yml",
+      "workflow_name": "CI",
+      "workflow_ref": "Yunushan/market-sentinel/.github/workflows/ci.yml@refs/heads/main",
+      "event": "push",
+      "check_name": "aggregate_python_package_build",
+      "job_key": "package",
+      "job_name": "Python package build",
+      "matrix": {},
+      "runner_environment": "github-hosted",
+      "runner_os": "Linux",
+      "runner_arch": "X64",
+      "generated_at": "2026-09-17T11:55:00Z",
+      "identity_sha256": "<canonical-job-identity-sha256>",
+      "artifact_name": "platform-ci-receipt-456-1-<canonical-job-identity-sha256>"
+    }
   ]
 }
 ```
 
-The example SHA is a placeholder. Replace every placeholder and ensure each
-`source_revision` or `target_commit` equals the exact checkout being scored.
+The example is an intentionally abbreviated shape and is not score-eligible:
+the real canonical artifact contains one receipt for every required job and no
+placeholders. Never hand-author it. Download the two artifacts produced by the
+platform-evidence workflow and ensure each `source_revision` equals the exact
+clean checkout being scored.
 
 Example after the evidence has actually been collected and reviewed:
 
@@ -641,11 +733,11 @@ python scripts/check_product_readiness.py \
   --release-evidence /path/to/release-evidence.json
 ```
 
-You may also pass raw schema-v1 `--deployment-evidence`,
-`--credentialed-evidence`, or `--funded-evidence` to obtain fail-closed
-diagnostics. Score credit requires the corresponding canonical schema-v2
-artifact. Do not add `--require-100` until every exact hosted collector and real
-external check has succeeded; it is expected to fail today.
+You may also pass raw deployment, credentialed, or funded reports to obtain
+fail-closed diagnostics. Score credit requires the corresponding canonical,
+trusted-workflow, exact-byte-attested artifact. Do not add `--require-100` until
+every exact hosted collector and real external check has succeeded; it is
+expected to fail for an uncommitted or incompletely evidenced candidate.
 
 Do not put venue credentials, private keys, cookies, or raw request logs in an
 evidence manifest. Use the deployment and Polymarket runbooks to produce

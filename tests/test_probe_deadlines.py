@@ -19,7 +19,11 @@ from urllib.request import Request
 from core.request_control import RequestCancelled, RequestControl, RequestDeadlineExceeded, cancellation_scope
 from scripts import verify_production_deployment as deployment
 from scripts.verify_service_health import open_probe, read_probe_body
-from test_polymarket_http_transport import local_tls_server, resolver_for
+from test_polymarket_http_transport import (
+    local_tls_server,
+    require_unintercepted_local_tls,
+    resolver_for,
+)
 
 
 @contextmanager
@@ -163,7 +167,7 @@ class ProbeDeadlineTests(unittest.TestCase):
 
         with (
             patch("core.probe_transport.RequestControl", return_value=control),
-            patch("core.probe_transport.ssl.create_default_context", side_effect=expire_during_setup),
+            patch("core.probe_transport.create_verified_client_context", side_effect=expire_during_setup),
             patch("socket.getaddrinfo") as resolver,
             patch("socket.socket.connect") as connect,
         ):
@@ -253,9 +257,10 @@ class ProbeDeadlineTests(unittest.TestCase):
 
     def test_pinned_tls_keeps_hostname_validation_and_sni(self):
         with tempfile.TemporaryDirectory() as directory, local_tls_server(directory) as (port, ca_file, observed):
+            require_unintercepted_local_tls(self, port, Path(directory) / "server.pem", observed)
             context = ssl.create_default_context(cafile=str(ca_file))
             with (
-                patch("core.probe_transport.ssl.create_default_context", return_value=context),
+                patch("core.probe_transport.create_verified_client_context", return_value=context),
                 patch("socket.getaddrinfo", side_effect=resolver_for("127.0.0.1")) as resolver,
             ):
                 with open_probe(Request(f"https://venue.example.test:{port}/data"), 2) as response:
@@ -271,7 +276,7 @@ class ProbeDeadlineTests(unittest.TestCase):
                     context = ssl.create_default_context(cafile=str(ca_file) if wrong_host else None)
                     host = "wrong.example.test" if wrong_host else "venue.example.test"
                     with (
-                        patch("core.probe_transport.ssl.create_default_context", return_value=context),
+                        patch("core.probe_transport.create_verified_client_context", return_value=context),
                         patch("socket.getaddrinfo", side_effect=resolver_for("127.0.0.1")),
                     ):
                         with self.assertRaises(URLError) as raised:

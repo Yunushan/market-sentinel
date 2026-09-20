@@ -1,0 +1,16 @@
+# Repository test fixtures contain deliberately synthetic values that exercise
+# credential validation and public-address normalization. Keep the allowlist
+# exact so every other detected value remains a blocking finding.
+[allowlist]
+description = "Synthetic test and public fixture values"
+regexTarget = "secret"
+regexes = [
+  '''^c9770e51b95ed9c8fa36e0b105bb751c1cf3bc37a7ed53497d2776566652286f$''',
+  '''^0b63a94c51e7d8f26430a91cbe75f36c48e1290b7a65dcf321a94760e8bd532f$''',
+  '''^durability-reconcile-1$''',
+  '''^live-ambiguous-1$''',
+  '''^YEStok-btc-150k-2025$''',
+  '''(?i)^0x1bc6326ea6af2ab8e4b6bc83418044b1923b2956$''',
+  '''(?i)^0x6629ce1cf35cc1329ebb4f63202f3f197b3f050b$''',
+  '''(?i)^0x59c6995e998f97a5a004497e5da6f8ad5b9d4fc9b352b7d483b7246d6368d68c$''',
+]

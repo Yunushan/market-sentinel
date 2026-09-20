@@ -31,16 +31,28 @@ jobs:
       tag: ${{ steps.coordinates.outputs.tag }}
       frontend_sha256: ${{ steps.identity.outputs.frontend_sha256 }}
       production_origin: ${{ steps.origin.outputs.production_origin }}
+      monitoring_nonce: ${{ steps.monitoring.outputs.nonce }}
+      oncall_receipt_origin: ${{ steps.oncall.outputs.receipt_origin }}
     steps:
       - name: Checkout protected main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+
+      - name: Generate run-unique monitoring challenge
+        id: monitoring
+        shell: bash
+        run: |
+          set -euo pipefail
+          nonce="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+          [[ "${nonce}" =~ ^[0-9a-f]{64}$ ]]
+          printf 'nonce=%s\n' "${nonce}" >> "${GITHUB_OUTPUT}"
 
       - name: Require exact protected production origin
         id: origin
@@ -54,6 +66,18 @@ jobs:
           test "${REQUESTED_ORIGIN}" = "${APPROVED_ORIGIN}"
           python -c 'import sys; from scripts.verify_production_deployment import _validated_public_origin; origin = _validated_public_origin(sys.argv[1], timeout=10); sys.exit(0 if origin == sys.argv[1] else "Production origin must be canonical")' "${APPROVED_ORIGIN}"
           echo "production_origin=${APPROVED_ORIGIN}" >> "${GITHUB_OUTPUT}"
+
+      - name: Require protected public on-call receipt service
+        id: oncall
+        shell: bash
+        env:
+          ONCALL_RECEIPT_ORIGIN: ${{ vars.MARKET_SENTINEL_ONCALL_RECEIPT_ORIGIN }}
+        run: |
+          set -euo pipefail
+          test -n "${ONCALL_RECEIPT_ORIGIN}"
+          canonical="$(python -c 'import sys; from scripts.collect_prometheus_delivery_evidence import canonical_public_https_origin; print(canonical_public_https_origin(sys.argv[1], "on-call receipt origin"))' "${ONCALL_RECEIPT_ORIGIN}")"
+          test "${canonical}" = "${ONCALL_RECEIPT_ORIGIN}"
+          printf 'receipt_origin=%s\n' "${canonical}" >> "${GITHUB_OUTPUT}"
 
       - name: Resolve exact release coordinates
         id: coordinates
@@ -135,6 +159,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Download trusted deployment identity
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -183,11 +208,53 @@ jobs:
             --output "${evidence_file}"
           sudo install -m 0644 "${evidence_file}" "${RUNNER_TEMP}/raw-deployment.json"
 
+      - name: Collect raw Prometheus alert-delivery evidence
+        shell: bash
+        env:
+          MONITORING_NONCE: ${{ needs.prepare.outputs.monitoring_nonce }}
+          MARKET_SENTINEL_ONCALL_RECEIPT_TOKEN: ${{ secrets.MARKET_SENTINEL_ONCALL_RECEIPT_TOKEN }}
+          ONCALL_RECEIPT_ORIGIN: ${{ needs.prepare.outputs.oncall_receipt_origin }}
+          EXPECTED_ALERTMANAGER_GID: ${{ vars.MARKET_SENTINEL_ALERTMANAGER_GID }}
+        run: |
+          set -euo pipefail
+          [[ "${MONITORING_NONCE}" =~ ^[0-9a-f]{64}$ ]]
+          test -n "${MARKET_SENTINEL_ONCALL_RECEIPT_TOKEN}"
+          test -n "${ONCALL_RECEIPT_ORIGIN}"
+          [[ "${EXPECTED_ALERTMANAGER_GID}" =~ ^[1-9][0-9]*$ ]]
+          identity_file="${RUNNER_TEMP}/deployment-identity/release-identity.json"
+          identity_sha256="$(/usr/bin/python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "${identity_file}")"
+          [[ "${identity_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          evidence_dir="/var/lib/market-sentinel-deployment-evidence"
+          rule_dir="/var/lib/prometheus/market-sentinel-attestation"
+          alert_file="${evidence_dir}/alert-delivery-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          sudo install -d -o root -g root -m 0700 "${evidence_dir}"
+          sudo install -d -o root -g prometheus -m 0750 "${rule_dir}"
+          sudo --preserve-env=MARKET_SENTINEL_ONCALL_RECEIPT_TOKEN /usr/bin/python3 \
+            "${GITHUB_WORKSPACE}/scripts/collect_prometheus_delivery_evidence.py" \
+            --source-revision "${GITHUB_SHA}" \
+            --deployment-identity-sha256 "${identity_sha256}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --nonce "${MONITORING_NONCE}" \
+            --rule-directory "${rule_dir}" \
+            --prometheus-origin http://127.0.0.1:9090 \
+            --alertmanager-origin http://127.0.0.1:9093 \
+            --oncall-receipt-origin "${ONCALL_RECEIPT_ORIGIN}" \
+            --oncall-url-file /etc/market-sentinel/alertmanager-oncall-webhook-url \
+            --oncall-credentials-file /etc/market-sentinel/alertmanager-oncall-bearer-token \
+            --expected-alertmanager-gid "${EXPECTED_ALERTMANAGER_GID}" \
+            --receiver-name market-sentinel-attestation \
+            --receiver-port 19094 \
+            --output "${alert_file}"
+          sudo install -m 0644 "${alert_file}" "${RUNNER_TEMP}/raw-alert-delivery.json"
+
       - name: Upload raw production deployment evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: raw-deployment-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/raw-deployment.json
+          path: |
+            ${{ runner.temp }}/raw-deployment.json
+            ${{ runner.temp }}/raw-alert-delivery.json
           if-no-files-found: error
           retention-days: 2
 
@@ -195,6 +262,10 @@ jobs:
     name: Probe production externally from GitHub-hosted runner
     needs: prepare
     runs-on: ubuntu-24.04
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
     environment:
       name: production
       url: ${{ needs.prepare.outputs.production_origin }}
@@ -205,6 +276,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Set up public probe Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -236,6 +308,11 @@ jobs:
             --evidence-nonce "${GITHUB_SHA}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
             --output "${RUNNER_TEMP}/external-deployment-probe/external-probe.json"
 
+      - name: Attest exact GitHub-hosted external probe
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/external-deployment-probe/external-probe.json
+
       - name: Upload raw GitHub-hosted external probe
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -260,6 +337,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Set up reviewer Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -284,10 +362,68 @@ jobs:
           name: external-deployment-probe-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/deployment-review
 
+      - name: Verify exact external-probe source attestation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/deployment-attestation"
+          attestation_result="${RUNNER_TEMP}/deployment-attestation/external-probe-attestation.json"
+          test ! -e "${attestation_result}"
+          gh attestation verify \
+            "${RUNNER_TEMP}/deployment-review/external-probe.json" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --source-repo "${GITHUB_REPOSITORY}" \
+            --source-digest "${GITHUB_SHA}" \
+            --source-ref "${GITHUB_REF}" \
+            --predicate-type https://slsa.dev/provenance/v1 \
+            --digest-alg sha256 \
+            --deny-self-hosted-runners \
+            --format json > "${attestation_result}"
+          python scripts/generate_deployment_evidence.py verify-external-probe-attestation \
+            --external-probe-report "${RUNNER_TEMP}/deployment-review/external-probe.json" \
+            --attestation-result "${attestation_result}" \
+            --revision "${GITHUB_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --workflow-ref "${GITHUB_WORKFLOW_REF}" \
+            --source-ref "${GITHUB_REF}"
+
+      - name: Review raw Prometheus alert-delivery evidence
+        shell: bash
+        env:
+          MONITORING_NONCE: ${{ needs.prepare.outputs.monitoring_nonce }}
+          ONCALL_RECEIPT_ORIGIN: ${{ needs.prepare.outputs.oncall_receipt_origin }}
+        run: |
+          set -euo pipefail
+          [[ "${MONITORING_NONCE}" =~ ^[0-9a-f]{64}$ ]]
+          test -n "${ONCALL_RECEIPT_ORIGIN}"
+          identity_file="${RUNNER_TEMP}/deployment-review/release-identity.json"
+          identity_sha256="$(python -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "${identity_file}")"
+          [[ "${identity_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          mkdir -p "${RUNNER_TEMP}/deployment-attestation"
+          python scripts/review_prometheus_delivery_evidence.py \
+            --input "${RUNNER_TEMP}/deployment-review/raw-alert-delivery.json" \
+            --output "${RUNNER_TEMP}/deployment-review/reviewed-alert-delivery.json" \
+            --expected-source-revision "${GITHUB_SHA}" \
+            --expected-deployment-identity-sha256 "${identity_sha256}" \
+            --expected-run-id "${GITHUB_RUN_ID}" \
+            --expected-run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --expected-nonce "${MONITORING_NONCE}" \
+            --expected-rule-directory /var/lib/prometheus/market-sentinel-attestation \
+            --expected-oncall-receipt-origin "${ONCALL_RECEIPT_ORIGIN}" \
+            --expected-prometheus-origin http://127.0.0.1:9090 \
+            --expected-alertmanager-origin http://127.0.0.1:9093 \
+            --expected-receiver-name market-sentinel-attestation \
+            --expected-receiver-port 19094
+
       - name: Review raw report and bind exact release identity
         shell: bash
         env:
           PRODUCTION_ORIGIN: ${{ needs.prepare.outputs.production_origin }}
+          MONITORING_NONCE: ${{ needs.prepare.outputs.monitoring_nonce }}
+          ONCALL_RECEIPT_ORIGIN: ${{ needs.prepare.outputs.oncall_receipt_origin }}
         run: |
           set -euo pipefail
           artifact="deployment-evidence-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -295,8 +431,12 @@ jobs:
           python scripts/generate_deployment_evidence.py evidence \
             --raw-report "${RUNNER_TEMP}/deployment-review/raw-deployment.json" \
             --external-probe-report "${RUNNER_TEMP}/deployment-review/external-probe.json" \
+            --alert-delivery-report "${RUNNER_TEMP}/deployment-review/raw-alert-delivery.json" \
+            --alert-delivery-review "${RUNNER_TEMP}/deployment-review/reviewed-alert-delivery.json" \
             --identity "${RUNNER_TEMP}/deployment-review/release-identity.json" \
+            --monitoring-nonce "${MONITORING_NONCE}" \
             --public-origin "${PRODUCTION_ORIGIN}" \
+            --oncall-receipt-origin "${ONCALL_RECEIPT_ORIGIN}" \
             --run-id "${GITHUB_RUN_ID}" \
             --run-attempt "${GITHUB_RUN_ATTEMPT}" \
             --workflow-ref "${GITHUB_WORKFLOW_REF}" \

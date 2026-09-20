@@ -112,7 +112,9 @@ def build_live_order_cancel_plan(request: LiveOrderCancelRequest) -> Dict[str, A
     else:
         notional = None
     if not allow_token_ids:
-        blockers.append("Missing token allow-list. Pass --allow-token-id or --allow-token-file.")
+        blockers.append(
+            "Missing token allow-list. The trusted funded workflow requires the protected environment policy."
+        )
     elif token_id and token_id not in allow_token_ids:
         blockers.append("Token id is not present in the explicit allow-list.")
     if not request.cancel_immediately:
@@ -153,11 +155,8 @@ def build_live_order_cancel_plan(request: LiveOrderCancelRequest) -> Dict[str, A
     if blockers:
         status = "blocked"
     elif request.execute and POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED:
-        # The execution harness stays testable, but the production constant
-        # remains false pending exact-revision V2/recovery review and operator
-        # approval. With the default constant, execution
-        # is therefore blocked above before any transport-capable dependency
-        # is constructed or called.
+        # This status exposes only the separately gated one-shot audit. Normal
+        # product mutation support remains disabled independently.
         status = "ready_to_execute"
     else:
         status = "dry_run"
@@ -194,7 +193,7 @@ def build_live_order_cancel_plan(request: LiveOrderCancelRequest) -> Dict[str, A
         "required_execution_flags": [
             "--allow-funded-order",
             "--cancel-immediately",
-            "--allow-token-id or --allow-token-file",
+            "--allow-token-environment for trusted funded evidence",
             "--confirm-live-order-cancel",
         ],
         "transcript": [
@@ -202,7 +201,7 @@ def build_live_order_cancel_plan(request: LiveOrderCancelRequest) -> Dict[str, A
             "Validate private key, signature type, funder/deposit wallet, official host, and Polygon chain id.",
             "Inspect the public orderbook without placing an order.",
             "Use only an explicit CLOB V2 build/post path after a fail-closed server-version check.",
-            "Stop before mutation while funded audit support remains disabled; never use a V1-signed fallback.",
+            "Use only the reviewed one-shot bounded-audit capability; never use a V1-signed fallback.",
         ],
         "blockers": blockers,
         "warnings": warnings,
@@ -347,16 +346,22 @@ def run_live_order_cancel_verification(
         plan["blockers"].append(maker_blocker)
         return plan
 
-    trader = trader_factory(
-        TraderConfig(
-            private_key=request.private_key,
-            funder_address=request.funder_address or None,
-            signature_type=int(plan["redacted_credentials"]["signature_type"]),
-            api_key=request.api_key,
-            api_secret=request.api_secret,
-            api_passphrase=request.api_passphrase,
-            bounded_audit=True,
-        )
+    trader_config = TraderConfig(
+        private_key=request.private_key,
+        funder_address=request.funder_address or None,
+        signature_type=int(plan["redacted_credentials"]["signature_type"]),
+        api_key=request.api_key,
+        api_secret=request.api_secret,
+        api_passphrase=request.api_passphrase,
+        bounded_audit=True,
+        bounded_audit_token_id=str(plan["token_id"]),
+        bounded_audit_max_size=float(plan["caps"]["max_size"]),
+        bounded_audit_max_notional=float(plan["caps"]["max_notional"]),
+    )
+    trader = (
+        PolymarketTrader.for_bounded_audit(trader_config)
+        if trader_factory is PolymarketTrader
+        else trader_factory(trader_config)
     )
     try:
         account_read_preflight, account_address = _same_account_authenticated_read_preflight(trader)
@@ -392,7 +397,7 @@ def run_live_order_cancel_verification(
     }
 
     recovery_base = {
-        "schema_version": 1,
+        "schema_version": 2,
         "market_id": "polymarket",
         "token_id": str(plan["token_id"]),
         "side": str(plan["side"]),

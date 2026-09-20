@@ -106,7 +106,7 @@ class OutboundEndpointTests(unittest.TestCase):
         invalid_urls = (
             "http://example.com/api",
             "ftp://example.com/api",
-            "https://user:secret@example.com/api",
+            "https://user:secret@example.com/api",  # secret-scan: allow -- rejection fixture
             "https://example.com/api#fragment",
             " https://example.com/api",
             "https://example.com\\@127.0.0.1/api",
@@ -300,6 +300,25 @@ class OutboundEndpointTests(unittest.TestCase):
             legacy.assert_called_once_with(request.url, proxies)
             current.assert_called_once_with(request, True, proxies, None)
             direct.assert_not_called()
+
+    def test_pinned_adapter_selects_scoped_verified_tls_contexts(self) -> None:
+        adapter = _PinnedHTTPAdapter()
+        self.addCleanup(adapter.close)
+        request = requests.Request("GET", "https://venue.example.test").prepare()
+        custom = object()
+
+        _, defaults = adapter.build_connection_pool_key_attributes(request, True)
+        self.assertIs(defaults["ssl_context"], adapter._platform_ssl_context)
+        self.assertEqual(defaults["cert_reqs"], "CERT_REQUIRED")
+
+        with (
+            patch.object(adapter, "_custom_trust_context", return_value=custom) as create,
+            patch("market_adapters.runtime.os.path.exists", return_value=True),
+        ):
+            _, explicit = adapter.build_connection_pool_key_attributes(request, "operator-ca.pem")
+        self.assertIs(explicit["ssl_context"], custom)
+        self.assertEqual(explicit["ca_certs"], "operator-ca.pem")
+        create.assert_called_once_with("operator-ca.pem")
 
     def test_failed_send_removes_request_and_thread_local_pins(self) -> None:
         session = _ValidatingSession(OutboundEndpointPolicy(resolver=resolver_for("93.184.216.34")))

@@ -64,6 +64,66 @@ jobs:
           gh api --method GET \
             "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/jobs?filter=latest&per_page=100" \
             > "${RUNNER_TEMP}/platform-source-jobs.json"
+          gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/artifacts?per_page=100" \
+            > "${RUNNER_TEMP}/platform-source-artifacts.json"
+
+      - name: Download exact source-job receipts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.ci_run_id }}
+        run: |
+          set -euo pipefail
+          receipt_root="${RUNNER_TEMP}/platform-source-receipts"
+          mkdir -p "${receipt_root}"
+          source_attempt="$(jq -er '.run_attempt | select(type == "number" and . > 0)' \
+            "${RUNNER_TEMP}/platform-source-run.json")"
+          mapfile -t receipt_artifacts < <(
+            jq -er \
+              --arg prefix "platform-ci-receipt-${SOURCE_RUN_ID}-${source_attempt}-" \
+              '.artifacts[] | select(.name | startswith($prefix)) | [.id, .name] | @tsv' \
+              "${RUNNER_TEMP}/platform-source-artifacts.json"
+          )
+          test "${#receipt_artifacts[@]}" -gt 0
+          for entry in "${receipt_artifacts[@]}"; do
+            IFS=$'\t' read -r artifact_id artifact_name <<< "${entry}"
+            [[ "${artifact_id}" =~ ^[1-9][0-9]*$ ]]
+            [[ "${artifact_name}" =~ ^platform-ci-receipt-${SOURCE_RUN_ID}-${source_attempt}-[0-9a-f]{64}$ ]]
+            destination="${receipt_root}/${artifact_id}"
+            mkdir -p "${destination}"
+            gh run download "${SOURCE_RUN_ID}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --name "${artifact_name}" \
+              --dir "${destination}"
+          done
+
+      - name: Verify every source-job receipt attestation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          receipt_root="${RUNNER_TEMP}/platform-source-receipts"
+          attestation_root="${RUNNER_TEMP}/platform-source-attestations"
+          mkdir -p "${attestation_root}"
+          receipt_count=0
+          while IFS= read -r -d '' receipt; do
+            identity="$(python -B scripts/platform_ci_receipt.py identity --input "${receipt}" \
+              | jq -er '.identity_sha256')"
+            [[ "${identity}" =~ ^[0-9a-f]{64}$ ]]
+            test ! -e "${attestation_root}/${identity}.json"
+            gh attestation verify "${receipt}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --format json \
+              > "${attestation_root}/${identity}.json"
+            receipt_count=$((receipt_count + 1))
+          done < <(find "${receipt_root}" -type f -name 'platform-ci-receipt.json' -print0)
+          test "${receipt_count}" -gt 0
+          python -B scripts/platform_ci_receipt.py collect \
+            --root "${receipt_root}" \
+            --attestations "${attestation_root}" \
+            --output "${RUNNER_TEMP}/platform-source-receipts.json"
 
       - name: Generate exact platform evidence
         shell: bash
@@ -76,6 +136,8 @@ jobs:
           python scripts/trusted_readiness_evidence.py platform \
             --run-input "${RUNNER_TEMP}/platform-source-run.json" \
             --jobs-input "${RUNNER_TEMP}/platform-source-jobs.json" \
+            --artifacts-input "${RUNNER_TEMP}/platform-source-artifacts.json" \
+            --receipts-input "${RUNNER_TEMP}/platform-source-receipts.json" \
             --source-run-id "${SOURCE_RUN_ID}" \
             --repository "${GITHUB_REPOSITORY}" \
             --source-revision "${GITHUB_SHA}" \

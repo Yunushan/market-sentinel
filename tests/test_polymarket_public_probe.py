@@ -34,6 +34,17 @@ def _source_args() -> list[str]:
     ]
 
 
+def _funded_identity_args() -> list[str]:
+    return [
+        "--evidence-run-id",
+        "123456",
+        "--evidence-run-attempt",
+        "2",
+        "--evidence-nonce",
+        f"{SOURCE_REVISION}:123456:2",
+    ]
+
+
 def _successful_public_checks() -> dict[str, dict[str, object]]:
     semantics = {
         "clob_time": "current_unix_time",
@@ -98,6 +109,30 @@ class PublicOnlyPolymarketProbeTests(unittest.TestCase):
         self.assertFalse(config.allow_api_key_derivation)
         self.assertFalse(config.allow_api_key_creation)
         self.assertEqual(config.api_secret, "api-secret")
+
+    def test_relayer_read_requires_an_object_collection_before_credential_promotion(self) -> None:
+        credentials = {
+            "RELAYER_API_KEY": "api-key",
+            "RELAYER_API_KEY_ADDRESS": "0x" + "a" * 40,
+        }
+        for response in ({"error": "invalid credentials"}, [{"id": "tx-1"}, "invalid-row"]):
+            with (
+                self.subTest(response=response),
+                patch.dict(os.environ, credentials, clear=True),
+                patch.object(live_probe.relayer, "get_recent_transactions", return_value=response),
+            ):
+                check = live_probe._authenticated_read_checks(2.0)["relayer_recent_transactions"]
+            self.assertEqual(check["status"], "failed")
+            self.assertNotIn("semantic_check", check)
+
+        with (
+            patch.dict(os.environ, credentials, clear=True),
+            patch.object(live_probe.relayer, "get_recent_transactions", return_value=[{"id": "tx-1"}]),
+        ):
+            check = live_probe._authenticated_read_checks(2.0)["relayer_recent_transactions"]
+        self.assertEqual(check["status"], "ok")
+        self.assertEqual(check["semantic_check"], "authenticated_collection")
+        self.assertEqual(check["records_observed"], 1)
 
     def test_strict_source_provenance_requires_the_canonical_origin(self) -> None:
         self.assertEqual(
@@ -287,6 +322,7 @@ class PublicOnlyPolymarketProbeTests(unittest.TestCase):
             ("--confirm-live-order-cancel", "confirmation"),
             ("--allow-token-id", "token"),
             ("--allow-token-file", "tokens.txt"),
+            ("--allow-token-environment", "POLYMARKET_FUNDED_TOKEN_ALLOWLIST"),
             ("--token-id", "token"),
             ("--side", "BUY"),
             ("--price", "0.5"),
@@ -382,6 +418,7 @@ class PublicOnlyPolymarketProbeTests(unittest.TestCase):
                     1,
                 )
 
+    @patch.object(live_probe, "POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", False)
     def test_funded_cli_blocks_before_mutation_transport_while_v2_is_unsupported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             report_path = Path(tmp) / "blocked-funded.json"
@@ -474,6 +511,7 @@ class PublicOnlyPolymarketProbeTests(unittest.TestCase):
                             "--allow-funded-order",
                             "--recovery-journal",
                             str(recovery_path),
+                            *_funded_identity_args(),
                         ]
                     )
             self.assertEqual(raised.exception.code, 2)
@@ -582,6 +620,7 @@ class PublicOnlyPolymarketProbeTests(unittest.TestCase):
                         live_probe.CONFIRM_LIVE_ORDER_CANCEL,
                         "--recovery-journal",
                         str(recovery_path.resolve()),
+                        *_funded_identity_args(),
                         "--report-file",
                         str(report_path),
                     ]
@@ -649,6 +688,7 @@ class PublicOnlyPolymarketProbeTests(unittest.TestCase):
                         live_probe.CONFIRM_LIVE_ORDER_CANCEL,
                         "--recovery-journal",
                         str(recovery_path.resolve()),
+                        *_funded_identity_args(),
                         "--report-file",
                         str(report_path),
                     ]
@@ -723,6 +763,7 @@ class PublicOnlyPolymarketProbeTests(unittest.TestCase):
                         live_probe.CONFIRM_LIVE_ORDER_CANCEL,
                         "--recovery-journal",
                         str(recovery_path.resolve()),
+                        *_funded_identity_args(),
                         "--report-file",
                         str(report_path),
                     ]
@@ -795,6 +836,7 @@ class PublicOnlyPolymarketProbeTests(unittest.TestCase):
                         live_probe.CONFIRM_LIVE_ORDER_CANCEL,
                         "--recovery-journal",
                         str(recovery_path.resolve()),
+                        *_funded_identity_args(),
                         "--report-file",
                         str(report_path),
                     ]

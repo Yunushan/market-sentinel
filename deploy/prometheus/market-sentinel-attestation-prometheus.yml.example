@@ -1,0 +1,11 @@
+# Merge these entries into the deployed Prometheus configuration. The lifecycle
+# endpoint must also be enabled on the loopback-only Prometheus web listener so
+# the collector can atomically load and later remove its run-unique rule.
+rule_files:
+  - /var/lib/prometheus/market-sentinel-attestation/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - 127.0.0.1:9093

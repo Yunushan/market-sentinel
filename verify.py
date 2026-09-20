@@ -42,8 +42,13 @@ REQUIRED_IMPORTS = {
     "eth-abi": "eth_abi",
 }
 
-MIN_TOTAL_BRANCH_COVERAGE = 65.0
-MIN_BACKEND_BRANCH_COVERAGE = 74.0
+MIN_TOTAL_BRANCH_COVERAGE = 72.0
+MIN_BACKEND_BRANCH_COVERAGE = 76.0
+# Windows Python 3.11+ exercises the Windows-only release and ACL branches
+# that are intentionally skipped on POSIX and Python 3.10 lanes.  Keep the
+# stricter floor for that canonical lane while using the repository's previous
+# compatibility floor where those branches cannot be collected by design.
+COMPATIBILITY_BACKEND_BRANCH_COVERAGE = 74.0
 BACKEND_COVERAGE_INCLUDE = "core/*,market_adapters/*,polymarket/*,web_api.py,market_sentinel_cli.py"
 RESOURCE_WARNING_POLICY = "error::ResourceWarning"
 
@@ -68,12 +73,15 @@ WORKFLOW_ACTION_PINS = {
         "actions/checkout": (7, "3d3c42e5aac5ba805825da76410c181273ba90b1"),
         "actions/setup-python": (7, "5fda3b95a4ea91299a34e894583c3862153e4b97"),
         "actions/dependency-review-action": (5, "a1d282b36b6f3519aa1f3fc636f609c47dddb294"),
-        "github/codeql-action/init": (4, "cdf488f595d80d6e07e03d4674febd5ab45fa938"),
-        "github/codeql-action/analyze": (4, "cdf488f595d80d6e07e03d4674febd5ab45fa938"),
+        "github/codeql-action/init": (4, "b96794f015dfd88f77b49b1c93e0fa7110f94c63"),
+        "github/codeql-action/analyze": (4, "b96794f015dfd88f77b49b1c93e0fa7110f94c63"),
     },
 }
 WORKFLOW_ACTION_REF_RE = re.compile(
     r"(?m)^\s*(?:-\s*)?uses:\s*['\"]?([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)@([0-9a-f]{40})['\"]?\s*#\s*v(\d+)(?:\.\d+\.\d+)?\s*$"
+)
+WORKFLOW_ACTION_USE_RE = re.compile(
+    r"(?m)^\s*(?:-\s*)?uses:\s*['\"]?([^@'\"\s]+)@([^'\"\s#]+)['\"]?(?:\s*#\s*(.*))?$"
 )
 
 
@@ -139,12 +147,75 @@ IMPLEMENTED_ADAPTER_FIXTURE_TESTS = {
 
 
 SECRET_HYGIENE_PATTERNS = {
-    "common access token": re.compile(r"\b(?:ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,})"),
+    "common access token": re.compile(r"\b(?:ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|sk_live_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|A(?:KI|SI)A[0-9A-Z]{16})"),
     "private key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
     "credentialed URL": re.compile(r"https?://[^\s/@]+:[^\s/@]+@"),
     "private network address": re.compile(r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})\b"),
     "hardcoded authorization or cookie": re.compile(r"(?i)(?:['\"]authorization['\"]|['\"]cookie['\"])\s*:\s*['\"][^'\"{}]{12,}['\"]"),
 }
+SECRET_HYGIENE_ALLOW_MARKER = "secret-scan: allow"
+SECRET_HYGIENE_TEXT_SUFFIXES = frozenset(
+    {
+        ".bat",
+        ".cjs",
+        ".cmd",
+        ".conf",
+        ".css",
+        ".example",
+        ".html",
+        ".ini",
+        ".js",
+        ".json",
+        ".lock",
+        ".md",
+        ".mjs",
+        ".pem",
+        ".ps1",
+        ".py",
+        ".service",
+        ".sh",
+        ".svg",
+        ".timer",
+        ".toml",
+        ".ts",
+        ".tsx",
+        ".txt",
+        ".key",
+        ".xml",
+        ".yaml",
+        ".yml",
+    }
+)
+SECRET_HYGIENE_TEXT_NAMES = frozenset(
+    {".env", ".gitignore", ".netrc", ".npmrc", ".pypirc", "Dockerfile", "LICENSE"}
+)
+SECRET_HYGIENE_FORBIDDEN_SECRET_SUFFIXES = frozenset(
+    {".jks", ".kdbx", ".keystore", ".p12", ".pfx"}
+)
+SECRET_HYGIENE_FORBIDDEN_SECRET_NAMES = frozenset({"id_dsa", "id_ed25519", "id_rsa"})
+SECRET_HYGIENE_MAX_FILE_BYTES = 8 * 1024 * 1024
+SECRET_HYGIENE_EXCLUDED_DIRECTORIES = frozenset(
+    {
+        ".cache",
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "env",
+        "node_modules",
+        "venv",
+    }
+)
+SECRET_HYGIENE_SELF_TEST_PATHS = frozenset(
+    {
+        Path("verify.py"),
+        Path("tests/test_secret_hygiene.py"),
+    }
+)
 
 
 def check_python_version() -> None:
@@ -195,9 +266,13 @@ def npm_command() -> str:
 def run_compile_check() -> None:
     checks = [
         compileall.compile_file(str(ROOT / "app.py"), quiet=1),
+        compileall.compile_file(str(ROOT / "market_sentinel_cli.py"), quiet=1),
+        compileall.compile_file(str(ROOT / "verify.py"), quiet=1),
+        compileall.compile_file(str(ROOT / "web_api.py"), quiet=1),
         compileall.compile_dir(str(ROOT / "core"), quiet=1),
         compileall.compile_dir(str(ROOT / "market_adapters"), quiet=1),
         compileall.compile_dir(str(ROOT / "polymarket"), quiet=1),
+        compileall.compile_dir(str(ROOT / "scripts"), quiet=1),
         compileall.compile_dir(str(ROOT / "tests"), quiet=1),
     ]
     if not all(checks):
@@ -352,8 +427,10 @@ def run_support_matrix_snapshot_check() -> None:
 
 def run_project_metadata_check() -> None:
     data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    if data.get("build-system", {}).get("requires") != ["setuptools>=77"]:
-        raise SystemExit("pyproject.toml build-system must require setuptools>=77 for PEP 639 metadata.")
+    if data.get("build-system", {}).get("requires") != ["setuptools==84.0.0"]:
+        raise SystemExit(
+            "pyproject.toml build-system must pin setuptools==84.0.0 so isolated resolution cannot drift."
+        )
     name = data.get("project", {}).get("name")
     if name != PROJECT_NAME:
         raise SystemExit(f"pyproject.toml project name must be {PROJECT_NAME!r}; got {name!r}.")
@@ -585,29 +662,113 @@ def run_goal_completion_audit_check() -> None:
 
 
 def _secret_hygiene_source_paths() -> list[Path]:
-    paths = [ROOT / name for name in ("app.py", "web_api.py", "market_sentinel_cli.py", "data/config.example.json")]
-    for directory, patterns in (
-        (ROOT / "core", ("*.py",)),
-        (ROOT / "market_adapters", ("*.py",)),
-        (ROOT / "polymarket", ("*.py",)),
-        (ROOT / "scripts", ("*.py",)),
-        (ROOT / "frontend" / "src", ("*.ts", "*.tsx")),
-    ):
-        for pattern in patterns:
-            paths.extend(directory.rglob(pattern))
-    return sorted(path for path in paths if path.is_file())
+    try:
+        tracked_and_unignored = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(ROOT),
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ],
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        tracked_and_unignored = None
+    if tracked_and_unignored is not None and tracked_and_unignored.returncode == 0:
+        candidates = [
+            ROOT / os.fsdecode(raw_path)
+            for raw_path in tracked_and_unignored.stdout.split(b"\0")
+            if raw_path
+        ]
+        return sorted(
+            path
+            for path in candidates
+            if path.relative_to(ROOT) not in SECRET_HYGIENE_SELF_TEST_PATHS
+            and (
+                path.suffix.lower() in SECRET_HYGIENE_TEXT_SUFFIXES
+                or path.name in SECRET_HYGIENE_TEXT_NAMES
+                or path.suffix.lower() in SECRET_HYGIENE_FORBIDDEN_SECRET_SUFFIXES
+                or path.name in SECRET_HYGIENE_FORBIDDEN_SECRET_NAMES
+            )
+        )
+
+    # Source archives and unusual developer environments may not include Git.
+    # Fall back to a pruned filesystem walk while preserving the same file rules.
+    paths: list[Path] = []
+    for current_root, directory_names, file_names in os.walk(ROOT, topdown=True):
+        current = Path(current_root)
+        directory_names[:] = [
+            name
+            for name in directory_names
+            if name not in SECRET_HYGIENE_EXCLUDED_DIRECTORIES
+            and not name.startswith("pytest-cache-files-")
+            and not name.endswith(".egg-info")
+            and not (current / name / "pyvenv.cfg").is_file()
+        ]
+        for file_name in file_names:
+            path = current / file_name
+            relative = path.relative_to(ROOT)
+            if relative in SECRET_HYGIENE_SELF_TEST_PATHS:
+                continue
+            if path.suffix.lower() not in SECRET_HYGIENE_TEXT_SUFFIXES and path.name not in SECRET_HYGIENE_TEXT_NAMES:
+                if (
+                    path.suffix.lower() not in SECRET_HYGIENE_FORBIDDEN_SECRET_SUFFIXES
+                    and path.name not in SECRET_HYGIENE_FORBIDDEN_SECRET_NAMES
+                ):
+                    continue
+            paths.append(path)
+    return sorted(paths)
 
 
 def _secret_hygiene_violations(paths: list[Path]) -> list[str]:
     violations: list[str] = []
     for path in paths:
-        text = path.read_text(encoding="utf-8")
         try:
-            label = str(path.relative_to(ROOT))
+            label = path.relative_to(ROOT).as_posix()
         except ValueError:
             label = str(path)
+        if (
+            path.suffix.lower() in SECRET_HYGIENE_FORBIDDEN_SECRET_SUFFIXES
+            or path.name in SECRET_HYGIENE_FORBIDDEN_SECRET_NAMES
+        ):
+            violations.append(f"{label}: private credential container or key filename is forbidden")
+            continue
+        if path.is_symlink():
+            violations.append(f"{label}: symbolic-link source is not allowed")
+            continue
+        try:
+            with path.open("rb") as stream:
+                raw = stream.read(SECRET_HYGIENE_MAX_FILE_BYTES + 1)
+        except OSError as exc:
+            violations.append(f"{label}: unreadable source ({type(exc).__name__})")
+            continue
+        if len(raw) > SECRET_HYGIENE_MAX_FILE_BYTES:
+            violations.append(
+                f"{label}: text source exceeds {SECRET_HYGIENE_MAX_FILE_BYTES} bytes"
+            )
+            continue
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            violations.append(f"{label}: text source is not valid UTF-8")
+            continue
         for line_number, line in enumerate(text.splitlines(), start=1):
+            if SECRET_HYGIENE_ALLOW_MARKER in line:
+                continue
             for label_name, pattern in SECRET_HYGIENE_PATTERNS.items():
+                # Tests deliberately exercise private-address and authorization
+                # rejection. Their synthetic values are not infrastructure
+                # secrets, while token/key/credentialed-URL rules still apply.
+                if label.startswith("tests/") and label_name in {
+                    "private network address",
+                    "hardcoded authorization or cookie",
+                }:
+                    continue
                 if pattern.search(line):
                     violations.append(f"{label}:{line_number}: {label_name}")
     return violations
@@ -1247,6 +1408,155 @@ def workflow_action_pin_issues(
     return issues
 
 
+def workflow_unpinned_action_issues(text: str) -> list[str]:
+    """Reject every external workflow action that lacks a reviewed immutable pin."""
+
+    issues: list[str] = []
+    for action, revision, comment in WORKFLOW_ACTION_USE_RE.findall(text):
+        if action.startswith("./"):
+            continue
+        if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+            issues.append(f"{action}@{revision} must use a lowercase 40-character commit SHA")
+        if re.match(r"v\d+(?:\.\d+\.\d+)?(?:\s|$)", comment.strip()) is None:
+            issues.append(f"{action}@{revision} must have a # v<major or semver> review comment")
+    return issues
+
+
+def action_reference_files(root: Path = ROOT) -> list[Path]:
+    """Return every GitHub workflow and composite-action manifest GitHub executes."""
+
+    workflow_directory = root / ".github" / "workflows"
+    action_directory = root / ".github" / "actions"
+    paths = {
+        *workflow_directory.glob("*.yml"),
+        *workflow_directory.glob("*.yaml"),
+        *action_directory.rglob("action.yml"),
+        *action_directory.rglob("action.yaml"),
+    }
+    return sorted(path for path in paths if path.is_file())
+
+
+def _logical_shell_commands(text: str) -> list[tuple[int, str]]:
+    """Join simple shell continuation lines while preserving the first line number."""
+
+    commands: list[tuple[int, str]] = []
+    fragments: list[str] = []
+    first_line = 0
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not fragments:
+            first_line = line_number
+        continuation = bool(stripped) and stripped.endswith(("\\", "`", "^"))
+        fragments.append(stripped[:-1].rstrip() if continuation else stripped)
+        if not continuation:
+            commands.append((first_line, " ".join(fragment for fragment in fragments if fragment)))
+            fragments = []
+    if fragments:
+        commands.append((first_line, " ".join(fragment for fragment in fragments if fragment)))
+    return commands
+
+
+def _pip_install_arguments(command: str) -> str | None:
+    match = re.search(r"\bpip(?:3)?(?:\.exe)?\s+install\b", command)
+    return command[match.end() :] if match is not None else None
+
+
+def _is_repository_source_install(arguments: str) -> bool:
+    tokens = re.findall(r'''"[^"]*"|'[^']*'|\S+''', arguments)
+    for raw_token in tokens:
+        token = raw_token.strip("'\"").rstrip(";")
+        if token.startswith("-e="):
+            token = token[3:]
+        elif token.startswith("--editable="):
+            token = token[len("--editable=") :]
+        base = token.split("[", 1)[0].rstrip("/")
+        if base in {
+            ".",
+            "file:.",
+            "$PWD",
+            "${PWD}",
+            "$GITHUB_WORKSPACE",
+            "${GITHUB_WORKSPACE}",
+            "/workspace",
+        }:
+            return True
+        if base.startswith(("file:$PWD", "file:${PWD}", "file:$GITHUB_WORKSPACE", "file:${GITHUB_WORKSPACE}")):
+            return True
+        if "github.workspace" in base.casefold():
+            return True
+    return False
+
+
+def source_install_policy_issues(text: str) -> list[str]:
+    """Reject source installs that can resolve an unreviewed PEP 517 backend."""
+
+    issues: list[str] = []
+    commands = _logical_shell_commands(text)
+    required_flags = ("--no-build-isolation", "--check-build-dependencies", "--no-deps")
+    for command_index, (line_number, command) in enumerate(commands):
+        arguments = _pip_install_arguments(command)
+        if arguments is None or not _is_repository_source_install(arguments):
+            continue
+        argument_tokens = arguments.split()
+        for flag in required_flags:
+            if flag not in argument_tokens:
+                issues.append(f"line {line_number}: source install is missing {flag}")
+        bootstrap_window = "\n".join(
+            value for _start, value in commands[max(0, command_index - 4) : command_index]
+        )
+        if "--require-hashes -r requirements-bootstrap.lock" not in bootstrap_window:
+            issues.append(
+                f"line {line_number}: source install is not preceded by the hash-locked build backend"
+            )
+    return issues
+
+
+def locked_requirement_install_policy_issues(text: str) -> list[str]:
+    """Reject documented lock installs that can fall back to dependency sdists."""
+
+    issues: list[str] = []
+    for line_number, command in _logical_shell_commands(text):
+        arguments = _pip_install_arguments(command)
+        if arguments is None or re.search(r"\.lock(?:\s|$|['\"])", arguments) is None:
+            continue
+        argument_tokens = arguments.split()
+        if "--require-hashes" not in argument_tokens:
+            issues.append(f"line {line_number}: locked dependency install is missing --require-hashes")
+        if "--only-binary=:all:" not in arguments.split():
+            issues.append(
+                f"line {line_number}: locked dependency install is missing --only-binary=:all:"
+            )
+    return issues
+
+
+def workflow_binary_install_policy_issues(text: str) -> list[str]:
+    """Require workflow-wide wheel-only policy anywhere a Python lock is installed."""
+
+    locked_installs = [
+        (line_number, arguments)
+        for line_number, command in _logical_shell_commands(text)
+        if (arguments := _pip_install_arguments(command)) is not None
+        and re.search(r"\.lock(?:\s|$|['\"])", arguments) is not None
+    ]
+    if not locked_installs:
+        return []
+    configured_values = [
+        match.group(1).strip().strip("'\"")
+        for match in re.finditer(r"(?m)^\s*PIP_ONLY_BINARY:\s*([^#\r\n]+)", text)
+    ]
+    issues: list[str] = []
+    for line_number, arguments in locked_installs:
+        if "--require-hashes" not in arguments.split():
+            issues.append(f"line {line_number}: workflow lock install is missing --require-hashes")
+        if "--no-binary" in arguments or "--no-binary=:all:" in arguments:
+            issues.append(f"line {line_number}: workflow lock install permits or requires source distributions")
+    if not configured_values or any(value != ":all:" for value in configured_values):
+        issues.append("workflow lock installs require PIP_ONLY_BINARY=:all:")
+    if re.search(r"\b(?:docker|podman)\s+run\b", text) and "-e PIP_ONLY_BINARY=:all:" not in text:
+        issues.append("containerized lock installs must receive PIP_ONLY_BINARY=:all:")
+    return issues
+
+
 def run_ci_cd_workflow_check() -> None:
     required_files = {
         ROOT / ".github" / "workflows" / "ci.yml": (
@@ -1303,11 +1613,18 @@ def run_ci_cd_workflow_check() -> None:
             "python -m pip install --no-cache-dir --require-hashes -r requirements-bootstrap.lock",
             "python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock",
             "python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock",
-            "python -m pip install --no-cache-dir --no-deps -e .",
+            "python -m pip install --no-cache-dir --no-build-isolation --check-build-dependencies --no-deps -e .",
             "python verify.py",
             "npm run build",
             "Smoke install built wheel",
-            "--force-reinstall --no-deps",
+            "python -m venv",
+            '"${smoke_python}" -m pip install --no-cache-dir --no-index',
+            "site.getsitepackages()",
+            "git show -s --format=%ct",
+            "git archive --format=tar",
+            "scripts/normalize_python_sdist.py",
+            "scripts/verify_reproducible_python_dist.py",
+            "--second-dir dist-repro",
             "License-Expression",
             "fetch-depth: 0",
             "scripts/verify_python_dist_artifacts.py",
@@ -1324,7 +1641,7 @@ def run_ci_cd_workflow_check() -> None:
         ROOT / ".github" / "workflows" / "release.yml": (
             "workflow_dispatch:",
             "release-unsigned",
-            "vars.REQUIRE_WINDOWS_CODE_SIGNING == 'true' && 'release' || 'release-unsigned'",
+            "needs.metadata.outputs.windows_signing_required == 'true' && 'release' || 'release-unsigned'",
             "contents: write",
             "Validate package version matches release tag",
             "Require release tag to resolve to workflow commit on protected main",
@@ -1347,7 +1664,7 @@ def run_ci_cd_workflow_check() -> None:
             "python -m pip install --no-cache-dir --require-hashes -r requirements-test.lock",
             "python -m pip install --no-cache-dir --require-hashes -r requirements-build.lock",
             "python -m pip install --no-cache-dir --require-hashes -r requirements-security.lock",
-            "python -m pip install --no-cache-dir --no-deps -e .",
+            "python -m pip install --no-cache-dir --no-build-isolation --check-build-dependencies --no-deps -e .",
             "Audit locked Python dependencies used for packaging",
             "pip_audit --requirement requirements.lock --progress-spinner off",
             "pip_audit --requirement requirements-live.lock --progress-spinner off",
@@ -1356,8 +1673,17 @@ def run_ci_cd_workflow_check() -> None:
             "pip_audit --requirement requirements-bootstrap.lock --progress-spinner off",
             "pip_audit --requirement requirements-security.lock --progress-spinner off",
             "scripts/build_windows_release.py",
+            "scripts/create_reproducible_zip.py",
+            "scripts/normalize_python_sdist.py",
+            "scripts/verify_release_policy.py",
+            "scripts/verify_reproducible_python_dist.py",
+            "Verify release publication policy",
+            "Record verified Windows signing status",
+            "SOURCE_DATE_EPOCH",
+            "--second-dir dist-repro",
+            "git archive --format=tar",
             "windows-dist",
-            "sha256sum * > SHA256SUMS.txt",
+            "sha256sum -- * > SHA256SUMS.txt",
             "Generate SPDX SBOM",
             "scripts/generate_release_sbom.py",
             "runs-on: ubuntu-24.04",
@@ -1383,7 +1709,9 @@ def run_ci_cd_workflow_check() -> None:
             "Verify unsigned Windows artifacts",
             "gh release create",
             "Smoke install built wheel",
-            "--force-reinstall --no-deps",
+            "python -m venv",
+            '"${smoke_python}" -m pip install --no-cache-dir --no-index',
+            "site.getsitepackages()",
             "License-Expression",
             "fetch-depth: 0",
             "scripts/verify_python_dist_artifacts.py",
@@ -1392,6 +1720,22 @@ def run_ci_cd_workflow_check() -> None:
             "actions/dependency-review-action",
             "fail-on-severity: high",
             "security-events: write",
+            "Secret history scan",
+            "fetch-depth: 0",
+            "Workflow and shell lint",
+            "Download pinned actionlint",
+            'archive="actionlint_${version}_linux_amd64.tar.gz"',
+            "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
+            "Install pinned pyflakes",
+            "pyflakes==3.4.0",
+            "Run actionlint with shellcheck and pyflakes",
+            "-shellcheck=",
+            "-pyflakes=",
+            "Download pinned gitleaks",
+            'archive="gitleaks_${version}_linux_x64.tar.gz"',
+            "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb",
+            "--config .gitleaks.toml",
+            '--log-opts="--all"',
         ),
         ROOT / ".github" / "dependabot.yml": (
             "package-ecosystem: github-actions",
@@ -1418,6 +1762,38 @@ def run_ci_cd_workflow_check() -> None:
             "hash protected",
             "direct dependency",
         ),
+        ROOT / "scripts" / "regenerate_dependency_locks.py": (
+            "REQUIRED_PYTHON",
+            "REQUIRED_PIP_TOOLS",
+            "requirements-bootstrap.lock",
+            "requirements-security.lock",
+            "--allow-unsafe",
+            "--generate-hashes",
+            "--strip-extras",
+            "scripts/verify_dependency_lock.py",
+        ),
+        ROOT / "scripts" / "run_platform_evidence.py": (
+            "requirements-bootstrap.lock",
+            "requirements-test.lock",
+            "--only-binary=:all:",
+            "--no-build-isolation",
+            "--check-build-dependencies",
+            "--no-deps",
+        ),
+        ROOT / "deploy" / "prometheus" / "market-sentinel-scrape.yml": (
+            "job_name: market-sentinel",
+            "metrics_path: /metrics",
+            "credentials_file: /etc/prometheus/market-sentinel-observability-token",
+            "127.0.0.1:8765",
+            "market-sentinel-alerts.yml",
+        ),
+        ROOT / "deploy" / "prometheus" / "market-sentinel-alerts.yml": (
+            "MarketSentinelDown",
+            "MarketSentinelHighServerErrorRatio",
+            "MarketSentinelOverloaded",
+            "MarketSentinelMutationSaturation",
+            "MarketSentinelRestartLoop",
+        ),
         ROOT / "scripts" / "generate_release_sbom.py": (
             "SPDX-2.3",
             "requirements-live.lock",
@@ -1439,7 +1815,18 @@ def run_ci_cd_workflow_check() -> None:
             "--host 127.0.0.1",
             "NoNewPrivileges=true",
             "ProtectSystem=strict",
-            "verify_service_health.py",
+            "ProtectKernelLogs=true",
+        ),
+        ROOT / "deploy" / "systemd" / "market-sentinel-health.service": (
+            "User=market-sentinel-health",
+            "Group=market-sentinel-health",
+            "EnvironmentFile=/etc/market-sentinel/market-sentinel-health.env",
+            "--require-observability-token",
+            "PrivateUsers=true",
+            "ProtectProc=invisible",
+        ),
+        ROOT / "deploy" / "systemd" / "market-sentinel-health.env.example": (
+            "MARKET_SENTINEL_OBSERVABILITY_TOKEN=",
         ),
         ROOT / "deploy" / "caddy" / "Caddyfile.example": (
             "basic_auth",
@@ -1456,7 +1843,9 @@ def run_ci_cd_workflow_check() -> None:
             "Funded production acceptance",
         ),
         ROOT / "docs" / "REPOSITORY_SETTINGS.md": (
-            "Team production policy",
+            "Independent-review prerequisite",
+            "required Code Owner review",
+            "Signed commits",
             "secret scanning",
             "REQUIRE_WINDOWS_CODE_SIGNING=true",
         ),
@@ -1511,11 +1900,41 @@ def run_ci_cd_workflow_check() -> None:
         if missing:
             raise SystemExit(f"{path.relative_to(ROOT)} is missing CI/CD fragments: {', '.join(missing)}")
 
+    for path in (
+        ROOT / ".github" / "workflows" / "ci.yml",
+        ROOT / ".github" / "workflows" / "release.yml",
+        ROOT / "README.md",
+        ROOT / "docs" / "PRODUCTION_OPERATIONS.md",
+    ):
+        issues = source_install_policy_issues(path.read_text(encoding="utf-8"))
+        if issues:
+            raise SystemExit(f"{path.relative_to(ROOT)} has unsafe source installs: {'; '.join(issues)}")
+
+    for path in (ROOT / "README.md", ROOT / "docs" / "PRODUCTION_OPERATIONS.md"):
+        issues = locked_requirement_install_policy_issues(path.read_text(encoding="utf-8"))
+        if issues:
+            raise SystemExit(
+                f"{path.relative_to(ROOT)} has unsafe locked dependency installs: {'; '.join(issues)}"
+            )
+
     for relative_path, expected_actions in WORKFLOW_ACTION_PINS.items():
         path = ROOT / relative_path
         issues = workflow_action_pin_issues(path.read_text(encoding="utf-8"), expected_actions)
         if issues:
             raise SystemExit(f"{relative_path} has invalid action versions: {'; '.join(issues)}")
+    for path in action_reference_files():
+        action_text = path.read_text(encoding="utf-8")
+        issues = workflow_unpinned_action_issues(action_text)
+        if issues:
+            raise SystemExit(
+                f"{path.relative_to(ROOT)} has unpinned or undocumented actions: {'; '.join(issues)}"
+            )
+        binary_install_issues = workflow_binary_install_policy_issues(action_text)
+        if binary_install_issues:
+            raise SystemExit(
+                f"{path.relative_to(ROOT)} has unsafe locked dependency installs: "
+                + "; ".join(binary_install_issues)
+            )
     result = subprocess.run(
         [sys.executable, "scripts/verify_platform_support.py"],
         cwd=ROOT,
@@ -1656,6 +2075,19 @@ def run_polymarket_credential_runbook_check() -> None:
     print("[ok] Polymarket credential runbook")
 
 
+def effective_backend_coverage_floor() -> float:
+    """Return the backend floor supported by this matrix lane.
+
+    Windows Python 3.11+ runs the Windows-only release and ACL tests.  POSIX
+    lanes and Python 3.10 intentionally skip those branches, so they use the
+    compatibility floor instead of failing on coverage that cannot be
+    collected on that host.
+    """
+    if os.name == "nt" and sys.version_info >= (3, 11):
+        return MIN_BACKEND_BRANCH_COVERAGE
+    return COMPATIBILITY_BACKEND_BRANCH_COVERAGE
+
+
 def run_unit_tests() -> None:
     suite = unittest.defaultTestLoader.discover(str(ROOT / "tests"))
     test_count = suite.countTestCases()
@@ -1666,6 +2098,7 @@ def run_unit_tests() -> None:
     env["COVERAGE_FILE"] = str(coverage_file)
     existing_warnings = env.get("PYTHONWARNINGS", "").strip()
     env["PYTHONWARNINGS"] = ",".join(filter(None, (existing_warnings, RESOURCE_WARNING_POLICY)))
+    backend_coverage_floor = effective_backend_coverage_floor()
     commands = (
         [sys.executable, "-m", "coverage", "erase"],
         [
@@ -1693,7 +2126,7 @@ def run_unit_tests() -> None:
             "coverage",
             "report",
             f"--include={BACKEND_COVERAGE_INCLUDE}",
-            f"--fail-under={MIN_BACKEND_BRANCH_COVERAGE:g}",
+            f"--fail-under={backend_coverage_floor:g}",
         ],
     )
     for command in commands:
@@ -1702,7 +2135,7 @@ def run_unit_tests() -> None:
             raise SystemExit(result.returncode)
     print(
         f"[ok] unit tests ({test_count} tests); combined statement/branch coverage "
-        f">= {MIN_TOTAL_BRANCH_COVERAGE:g}% overall and >= {MIN_BACKEND_BRANCH_COVERAGE:g}% backend"
+        f">= {MIN_TOTAL_BRANCH_COVERAGE:g}% overall and >= {backend_coverage_floor:g}% backend"
     )
 
 

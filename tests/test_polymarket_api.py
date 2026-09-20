@@ -40,7 +40,12 @@ from polymarket.coverage import polymarket_official_api_coverage
 from polymarket.accounting import parse_accounting_snapshot_zip, reconcile_mdd_payload_with_accounting
 from polymarket.credential_runbook import build_polymarket_credential_runbook
 from polymarket.endpoints import ALL_POLYMARKET_ENDPOINTS, CLOB_ENDPOINTS, PolymarketEndpoint
-from polymarket.http_client import PolymarketHTTPError, PolymarketRateLimitError, PolymarketValidationError
+from polymarket.http_client import (
+    PolymarketHTTPError,
+    PolymarketRateLimitError,
+    PolymarketResponseError,
+    PolymarketValidationError,
+)
 from polymarket.live_verification import (
     CONFIRM_LIVE_ORDER_CANCEL,
     LiveOrderCancelRequest,
@@ -1230,6 +1235,24 @@ store_live_validation_report(
         self.assertEqual(mock_request.call_args.args[:2], ("GET", "https://clob.polymarket.com/data/orders"))
         self.assertEqual(mock_request.call_args.kwargs["params"]["market"], "0xmarket")
 
+    def test_relayer_authenticated_collections_reject_error_objects_and_non_object_rows(self) -> None:
+        headers = {"RELAYER_API_KEY": "key", "RELAYER_API_KEY_ADDRESS": "0xabc"}
+
+        with (
+            patch(HTTP_REQUEST, return_value=FakeResponse({"error": "invalid credentials"})),
+            self.assertRaisesRegex(PolymarketResponseError, "expected an array response"),
+        ):
+            relayer.get_recent_transactions(headers)
+
+        with (
+            patch(HTTP_REQUEST, return_value=FakeResponse([{"id": "tx-1"}, "invalid-row"])),
+            self.assertRaisesRegex(PolymarketResponseError, "every array item"),
+        ):
+            relayer.get_recent_transactions(headers)
+
+        with patch(HTTP_REQUEST, return_value=FakeResponse([{"id": "tx-1"}])):
+            self.assertEqual(relayer.get_recent_transactions(headers), [{"id": "tx-1"}])
+
     def test_polymarket_endpoint_registry_locks_documented_contract_caps(self) -> None:
         self.assertGreaterEqual(len(ALL_POLYMARKET_ENDPOINTS), 80)
         self.assertEqual(CLOB_ENDPOINTS["batch_prices_history"].max_items, 20)
@@ -1396,9 +1419,10 @@ store_live_validation_report(
         self.assertNotIn("explicit-api-key", str(plan))
         self.assertNotIn("explicit-api-secret", str(plan))
         self.assertNotIn("explicit-api-passphrase", str(plan))
-        self.assertFalse(plan["execution_supported"])
+        self.assertTrue(plan["execution_supported"])
         self.assertIn("CLOB V2", " ".join(plan["transcript"]))
 
+    @patch("polymarket.live_verification.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", False)
     def test_live_order_cancel_harness_fails_closed_before_any_transport_for_v2_migration(self) -> None:
         result = run_live_order_cancel_verification(
             LiveOrderCancelRequest(
@@ -1947,8 +1971,8 @@ store_live_validation_report(
         gates = build_live_validation_stage_gates(report)
 
         self.assertTrue(gates["credentialed_read_ok"])
-        self.assertFalse(gates["safe_to_attempt_funded_order"])
-        self.assertIn("CLOB V2", gates["next_step"])
+        self.assertTrue(gates["safe_to_attempt_funded_order"])
+        self.assertIn("operator explicitly approves", gates["next_step"])
         self.assertEqual(gates["accepted_credential_read_checks"], ["clob_l2_orders"])
 
     def test_live_report_promotion_requires_concrete_authenticated_read_evidence(self) -> None:
@@ -2016,7 +2040,7 @@ store_live_validation_report(
                     live_validation_report_promotion(invalid_read)["can_promote_credential_live_verified"]
                 )
 
-    @patch("polymarket.live_reports.POLYMARKET_LIVE_MUTATIONS_SUPPORTED", True)
+    @patch("polymarket.live_reports.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", True)
     def test_live_report_promotion_requires_funded_order_cancel_audit_evidence(self) -> None:
         dry_run_report = {
             "mode": "strict_cli",
@@ -2124,6 +2148,7 @@ store_live_validation_report(
                 self.assertEqual(rejected["funded_live_verified"], "blocked")
                 self.assertFalse(rejected["can_promote_funded_live_verified"])
 
+    @patch("polymarket.live_reports.POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED", False)
     def test_live_report_promotion_blocks_funded_candidate_until_v2_is_supported(self) -> None:
         report = json.loads(
             (LIVE_REPORT_FIXTURE_ROOT / "valid_funded_audit.json").read_text(encoding="utf-8")
@@ -2254,7 +2279,7 @@ store_live_validation_report(
         )
 
         self.assertEqual(credentialed["credential_live_verified"], "candidate_only")
-        self.assertEqual(funded["funded_live_verified"], "blocked")
+        self.assertEqual(funded["funded_live_verified"], "candidate_only")
         self.assertEqual(dry_run["funded_live_verified"], "blocked")
         self.assertEqual(runbook["credential_live_verified"], "blocked")
         self.assertEqual(browser["credential_live_verified"], "blocked")
@@ -2809,7 +2834,7 @@ store_live_validation_report(
         funded = result["entries"][1]
         invalid = result["entries"][2]
         self.assertEqual(credentialed["summary"]["credential_live_verified"], "candidate_only")
-        self.assertEqual(funded["summary"]["funded_live_verified"], "blocked")
+        self.assertEqual(funded["summary"]["funded_live_verified"], "candidate_only")
         self.assertFalse(invalid["schema_validation"]["ok"])
         self.assertIn("non-empty string mode", " ".join(invalid["schema_validation"]["errors"]))
         for entry in result["entries"]:

@@ -10,11 +10,13 @@ import textwrap
 import uuid
 from pathlib import Path
 from xml.sax.saxutils import escape
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZipFile
 
 try:
+    from scripts.create_reproducible_zip import create_reproducible_zip
     from scripts.release_version import parse_release_version
 except ModuleNotFoundError:  # Direct execution adds scripts/, rather than the repository root, to sys.path.
+    from create_reproducible_zip import create_reproducible_zip
     from release_version import parse_release_version
 
 
@@ -231,13 +233,7 @@ def copy_release_payload(package_dir: Path, frontend_dist: Path, version: str) -
 def make_portable_zip(package_dir: Path, output_dir: Path, tag: str) -> Path:
     zip_path = output_dir / f"{APP_NAME}-{tag}-win-x64.zip"
     root_name = f"{APP_NAME}-{tag}-win-x64"
-    if zip_path.exists():
-        zip_path.unlink()
-    with ZipFile(zip_path, "w", ZIP_DEFLATED) as archive:
-        for path in sorted(package_dir.rglob("*")):
-            if path.is_file():
-                archive.write(path, Path(root_name) / path.relative_to(package_dir))
-    return zip_path
+    return create_reproducible_zip(package_dir, zip_path, prefix=root_name)
 
 
 def validate_staged_package(package_dir: Path, version: str) -> None:

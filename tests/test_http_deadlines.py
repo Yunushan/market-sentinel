@@ -16,6 +16,7 @@ from core.request_control import (
     RequestControl,
     RequestDeadlineExceeded,
     cancellation_scope,
+    controlled_response,
     current_request,
     request_scope,
     resolve_with_deadline,
@@ -261,6 +262,51 @@ class HTTPDeadlineTests(unittest.TestCase):
                 self.assertEqual(response.json(), {"ok": True})
             with self.assertRaises(RequestDeadlineExceeded):
                 session.send(requests.Request("GET", origin + "/headers").prepare(), timeout=0.25)
+
+    def test_owned_phase_timeouts_are_not_reclassified_as_overall_deadlines(self):
+        for phase_error, timeout in (
+            (requests.ConnectTimeout("connect phase expired"), (0.01, 5.0)),
+            (requests.ReadTimeout("read phase expired"), (5.0, 0.01)),
+        ):
+            with self.subTest(error=type(phase_error).__name__):
+                observed = []
+
+                def fail_in_phase(*, timeout, observed=observed, phase_error=phase_error):
+                    observed.append(timeout)
+                    raise phase_error
+
+                with self.assertRaises(type(phase_error)) as raised:
+                    controlled_response(sum(timeout), fail_in_phase, timeout=timeout)
+                self.assertIs(raised.exception, phase_error)
+                self.assertEqual(observed, [timeout])
+
+    def test_transport_timeout_at_rounding_boundary_becomes_overall_deadline(self):
+        transport_error = requests.ReadTimeout("transport timer rounded early")
+
+        def expire_at_boundary():
+            control = current_request()
+            self.assertIsNotNone(control)
+            control.deadline = time.monotonic() + 0.002
+            raise transport_error
+
+        with self.assertRaises(RequestDeadlineExceeded) as raised:
+            controlled_response(1, expire_at_boundary)
+        self.assertIs(raised.exception.__cause__, transport_error)
+
+    def test_tuple_phase_timeout_at_rounding_boundary_is_preserved(self):
+        phase_error = requests.ReadTimeout("configured read phase expired")
+        timeout = (5.0, 0.01)
+
+        def expire_phase_at_boundary(*, timeout):
+            self.assertEqual(timeout, (5.0, 0.01))
+            control = current_request()
+            self.assertIsNotNone(control)
+            control.deadline = time.monotonic() + 0.002
+            raise phase_error
+
+        with self.assertRaises(requests.ReadTimeout) as raised:
+            controlled_response(sum(timeout), expire_phase_at_boundary, timeout=timeout)
+        self.assertIs(raised.exception, phase_error)
 
     def test_dns_timeout_has_bounded_helpers_and_no_http_continuation(self):
         release = threading.Event()

@@ -29,7 +29,7 @@ PROJECT_PATH = ROOT / "pyproject.toml"
 LOCKED_REQUIREMENT_RE = re.compile(
     r"^([A-Za-z0-9_.-]+)==([^\s;\\]+)(?:\s*;\s*[^\\]+)?\s*\\?$"
 )
-HASH_RE = re.compile(r"^\s*--hash=sha256:[0-9a-f]{64}$")
+HASH_RE = re.compile(r"^\s*--hash=sha256:[0-9a-f]{64}(?:\s*\\)?\s*$")
 
 
 def canonical_name(value: str) -> str:
@@ -50,7 +50,10 @@ def lock_issues(lock_text: str, project_dependencies: list[str]) -> list[str]:
         active_name = None
         active_has_hash = False
 
-    for line in lock_text.splitlines():
+    for line_number, line in enumerate(lock_text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
         match = LOCKED_REQUIREMENT_RE.match(line)
         if match:
             finish_active()
@@ -58,11 +61,18 @@ def lock_issues(lock_text: str, project_dependencies: list[str]) -> list[str]:
             locked[active_name] = locked.get(active_name, 0) + 1
             locked_versions.setdefault(active_name, []).append(match.group(2))
             continue
-        if active_name and HASH_RE.match(line):
-            active_has_hash = True
+        if HASH_RE.match(line):
+            if active_name is None:
+                issues.append(f"line {line_number}: hash is not attached to a pinned requirement")
+            else:
+                active_has_hash = True
             continue
-        if active_name and line and not line.startswith((" ", "#")):
-            finish_active()
+        finish_active()
+        if stripped.startswith("-"):
+            directive = stripped.rstrip("\\").split(maxsplit=1)[0]
+            issues.append(f"line {line_number}: pip control directive is not allowed in a lock file: {directive}")
+        else:
+            issues.append(f"line {line_number}: unrecognized lock-file content")
     finish_active()
 
     for dependency in project_dependencies:
