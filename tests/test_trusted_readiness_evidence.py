@@ -1008,6 +1008,8 @@ class TrustedReadinessEvidenceTests(unittest.TestCase):
         self.assertGreaterEqual(workflow.count("id-token: write"), 9)
         self.assertIn("actions/attest-build-provenance@4d101475", action)
         self.assertIn("actions/upload-artifact@043fb46", action)
+        self.assertIn("python -B -m scripts.platform_ci_receipt generate", action)
+        self.assertIn("python -B -m scripts.platform_ci_receipt identity", action)
         self.assertIn("--run-attempt \"${GITHUB_RUN_ATTEMPT}\"", action)
         self.assertIn("--runner-environment \"${RUNNER_ENVIRONMENT}\"", action)
         self.assertEqual(action.count("git diff --quiet --no-ext-diff"), 2)
