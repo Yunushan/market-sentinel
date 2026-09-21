@@ -56,7 +56,7 @@ runs:
           polymarket/funded_policy.py
         receipt_dir="${RUNNER_TEMP}/market-sentinel-platform-receipt"
         mkdir -p "${receipt_dir}"
-        python -B scripts/platform_ci_receipt.py generate \
+        python -B -m scripts.platform_ci_receipt generate \
           --repository "${GITHUB_REPOSITORY}" \
           --source-revision "${GITHUB_SHA}" \
           --run-id "${GITHUB_RUN_ID}" \
@@ -94,7 +94,7 @@ runs:
           scripts/platform_ci_receipt.py \
           scripts/trusted_readiness_evidence.py \
           polymarket/funded_policy.py
-        python -B scripts/platform_ci_receipt.py identity \
+        python -B -m scripts.platform_ci_receipt identity \
           --input "${RECEIPT_PATH}" \
           --expected-identity "${EXPECTED_IDENTITY}" \
           --expected-sha256 "${EXPECTED_RECEIPT_SHA256}"

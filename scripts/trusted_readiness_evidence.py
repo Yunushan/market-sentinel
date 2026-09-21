@@ -14,11 +14,17 @@ import json
 import math
 import os
 import re
+import sys
 import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+
+# Keep direct `python scripts/...` invocations importable from the repository root.
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from polymarket.funded_policy import (
     FUNDED_TOKEN_ALLOWLIST_VARIABLE,
