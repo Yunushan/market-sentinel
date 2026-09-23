@@ -511,6 +511,20 @@ jobs:
           $installer = "release-assets/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64.msi"
           python scripts/sign_windows_release.py --path $installer
 
+      - name: Verify Windows release metadata
+        env:
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+          RELEASE_TAG_NAME: ${{ needs.metadata.outputs.tag_name }}
+        shell: pwsh
+        run: |
+          $executable = "build/windows-release/market-sentinel-$($env:RELEASE_TAG_NAME)-win-x64/market-sentinel.exe"
+          $installer = "release-assets/market-sentinel-$($env:RELEASE_TAG_NAME)-win-x64.msi"
+          & ./scripts/verify_windows_release_metadata.ps1 `
+            -ExecutablePath $executable `
+            -InstallerPath $installer `
+            -Version $env:RELEASE_VERSION `
+            -PythonExecutable (Get-Command python -ErrorAction Stop).Source
+
       - name: Verify signatures in final Windows artifacts
         if: ${{ env.WINDOWS_SIGNING_REQUIRED == 'true' }}
         shell: pwsh
@@ -560,6 +574,18 @@ jobs:
             throw "Expected exactly one embedded market-sentinel.exe; found $($embeddedExecutables.Count)."
           }
           Write-Warning "Windows EXE/MSI artifacts are intentionally unsigned; do not treat this release as production-trusted."
+
+      - name: Smoke test installed Windows MSI
+        env:
+          RELEASE_TAG_NAME: ${{ needs.metadata.outputs.tag_name }}
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+        shell: pwsh
+        run: |
+          $packageName = "market-sentinel-$($env:RELEASE_TAG_NAME)-win-x64"
+          & ./scripts/smoke_windows_msi.ps1 `
+            -InstallerPath "release-assets/${packageName}.msi" `
+            -StagedExecutablePath "build/windows-release/$packageName/market-sentinel.exe" `
+            -Version $env:RELEASE_VERSION
 
       - name: Record verified Windows signing status
         id: windows_signing_status

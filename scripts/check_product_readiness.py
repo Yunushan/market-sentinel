@@ -371,6 +371,7 @@ REQUIRED_OPERATIONS_FILES = (
     "scripts/verify_production_deployment.py",
     "scripts/review_deployment_evidence.py",
     "scripts/generate_deployment_evidence.py",
+    "scripts/initialize_production_config.py",
     "scripts/backup_state.py",
     "scripts/restore_state_backup.py",
     "scripts/verify_service_health.py",
@@ -2519,10 +2520,10 @@ REQUIRED_REPOSITORY_SETTINGS_CHECKS = (
     "branch_require_up_to_date",
     "branch_enforce_admins",
     "branch_require_pull_request",
-    "branch_minimum_approvals",
+    "branch_solo_zero_approvals",
     "branch_dismiss_stale_reviews",
-    "branch_require_code_owner_reviews",
-    "branch_require_last_push_approval",
+    "branch_solo_code_owner_gate_disabled",
+    "branch_solo_last_push_gate_disabled",
     "branch_require_signed_commits",
     "branch_conversation_resolution",
     "branch_linear_history",
@@ -2531,14 +2532,14 @@ REQUIRED_REPOSITORY_SETTINGS_CHECKS = (
 )
 REQUIRED_RELEASE_ENVIRONMENT_CHECKS = (
     "release_required_reviewers",
-    "release_independent_reviewers",
-    "release_prevent_self_review",
+    "release_owner_reviewer",
+    "release_allow_owner_approval",
     "release_deployment_refs",
     "release_signing_secrets",
     "release_windows_code_signing_required",
     "production_required_reviewers",
-    "production_independent_reviewers",
-    "production_prevent_self_review",
+    "production_owner_reviewer",
+    "production_allow_owner_approval",
     "production_protected_branches",
     "production_secrets",
     "production_variables",
@@ -5066,7 +5067,7 @@ def _build_report_with_configured_tools(args: argparse.Namespace) -> dict[str, A
         else "Collect GitHub-attested public-only evidence and keep credentialed/funded stages fail-closed.",
         []
         if live_ok and public_ok
-        else ["Run .github/workflows/polymarket-evidence.yml public-only evidence on the exact protected-main revision."],
+        else ["Dispatch .github/workflows/ci.yml on the exact protected-main revision and supply its attested public-polymarket-live report."],
     )
     if credentialed_ok:
         live["earned"] += 1

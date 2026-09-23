@@ -112,8 +112,8 @@ class ProductionOperationsTests(unittest.TestCase):
         self.assertIn("Cross-Origin-Opener-Policy", proxy)
         self.assertIn("Cross-Origin-Resource-Policy", proxy)
         self.assertIn("Report a vulnerability", security)
-        self.assertIn("Independent-review prerequisite", repository_settings)
-        self.assertIn("required Code Owner review", repository_settings)
+        self.assertIn("Single-maintainer authorization", repository_settings)
+        self.assertIn("zero required approving reviews", repository_settings)
         self.assertIn("Signed commits", repository_settings)
         self.assertIn("secret scanning", repository_settings)
         self.assertIn("Python package build", repository_settings)
@@ -131,6 +131,27 @@ class ProductionOperationsTests(unittest.TestCase):
         self.assertIn("MARKET_SENTINEL_OBSERVABILITY_TOKEN", health_environment)
         self.assertNotIn("MARKET_SENTINEL_API_TOKEN", health_environment)
         self.assertIn("* @Yunushan", codeowners)
+
+    def test_caddy_service_receives_private_proxy_credentials_on_start_and_reload(self) -> None:
+        drop_in = (ROOT / "deploy" / "caddy" / "market-sentinel-env.conf").read_text(
+            encoding="utf-8"
+        )
+        operations = (ROOT / "docs" / "PRODUCTION_OPERATIONS.md").read_text(encoding="utf-8")
+        environment = "EnvironmentFile=/etc/caddy/market-sentinel.env"
+        install = "deploy/caddy/market-sentinel-env.conf"
+        validate = (
+            "sudo caddy validate --config /etc/caddy/Caddyfile "
+            "--envfile /etc/caddy/market-sentinel.env"
+        )
+
+        self.assertEqual(drop_in.splitlines()[-1], environment)
+        self.assertNotIn("EnvironmentFile=-", drop_in)
+        self.assertIn("/etc/systemd/system/caddy.service.d/market-sentinel-env.conf", operations)
+        self.assertIn("sudo install -o root -g root -m 0600 /dev/null /etc/caddy/market-sentinel.env", operations)
+        self.assertIn("root:root:600", operations)
+        self.assertIn(validate, operations)
+        self.assertLess(operations.index(install), operations.index("sudo systemctl enable --now caddy.service"))
+        self.assertLess(operations.index(validate), operations.index("sudo systemctl enable --now caddy.service"))
 
     def test_service_environment_places_every_durable_store_under_the_backed_up_state_root(self) -> None:
         service_environment = (ROOT / "deploy" / "systemd" / "market-sentinel.env.example").read_text(
@@ -274,7 +295,7 @@ class ProductionOperationsTests(unittest.TestCase):
             operations,
         )
         self.assertIn(
-            "useradd --system --home /nonexistent --shell /sbin/nologin market-sentinel-health",
+            "useradd --system --user-group --home /nonexistent --shell /sbin/nologin market-sentinel-health",
             operations,
         )
         self.assertIn("/var/lib/market-sentinel-deployment-evidence/deployment-evidence-<RELEASE_VERSION>.json", operations)

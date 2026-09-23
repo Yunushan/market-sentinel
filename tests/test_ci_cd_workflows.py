@@ -471,8 +471,12 @@ jobs:
             "Sign staged Windows executable",
             "Package Windows portable zip and MSI",
             "Sign Windows MSI package",
+            "Verify Windows release metadata",
+            "scripts/verify_windows_release_metadata.ps1",
             "Verify signatures in final Windows artifacts",
             "Verify unsigned Windows artifacts",
+            "Smoke test installed Windows MSI",
+            "scripts/smoke_windows_msi.ps1",
             "Record verified Windows signing status",
             "--prepare-only",
             "--package-only",
@@ -554,8 +558,10 @@ jobs:
         sign_exe_index = windows_app.index("Sign staged Windows executable")
         package_index = windows_app.index("Package Windows portable zip and MSI")
         sign_msi_index = windows_app.index("Sign Windows MSI package")
+        metadata_index = windows_app.index("Verify Windows release metadata")
         verify_signatures_index = windows_app.index("Verify signatures in final Windows artifacts")
         verify_unsigned_index = windows_app.index("Verify unsigned Windows artifacts")
+        installed_smoke_index = windows_app.index("Smoke test installed Windows MSI")
         signing_status_index = windows_app.index("Record verified Windows signing status")
         upload_index = windows_app.index("Upload Windows release packages")
         self.assertLess(prepare_index, smoke_index)
@@ -563,10 +569,15 @@ jobs:
         self.assertLess(prepare_index, sign_exe_index)
         self.assertLess(sign_exe_index, package_index)
         self.assertLess(package_index, sign_msi_index)
+        self.assertLess(sign_msi_index, metadata_index)
+        self.assertLess(metadata_index, verify_signatures_index)
         self.assertLess(sign_msi_index, verify_signatures_index)
         self.assertLess(verify_signatures_index, verify_unsigned_index)
         self.assertLess(verify_signatures_index, upload_index)
         self.assertLess(verify_unsigned_index, upload_index)
+        self.assertLess(verify_signatures_index, installed_smoke_index)
+        self.assertLess(verify_unsigned_index, installed_smoke_index)
+        self.assertLess(installed_smoke_index, signing_status_index)
         self.assertLess(verify_signatures_index, signing_status_index)
         self.assertLess(verify_unsigned_index, signing_status_index)
         self.assertLess(signing_status_index, upload_index)
@@ -578,6 +589,8 @@ jobs:
         self.assertIn('Get-ChildItem -LiteralPath $extractDirectory -Recurse -File -Filter "market-sentinel.exe"', windows_app)
         self.assertIn("verify /pa /all $embeddedExecutables[0].FullName", windows_app)
         self.assertIn("verify /pa /all $installer", windows_app)
+        self.assertIn("-InstallerPath \"release-assets/${packageName}.msi\"", windows_app)
+        self.assertIn("-StagedExecutablePath \"build/windows-release/$packageName/market-sentinel.exe\"", windows_app)
         self.assertNotIn("Get-ChildItem release-assets -File", windows_app)
         checksum_index = text.index("sha256sum -- * > SHA256SUMS.txt")
         notes_index = text.index("cat > release-assets/RELEASE_NOTES.md")
@@ -877,8 +890,8 @@ jobs:
             "Environments: read",
             "Actions: read",
             "Variables: read",
-            "Independent-review prerequisite",
-            "required Code Owner review",
+            "Single-maintainer authorization",
+            "zero required approving reviews",
             "Signed commits",
             "REQUIRE_WINDOWS_CODE_SIGNING=true",
             "nonzero exit status",

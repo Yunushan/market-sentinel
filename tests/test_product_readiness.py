@@ -1174,6 +1174,31 @@ class ProductReadinessTests(unittest.TestCase):
                 required_checks=REQUIRED_RELEASE_ENVIRONMENT_CHECKS,
             )
 
+            legacy_checks = {
+                "release_owner_reviewer": "release_independent_reviewers",
+                "release_allow_owner_approval": "release_prevent_self_review",
+                "production_owner_reviewer": "production_independent_reviewers",
+                "production_allow_owner_approval": "production_prevent_self_review",
+            }
+            path.write_text(
+                json.dumps(
+                    {
+                        **base,
+                        "checks": [
+                            {"name": legacy_checks.get(name, name), "status": "pass"}
+                            for name in REQUIRED_RELEASE_ENVIRONMENT_CHECKS
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            legacy, legacy_detail = _reviewed_evidence(
+                str(path),
+                "release-environment",
+                evidence_type="release-environment",
+                required_checks=REQUIRED_RELEASE_ENVIRONMENT_CHECKS,
+            )
+
             path.write_text(
                 json.dumps(
                     {
@@ -1199,6 +1224,8 @@ class ProductReadinessTests(unittest.TestCase):
         self.assertFalse(incomplete)
         self.assertIn("missing required checks", detail)
         self.assertTrue(complete, complete_detail)
+        self.assertFalse(legacy)
+        self.assertIn("missing required checks", legacy_detail)
         self.assertFalse(unknown)
         self.assertIn("unknown checks", unknown_detail)
 

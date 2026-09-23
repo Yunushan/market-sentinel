@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,16 +15,66 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 from scripts.build_windows_release import (
     APP_NAME,
     build_pyinstaller,
+    copy_release_payload,
     extract_frontend_archive,
     main,
     make_portable_zip,
     msi_product_version,
     validate_staged_package,
     windows_config_bootstrap,
+    write_windows_version_resource,
 )
 
 
 class WindowsReleaseBuildTests(unittest.TestCase):
+    def test_windows_payload_includes_linked_code_signing_and_privacy_policies(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package_dir = root / "package"
+            frontend_dist = root / "frontend-dist"
+            package_dir.mkdir()
+            frontend_dist.mkdir()
+            (frontend_dist / "index.html").write_text("<html></html>", encoding="utf-8")
+
+            copy_release_payload(package_dir, frontend_dist, "1.0.12")
+
+            project_root = Path(__file__).resolve().parent.parent
+            readme = (package_dir / "README.md").read_text(encoding="utf-8")
+            for name in ("CODE_SIGNING_POLICY.md", "PRIVACY.md"):
+                with self.subTest(name=name):
+                    self.assertIn(f"]({name})", readme)
+                    self.assertEqual((package_dir / name).read_bytes(), (project_root / name).read_bytes())
+
+    @unittest.skipUnless(os.name == "nt" and shutil.which("pwsh"), "PowerShell MSI runner guard")
+    def test_msi_smoke_rejects_a_non_hosted_runner_before_install(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = dict(os.environ)
+            environment["GITHUB_ACTIONS"] = "false"
+            environment["RUNNER_ENVIRONMENT"] = "self-hosted"
+            result = subprocess.run(
+                [
+                    shutil.which("pwsh") or "pwsh",
+                    "-NoProfile",
+                    "-File",
+                    str(Path(__file__).resolve().parent.parent / "scripts" / "smoke_windows_msi.ps1"),
+                    "-InstallerPath",
+                    str(root / "missing.msi"),
+                    "-StagedExecutablePath",
+                    str(root / "missing.exe"),
+                    "-Version",
+                    "0.1.0",
+                ],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("requires a GitHub-hosted Windows runner", result.stderr)
+            self.assertEqual(list(root.iterdir()), [])
+
     @unittest.skipUnless(os.name == "nt", "Windows batch launcher integration")
     def test_config_bootstrap_uses_portable_path_when_writable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -156,6 +208,25 @@ class WindowsReleaseBuildTests(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, error):
                     msi_product_version(version)
 
+    def test_executable_resource_uses_the_installer_version_for_each_release_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            resource_path = Path(directory) / "windows-version.txt"
+            for version in ("1.2.3a1", "1.2.3b1", "1.2.3rc1", "1.2.3"):
+                with self.subTest(version=version):
+                    path = write_windows_version_resource(Path(directory), version)
+                    self.assertEqual(path, resource_path)
+                    resource = path.read_text(encoding="utf-8")
+                    compile(resource, str(path), "eval")
+                    native_version = msi_product_version(version)
+                    native_parts = tuple(map(int, native_version.split("."))) + (0,)
+                    self.assertIn(f"filevers={native_parts}", resource)
+                    self.assertIn(f"prodvers={native_parts}", resource)
+                    self.assertIn(f"StringStruct('FileVersion', '{native_version}')", resource)
+                    self.assertIn(f"StringStruct('ProductVersion', '{native_version}')", resource)
+                    self.assertIn("StringStruct('ProductName', 'MarketSentinel')", resource)
+                    self.assertIn("StringStruct('OriginalFilename', 'market-sentinel.exe')", resource)
+                    self.assertEqual(write_windows_version_resource(Path(directory), version).read_bytes(), resource.encode("utf-8"))
+
     def test_pyinstaller_collects_both_optional_live_sdk_packages(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -168,12 +239,41 @@ class WindowsReleaseBuildTests(unittest.TestCase):
                 (built_app / f"{APP_NAME}.exe").write_bytes(b"frozen-app")
 
             with patch("scripts.build_windows_release.run", side_effect=fake_run) as runner:
-                build_pyinstaller(work_dir, package_dir)
+                build_pyinstaller(work_dir, package_dir, "1.2.3")
 
             command = runner.call_args.args[0]
             self.assertIn(["--collect-all", "py_clob_client_v2"], [command[index : index + 2] for index in range(len(command) - 1)])
             self.assertIn(["--collect-all", "opinion_clob_sdk"], [command[index : index + 2] for index in range(len(command) - 1)])
+            self.assertIn(["--version-file", str(work_dir / "windows-version.txt")], [command[index : index + 2] for index in range(len(command) - 1)])
             self.assertEqual((package_dir / f"{APP_NAME}.exe").read_bytes(), b"frozen-app")
+
+    @unittest.skipUnless(os.name == "nt" and shutil.which("pwsh"), "Windows release metadata integration")
+    def test_metadata_verifier_rejects_an_unrelated_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            installer = Path(directory) / "placeholder.msi"
+            installer.write_bytes(b"not an installer")
+            result = subprocess.run(
+                [
+                    shutil.which("pwsh") or "pwsh",
+                    "-NoProfile",
+                    "-File",
+                    str(Path(__file__).resolve().parent.parent / "scripts" / "verify_windows_release_metadata.ps1"),
+                    "-ExecutablePath",
+                    sys.executable,
+                    "-InstallerPath",
+                    str(installer),
+                    "-Version",
+                    "1.2.3",
+                    "-PythonExecutable",
+                    sys.executable,
+                ],
+                cwd=Path(__file__).resolve().parent.parent,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("executable version resource does not match", result.stderr)
 
     def test_package_only_validation_rejects_missing_or_stale_payload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

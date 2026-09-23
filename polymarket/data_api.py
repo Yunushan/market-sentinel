@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
 from .endpoints import DATA_ENDPOINTS
-from .http_client import PolymarketResponseError, comma_join, request_bytes, request_json
+from .http_client import PolymarketResponseError, PolymarketValidationError, comma_join, request_bytes, request_json
 from .leaderboard import LEADERBOARD_MAX_OFFSET, normalize_leaderboard_category
 
 
@@ -179,6 +179,102 @@ def get_leaderboard(
         "category": clean_category,
     }
     return _list_payload(_get_json("leaderboard", params=params, timeout=timeout), ["data", "leaderboard", "users", "results"])
+
+
+def get_leaderboard_v2_page(
+    *,
+    limit: int = 1000,
+    cursor: Optional[str] = None,
+    sort_by: str = "PNL",
+    period: str = "all",
+    category: str = "OVERALL",
+    timeout: float = 15.0,
+) -> Dict[str, Any]:
+    """Read one ranked Data API v2 board page without changing its financial units.
+
+    V2 ``volume`` is outcome shares, not USD. The cursor traverses a ranked
+    board, not every Polymarket account, and its offset-shaped walk may skip or
+    repeat rows if the board changes between pages. Existing v1 USD analytics
+    must not consume these raw rows as v1 leaderboard rows.
+    """
+    if cursor is not None:
+        if not isinstance(cursor, str) or not cursor or cursor.strip() != cursor:
+            raise PolymarketValidationError("Leaderboard v2 cursor must be a nonempty opaque string.")
+        if limit != 1000 or sort_by != "PNL" or period != "all" or category != "OVERALL":
+            raise PolymarketValidationError("Leaderboard v2 cursor binds the board; resume with cursor only.")
+        params: Dict[str, Any] = {"cursor": cursor}
+    else:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise PolymarketValidationError("Leaderboard v2 first-page limit must be between 1 and 1000.")
+        clean_sort = str(sort_by).strip().upper()
+        if clean_sort not in {"PNL", "VOLUME"}:
+            raise PolymarketValidationError("Leaderboard v2 sort must be PNL or VOLUME.")
+        clean_period = str(period).strip().lower()
+        if clean_period not in {"day", "week", "month", "all"}:
+            raise PolymarketValidationError("Leaderboard v2 period must be day, week, month, or all.")
+        clean_category = str(category).strip().upper()
+        if clean_category == "COMBOS":
+            if clean_sort == "VOLUME":
+                raise PolymarketValidationError("Leaderboard v2 combos has no volume board.")
+        else:
+            try:
+                clean_category = normalize_leaderboard_category(category)
+            except ValueError as exc:
+                raise PolymarketValidationError(str(exc)) from exc
+        params = {"limit": limit, "sort_by": clean_sort, "time_period": clean_period, "category": clean_category.lower()}
+
+    data = _get_json("leaderboard_v2", params=params, timeout=timeout)
+    if not isinstance(data, dict) or not isinstance(data.get("data"), list) or any(
+        not isinstance(row, dict) for row in data["data"]
+    ):
+        raise PolymarketResponseError("Leaderboard v2 must return an object with an array of rows; board coverage is unknown.")
+    pagination = data.get("pagination")
+    if not isinstance(pagination, dict) or not isinstance(pagination.get("has_more"), bool):
+        raise PolymarketResponseError("Leaderboard v2 pagination metadata is missing or invalid; board coverage is unknown.")
+    next_cursor = pagination.get("next_cursor")
+    if (pagination["has_more"] and (not isinstance(next_cursor, str) or not next_cursor)) or (
+        not pagination["has_more"] and next_cursor is not None
+    ):
+        raise PolymarketResponseError("Leaderboard v2 cursor and has_more disagree; board coverage is unknown.")
+    return data
+
+
+def iter_leaderboard_v2_pages(
+    *,
+    limit: int = 1000,
+    cursor: Optional[str] = None,
+    sort_by: str = "PNL",
+    period: str = "all",
+    category: str = "OVERALL",
+    max_pages: Optional[int] = 10000,
+    timeout: float = 15.0,
+) -> Iterator[Dict[str, Any]]:
+    """Walk v2 board cursors; exhaustion is not a consistent all-account snapshot."""
+    if max_pages is not None and (isinstance(max_pages, bool) or not isinstance(max_pages, int) or max_pages < 1):
+        raise PolymarketValidationError("Leaderboard v2 max_pages must be positive or None.")
+    if cursor is not None and (limit != 1000 or sort_by != "PNL" or period != "all" or category != "OVERALL"):
+        raise PolymarketValidationError("Leaderboard v2 cursor binds the board; resume with cursor only.")
+    seen_cursors: set[str] = {cursor} if isinstance(cursor, str) and cursor else set()
+    page_count = 0
+    while True:
+        if max_pages is not None and page_count >= max_pages:
+            raise PolymarketResponseError("Leaderboard v2 page budget reached before cursor exhaustion; board coverage is unknown.")
+        if cursor is None:
+            page = get_leaderboard_v2_page(
+                limit=limit, sort_by=sort_by, period=period, category=category, timeout=timeout,
+            )
+        else:
+            page = get_leaderboard_v2_page(cursor=cursor, timeout=timeout)
+        page_count += 1
+        next_cursor = page["pagination"]["next_cursor"]
+        if next_cursor is not None:
+            if next_cursor in seen_cursors:
+                raise PolymarketResponseError("Leaderboard v2 repeated a cursor; board coverage is unknown.")
+            seen_cursors.add(next_cursor)
+        yield page
+        if next_cursor is None:
+            return
+        cursor = next_cursor
 
 
 def get_total_value(
