@@ -561,6 +561,18 @@ jobs:
           }
           Write-Warning "Windows EXE/MSI artifacts are intentionally unsigned; do not treat this release as production-trusted."
 
+      - name: Smoke test installed Windows MSI
+        env:
+          RELEASE_TAG_NAME: ${{ needs.metadata.outputs.tag_name }}
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+        shell: pwsh
+        run: |
+          $packageName = "market-sentinel-$($env:RELEASE_TAG_NAME)-win-x64"
+          & ./scripts/smoke_windows_msi.ps1 `
+            -InstallerPath "release-assets/${packageName}.msi" `
+            -StagedExecutablePath "build/windows-release/$packageName/market-sentinel.exe" `
+            -Version $env:RELEASE_VERSION
+
       - name: Record verified Windows signing status
         id: windows_signing_status
         shell: pwsh

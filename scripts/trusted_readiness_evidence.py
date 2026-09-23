@@ -52,6 +52,7 @@ MAX_EVIDENCE_BYTES = 1024 * 1024
 MAX_FUTURE_SKEW_SECONDS = 5 * 60
 MAX_AGE_HOURS = 24
 REPOSITORY = "Yunushan/market-sentinel"
+REPOSITORY_OWNER = REPOSITORY.partition("/")[0]
 TRUSTED_REF = "refs/heads/main"
 PLATFORM_SOURCE_WORKFLOW = ".github/workflows/ci.yml"
 PLATFORM_SOURCE_WORKFLOW_NAME = "CI"
@@ -83,10 +84,10 @@ REPOSITORY_SETTINGS_CHECKS = (
     "branch_require_up_to_date",
     "branch_enforce_admins",
     "branch_require_pull_request",
-    "branch_minimum_approvals",
+    "branch_solo_zero_approvals",
     "branch_dismiss_stale_reviews",
-    "branch_require_code_owner_reviews",
-    "branch_require_last_push_approval",
+    "branch_solo_code_owner_gate_disabled",
+    "branch_solo_last_push_gate_disabled",
     "branch_require_signed_commits",
     "branch_conversation_resolution",
     "branch_linear_history",
@@ -95,14 +96,14 @@ REPOSITORY_SETTINGS_CHECKS = (
 )
 RELEASE_ENVIRONMENT_CHECKS = (
     "release_required_reviewers",
-    "release_independent_reviewers",
-    "release_prevent_self_review",
+    "release_owner_reviewer",
+    "release_allow_owner_approval",
     "release_deployment_refs",
     "release_signing_secrets",
     "release_windows_code_signing_required",
     "production_required_reviewers",
-    "production_independent_reviewers",
-    "production_prevent_self_review",
+    "production_owner_reviewer",
+    "production_allow_owner_approval",
     "production_protected_branches",
     "production_secrets",
     "production_variables",
@@ -1490,13 +1491,13 @@ def _review_production_environment(
     required_rule = protection_rules[rule_types.index("required_reviewers")]
     if (
         set(required_rule) != _FUNDED_REQUIRED_REVIEWERS_RULE_FIELDS
-        or required_rule.get("prevent_self_review") is not True
+        or required_rule.get("prevent_self_review") is not False
         or not isinstance(required_rule.get("node_id"), str)
         or not required_rule["node_id"]
     ):
         raise TrustedEvidenceError(error)
     raw_reviewers = required_rule.get("reviewers")
-    if not isinstance(raw_reviewers, list) or not 1 <= len(raw_reviewers) <= 6:
+    if not isinstance(raw_reviewers, list) or len(raw_reviewers) != 1:
         raise TrustedEvidenceError(error)
     reviewer_summaries: list[dict[str, Any]] = []
     reviewer_keys: set[tuple[str, int]] = set()
@@ -1506,16 +1507,15 @@ def _review_production_environment(
             raise TrustedEvidenceError(error)
         reviewer_type = item.get("type")
         reviewer = item.get("reviewer")
-        if reviewer_type not in {"User", "Team"} or not isinstance(reviewer, Mapping):
+        if reviewer_type != "User" or not isinstance(reviewer, Mapping):
             raise TrustedEvidenceError(error)
         reviewer_id = reviewer.get("id")
-        identity_field = "login" if reviewer_type == "User" else "slug"
-        identity = reviewer.get(identity_field)
+        identity = reviewer.get("login")
         if (
             type(reviewer_id) is not int
             or reviewer_id < 1
             or not isinstance(identity, str)
-            or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", identity)
+            or identity != REPOSITORY_OWNER
         ):
             raise TrustedEvidenceError(error)
         key = (reviewer_type, reviewer_id)
@@ -1536,7 +1536,7 @@ def _review_production_environment(
         "updated_at": updated_at_text,
         "collector_started_at": collector_started_at_text,
         "required_reviewers": reviewer_summaries,
-        "prevent_self_review": True,
+        "prevent_self_review": False,
         "protected_branches": True,
     }
 
@@ -1549,7 +1549,7 @@ def _review_funded_environment_approval(
     run_id: int,
     run_attempt: int,
 ) -> dict[str, Any]:
-    error = "funded evidence requires one exact run-specific approved production review"
+    error = "funded evidence requires one exact run-specific owner confirmation"
     # The review-history endpoint is scoped to a run, not an attempt. Refuse reruns
     # so a prior attempt's approval cannot be replayed for a later funded action.
     if run_attempt != 1 or not isinstance(run_approvals, list) or len(run_approvals) != 1:
@@ -1620,6 +1620,18 @@ def _review_funded_environment_approval(
         or approved_environment.get("url") != FUNDED_ENVIRONMENT_SOURCE
     ):
         raise TrustedEvidenceError(error)
+    configured_reviewers = environment_protection.get("required_reviewers")
+    if (
+        not isinstance(configured_reviewers, list)
+        or len(configured_reviewers) != 1
+        or not isinstance(configured_reviewers[0], Mapping)
+        or configured_reviewers[0].get("type") != "User"
+        or configured_reviewers[0].get("id") != reviewer_id
+        or configured_reviewers[0].get("identity") != reviewer_login
+        or reviewer_login != REPOSITORY_OWNER
+    ):
+        raise TrustedEvidenceError(error)
+    # The exact run's owner approval is the operator's confirmation for this action.
     return {
         "schema_version": 1,
         "run_id": run_id,
@@ -1952,7 +1964,7 @@ def _funded_control_summary_errors(
         environment = {}
     reviewers = environment.get("required_reviewers")
     reviewer_summaries: list[dict[str, Any]] = []
-    if not isinstance(reviewers, list) or not 1 <= len(reviewers) <= 6:
+    if not isinstance(reviewers, list) or len(reviewers) != 1:
         errors.append("funded production environment reviewer summary is invalid")
     else:
         reviewer_keys: set[tuple[str, int]] = set()
@@ -1965,11 +1977,11 @@ def _funded_control_summary_errors(
             reviewer_id = reviewer.get("id")
             identity = reviewer.get("identity")
             if (
-                reviewer_type not in {"User", "Team"}
+                reviewer_type != "User"
                 or type(reviewer_id) is not int
                 or reviewer_id < 1
                 or not isinstance(identity, str)
-                or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", identity)
+                or identity != REPOSITORY_OWNER
             ):
                 errors.append("funded production environment reviewer summary is invalid")
                 break
@@ -1995,7 +2007,7 @@ def _funded_control_summary_errors(
         or environment.get("environment_name") != FUNDED_ENVIRONMENT_NAME
         or environment.get("source") != FUNDED_ENVIRONMENT_SOURCE
         or environment.get("collector_started_at") != collector_started_at_text
-        or environment.get("prevent_self_review") is not True
+        or environment.get("prevent_self_review") is not False
         or environment.get("protected_branches") is not True
     ):
         errors.append("funded production environment protection summary is invalid")
@@ -2033,6 +2045,10 @@ def _funded_control_summary_errors(
         or reviewer_id < 1
         or not isinstance(reviewer_login, str)
         or not re.fullmatch(r"[A-Za-z0-9-]{1,39}", reviewer_login)
+        or reviewer_login != REPOSITORY_OWNER
+        or len(reviewer_summaries) != 1
+        or reviewer_summaries[0].get("id") != reviewer_id
+        or reviewer_summaries[0].get("identity") != reviewer_login
         or approval.get("source")
         != f"https://api.github.com/repos/{REPOSITORY}/actions/runs/{collector_run_id}/approvals"
     ):

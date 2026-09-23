@@ -13,9 +13,10 @@ Protect `main` with:
    package build` is the aggregate CI gate: it waits for the supported
    Python/OS matrix, enterprise Linux containers, Windows 11, React build,
    mobile-web smoke, and real Tkinter GUI lifecycle jobs.
-2. Pull requests with at least one approval, dismissal of stale approvals,
-   approval of the most recent push by someone other than its author, and a
-   required Code Owner review.
+2. Pull requests for every change, with zero required approving reviews in
+   this single-maintainer repository. Keep stale-review dismissal enabled for
+   any optional reviews. Do not enable Code Owner or most-recent-push approval
+   gates that the sole change author cannot satisfy.
 3. Signed commits for every change admitted to the protected branch.
 4. No force pushes, no branch deletion, and no direct administrator bypass for
    normal releases.
@@ -25,13 +26,15 @@ The separate tag-triggered `Release` workflow performs release validation. Its
 protected `release` environment must gate publishing, code signing, SBOM,
 checksums, and provenance rather than being configured as a branch status check.
 
-## Independent-review prerequisite
+## Single-maintainer authorization
 
-Production readiness requires an independent maintainer or team capable of
-approving owner-authored changes. Keep `.github/CODEOWNERS` current with that
-independent identity before enabling the required Code Owner review rule. Until
-then, the repository is intentionally unable to satisfy the production
-governance contract and must not claim 100/100 readiness.
+`@Yunushan` is the sole maintainer. Protected pull requests, the complete
+required CI gate, signed commits, exact release refs, and run-specific
+environment approvals are the required controls. `.github/CODEOWNERS` records
+ownership but is not a required approval gate. The maintainer's environment
+approval is a deliberate second action by the same person. It does not provide
+independent authorization against maintainer error or account compromise.
+Readiness assessments and release decisions must describe that limitation plainly.
 
 ## Security and automation
 
@@ -52,8 +55,9 @@ governance contract and must not claim 100/100 readiness.
 
 ## Release environment
 
-Create the `release` environment with required reviewers, no self-approval,
-and **Selected branches and tags** deployment rules containing exactly the
+Create the `release` environment with exactly `@Yunushan` as the required
+reviewer, permit the run initiator to approve it, and select
+**Selected branches and tags** deployment rules containing exactly the
 protected branch `main` and tag pattern `v*.*.*`. Do not select **Protected
 branches only**: GitHub applies that setting to branches, so it can block the
 normal tag-triggered release job. The workflow
@@ -80,11 +84,14 @@ policy-relevant names returned by GitHub.
 
 ## Production environment
 
-Create the separate `production` environment with at least two distinct
-eligible reviewers, prevention of self-review, and deployment restricted to
-protected branches. The funded evidence lane accepts only the first attempt of
-an exactly approved run and binds the approval reviewer, environment id, live
-environment protections, and policy timestamps into the attested artifact.
+Create the separate `production` environment with exactly `@Yunushan` as its
+required reviewer, permit the run initiator to approve it, and restrict
+deployment to protected branches. The funded evidence lane accepts only the
+first attempt of an exactly approved run and binds the approval reviewer,
+environment id, live environment protections, and policy timestamps into the
+attested artifact. This approval is operator confirmation, not independent
+review. A funded order still requires explicit user authorization for its exact
+market, limit, and cap before dispatch.
 
 The governance collector requires the secret inventory used by the deployment
 and Polymarket acceptance workflows:
@@ -129,12 +136,13 @@ python scripts/verify_repository_settings.py \
 ```
 
 It validates required checks, up-to-date and administrator-enforced branch
-protection, pull-request, Code Owner, signed-commit, conversation, and
+protection, pull-request, single-maintainer, signed-commit, conversation, and
 linear-history controls, disabled force pushes and deletions,
-release-environment reviewers and self-review prevention,
+the exact owner-only release approval route,
 the exact `main`/`v*.*.*` deployment-ref policy, required Windows-signing secret
-names, protected production reviewers/branches, the required production secret
-and variable names, and `REQUIRE_WINDOWS_CODE_SIGNING=true`. It reports a nonzero exit status on any
+names, the owner-only protected production approval route and branches, the
+required production secret and variable names, and
+`REQUIRE_WINDOWS_CODE_SIGNING=true`. It reports a nonzero exit status on any
 missing control. Run it from an administrator-authorized workstation; a normal
 workflow token is intentionally insufficient for this audit.
 

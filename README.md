@@ -77,7 +77,7 @@ Polymarket coverage is intentionally reported by verification tier, not as a sin
 | `offline_tested` | Unit tests cover request construction, parsing, and guardrails. |
 | `public_live_verified` | Safe non-credentialed live probe passed from this machine. |
 | `credential_live_verified` | Real credentialed read/stream verified. Currently blocked without credentials. |
-| `funded_live_verified` | Exact-revision bounded order/immediate-cancel flow verified from the protected workflow, including independent review and a resolved durable recovery journal. This evidence tier does not enable normal product mutations; credentials, eligibility, funding, and explicit live-action approval are still required. |
+| `funded_live_verified` | Exact-revision bounded order/immediate-cancel flow verified from the protected workflow, including hosted evidence review and a resolved durable recovery journal. This evidence tier does not enable normal product mutations; credentials, eligibility, funding, and explicit live-action approval are still required. |
 
 Current truthful status: Gamma/Data/CLOB/Bridge probes are implemented and must be
 re-run from the target network before claiming `public_live_verified`; the latest
@@ -481,6 +481,21 @@ The scanner never requests beyond that offset and records
 set of identified wallets also stops pagination even when order, ranks or PnL
 change. These results cannot enumerate every Polymarket account or millions of
 users; the original unlimited settings remain unchanged.
+
+For a broader read-only walk of a selected ranked board, use the official
+[Data API v2 leaderboard](https://docs.polymarket.com/api-reference/boards/get-the-trader-leaderboard)
+through `market-sentinel polymarket-leaderboard-v2 --page-size 1000
+--max-pages 10 --period all --sort PNL --category OVERALL --output board.json`.
+The command streams raw rows to an atomic JSON export, including
+`completion_reason`, `cursor_exhausted`, and `next_cursor`. Its default one-page
+budget returns an explicitly partial result when a next cursor exists. Continue
+from that token with `--cursor TOKEN --max-pages 10 --output next.json`; the
+resumed export leaves board parameters unknown because the opaque cursor binds
+them. V2 `volume` is outcome shares, so these rows are not fed into the v1
+`volume_usd` and PnL/volume analytics. V2 cursors remove v1's documented
+1,000-offset request boundary, but the board still omits unranked accounts and
+its offset-shaped cursor walk can skip or repeat rows across a data refresh.
+Even `cursor_exhausted=true` is not a stable, exhaustive account snapshot.
 
 Saved MDD calculations are bound to their normalized calculation options and
 algorithm version. On `--resume`, changing mode, history limits, equity basis,

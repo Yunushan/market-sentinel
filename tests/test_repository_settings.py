@@ -36,10 +36,10 @@ def _passing_protection() -> dict:
         },
         "enforce_admins": {"enabled": True},
         "required_pull_request_reviews": {
-            "required_approving_review_count": 1,
+            "required_approving_review_count": 0,
             "dismiss_stale_reviews": True,
-            "require_code_owner_reviews": True,
-            "require_last_push_approval": True,
+            "require_code_owner_reviews": False,
+            "require_last_push_approval": False,
         },
         "required_conversation_resolution": {"enabled": True},
         "required_linear_history": {"enabled": True},
@@ -52,15 +52,14 @@ def _passing_signature_protection() -> dict:
     return {"enabled": True}
 
 
-def _passing_environment(*, release: bool = False) -> dict:
+def _passing_environment(*, release: bool = False, owner: str = "acme") -> dict:
     return {
         "protection_rules": [
             {
                 "type": "required_reviewers",
-                "prevent_self_review": True,
+                "prevent_self_review": False,
                 "reviewers": [
-                    {"type": "User", "reviewer": {"id": 1}},
-                    {"type": "User", "reviewer": {"id": 2}},
+                    {"type": "User", "reviewer": {"id": 1, "login": owner}},
                 ],
             }
         ],
@@ -84,10 +83,11 @@ def _passing_release_policies() -> dict:
 
 def _passing_documents(repository: str = "acme/market-sentinel") -> dict[str, dict]:
     prefix = f"/repos/{repository}"
+    owner = repository.split("/", 1)[0]
     return {
         f"{prefix}/branches/main/protection": _passing_protection(),
         f"{prefix}/branches/main/protection/required_signatures": _passing_signature_protection(),
-        f"{prefix}/environments/release": _passing_environment(release=True),
+        f"{prefix}/environments/release": _passing_environment(release=True, owner=owner),
         f"{prefix}/environments/release/deployment-branch-policies?per_page=100": _passing_release_policies(),
         f"{prefix}/environments/release/secrets?per_page=100": {
             "total_count": len(REQUIRED_RELEASE_SECRETS),
@@ -96,7 +96,7 @@ def _passing_documents(repository: str = "acme/market-sentinel") -> dict[str, di
                 for name in sorted(REQUIRED_RELEASE_SECRETS)
             ],
         },
-        f"{prefix}/environments/production": _passing_environment(),
+        f"{prefix}/environments/production": _passing_environment(owner=owner),
         f"{prefix}/environments/production/secrets?per_page=100": {
             "total_count": len(REQUIRED_PRODUCTION_SECRETS),
             "secrets": [{"name": name, "value": "must-not-escape"} for name in sorted(REQUIRED_PRODUCTION_SECRETS)]
@@ -136,9 +136,10 @@ class RepositorySettingsTests(unittest.TestCase):
                     REQUIRED_RELEASE_SECRETS,
                     _passing_release_policies(),
                     "main",
+                    "acme",
                 ),
                 check_release_variable({"value": "true"}),
-                *check_production_environment(_passing_environment(), REQUIRED_PRODUCTION_SECRETS),
+                *check_production_environment(_passing_environment(), REQUIRED_PRODUCTION_SECRETS, "acme"),
                 check_production_variables(REQUIRED_PRODUCTION_VARIABLES),
             ]
         }
@@ -173,10 +174,10 @@ class RepositorySettingsTests(unittest.TestCase):
         weak = _passing_protection()
         weak["required_status_checks"] = {"strict": False, "contexts": ["CodeQL"]}
         weak["required_pull_request_reviews"] = {
-            "required_approving_review_count": 0,
+            "required_approving_review_count": 1,
             "dismiss_stale_reviews": False,
-            "require_code_owner_reviews": False,
-            "require_last_push_approval": False,
+            "require_code_owner_reviews": True,
+            "require_last_push_approval": True,
         }
         weak["allow_force_pushes"] = {"enabled": True}
         names = {
@@ -188,10 +189,10 @@ class RepositorySettingsTests(unittest.TestCase):
         self.assertIn("branch_status_checks_bound_to_actions_app", names)
         self.assertIn("branch_require_up_to_date", names)
         self.assertIn("branch_force_pushes_disabled", names)
-        self.assertIn("branch_minimum_approvals", names)
+        self.assertIn("branch_solo_zero_approvals", names)
         self.assertIn("branch_dismiss_stale_reviews", names)
-        self.assertIn("branch_require_code_owner_reviews", names)
-        self.assertIn("branch_require_last_push_approval", names)
+        self.assertIn("branch_solo_code_owner_gate_disabled", names)
+        self.assertIn("branch_solo_last_push_gate_disabled", names)
         self.assertIn("branch_require_signed_commits", names)
 
     def test_release_environment_requires_reviewers_branches_and_signing_secrets(self) -> None:
@@ -201,6 +202,7 @@ class RepositorySettingsTests(unittest.TestCase):
             secret_names,
             _passing_release_policies(),
             "main",
+            "acme",
         )
         self.assertTrue(all(check["status"] == "pass" for check in checks))
         self.assertEqual(check_release_variable({"value": "true"})["status"], "pass")
@@ -208,15 +210,15 @@ class RepositorySettingsTests(unittest.TestCase):
         weak = {"protection_rules": [], "deployment_branch_policy": {"protected_branches": False}}
         failures = {
             check["name"]
-            for check in check_release_environment(weak, [], {"branch_policies": []}, "main")
+            for check in check_release_environment(weak, [], {"branch_policies": []}, "main", "acme")
             if check["status"] == "fail"
         }
         self.assertEqual(
             failures,
             {
                 "release_required_reviewers",
-                "release_independent_reviewers",
-                "release_prevent_self_review",
+                "release_owner_reviewer",
+                "release_allow_owner_approval",
                 "release_deployment_refs",
                 "release_signing_secrets",
             },
@@ -243,10 +245,88 @@ class RepositorySettingsTests(unittest.TestCase):
                         secret_names,
                         policies,
                         "main",
+                        "acme",
                     )
                     if check["name"] == "release_deployment_refs"
                 )
                 self.assertEqual(ref_check["status"], "fail")
+
+    def test_environment_reviewer_must_be_exactly_the_repository_owner(self) -> None:
+        for label, reviewers in (
+            ("missing", []),
+            ("other-user", [{"type": "User", "reviewer": {"id": 2, "login": "someone-else"}}]),
+            ("team", [{"type": "Team", "reviewer": {"id": 1, "login": "acme"}}]),
+            ("invalid-id", [{"type": "User", "reviewer": {"id": True, "login": "acme"}}]),
+            (
+                "extra-reviewer",
+                [
+                    {"type": "User", "reviewer": {"id": 1, "login": "acme"}},
+                    {"type": "User", "reviewer": {"id": 2, "login": "someone-else"}},
+                ],
+            ),
+        ):
+            with self.subTest(label=label):
+                release = _passing_environment(release=True)
+                production = _passing_environment()
+                release["protection_rules"][0]["reviewers"] = reviewers
+                production["protection_rules"][0]["reviewers"] = reviewers
+                release_checks = check_release_environment(
+                    release, REQUIRED_RELEASE_SECRETS, _passing_release_policies(), "main", "acme"
+                )
+                production_checks = check_production_environment(
+                    production, REQUIRED_PRODUCTION_SECRETS, "acme"
+                )
+                self.assertEqual(
+                    next(check for check in release_checks if check["name"] == "release_owner_reviewer")["status"],
+                    "fail",
+                )
+                self.assertEqual(
+                    next(check for check in production_checks if check["name"] == "production_owner_reviewer")["status"],
+                    "fail",
+                )
+
+        release = _passing_environment(release=True)
+        production = _passing_environment()
+        release["protection_rules"][0]["reviewers"][0]["reviewer"]["login"] = "ACME"
+        production["protection_rules"][0]["reviewers"][0]["reviewer"]["login"] = "ACME"
+        self.assertEqual(
+            next(
+                check
+                for check in check_release_environment(
+                    release, REQUIRED_RELEASE_SECRETS, _passing_release_policies(), "main", "acme"
+                )
+                if check["name"] == "release_owner_reviewer"
+            )["status"],
+            "pass",
+        )
+        self.assertEqual(
+            next(
+                check
+                for check in check_production_environment(production, REQUIRED_PRODUCTION_SECRETS, "acme")
+                if check["name"] == "production_owner_reviewer"
+            )["status"],
+            "pass",
+        )
+
+    def test_environment_owner_must_be_allowed_to_approve(self) -> None:
+        release = _passing_environment(release=True)
+        production = _passing_environment()
+        release["protection_rules"][0]["prevent_self_review"] = True
+        production["protection_rules"][0]["prevent_self_review"] = True
+        release_failures = {
+            check["name"]
+            for check in check_release_environment(
+                release, REQUIRED_RELEASE_SECRETS, _passing_release_policies(), "main", "acme"
+            )
+            if check["status"] == "fail"
+        }
+        production_failures = {
+            check["name"]
+            for check in check_production_environment(production, REQUIRED_PRODUCTION_SECRETS, "acme")
+            if check["status"] == "fail"
+        }
+        self.assertEqual(release_failures, {"release_allow_owner_approval"})
+        self.assertEqual(production_failures, {"production_allow_owner_approval"})
 
     def test_collection_uses_documented_read_only_api_endpoints(self) -> None:
         requested: list[str] = []
@@ -308,9 +388,10 @@ class RepositorySettingsTests(unittest.TestCase):
             state["repository_variables"],
             {"REQUIRE_WINDOWS_CODE_SIGNING": "true"},
         )
-        self.assertTrue(
+        self.assertFalse(
             state["branch_protection"]["required_pull_request_reviews"]["require_code_owner_reviews"]
         )
+        self.assertEqual(state["release_environment"]["required_reviewers"], [{"type": "User", "id": 1, "login": "acme"}])
         self.assertTrue(state["branch_protection"]["required_signatures"])
 
         reordered = _passing_documents()
@@ -353,14 +434,37 @@ class RepositorySettingsTests(unittest.TestCase):
         self.assertNotEqual(changed_digest, baseline_digest)
         self.assertIn("branch_require_up_to_date", {item["name"] for item in checks if item["status"] == "fail"})
 
+    def test_governance_digest_binds_environment_reviewer_login(self) -> None:
+        documents = _passing_documents()
+        _, baseline, baseline_digest = collect_governance_evidence(
+            "acme/market-sentinel",
+            "main",
+            "not-a-real-token",
+            5.0,
+            lambda path, _token, _timeout: documents[path],
+        )
+        documents["/repos/acme/market-sentinel/environments/release"]["protection_rules"][0][
+            "reviewers"
+        ][0]["reviewer"]["login"] = "someone-else"
+        checks, changed, changed_digest = collect_governance_evidence(
+            "acme/market-sentinel",
+            "main",
+            "not-a-real-token",
+            5.0,
+            lambda path, _token, _timeout: documents[path],
+        )
+        self.assertNotEqual(changed, baseline)
+        self.assertNotEqual(changed_digest, baseline_digest)
+        self.assertIn("release_owner_reviewer", {item["name"] for item in checks if item["status"] == "fail"})
+
     def test_governance_digest_binds_code_owner_and_signed_commit_controls(self) -> None:
         for label, mutate, expected_failure in (
             (
                 "code-owner-reviews",
                 lambda documents: documents["/repos/acme/market-sentinel/branches/main/protection"][
                     "required_pull_request_reviews"
-                ].__setitem__("require_code_owner_reviews", False),
-                "branch_require_code_owner_reviews",
+                ].__setitem__("require_code_owner_reviews", True),
+                "branch_solo_code_owner_gate_disabled",
             ),
             (
                 "signed-commits",

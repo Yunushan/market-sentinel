@@ -923,6 +923,42 @@ not production-host evidence.
   directory with private permissions, reducing final-component symlink races.
   Start the service loopback-only from the restored state, run the health
   check, and confirm no live trading is enabled by restored configuration.
+- Copied-backup drill: on a separate recovery host, obtain a backup archive and
+  its adjacent `.json` manifest through the operator's encrypted backup
+  transport. Record the archive SHA-256 and backup creation timestamp from the
+  trusted source inventory *before* transferring the pair; do not read either
+  expected value from the recovered manifest. Install the reviewed release and
+  frontend on the recovery host, make a private parent directory for the new
+  restore destination, then run:
+
+  ```bash
+  /opt/market-sentinel/.venv/bin/python /opt/market-sentinel/scripts/drill_state_recovery.py \
+    --archive /mnt/recovered-backups/<archive>.tar.gz \
+    --destination /var/lib/market-sentinel-recovery-drill/<new-state-directory> \
+    --expected-sha256 '<source-inventory-archive-sha256>' \
+    --expected-created-at '<source-inventory-created-at-utc>' \
+    --frontend-dir /opt/market-sentinel/frontend/dist \
+    --expected-version '<reviewed-release-version>' \
+    --expected-source-revision '<reviewed-release-commit>' \
+    --expected-frontend-sha256 '<reviewed-frontend-sha256>' \
+    --max-backup-age-seconds 93600 \
+    --max-restore-validation-seconds 300
+  ```
+
+  The command verifies the copied pair, refuses a pre-existing destination,
+  restores it privately, checks its file inventory, and boots the isolated
+  read-only application probe without credentials or venue access. It emits
+  backup age at drill start and elapsed time from local archive verification
+  through application validation, and exits unsuccessfully if either exceeds
+  the chosen limit. Preserve the JSON output, source inventory, transfer log,
+  and host identity in the operations record. A failed run can leave a private
+  partial restore for investigation; use a new destination for any retry. The
+  script cannot establish that the copy was truly off-host or authenticate the
+  source inventory by itself.
+  Backup age is a conservative freshness bound, not measured data-loss RPO;
+  elapsed restore-validation time excludes incident detection, host provisioning,
+  archive transfer, and public-service cutover, so it is not end-to-end RTO.
+  This diagnostic report is not accepted as production-readiness score evidence.
 - Configuration recovery: an existing malformed `config.json` now fails closed
   and is never silently replaced with defaults. Stop the service and use the
   restore command above to extract the most recent verified backup into a

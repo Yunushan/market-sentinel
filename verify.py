@@ -1843,8 +1843,8 @@ def run_ci_cd_workflow_check() -> None:
             "Funded production acceptance",
         ),
         ROOT / "docs" / "REPOSITORY_SETTINGS.md": (
-            "Independent-review prerequisite",
-            "required Code Owner review",
+            "Single-maintainer authorization",
+            "zero required approving reviews",
             "Signed commits",
             "secret scanning",
             "REQUIRE_WINDOWS_CODE_SIGNING=true",

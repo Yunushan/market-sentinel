@@ -516,9 +516,12 @@ and the in-memory conflict cache is not a global durable deduplication system.
 The historical governance snapshot required one approving review, dismissed stale
 approvals, required approval after the last push, enforced the rules for
 administrators, and did not require signed commits. That snapshot cannot support
-a 100/100 decision. Current governance evidence must revalidate required Code
-Owner review and signed-commit enforcement together with the other protected
-branch controls before it can receive readiness credit.
+a 100/100 decision. The current single-maintainer contract requires zero
+mandatory human PR approvals so the sole author can merge after protected CI;
+it still requires signed commits, strict checks, pull requests, and no
+administrator bypass. It does not claim independent human authorization.
+Current governance evidence must revalidate the exact contract before it can
+receive readiness credit.
 
 The scorer never treats a workflow matrix, requested runner label, or aggregate
 success status as proof that a hosted runner completed. Every point-bearing
@@ -583,8 +586,8 @@ worktree has tracked or untracked changes because a workflow run or release for
 | `--funded-evidence` | Trusted-workflow, exact-byte-attested bounded Polymarket audit | Explicit protected-environment approval, exact production collector job, same-account read, source gate, geoblock, balance/allowance, post-only capped order, immediate cancel, zero-fill, durable resolved journal, hosted review, artifact, and attestation must all verify |
 
 Release-environment evidence must include passing checks named exactly
-`release_required_reviewers`, `release_prevent_self_review`,
-`release_deployment_refs`, `release_signing_secrets`, and
+`release_required_reviewers`, `release_owner_reviewer`,
+`release_allow_owner_approval`, `release_deployment_refs`, `release_signing_secrets`, and
 `release_windows_code_signing_required`. Missing, unknown, or renamed checks
 fail closed. The repository currently includes
 `evidence/release-environment.json`, a historical snapshot that intentionally
@@ -639,8 +642,10 @@ The implemented protected-main Polymarket workflow can produce score-eligible
 trusted artifacts, but its credentialed tier still requires real secrets and
 eligible-account reads. Its funded tier uses a separate persistent production
 collector and hosted reviewer, and requires deliberate protected-environment
-approval for a hard-capped, post-only V2 order followed by immediate exact-ID
-cancellation, zero-fill proof, and a durable resolved recovery journal. Normal
+confirmation by the sole maintainer for a hard-capped, post-only V2 order
+followed by immediate exact-ID cancellation, zero-fill proof, and a durable
+resolved recovery journal. This is run-specific operator confirmation, not
+independent human approval. Normal
 product mutation remains disabled. The historical 83-point result lacked this
 external evidence; every candidate must revalidate local checks and supply its
 own fresh qualifying artifacts. The formal path can now reach 100/100, but
@@ -719,25 +724,61 @@ placeholders. Never hand-author it. Download the two artifacts produced by the
 platform-evidence workflow and ensure each `source_revision` equals the exact
 clean checkout being scored.
 
-Example after the evidence has actually been collected and reviewed:
+Before scoring external evidence, resolve the `git` and `gh` executables from the
+same `PATH` used for the scorer and calculate the SHA-256 of each canonical
+executable. For example, run this Python code with that environment:
+
+```python
+import hashlib
+import shutil
+from pathlib import Path
+
+for name in ("git", "gh"):
+    found = shutil.which(name)
+    if found is None:
+        raise SystemExit(f"{name} is not on PATH")
+    path = Path(found).resolve(strict=True)
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    print(f"{name}: {path} sha256={digest.hexdigest()}")
+```
+
+Check that both resolved paths belong to trusted installations outside the
+checkout and temporary directories, and verify their installation provenance.
+Then set `GIT_SHA256` and `GH_SHA256` to the reviewed digests.
+The scorer hashes the resolved executables again and rejects missing, changed,
+or mismatched pins before awarding external evidence points.
+
+After every fresh, canonical artifact has been collected and reviewed for the
+same clean protected-main revision, set `DEPLOYMENT_ORIGIN` to the exact public
+HTTPS origin bound into the deployment artifact and run the complete 100-point
+gate:
 
 ```bash
 python scripts/check_product_readiness.py \
   --full-local \
+  --git-sha256 "$GIT_SHA256" \
+  --gh-sha256 "$GH_SHA256" \
   --public-live-report /path/to/public-polymarket-live.json \
-  --platform-ci-evidence evidence/platform-ci.json \
-  --platform-evidence evidence/platform.json \
-  --repository-settings-evidence evidence/repository-settings.json \
-  --release-environment-evidence evidence/release-environment.json \
+  --platform-ci-evidence /path/to/platform-ci-evidence.json \
+  --platform-evidence /path/to/platform-evidence.json \
+  --repository-settings-evidence /path/to/repository-settings-evidence.json \
+  --release-environment-evidence /path/to/release-environment-evidence.json \
   --release-history-evidence /path/to/release-evidence.json \
-  --release-evidence /path/to/release-evidence.json
+  --release-evidence /path/to/release-evidence.json \
+  --deployment-evidence /path/to/deployment-evidence.json \
+  --deployment-origin "$DEPLOYMENT_ORIGIN" \
+  --credentialed-evidence /path/to/credentialed-evidence.json \
+  --funded-evidence /path/to/funded-evidence.json \
+  --require-100 --json
 ```
 
-You may also pass raw deployment, credentialed, or funded reports to obtain
-fail-closed diagnostics. Score credit requires the corresponding canonical,
-trusted-workflow, exact-byte-attested artifact. Do not add `--require-100` until
-every exact hosted collector and real external check has succeeded; it is
-expected to fail for an uncommitted or incompletely evidenced candidate.
+Raw deployment, credentialed, or funded reports can provide fail-closed
+diagnostics, but only the corresponding canonical, trusted-workflow,
+exact-byte-attested artifacts earn points. The complete command fails for an
+uncommitted or incompletely evidenced candidate.
 
 Do not put venue credentials, private keys, cookies, or raw request logs in an
 evidence manifest. Use the deployment and Polymarket runbooks to produce

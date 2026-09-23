@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -23,6 +24,36 @@ from scripts.build_windows_release import (
 
 
 class WindowsReleaseBuildTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt" and shutil.which("pwsh"), "PowerShell MSI runner guard")
+    def test_msi_smoke_rejects_a_non_hosted_runner_before_install(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = dict(os.environ)
+            environment["GITHUB_ACTIONS"] = "false"
+            environment["RUNNER_ENVIRONMENT"] = "self-hosted"
+            result = subprocess.run(
+                [
+                    shutil.which("pwsh") or "pwsh",
+                    "-NoProfile",
+                    "-File",
+                    str(Path(__file__).resolve().parent.parent / "scripts" / "smoke_windows_msi.ps1"),
+                    "-InstallerPath",
+                    str(root / "missing.msi"),
+                    "-StagedExecutablePath",
+                    str(root / "missing.exe"),
+                    "-Version",
+                    "0.1.0",
+                ],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("requires a GitHub-hosted Windows runner", result.stderr)
+            self.assertEqual(list(root.iterdir()), [])
+
     @unittest.skipUnless(os.name == "nt", "Windows batch launcher integration")
     def test_config_bootstrap_uses_portable_path_when_writable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

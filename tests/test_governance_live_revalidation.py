@@ -19,15 +19,14 @@ from scripts.verify_repository_settings import (
 )
 
 
-def _reviewed_environment(*, release: bool) -> dict[str, Any]:
+def _owner_reviewed_environment(*, release: bool) -> dict[str, Any]:
     return {
         "protection_rules": [
             {
                 "type": "required_reviewers",
-                "prevent_self_review": True,
+                "prevent_self_review": False,
                 "reviewers": [
-                    {"type": "User", "reviewer": {"id": 1}},
-                    {"type": "User", "reviewer": {"id": 2}},
+                    {"type": "User", "reviewer": {"id": 1, "login": "Yunushan"}},
                 ],
             }
         ],
@@ -53,10 +52,10 @@ def _governance_documents() -> dict[str, dict[str, Any]]:
             },
             "enforce_admins": {"enabled": True},
             "required_pull_request_reviews": {
-                "required_approving_review_count": 1,
+                "required_approving_review_count": 0,
                 "dismiss_stale_reviews": True,
-                "require_code_owner_reviews": True,
-                "require_last_push_approval": True,
+                "require_code_owner_reviews": False,
+                "require_last_push_approval": False,
             },
             "required_conversation_resolution": {"enabled": True},
             "required_linear_history": {"enabled": True},
@@ -64,7 +63,7 @@ def _governance_documents() -> dict[str, dict[str, Any]]:
             "allow_deletions": {"enabled": False},
         },
         f"{prefix}/branches/main/protection/required_signatures": {"enabled": True},
-        f"{prefix}/environments/release": _reviewed_environment(release=True),
+        f"{prefix}/environments/release": _owner_reviewed_environment(release=True),
         f"{prefix}/environments/release/deployment-branch-policies?per_page=100": {
             "total_count": 2,
             "branch_policies": [
@@ -76,7 +75,7 @@ def _governance_documents() -> dict[str, dict[str, Any]]:
             "total_count": len(REQUIRED_RELEASE_SECRETS),
             "secrets": [{"name": name} for name in sorted(REQUIRED_RELEASE_SECRETS)]
         },
-        f"{prefix}/environments/production": _reviewed_environment(release=False),
+        f"{prefix}/environments/production": _owner_reviewed_environment(release=False),
         f"{prefix}/environments/production/secrets?per_page=100": {
             "total_count": len(REQUIRED_PRODUCTION_SECRETS),
             "secrets": [{"name": name} for name in sorted(REQUIRED_PRODUCTION_SECRETS)]
@@ -159,16 +158,30 @@ def test_live_governance_revalidation_rejects_newly_failing_control() -> None:
     assert "branch_require_up_to_date" in detail
 
 
-def test_live_governance_revalidation_rejects_lost_review_or_signature_controls() -> None:
+def test_live_governance_revalidation_rejects_solo_policy_or_signature_drift() -> None:
     attested_documents = _governance_documents()
     prefix = f"/repos/{PUBLIC_LIVE_REPOSITORY}/branches/main/protection"
     for control, mutate, expected_failure in (
         (
-            "code-owner-reviews",
+            "code-owner-gate",
             lambda documents: documents[prefix]["required_pull_request_reviews"].__setitem__(
-                "require_code_owner_reviews", False
+                "require_code_owner_reviews", True
             ),
-            "branch_require_code_owner_reviews",
+            "branch_solo_code_owner_gate_disabled",
+        ),
+        (
+            "approval-count",
+            lambda documents: documents[prefix]["required_pull_request_reviews"].__setitem__(
+                "required_approving_review_count", 1
+            ),
+            "branch_solo_zero_approvals",
+        ),
+        (
+            "last-push-gate",
+            lambda documents: documents[prefix]["required_pull_request_reviews"].__setitem__(
+                "require_last_push_approval", True
+            ),
+            "branch_solo_last_push_gate_disabled",
         ),
         (
             "signed-commits",
@@ -184,6 +197,48 @@ def test_live_governance_revalidation_rejects_lost_review_or_signature_controls(
             accepted, detail = _verify_live_governance_state(_digest(attested_documents))
 
         assert not accepted, control
+        assert expected_failure in detail
+
+
+def test_live_governance_revalidation_rejects_wrong_owner_or_self_review_gate() -> None:
+    attested_documents = _governance_documents()
+    prefix = f"/repos/{PUBLIC_LIVE_REPOSITORY}/environments"
+    for environment, control, mutate, expected_failure in (
+        (
+            "release",
+            "reviewer",
+            lambda rule: rule["reviewers"][0]["reviewer"].__setitem__("login", "other-user"),
+            "release_owner_reviewer",
+        ),
+        (
+            "release",
+            "self-review",
+            lambda rule: rule.__setitem__("prevent_self_review", True),
+            "release_allow_owner_approval",
+        ),
+        (
+            "production",
+            "reviewer",
+            lambda rule: rule["reviewers"][0]["reviewer"].__setitem__("login", "other-user"),
+            "production_owner_reviewer",
+        ),
+        (
+            "production",
+            "self-review",
+            lambda rule: rule.__setitem__("prevent_self_review", True),
+            "production_allow_owner_approval",
+        ),
+    ):
+        live_documents = deepcopy(attested_documents)
+        reviewer_rule = live_documents[f"{prefix}/{environment}"]["protection_rules"][0]
+        mutate(reviewer_rule)
+        with patch(
+            "scripts.check_product_readiness._run_gh_json",
+            side_effect=_github_query(live_documents),
+        ):
+            accepted, detail = _verify_live_governance_state(_digest(attested_documents))
+
+        assert not accepted, (environment, control)
         assert expected_failure in detail
 
 

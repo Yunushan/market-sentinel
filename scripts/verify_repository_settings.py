@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover - optional for minimal standalone use
 
 API_VERSION = "2026-03-10"
 DEFAULT_API_URL = "https://api.github.com"
-GOVERNANCE_STATE_SCHEMA_VERSION = 2
+GOVERNANCE_STATE_SCHEMA_VERSION = 3
 REQUIRED_CHECKS = frozenset(
     {
         "Python package build",
@@ -30,7 +30,6 @@ REQUIRED_CHECKS = frozenset(
     }
 )
 GITHUB_ACTIONS_APP_ID = 15368
-MINIMUM_INDEPENDENT_REVIEWERS = 2
 REQUIRED_RELEASE_TAG_POLICY = "v*.*.*"
 REQUIRED_RELEASE_SECRETS = frozenset(
     {
@@ -116,17 +115,26 @@ def _actions_app_contexts(protection: dict[str, Any]) -> set[str]:
     }
 
 
-def _reviewer_count(reviewer_rule: Any) -> int:
+def _owner_reviewer(reviewer_rule: Any, owner_login: str) -> bool:
+    """Require the sole eligible environment reviewer to be the repository owner."""
     if not isinstance(reviewer_rule, dict):
-        return 0
-    identities: set[tuple[str, int]] = set()
-    for row in reviewer_rule.get("reviewers", []):
-        reviewer = row.get("reviewer") if isinstance(row, dict) else None
-        reviewer_type = row.get("type") if isinstance(row, dict) else None
-        reviewer_id = reviewer.get("id") if isinstance(reviewer, dict) else None
-        if isinstance(reviewer_type, str) and type(reviewer_id) is int and reviewer_id > 0:
-            identities.add((reviewer_type, reviewer_id))
-    return len(identities)
+        return False
+    rows = reviewer_rule.get("reviewers")
+    if not isinstance(rows, list) or len(rows) != 1:
+        return False
+    row = rows[0]
+    reviewer = row.get("reviewer") if isinstance(row, dict) else None
+    if not isinstance(reviewer, dict):
+        return False
+    login = reviewer.get("login")
+    reviewer_id = reviewer.get("id")
+    return (
+        row.get("type") == "User"
+        and type(reviewer_id) is int
+        and reviewer_id > 0
+        and isinstance(login, str)
+        and login.casefold() == owner_login.casefold()
+    )
 
 
 def check_branch_protection(
@@ -144,14 +152,14 @@ def check_branch_protection(
     pull_request_rule = protection.get("required_pull_request_reviews")
     pull_requests = isinstance(pull_request_rule, dict)
     approvals = pull_request_rule.get("required_approving_review_count") if isinstance(pull_request_rule, dict) else None
-    minimum_approvals = type(approvals) is int and approvals >= 1
+    solo_zero_approvals = type(approvals) is int and approvals == 0
     dismiss_stale = isinstance(pull_request_rule, dict) and pull_request_rule.get("dismiss_stale_reviews") is True
-    code_owner_reviews = (
+    code_owner_gate_disabled = (
         isinstance(pull_request_rule, dict)
-        and pull_request_rule.get("require_code_owner_reviews") is True
+        and pull_request_rule.get("require_code_owner_reviews") is False
     )
-    last_push_approval = (
-        isinstance(pull_request_rule, dict) and pull_request_rule.get("require_last_push_approval") is True
+    last_push_gate_disabled = (
+        isinstance(pull_request_rule, dict) and pull_request_rule.get("require_last_push_approval") is False
     )
     signed_commits = signature_protection.get("enabled") is True
     conversation = isinstance(protection.get("required_conversation_resolution"), dict) and protection[
@@ -174,17 +182,17 @@ def check_branch_protection(
         _check("branch_require_up_to_date", strict, "required_status_checks.strict must be true"),
         _check("branch_enforce_admins", enforce_admins, "administrator bypass must be disabled"),
         _check("branch_require_pull_request", pull_requests, "required_pull_request_reviews must be configured"),
-        _check("branch_minimum_approvals", minimum_approvals, "at least one approving review must be required"),
+        _check("branch_solo_zero_approvals", solo_zero_approvals, "exactly zero approving reviews must be required for the sole maintainer"),
         _check("branch_dismiss_stale_reviews", dismiss_stale, "stale approvals must be dismissed after new commits"),
         _check(
-            "branch_require_code_owner_reviews",
-            code_owner_reviews,
-            "Code Owner review must be required",
+            "branch_solo_code_owner_gate_disabled",
+            code_owner_gate_disabled,
+            "Code Owner review gate must be disabled for the sole maintainer",
         ),
         _check(
-            "branch_require_last_push_approval",
-            last_push_approval,
-            "the most recent push must be approved by someone other than its author",
+            "branch_solo_last_push_gate_disabled",
+            last_push_gate_disabled,
+            "last-push approval gate must be disabled for the sole maintainer",
         ),
         _check("branch_require_signed_commits", signed_commits, "signed commits must be required"),
         _check("branch_conversation_resolution", conversation, "required conversation resolution must be enabled"),
@@ -199,13 +207,14 @@ def check_release_environment(
     secret_names: Iterable[str],
     deployment_policies: dict[str, Any],
     protected_branch: str,
+    owner_login: str,
 ) -> list[dict[str, str]]:
-    """Validate release approvals, exact ref restrictions, signing configuration, and secrets."""
+    """Validate owner approval, exact ref restrictions, signing configuration, and secrets."""
     rules = environment.get("protection_rules")
     rules = rules if isinstance(rules, list) else []
     reviewer_rule = next((rule for rule in rules if isinstance(rule, dict) and rule.get("type") == "required_reviewers"), None)
-    self_review_disabled = isinstance(reviewer_rule, dict) and reviewer_rule.get("prevent_self_review") is True
-    reviewer_count = _reviewer_count(reviewer_rule)
+    allow_owner_approval = isinstance(reviewer_rule, dict) and reviewer_rule.get("prevent_self_review") is False
+    owner_reviewer = _owner_reviewer(reviewer_rule, owner_login)
     branch_policy = environment.get("deployment_branch_policy")
     custom_policy = (
         isinstance(branch_policy, dict)
@@ -231,11 +240,11 @@ def check_release_environment(
     return [
         _check("release_required_reviewers", reviewer_rule is not None, "release environment must require reviewer approval"),
         _check(
-            "release_independent_reviewers",
-            reviewer_count >= MINIMUM_INDEPENDENT_REVIEWERS,
-            f"release environment needs at least {MINIMUM_INDEPENDENT_REVIEWERS} distinct eligible reviewers; found {reviewer_count}",
+            "release_owner_reviewer",
+            owner_reviewer,
+            f"release environment must name exactly one User reviewer matching repository owner {owner_login!r}",
         ),
-        _check("release_prevent_self_review", self_review_disabled, "release environment must prevent self approval"),
+        _check("release_allow_owner_approval", allow_owner_approval, "release environment must allow the owner to approve deployment"),
         _check(
             "release_deployment_refs",
             exact_ref_policy,
@@ -248,29 +257,31 @@ def check_release_environment(
     ]
 
 
-def check_production_environment(environment: dict[str, Any], secret_names: Iterable[str]) -> list[dict[str, str]]:
-    """Validate the independent approval and secret inventory used by production evidence lanes."""
+def check_production_environment(
+    environment: dict[str, Any], secret_names: Iterable[str], owner_login: str
+) -> list[dict[str, str]]:
+    """Validate owner approval and secret inventory used by production evidence lanes."""
     rules = environment.get("protection_rules")
     rules = rules if isinstance(rules, list) else []
     reviewer_rule = next(
         (rule for rule in rules if isinstance(rule, dict) and rule.get("type") == "required_reviewers"),
         None,
     )
-    reviewer_count = _reviewer_count(reviewer_rule)
+    owner_reviewer = _owner_reviewer(reviewer_rule, owner_login)
     branch_policy = environment.get("deployment_branch_policy")
     protected_branches = isinstance(branch_policy, dict) and branch_policy.get("protected_branches") is True
     missing_secrets = sorted(REQUIRED_PRODUCTION_SECRETS - {str(name) for name in secret_names})
     return [
         _check("production_required_reviewers", reviewer_rule is not None, "production environment must require reviewer approval"),
         _check(
-            "production_independent_reviewers",
-            reviewer_count >= MINIMUM_INDEPENDENT_REVIEWERS,
-            f"production environment needs at least {MINIMUM_INDEPENDENT_REVIEWERS} distinct eligible reviewers; found {reviewer_count}",
+            "production_owner_reviewer",
+            owner_reviewer,
+            f"production environment must name exactly one User reviewer matching repository owner {owner_login!r}",
         ),
         _check(
-            "production_prevent_self_review",
-            isinstance(reviewer_rule, dict) and reviewer_rule.get("prevent_self_review") is True,
-            "production environment must prevent self approval",
+            "production_allow_owner_approval",
+            isinstance(reviewer_rule, dict) and reviewer_rule.get("prevent_self_review") is False,
+            "production environment must allow the owner to approve deployment",
         ),
         _check(
             "production_protected_branches",
@@ -309,10 +320,10 @@ REQUIRED_REPOSITORY_SETTINGS_CHECKS = (
     "branch_require_up_to_date",
     "branch_enforce_admins",
     "branch_require_pull_request",
-    "branch_minimum_approvals",
+    "branch_solo_zero_approvals",
     "branch_dismiss_stale_reviews",
-    "branch_require_code_owner_reviews",
-    "branch_require_last_push_approval",
+    "branch_solo_code_owner_gate_disabled",
+    "branch_solo_last_push_gate_disabled",
     "branch_require_signed_commits",
     "branch_conversation_resolution",
     "branch_linear_history",
@@ -321,14 +332,14 @@ REQUIRED_REPOSITORY_SETTINGS_CHECKS = (
 )
 REQUIRED_RELEASE_ENVIRONMENT_CHECKS = (
     "release_required_reviewers",
-    "release_independent_reviewers",
-    "release_prevent_self_review",
+    "release_owner_reviewer",
+    "release_allow_owner_approval",
     "release_deployment_refs",
     "release_signing_secrets",
     "release_windows_code_signing_required",
     "production_required_reviewers",
-    "production_independent_reviewers",
-    "production_prevent_self_review",
+    "production_owner_reviewer",
+    "production_allow_owner_approval",
     "production_protected_branches",
     "production_secrets",
     "production_variables",
@@ -380,7 +391,14 @@ def _reviewer_state(environment: Mapping[str, Any]) -> list[dict[str, Any]]:
             reviewer_type = row.get("type") if isinstance(row, Mapping) else None
             reviewer_id = reviewer.get("id") if isinstance(reviewer, Mapping) else None
             if isinstance(reviewer_type, str) and type(reviewer_id) is int and reviewer_id > 0:
-                reviewers.append({"type": reviewer_type, "id": reviewer_id})
+                reviewer_login = reviewer.get("login")
+                reviewers.append(
+                    {
+                        "type": reviewer_type,
+                        "id": reviewer_id,
+                        "login": reviewer_login if isinstance(reviewer_login, str) else None,
+                    }
+                )
     return sorted(reviewers, key=lambda item: (item["type"], item["id"]))
 
 
@@ -577,6 +595,7 @@ def collect_governance_evidence(
     production_secrets = documents["production_secrets"]
     production_variables = documents["production_variables"]
     variable = documents["release_variable"]
+    owner_login = repository.split("/", 1)[0]
 
     checks = [
         *check_branch_protection(protection, signature_protection),
@@ -585,11 +604,13 @@ def collect_governance_evidence(
             _named_inventory(secrets, "secrets"),
             release_policies,
             branch,
+            owner_login,
         ),
         check_release_variable(variable),
         *check_production_environment(
             production_environment,
             _named_inventory(production_secrets, "secrets"),
+            owner_login,
         ),
         check_production_variables(_named_inventory(production_variables, "variables")),
     ]

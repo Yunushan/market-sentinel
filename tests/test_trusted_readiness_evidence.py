@@ -70,10 +70,9 @@ def _governance_environment(*, release: bool) -> dict[str, object]:
         "protection_rules": [
             {
                 "type": "required_reviewers",
-                "prevent_self_review": True,
+                "prevent_self_review": False,
                 "reviewers": [
-                    {"type": "User", "reviewer": {"id": 1}},
-                    {"type": "User", "reviewer": {"id": 2}},
+                    {"type": "User", "reviewer": {"id": 42, "login": REPOSITORY.partition("/")[0]}},
                 ],
             }
         ],
@@ -99,10 +98,10 @@ def governance_api_documents() -> dict[str, dict[str, object]]:
             },
             "enforce_admins": {"enabled": True},
             "required_pull_request_reviews": {
-                "required_approving_review_count": 1,
+                "required_approving_review_count": 0,
                 "dismiss_stale_reviews": True,
-                "require_code_owner_reviews": True,
-                "require_last_push_approval": True,
+                "require_code_owner_reviews": False,
+                "require_last_push_approval": False,
             },
             "required_conversation_resolution": {"enabled": True},
             "required_linear_history": {"enabled": True},
@@ -450,8 +449,8 @@ def funded_environment_config() -> dict[str, object]:
         "created_at": "2026-09-17T08:00:00Z",
         "updated_at": "2026-09-17T09:00:00Z",
         "protection_rules": [
-            {"id": 11, "node_id": "RULE_reviewers", "type": "required_reviewers", "prevent_self_review": True, "reviewers": [
-                {"type": "Team", "reviewer": {"id": 41, "slug": "production-approvers"}}
+            {"id": 11, "node_id": "RULE_reviewers", "type": "required_reviewers", "prevent_self_review": False, "reviewers": [
+                {"type": "User", "reviewer": {"id": 42, "login": REPOSITORY.partition("/")[0]}}
             ]},
             {"id": 12, "node_id": "RULE_branch", "type": "branch_policy"},
         ],
@@ -476,7 +475,7 @@ def funded_run_approvals() -> list[dict[str, object]]:
             "updated_at",
         )
     }
-    login = "production-reviewer"
+    login = REPOSITORY.partition("/")[0]
     api_user = f"https://api.github.com/users/{login}"
     return [
         {
@@ -1127,7 +1126,7 @@ class TrustedReadinessEvidenceTests(unittest.TestCase):
                     token_policy=funded_token_policy(),
                 )
 
-    def test_funded_builder_requires_preexisting_protections_and_independent_policy(self) -> None:
+    def test_funded_builder_requires_preexisting_protections_and_owner_confirmation(self) -> None:
         def build(
             *,
             report: dict[str, object] | None = None,
@@ -1165,11 +1164,23 @@ class TrustedReadinessEvidenceTests(unittest.TestCase):
         )
         self.assertEqual(valid["environment_approval"]["state"], "approved")  # type: ignore[index]
         self.assertEqual(valid["environment_approval"]["run_id"], EVIDENCE_RUN_ID)  # type: ignore[index]
+        self.assertEqual(
+            valid["environment_approval"]["reviewer"],  # type: ignore[index]
+            {"id": 42, "login": REPOSITORY.partition("/")[0]},
+        )
 
         missing_reviewers = funded_environment_config()
         missing_reviewers["protection_rules"][0]["reviewers"] = []  # type: ignore[index]
-        self_review = funded_environment_config()
-        self_review["protection_rules"][0]["prevent_self_review"] = False  # type: ignore[index]
+        blocked_owner_review = funded_environment_config()
+        blocked_owner_review["protection_rules"][0]["prevent_self_review"] = True  # type: ignore[index]
+        wrong_reviewer = funded_environment_config()
+        wrong_reviewer["protection_rules"][0]["reviewers"][0]["reviewer"]["login"] = "someone-else"  # type: ignore[index]
+        team_reviewer = funded_environment_config()
+        team_reviewer["protection_rules"][0]["reviewers"][0] = {  # type: ignore[index]
+            "type": "Team", "reviewer": {"id": 42, "slug": "operators"}
+        }
+        different_owner_id = funded_environment_config()
+        different_owner_id["protection_rules"][0]["reviewers"][0]["reviewer"]["id"] = 43  # type: ignore[index]
         changed_after_start = funded_environment_config()
         changed_after_start["updated_at"] = "2026-09-17T10:00:01Z"
         unprotected_branches = funded_environment_config()
@@ -1187,7 +1198,9 @@ class TrustedReadinessEvidenceTests(unittest.TestCase):
 
         cases = (
             ("missing-reviewers", missing_reviewers, funded_token_policy()),
-            ("self-review", self_review, funded_token_policy()),
+            ("blocked-owner-review", blocked_owner_review, funded_token_policy()),
+            ("wrong-reviewer", wrong_reviewer, funded_token_policy()),
+            ("team-reviewer", team_reviewer, funded_token_policy()),
             ("config-updated-after-start", changed_after_start, funded_token_policy()),
             ("unprotected-branches", unprotected_branches, funded_token_policy()),
             ("duplicate-reviewer", duplicate_reviewers, funded_token_policy()),
@@ -1206,16 +1219,25 @@ class TrustedReadinessEvidenceTests(unittest.TestCase):
         wrong_environment_approval[0]["environments"][0]["id"] = 999  # type: ignore[index]
         malformed_approval = funded_run_approvals()
         malformed_approval[0]["user"]["unexpected"] = True  # type: ignore[index]
+        someone_else_approved = funded_run_approvals()
+        someone_else_approved[0]["user"]["login"] = "someone-else"  # type: ignore[index]
+        someone_else_approved[0]["user"]["id"] = 99  # type: ignore[index]
+        wrong_approval_id = funded_run_approvals()
+        wrong_approval_id[0]["user"]["id"] = 99  # type: ignore[index]
         approval_cases: tuple[tuple[str, object], ...] = (
             ("missing-run-approval", []),
             ("rejected-run-approval", rejected_approval),
             ("wrong-approval-environment", wrong_environment_approval),
             ("duplicate-run-approval", funded_run_approvals() * 2),
             ("malformed-run-approval", malformed_approval),
+            ("someone-else-approved", someone_else_approved),
+            ("owner-login-wrong-id", wrong_approval_id),
         )
         for name, approvals in approval_cases:
             with self.subTest(name=name), self.assertRaises(TrustedEvidenceError):
                 build(approvals=approvals)
+        with self.assertRaises(TrustedEvidenceError):
+            build(environment=different_owner_id)
 
         replayed_attempt_jobs = funded_run_jobs()
         replayed_attempt_jobs["jobs"][0]["run_attempt"] = 2  # type: ignore[index]
@@ -1267,9 +1289,13 @@ class TrustedReadinessEvidenceTests(unittest.TestCase):
             token_policy=funded_token_policy(),
         )
         cases: list[tuple[str, dict[str, object]]] = []
-        self_review = deepcopy(manifest)
-        self_review["environment_protection"]["prevent_self_review"] = False  # type: ignore[index]
-        cases.append(("self-review", self_review))
+        blocked_owner_review = deepcopy(manifest)
+        blocked_owner_review["environment_protection"]["prevent_self_review"] = True  # type: ignore[index]
+        cases.append(("blocked-owner-review", blocked_owner_review))
+        other_reviewer = deepcopy(manifest)
+        other_reviewer["environment_protection"]["required_reviewers"][0]["identity"] = "someone-else"  # type: ignore[index]
+        other_reviewer["environment_approval"]["reviewer"]["login"] = "someone-else"  # type: ignore[index]
+        cases.append(("someone-else-reviewer-and-approval", other_reviewer))
         stale_environment = deepcopy(manifest)
         stale_environment["environment_protection"]["updated_at"] = (  # type: ignore[index]
             "2026-09-17T10:00:01Z"

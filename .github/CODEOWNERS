@@ -1,3 +1,3 @@
-# Production readiness requires adding an independent maintainer or team here;
-# this solo-owner map cannot satisfy independent Code Owner review by itself.
+# Ownership map for the single-maintainer repository. Code Owner approval is
+# not a required branch-protection gate; signed commits and CI gate every PR.
 * @Yunushan

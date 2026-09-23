@@ -4782,7 +4782,7 @@ class WebApiTests(unittest.TestCase):
             "web_api.data_api.get_trades",
             return_value=[],
         ):
-            payload = polymarket_user_mdd_payload(WALLET, closed_limit=10, activity_limit=1000, trade_limit=0)
+            payload = polymarket_user_mdd_payload(WALLET, closed_limit=10, activity_limit=1000, trade_limit=10)
 
         self.assertEqual(payload["activity_events"], 3)
         self.assertEqual(payload["trade_events"], 0)
@@ -4830,7 +4830,7 @@ class WebApiTests(unittest.TestCase):
                 WALLET,
                 mode="mark_replay",
                 activity_limit=10,
-                trade_limit=0,
+                trade_limit=10,
                 mark_replay_token_limit=20,
                 mark_replay_interval="1h",
                 mark_replay_fidelity=60,
