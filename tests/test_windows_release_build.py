@@ -4,6 +4,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,6 +21,7 @@ from scripts.build_windows_release import (
     msi_product_version,
     validate_staged_package,
     windows_config_bootstrap,
+    write_windows_version_resource,
 )
 
 
@@ -187,6 +189,25 @@ class WindowsReleaseBuildTests(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, error):
                     msi_product_version(version)
 
+    def test_executable_resource_uses_the_installer_version_for_each_release_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            resource_path = Path(directory) / "windows-version.txt"
+            for version in ("1.2.3a1", "1.2.3b1", "1.2.3rc1", "1.2.3"):
+                with self.subTest(version=version):
+                    path = write_windows_version_resource(Path(directory), version)
+                    self.assertEqual(path, resource_path)
+                    resource = path.read_text(encoding="utf-8")
+                    compile(resource, str(path), "eval")
+                    native_version = msi_product_version(version)
+                    native_parts = tuple(map(int, native_version.split("."))) + (0,)
+                    self.assertIn(f"filevers={native_parts}", resource)
+                    self.assertIn(f"prodvers={native_parts}", resource)
+                    self.assertIn(f"StringStruct('FileVersion', '{native_version}')", resource)
+                    self.assertIn(f"StringStruct('ProductVersion', '{native_version}')", resource)
+                    self.assertIn("StringStruct('ProductName', 'MarketSentinel')", resource)
+                    self.assertIn("StringStruct('OriginalFilename', 'market-sentinel.exe')", resource)
+                    self.assertEqual(write_windows_version_resource(Path(directory), version).read_bytes(), resource.encode("utf-8"))
+
     def test_pyinstaller_collects_both_optional_live_sdk_packages(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -199,12 +220,41 @@ class WindowsReleaseBuildTests(unittest.TestCase):
                 (built_app / f"{APP_NAME}.exe").write_bytes(b"frozen-app")
 
             with patch("scripts.build_windows_release.run", side_effect=fake_run) as runner:
-                build_pyinstaller(work_dir, package_dir)
+                build_pyinstaller(work_dir, package_dir, "1.2.3")
 
             command = runner.call_args.args[0]
             self.assertIn(["--collect-all", "py_clob_client_v2"], [command[index : index + 2] for index in range(len(command) - 1)])
             self.assertIn(["--collect-all", "opinion_clob_sdk"], [command[index : index + 2] for index in range(len(command) - 1)])
+            self.assertIn(["--version-file", str(work_dir / "windows-version.txt")], [command[index : index + 2] for index in range(len(command) - 1)])
             self.assertEqual((package_dir / f"{APP_NAME}.exe").read_bytes(), b"frozen-app")
+
+    @unittest.skipUnless(os.name == "nt" and shutil.which("pwsh"), "Windows release metadata integration")
+    def test_metadata_verifier_rejects_an_unrelated_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            installer = Path(directory) / "placeholder.msi"
+            installer.write_bytes(b"not an installer")
+            result = subprocess.run(
+                [
+                    shutil.which("pwsh") or "pwsh",
+                    "-NoProfile",
+                    "-File",
+                    str(Path(__file__).resolve().parent.parent / "scripts" / "verify_windows_release_metadata.ps1"),
+                    "-ExecutablePath",
+                    sys.executable,
+                    "-InstallerPath",
+                    str(installer),
+                    "-Version",
+                    "1.2.3",
+                    "-PythonExecutable",
+                    sys.executable,
+                ],
+                cwd=Path(__file__).resolve().parent.parent,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("executable version resource does not match", result.stderr)
 
     def test_package_only_validation_rejects_missing_or_stale_payload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

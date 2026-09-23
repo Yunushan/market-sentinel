@@ -371,6 +371,7 @@ REQUIRED_OPERATIONS_FILES = (
     "scripts/verify_production_deployment.py",
     "scripts/review_deployment_evidence.py",
     "scripts/generate_deployment_evidence.py",
+    "scripts/initialize_production_config.py",
     "scripts/backup_state.py",
     "scripts/restore_state_backup.py",
     "scripts/verify_service_health.py",

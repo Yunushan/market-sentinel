@@ -511,6 +511,20 @@ jobs:
           $installer = "release-assets/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64.msi"
           python scripts/sign_windows_release.py --path $installer
 
+      - name: Verify Windows release metadata
+        env:
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+          RELEASE_TAG_NAME: ${{ needs.metadata.outputs.tag_name }}
+        shell: pwsh
+        run: |
+          $executable = "build/windows-release/market-sentinel-$($env:RELEASE_TAG_NAME)-win-x64/market-sentinel.exe"
+          $installer = "release-assets/market-sentinel-$($env:RELEASE_TAG_NAME)-win-x64.msi"
+          & ./scripts/verify_windows_release_metadata.ps1 `
+            -ExecutablePath $executable `
+            -InstallerPath $installer `
+            -Version $env:RELEASE_VERSION `
+            -PythonExecutable (Get-Command python -ErrorAction Stop).Source
+
       - name: Verify signatures in final Windows artifacts
         if: ${{ env.WINDOWS_SIGNING_REQUIRED == 'true' }}
         shell: pwsh

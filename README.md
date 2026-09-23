@@ -14,6 +14,14 @@ A local multi-market prediction-market command center for:
 > Only use each market in ways that comply with that market's terms and your local laws/regulations.
 > Polymarket public/authenticated reads, alerts, paper trading, and simulation-first copy previews remain available. Normal product live mutations remain disabled. The only enabled mutation capability is the dedicated, one-shot, allow-listed, hard-capped, post-only GTC funded-audit path used by the journaled verifier; it still requires an explicitly approved production workflow run and does not enable application trading. The legacy `py-clob-client`/V1-signed order path must not be used in production.
 
+## Code signing policy
+
+The [code signing policy](CODE_SIGNING_POLICY.md) identifies the sole
+maintainer's proposed author, reviewer, and release-approval roles. The project
+is evaluating SignPath Foundation as a possible provider; the current release
+workflow does not use SignPath, and acceptance has not been verified. See the
+[privacy policy](PRIVACY.md) for local data and venue API requests.
+
 ## Features (what works today)
 
 ### 1) Price triggers

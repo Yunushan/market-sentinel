@@ -471,6 +471,8 @@ jobs:
             "Sign staged Windows executable",
             "Package Windows portable zip and MSI",
             "Sign Windows MSI package",
+            "Verify Windows release metadata",
+            "scripts/verify_windows_release_metadata.ps1",
             "Verify signatures in final Windows artifacts",
             "Verify unsigned Windows artifacts",
             "Smoke test installed Windows MSI",
@@ -556,6 +558,7 @@ jobs:
         sign_exe_index = windows_app.index("Sign staged Windows executable")
         package_index = windows_app.index("Package Windows portable zip and MSI")
         sign_msi_index = windows_app.index("Sign Windows MSI package")
+        metadata_index = windows_app.index("Verify Windows release metadata")
         verify_signatures_index = windows_app.index("Verify signatures in final Windows artifacts")
         verify_unsigned_index = windows_app.index("Verify unsigned Windows artifacts")
         installed_smoke_index = windows_app.index("Smoke test installed Windows MSI")
@@ -566,6 +569,8 @@ jobs:
         self.assertLess(prepare_index, sign_exe_index)
         self.assertLess(sign_exe_index, package_index)
         self.assertLess(package_index, sign_msi_index)
+        self.assertLess(sign_msi_index, metadata_index)
+        self.assertLess(metadata_index, verify_signatures_index)
         self.assertLess(sign_msi_index, verify_signatures_index)
         self.assertLess(verify_signatures_index, verify_unsigned_index)
         self.assertLess(verify_signatures_index, upload_index)

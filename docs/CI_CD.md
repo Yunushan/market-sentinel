@@ -253,6 +253,9 @@ from hash-protected `requirements-build.lock`.
 ## Windows Release Packages
 
 Windows artifacts are produced by `scripts/build_windows_release.py` on the `windows-2025-vs2026` GitHub Actions runner. The release workflow pins WiX Toolset `6.0.2` for MSI packaging so the build is deterministic and does not silently accept newer WiX EULA prompts in CI.
+The builder embeds the MSI's mapped native version in the EXE's PE
+product/file metadata, and the release job verifies both artifacts;
+`VERSION.txt` retains the semantic release version.
 
 The portable zip contains:
 

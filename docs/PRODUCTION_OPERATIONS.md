@@ -336,8 +336,8 @@ test "${SYSTEMD_VERSION}" -ge 247
 ```
 
 ```bash
-sudo useradd --system --home /var/lib/market-sentinel --shell /sbin/nologin market-sentinel
-sudo useradd --system --home /nonexistent --shell /sbin/nologin market-sentinel-health
+sudo useradd --system --user-group --home /var/lib/market-sentinel --shell /sbin/nologin market-sentinel
+sudo useradd --system --user-group --home /nonexistent --shell /sbin/nologin market-sentinel-health
 sudo install -d -o market-sentinel -g market-sentinel -m 0700 /var/lib/market-sentinel
 sudo install -d -o root -g market-sentinel -m 0750 /etc/market-sentinel
 sudo install -m 0600 deploy/systemd/market-sentinel.env.example /etc/market-sentinel/market-sentinel.env
@@ -378,6 +378,24 @@ The bootstrap lock installs the exact setuptools version declared in
 `pyproject.toml` before either source install. Keep build isolation disabled and
 the build-dependency check enabled: permitting an isolated PEP 517 build would
 allow pip to fetch and execute a backend that is outside the reviewed lock.
+
+Initialize the private state file before enabling either worker timer or taking
+the first backup. Run this as the service account from the installed release:
+
+```bash
+sudo -u market-sentinel -g market-sentinel -- \
+  /opt/market-sentinel/.venv/bin/python \
+  /opt/market-sentinel/scripts/initialize_production_config.py
+```
+
+The initializer requires the state directory to be owned by
+`market-sentinel:market-sentinel` with mode `0700`. It creates a new default
+`config.json` through the application's atomic store, or validates an existing
+service-owned mode-`0600` file without rewriting it. An unsafe directory, link,
+malformed file, or competing first write fails closed. Review the output before
+starting services. A missing config is accepted by the read-only `doctor`
+command as defaults, but both bundled worker units require a regular config
+file and the restore drill requires that file in a recent backup.
 
 Before either unattended-worker timer is enabled, replace
 `MARKET_SENTINEL_SOURCE_REVISION` in

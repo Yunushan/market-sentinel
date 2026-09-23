@@ -79,11 +79,55 @@ def prepare_frontend_dist(frontend_zip: Path | None) -> Path:
     return frontend_dist
 
 
-def build_pyinstaller(work_dir: Path, package_dir: Path) -> None:
+def write_windows_version_resource(work_dir: Path, version: str) -> Path:
+    """Give the EXE the same native product version as its MSI installer.
+
+    Windows Installer needs the monotonic three-field version mapped by
+    ``msi_product_version``. The human release version remains in VERSION.txt.
+    """
+    native_version = msi_product_version(version)
+    version_parts = tuple(int(part) for part in native_version.split(".")) + (0,)
+    resource_path = work_dir / "windows-version.txt"
+    resource = textwrap.dedent(
+            f"""\
+            VSVersionInfo(
+              ffi=FixedFileInfo(
+                filevers={version_parts},
+                prodvers={version_parts},
+                mask=0x3f,
+                flags=0x0,
+                OS=0x40004,
+                fileType=0x1,
+                subtype=0x0,
+                date=(0, 0)
+              ),
+              kids=[
+                StringFileInfo([
+                  StringTable('040904B0', [
+                    StringStruct('CompanyName', '{MANUFACTURER}'),
+                    StringStruct('FileDescription', '{DISPLAY_NAME}'),
+                    StringStruct('FileVersion', '{native_version}'),
+                    StringStruct('InternalName', '{APP_NAME}'),
+                    StringStruct('OriginalFilename', '{APP_NAME}.exe'),
+                    StringStruct('ProductName', '{DISPLAY_NAME}'),
+                    StringStruct('ProductVersion', '{native_version}')
+                  ])
+                ]),
+                VarFileInfo([VarStruct('Translation', [1033, 1200])])
+              ]
+            )
+            """
+    )
+    resource_path.write_bytes(resource.encode("utf-8"))
+    return resource_path
+
+
+def build_pyinstaller(work_dir: Path, package_dir: Path, version: str) -> None:
     pyinstaller_dist = work_dir / "pyinstaller-dist"
     pyinstaller_build = work_dir / "pyinstaller-build"
     clean_dir(pyinstaller_dist)
     clean_dir(pyinstaller_build)
+    version_resource = write_windows_version_resource(work_dir, version)
 
     command = [
         sys.executable,
@@ -97,6 +141,8 @@ def build_pyinstaller(work_dir: Path, package_dir: Path) -> None:
         APP_NAME,
         "--icon",
         str(ROOT / "assets" / "marketsentinel.ico"),
+        "--version-file",
+        str(version_resource),
         "--distpath",
         str(pyinstaller_dist),
         "--workpath",
@@ -456,7 +502,7 @@ def main() -> int:
     else:
         clean_dir(work_dir)
         frontend_dist = prepare_frontend_dist(args.frontend_zip.resolve() if args.frontend_zip else None)
-        build_pyinstaller(work_dir, package_dir)
+        build_pyinstaller(work_dir, package_dir, args.version)
         copy_release_payload(package_dir, frontend_dist, args.version)
         validate_staged_package(package_dir, args.version)
 

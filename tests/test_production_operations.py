@@ -274,7 +274,7 @@ class ProductionOperationsTests(unittest.TestCase):
             operations,
         )
         self.assertIn(
-            "useradd --system --home /nonexistent --shell /sbin/nologin market-sentinel-health",
+            "useradd --system --user-group --home /nonexistent --shell /sbin/nologin market-sentinel-health",
             operations,
         )
         self.assertIn("/var/lib/market-sentinel-deployment-evidence/deployment-evidence-<RELEASE_VERSION>.json", operations)
