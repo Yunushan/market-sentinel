@@ -126,15 +126,18 @@ class OncallReceiptBridgeTests(unittest.TestCase):
         audit = self.bridge.db.execute("SELECT event FROM audit_events ORDER BY id").fetchall()
         self.assertEqual(audit, [("received",), ("dispatched",), ("human_acknowledged",)])
 
-    def test_mismatched_delivery_and_changed_webhook_cannot_claim_receipt(self) -> None:
+    def test_mismatched_delivery_and_changed_event_cannot_claim_receipt(self) -> None:
         raw = self.webhook()
         accepted = self.request("POST", DEFAULT_ONCALL_WEBHOOK_PATH, token=WEBHOOK_TOKEN, body=raw)[1]
         ack_path = f"{ACK_PATH_PREFIX}/{BINDING}"
         forged = json.dumps({"delivery_id": "0" * 32, "acknowledgement": "human"}).encode()
         self.assertEqual(self.request("POST", ack_path, token=ACK_TOKEN, body=forged)[0], 400)
-        changed = raw.replace(b'"version": "4"', b'"version":"4"')
-        self.assertNotEqual(changed, raw)
-        self.assertEqual(self.request("POST", DEFAULT_ONCALL_WEBHOOK_PATH, token=WEBHOOK_TOKEN, body=changed)[0], 400)
+        changed = json.loads(raw)
+        changed["alerts"][0]["fingerprint"] = "fedcba9876543210"
+        self.assertEqual(
+            self.request("POST", DEFAULT_ONCALL_WEBHOOK_PATH, token=WEBHOOK_TOKEN,
+                         body=json.dumps(changed).encode())[0], 400,
+        )
         self.assertEqual(len(self.sent), 1)
         self.assertEqual(self.bridge.receipt(BINDING), None)
         self.assertEqual(len(accepted["delivery_id"]), 32)
@@ -168,10 +171,17 @@ class OncallReceiptBridgeTests(unittest.TestCase):
         self.assertIsNone(self.bridge.receipt(BINDING))
         ack = json.dumps({"delivery_id": self.sent[0]["delivery_id"], "acknowledgement": "human"}).encode()
         self.assertEqual(self.request("POST", f"{ACK_PATH_PREFIX}/{BINDING}", token=ACK_TOKEN, body=ack)[0], 400)
-        status, accepted = self.request("POST", DEFAULT_ONCALL_WEBHOOK_PATH, token=WEBHOOK_TOKEN, body=raw)
+        changed = raw.replace(b'"version": "4"', b'"version":"4"')
+        self.assertNotEqual(changed, raw)
+        status, accepted = self.request("POST", DEFAULT_ONCALL_WEBHOOK_PATH, token=WEBHOOK_TOKEN, body=changed)
         self.assertEqual(status, 202)
         self.assertEqual(self.sent[0]["delivery_id"], accepted["delivery_id"])
         self.assertEqual(self.sent[1]["delivery_id"], accepted["delivery_id"])
+        self.assertEqual(
+            self.request("POST", DEFAULT_ONCALL_WEBHOOK_PATH, token=WEBHOOK_TOKEN, body=changed)[1]["status"],
+            "dispatched",
+        )
+        self.assertEqual(len(self.sent), 2)
 
     def test_smtp_dispatch_requires_starttls_and_authenticated_acceptance(self) -> None:
         smtp = mock.MagicMock()

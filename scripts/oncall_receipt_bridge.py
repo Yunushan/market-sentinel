@@ -384,7 +384,7 @@ class ReceiptBridge:
         identity = _parse_webhook(raw, now=_utc(received))
         binding = identity["binding_sha256"]
         row = self.db.execute(
-            "SELECT event_sha256, body_sha256, record_json, state FROM deliveries WHERE binding=?", (binding,)
+            "SELECT event_sha256, record_json, state FROM deliveries WHERE binding=?", (binding,)
         ).fetchone()
         if row is None:
             record = {**identity, "delivery_id": uuid.uuid4().hex}
@@ -400,8 +400,8 @@ class ReceiptBridge:
                     (binding, received),
                 )
         else:
-            event_sha, body_sha, serialized, state = row
-            if event_sha != identity["webhook_event_sha256"] or body_sha != identity["webhook_body_sha256"]:
+            event_sha, serialized, state = row
+            if event_sha != identity["webhook_event_sha256"]:
                 raise BridgeError("challenge binding was already used by a different webhook")
             record = json.loads(serialized)
             if state in {"dispatched", "acknowledged"}:
