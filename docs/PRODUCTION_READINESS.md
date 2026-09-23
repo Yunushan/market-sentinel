@@ -592,8 +592,11 @@ Release-environment evidence must include passing checks named exactly
 fail closed. The repository currently includes
 `evidence/release-environment.json`, a historical snapshot that intentionally
 does not prove signing-secret presence; the scorer therefore rejects it for
-the environment point, and the release workflow remains fail-closed until the
-two signing secrets are configured and freshly verified.
+the environment point. The current PFX signing contract also cannot establish
+public trust with a newly issued hardware/cloud-protected key. A supported
+signing provider must be integrated and the resulting EXE/MSI signatures
+verified before treating the stable release as production-ready. Keep the
+release workflow fail-closed until then.
 
 The two release options intentionally retain their existing CLI names, but
 they no longer accept manually asserted `verified=true` release manifests.

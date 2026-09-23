@@ -265,6 +265,12 @@ The portable zip contains:
 
 The MSI installs the same payload under Program Files, creates Start Menu shortcuts for the Tkinter and React launchers, and supports normal Windows uninstall/upgrade behavior through MSI product metadata. Before upload, the release job installs the final MSI on its disposable GitHub-hosted Windows runner, checks the installed files and executable against the staged payload, runs the installed executable's smoke test from a separate temporary directory, then uninstalls and verifies cleanup even if the smoke test fails. Every stable tag, including a draft, requires signing; setting `REQUIRE_WINDOWS_CODE_SIGNING=true` extends the same requirement to prereleases. The protected `release` environment must provide `WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64`, `WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD`, and the separately scoped `READINESS_ADMIN_TOKEN` used for the governance-evidence recheck described in `docs/REPOSITORY_SETTINGS.md`. Before downloading build inputs or running WiX/PyInstaller, the release job verifies that the signing secret is a password-protected PFX with a private key and that the timestamp endpoint is HTTPS. `scripts/sign_windows_release.py` signs and verifies every EXE/MSI using an RFC 3161 timestamp URL; certificates are decoded only into a temporary file on the Windows runner. If signing is not required, the workflow may build unsigned portable ZIP/MSI artifacts only for a validated prerelease and labels that status in the release notes. Unsigned Windows artifacts are not production-trusted.
 
+The PFX signing path above is an implementation gap for a new publicly trusted
+code-signing key: current issuers require hardware or cloud-protected private
+keys. Configure a supported signer and update the release workflow before a
+production-trusted stable release. Signing-secret names alone are not proof of
+that integration; see `docs/REPOSITORY_SETTINGS.md`.
+
 The Windows launchers use `data/config.json` when the package folder is writable, which keeps the portable zip self-contained. If the app is installed under a protected folder such as Program Files, the launchers set `PREDICTION_MARKET_CONFIG_PATH` to `%APPDATA%\market-sentinel\data\config.json` so normal users can save settings without administrator privileges.
 
 ## Required Repository Settings

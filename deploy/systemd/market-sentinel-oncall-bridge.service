@@ -1,0 +1,25 @@
+[Unit]
+Description=Market Sentinel independent on-call receipt bridge
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=market-sentinel-oncall
+Group=market-sentinel-oncall
+WorkingDirectory=/opt/market-sentinel-oncall/current
+EnvironmentFile=/etc/market-sentinel-oncall/bridge.env
+ExecStart=/opt/market-sentinel-oncall/current/.venv/bin/python -B -m scripts.oncall_receipt_bridge serve
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/market-sentinel-oncall
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

@@ -62,12 +62,24 @@ protected branch `main` and tag pattern `v*.*.*`. Do not select **Protected
 branches only**: GitHub applies that setting to branches, so it can block the
 normal tag-triggered release job. The workflow
 uses this protected environment for every stable tag, including drafts, and whenever
-signing is independently required. Store production code-signing credentials there:
+signing is independently required. The current release workflow expects
 `WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64`,
 `WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD`, and optional
 `WINDOWS_CODE_SIGNING_TIMESTAMP_URL`; set
-`REQUIRE_WINDOWS_CODE_SIGNING=true`. Stable tags require signing even if that
-variable is absent or false because a draft can later be published manually.
+`REQUIRE_WINDOWS_CODE_SIGNING=true`. **This PFX-based signing path is an
+unresolved production integration gap.** Newly issued publicly trusted code
+signing keys must be protected by compliant hardware or a cloud signing
+service under the [CA/Browser Forum code signing requirements](https://cabforum.org/working-groups/code-signing/requirements/).
+The current workflow imports an exportable private key from a PFX into an
+ephemeral Windows runner. Merely adding a self-signed or exportable PFX secret
+does not establish public trust. Select a provider that can sign the EXE and MSI from
+protected hardware or a cloud service, integrate its supported method into
+the workflow, and verify the final signatures and timestamps before publishing
+a stable release. [SignPath Foundation](https://signpath.org/) is a possible
+no-cost route for an accepted open-source project; acceptance and integration
+are still unverified. Keep the stable-release signing gate fail-closed until
+that work is complete. Stable tags require signing even if the variable is
+absent or false because a draft can later be published manually.
 If credentials are unavailable, an explicitly unsigned testing/development run
 must use a validated prerelease tag; only prerelease artifacts can select the unprotected
 `release-unsigned` environment. The workflow labels those Windows assets
@@ -102,9 +114,15 @@ and Polymarket acceptance workflows:
 - `POLY_ADDRESS`, `POLY_API_KEY`, `POLY_API_SECRET`, `POLY_PASSPHRASE`,
   `POLYMARKET_PRIVATE_KEY`, `POLYMARKET_FUNDER_ADDRESS`, and
   `POLYMARKET_SIGNATURE_TYPE`;
-- `RELAYER_API_KEY` and `RELAYER_API_KEY_ADDRESS`;
-- `POLYMARKET_RECOVERY_STORE_URL`, `POLYMARKET_RECOVERY_STORE_TOKEN`, and
-  `POLYMARKET_RECOVERY_ENCRYPTION_KEY_BASE64`.
+- `RELAYER_API_KEY` and `RELAYER_API_KEY_ADDRESS`.
+
+The `POLYMARKET_RECOVERY_STORE_URL`, `POLYMARKET_RECOVERY_STORE_TOKEN`, and
+`POLYMARKET_RECOVERY_ENCRYPTION_KEY_BASE64` names are reserved for a future
+off-host recovery integration. No workflow currently uses them. Adding empty
+or placeholder secrets would not provide recoverability after host loss, so
+they are not part of the required governance inventory. The funded audit still
+requires its durable private journal on the production runner; off-host
+recovery needs a provider-specific write/read-back and restore drill.
 
 It also requires these production environment variables:
 
@@ -139,12 +157,13 @@ It validates required checks, up-to-date and administrator-enforced branch
 protection, pull-request, single-maintainer, signed-commit, conversation, and
 linear-history controls, disabled force pushes and deletions,
 the exact owner-only release approval route,
-the exact `main`/`v*.*.*` deployment-ref policy, required Windows-signing secret
-names, the owner-only protected production approval route and branches, the
-required production secret and variable names, and
-`REQUIRE_WINDOWS_CODE_SIGNING=true`. It reports a nonzero exit status on any
-missing control. Run it from an administrator-authorized workstation; a normal
-workflow token is intentionally insufficient for this audit.
+the exact `main`/`v*.*.*` deployment-ref policy, the current Windows-signing
+secret-name contract, the owner-only protected production approval route and
+branches, the required production secret and variable names, and
+`REQUIRE_WINDOWS_CODE_SIGNING=true`. Passing this settings audit does not prove
+that a publicly trusted signer has been integrated. It reports a nonzero exit status
+on any missing control. Run it from an administrator-authorized workstation;
+a normal workflow token is intentionally insufficient for this audit.
 
 The collector also emits a canonical, secret-free governance-state snapshot and
 its `governance_state_sha256`. Secret and variable values are never included;

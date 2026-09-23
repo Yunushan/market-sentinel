@@ -625,6 +625,10 @@ same origin as the protected production environment variable
 `MARKET_SENTINEL_ONCALL_RECEIPT_ORIGIN` and the same token as the protected
 secret `MARKET_SENTINEL_ONCALL_RECEIPT_TOKEN`.
 
+The independent SMTP-backed bridge, its separate-host service configuration,
+and the human acknowledgement procedure are in
+[`ONCALL_RECEIPT_BRIDGE.md`](ONCALL_RECEIPT_BRIDGE.md).
+
 ```bash
 sudo install -d -o root -g prometheus -m 0750 /var/lib/prometheus/market-sentinel-attestation
 sudo promtool check config /etc/prometheus/prometheus.yml
@@ -829,6 +833,77 @@ For a non-Linux or isolated local loopback smoke test only, add
 `--skip-systemd`. This intentionally skips Linux systemd and filesystem
 ownership checks while retaining versioned health and metrics validation; it is
 not production-host evidence.
+
+### Production rollback drill journal
+
+Run a real rollback drill on the production Linux host before the protected
+deployment-evidence workflow. Prepare complete, reviewed current and prior
+stable releases first: each needs its clean Git checkout, matching installed
+runtime dependencies and frontend build. Keep durable state and the root-owned
+service environment outside both release trees. Preserve a known way to
+reactivate the current release if the rollback fails. The release switch itself
+is an operator action in a second shell; `drill_production_rollback.py` never
+changes Git, service units, symlinks, or application state.
+
+Resolve the two revisions from their reviewed stable tags. Obtain each frontend
+SHA-256 from its reviewed release asset, not by hashing the mutable live tree at
+drill time. Use the protected production provider label, host-identity digest,
+and public origin that the deployment-evidence workflow will use. Put only the
+observability token in the drill process environment; do not pass a token on
+the command line or load the admin or venue environment file. Create the
+report directory before starting:
+
+```bash
+sudo install -d -o root -g root -m 0700 /var/lib/market-sentinel-rollback-drills
+CURRENT_VERSION='<deployed-stable-version>'
+CURRENT_REVISION='<reviewed-current-tag-commit-sha>'
+CURRENT_FRONTEND_SHA256='<reviewed-current-frontend-tree-sha256>'
+ROLLBACK_VERSION='<reviewed-prior-stable-version>'
+ROLLBACK_REVISION='<reviewed-prior-tag-commit-sha>'
+ROLLBACK_FRONTEND_SHA256='<reviewed-prior-frontend-tree-sha256>'
+DEPLOYMENT_PROVIDER='<protected-provider-slug>'
+HOST_ID_SHA256='<protected-machine-id-sha256>'
+PRODUCTION_ORIGIN='https://analytics.example.com'
+
+sudo --preserve-env=MARKET_SENTINEL_OBSERVABILITY_TOKEN \
+  /opt/market-sentinel/.venv/bin/python /opt/market-sentinel/scripts/drill_production_rollback.py \
+  --current-version "${CURRENT_VERSION}" \
+  --current-revision "${CURRENT_REVISION}" \
+  --current-frontend-sha256 "${CURRENT_FRONTEND_SHA256}" \
+  --rollback-version "${ROLLBACK_VERSION}" \
+  --rollback-revision "${ROLLBACK_REVISION}" \
+  --rollback-frontend-sha256 "${ROLLBACK_FRONTEND_SHA256}" \
+  --deployment-provider "${DEPLOYMENT_PROVIDER}" \
+  --expected-host-id-sha256 "${HOST_ID_SHA256}" \
+  --public-origin "${PRODUCTION_ORIGIN}" \
+  --confirm-production-drill I_UNDERSTAND_THIS_RESTARTS_PRODUCTION
+```
+
+The command requires an interactive root session on Linux; there is no dry-run
+mode that can write a successful journal. It first verifies the currently
+running release. At the first prompt, use the prepared release-switch procedure
+in the second shell to activate the prior release and restart
+`market-sentinel-web.service`; type the displayed `ACTIVATED <revision>` phrase
+only after that action. At the second prompt, reactivate the original release,
+restart the service, and type `REACTIVATED <revision>`. The script requires a
+new systemd invocation at each transition and verifies authenticated ready
+health, exact version/source/frontend fingerprints, a clean checked-out Git
+revision, and the frontend files on disk. It writes the verifier's exact five
+ordered observations only after the full current → prior → current sequence.
+Confirm public HTTPS health and both worker timers after the original release
+is restored, then collect deployment evidence within 24 hours.
+
+An existing `latest.json` is copied byte-for-byte to a unique root-private
+`latest.previous-<uuid>.json` before a new attempt invalidates `latest.json`.
+The active report remains `in_progress` or `failed` until every observation
+passes. If any stage fails or is interrupted, the script prompts for immediate
+reactivation and independently checks the current release again. If that
+recovery check cannot pass, follow the prepared manual recovery procedure and
+keep production evidence blocked. A failed journal, even with a verified final
+current release, is never success evidence. The script cannot guarantee
+recovery when a host, service, or operator action fails; an operator must remain
+present for the full drill. Preserve the previous journals and systemd logs for
+the operations record.
 
 ## Monitoring and recovery
 
