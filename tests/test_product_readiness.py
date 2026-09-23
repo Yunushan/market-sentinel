@@ -1764,9 +1764,11 @@ class ProductReadinessTests(unittest.TestCase):
             _ToolTrustContext,
             _resolve_executable_identity,
             _run_gh_json,
+            _windows_system_root,
         )
 
         identity = _resolve_executable_identity("git", require_pin=False)
+        expected_system_root = _windows_system_root() if os.name == "nt" else None
         context = _ToolTrustContext(
             external_awards_requested=True,
             pins={"gh": identity.sha256},
@@ -1785,6 +1787,8 @@ class ProductReadinessTests(unittest.TestCase):
                         "GH_DEBUG": "api",
                         "HTTPS_PROXY": "http://attacker.invalid",
                         "GIT_DIR": "attacker-git-dir",
+                        "SystemRoot": "attacker-system-root",
+                        "WINDIR": "attacker-windows-directory",
                     },
                     clear=False,
                 ),
@@ -1810,9 +1814,21 @@ class ProductReadinessTests(unittest.TestCase):
         self.assertEqual(environment["GH_HOST"], "github.com")
         self.assertEqual(environment["GH_PROMPT_DISABLED"], "1")
         self.assertEqual(environment["GH_TOKEN"], "test-token")
-        for name in ("GH_DEBUG", "HTTPS_PROXY", "GIT_DIR", "PATH"):
+        if expected_system_root is not None:
+            self.assertEqual(environment["SystemRoot"], expected_system_root)
+        else:
+            self.assertNotIn("SystemRoot", environment)
+        for name in ("GH_DEBUG", "HTTPS_PROXY", "GIT_DIR", "PATH", "WINDIR"):
             self.assertNotIn(name, environment)
         self.assertNotEqual(environment["GH_CONFIG_DIR"], "attacker-config")
+
+    @unittest.skipUnless(os.name == "nt", "Windows system directory API is Windows-only")
+    def test_trusted_gh_fails_closed_when_windows_system_directory_is_unavailable(self) -> None:
+        from scripts.check_product_readiness import _ToolTrustError, _windows_system_root
+
+        with patch("ctypes.WinDLL", side_effect=OSError("system API unavailable")):
+            with self.assertRaisesRegex(_ToolTrustError, "Windows system directory"):
+                _windows_system_root()
 
     def test_trusted_tool_replacement_after_execution_is_rejected(self) -> None:
         from scripts.check_product_readiness import (
