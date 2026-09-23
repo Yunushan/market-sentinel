@@ -252,7 +252,9 @@ def write_launcher_files(package_dir: Path, version: str) -> None:
 
 def copy_release_payload(package_dir: Path, frontend_dist: Path, version: str) -> None:
     copy_file(ROOT / "README.md", package_dir / "README.md")
+    copy_file(ROOT / "CODE_SIGNING_POLICY.md", package_dir / "CODE_SIGNING_POLICY.md")
     copy_file(ROOT / "LICENSE", package_dir / "LICENSE")
+    copy_file(ROOT / "PRIVACY.md", package_dir / "PRIVACY.md")
     copy_file(ROOT / "pyproject.toml", package_dir / "pyproject.toml")
     copy_file(ROOT / "requirements.txt", package_dir / "requirements.txt")
     copy_file(ROOT / "requirements.lock", package_dir / "requirements.lock")

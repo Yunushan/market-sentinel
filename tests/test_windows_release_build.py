@@ -15,6 +15,7 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 from scripts.build_windows_release import (
     APP_NAME,
     build_pyinstaller,
+    copy_release_payload,
     extract_frontend_archive,
     main,
     make_portable_zip,
@@ -26,6 +27,24 @@ from scripts.build_windows_release import (
 
 
 class WindowsReleaseBuildTests(unittest.TestCase):
+    def test_windows_payload_includes_linked_code_signing_and_privacy_policies(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package_dir = root / "package"
+            frontend_dist = root / "frontend-dist"
+            package_dir.mkdir()
+            frontend_dist.mkdir()
+            (frontend_dist / "index.html").write_text("<html></html>", encoding="utf-8")
+
+            copy_release_payload(package_dir, frontend_dist, "1.0.12")
+
+            project_root = Path(__file__).resolve().parent.parent
+            readme = (package_dir / "README.md").read_text(encoding="utf-8")
+            for name in ("CODE_SIGNING_POLICY.md", "PRIVACY.md"):
+                with self.subTest(name=name):
+                    self.assertIn(f"]({name})", readme)
+                    self.assertEqual((package_dir / name).read_bytes(), (project_root / name).read_bytes())
+
     @unittest.skipUnless(os.name == "nt" and shutil.which("pwsh"), "PowerShell MSI runner guard")
     def test_msi_smoke_rejects_a_non_hosted_runner_before_install(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

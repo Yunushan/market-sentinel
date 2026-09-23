@@ -324,8 +324,11 @@ effective sandbox contract uses `ProtectProc=` and `ProcSubset=`, which are not
 available on the systemd 239 shipped by RHEL/Rocky 8. RHEL/Rocky 9+ is the
 supported enterprise baseline; use an Ubuntu release whose packaged systemd is
 also at least 247. Source-level compatibility checks on an older distribution
-do not certify these installed production units. Verify the host before
-installing anything:
+do not certify these installed production units. Install Git, Python 3.10 or
+newer with `venv` and `pip`, and Node.js 24 with npm before cloning the release.
+Node.js 24 matches the reviewed CI frontend build lane; an older distro Node
+package may not satisfy the locked Vite dependency's engine requirement.
+Verify the host toolchain before cloning the release:
 
 ```bash
 SYSTEMD_VERSION="$(systemctl --version | awk 'NR == 1 {print $2}')"
@@ -333,6 +336,11 @@ case "${SYSTEMD_VERSION}" in
   ''|*[!0-9]*) echo "unsupported systemd version: ${SYSTEMD_VERSION:-missing}" >&2; exit 1 ;;
 esac
 test "${SYSTEMD_VERSION}" -ge 247
+git --version >/dev/null
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else "Python 3.10+ required")'
+python3 -m venv --help >/dev/null
+test "$(node -p 'process.versions.node.split(".")[0]')" -eq 24
+npm --version >/dev/null
 ```
 
 ```bash
@@ -554,17 +562,38 @@ configuration through the host's secret-management and configuration process.
 
 Install Caddy from its official package repository, copy
 `deploy/caddy/Caddyfile.example` to `/etc/caddy/Caddyfile`, and replace the
-example hostname. Set these protected Caddy environment values:
+example hostname. The packaged `caddy.service` does not inherit variables set
+in an operator's shell. Install the reviewed systemd drop-in so both startup
+and reload receive the proxy credentials:
 
 ```bash
-MARKET_SENTINEL_API_TOKEN="$(openssl rand -hex 32)"
-MARKET_SENTINEL_CADDY_PASSWORD_HASH="$(caddy hash-password --plaintext 'replace-this-password')"
-MARKET_SENTINEL_ALLOWED_ORIGINS="https://analytics.example.com"
+sudo install -d -o root -g root -m 0755 /etc/systemd/system/caddy.service.d
+sudo install -o root -g root -m 0644 \
+  deploy/caddy/market-sentinel-env.conf \
+  /etc/systemd/system/caddy.service.d/market-sentinel-env.conf
+sudo test ! -L /etc/caddy/market-sentinel.env
+if ! sudo test -e /etc/caddy/market-sentinel.env; then
+  sudo install -o root -g root -m 0600 /dev/null /etc/caddy/market-sentinel.env
+fi
+caddy hash-password
+sudoedit /etc/caddy/market-sentinel.env
 ```
 
-Use the same `MARKET_SENTINEL_API_TOKEN` in
-`/etc/market-sentinel/market-sentinel.env`. Generate another value with
-`openssl rand -hex 32` and place the result in that file as
+The `caddy hash-password` command prompts for a password without echoing it;
+copy its hash into the root-owned environment file. Add exactly these two
+assignments, with no shell quotes or `export` prefix:
+
+```text
+MARKET_SENTINEL_API_TOKEN=<same admin token as market-sentinel.env>
+MARKET_SENTINEL_CADDY_PASSWORD_HASH=<hash printed by caddy hash-password>
+```
+
+Generate the admin token once with `openssl rand -hex 32` and put the exact
+same value in both this Caddy file and
+`/etc/market-sentinel/market-sentinel.env`; do not generate a second proxy
+token. Set `MARKET_SENTINEL_ALLOWED_ORIGINS=https://<public-hostname>` in the
+web service environment file, using the hostname in the Caddyfile. Generate
+another value with `openssl rand -hex 32` and place the result in that file as
 `MARKET_SENTINEL_OBSERVABILITY_TOKEN=<generated-value>`. Never reuse the admin
 token for this least-privilege credential. It is accepted only for
 `GET /api/health` and `GET /metrics`; it cannot read state or invoke mutations.
@@ -574,6 +603,26 @@ only `MARKET_SENTINEL_OBSERVABILITY_TOKEN`; the health unit does not load the
 admin environment and fails closed if the observer credential is absent. The
 standalone probe retains admin-token fallback only for local backward
 compatibility when observability-only mode is not requested.
+
+Check the protected Caddy file and service binding before allowing public
+traffic. Validation must use the same file that systemd loads; plain `caddy
+validate` in an interactive shell can expand different values. Restart Caddy
+after changing either the Caddyfile or its environment file, then run the
+public authentication probes described under Deployment evidence:
+
+```bash
+test "$(sudo stat -c '%U:%G:%a' /etc/caddy/market-sentinel.env)" = 'root:root:600'
+sudo systemctl daemon-reload
+sudo systemctl cat caddy.service
+sudo caddy validate --config /etc/caddy/Caddyfile --envfile /etc/caddy/market-sentinel.env
+sudo systemctl enable --now caddy.service
+sudo systemctl restart caddy.service
+sudo systemctl is-active caddy.service
+```
+
+Confirm the drop-in appears in `systemctl cat` with the exact non-optional
+`EnvironmentFile` path. A successful Caddy parse alone does not prove the two
+tokens agree; the authenticated public deployment probe checks that behavior.
 
 The bundled Prometheus scrape configuration reads a third copy from
 `/etc/prometheus/market-sentinel-observability-token`. Unlike the two systemd

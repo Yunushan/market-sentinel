@@ -37,6 +37,7 @@ REQUIRED_SDIST_MEMBERS = {
     "assets/marketsentinel.svg",
     "data/config.example.json",
     "deploy/caddy/Caddyfile.example",
+    "deploy/caddy/market-sentinel-env.conf",
     "deploy/prometheus/market-sentinel-alerts.yml",
     "deploy/prometheus/market-sentinel-attestation-alertmanager.yml.example",
     "deploy/prometheus/market-sentinel-attestation-prometheus.yml.example",
