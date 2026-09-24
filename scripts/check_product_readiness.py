@@ -723,6 +723,31 @@ def _base_sanitized_environment() -> dict[str, str]:
     return {"LANG": "C", "LC_ALL": "C", "NO_COLOR": "1"}
 
 
+def _windows_system_root() -> str:
+    """Get the OS Windows directory without trusting the caller's environment."""
+    import ctypes
+    from ctypes import wintypes
+
+    try:
+        get_system_windows_directory = ctypes.WinDLL(
+            "kernel32", use_last_error=True
+        ).GetSystemWindowsDirectoryW
+        get_system_windows_directory.argtypes = (wintypes.LPWSTR, wintypes.UINT)
+        get_system_windows_directory.restype = wintypes.UINT
+        size = 260
+        while size <= 32768:
+            buffer = ctypes.create_unicode_buffer(size)
+            copied = get_system_windows_directory(buffer, size)
+            if copied == 0:
+                break
+            if copied < size and buffer.value:
+                return buffer.value
+            size = copied + 1
+    except (AttributeError, OSError, ValueError) as exc:
+        raise _ToolTrustError("Windows system directory is unavailable") from exc
+    raise _ToolTrustError("Windows system directory is unavailable")
+
+
 def _trusted_tool_environment(name: str, work_directory: Path) -> dict[str, str]:
     environment = _base_sanitized_environment()
     if name == "git":
@@ -757,6 +782,8 @@ def _trusted_tool_environment(name: str, work_directory: Path) -> dict[str, str]
             "USERPROFILE": str(work_directory),
         }
     )
+    if os.name == "nt":
+        environment["SystemRoot"] = _windows_system_root()
     return environment
 
 
