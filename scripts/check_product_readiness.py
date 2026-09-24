@@ -882,11 +882,15 @@ def _run_local_gates(full: bool) -> dict[str, Any]:
     command = [sys.executable, "-B", "verify.py", "--skip-pip-check"]
     if full:
         command.extend(("--frontend-build", "--frontend-live-smoke"))
+    local_environment = os.environ.copy()
+    for credential_name in ("GH_TOKEN", "GITHUB_TOKEN"):
+        local_environment.pop(credential_name, None)
     started = time.monotonic()
     try:
         result = subprocess.run(
             command,
             cwd=ROOT,
+            env=local_environment,
             capture_output=True,
             text=True,
             check=False,

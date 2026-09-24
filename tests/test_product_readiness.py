@@ -633,6 +633,22 @@ class ProductReadinessTests(unittest.TestCase):
         self.assertNotIn("stdout-secret-value", serialized)
         self.assertNotIn("stderr-secret-value", serialized)
 
+    def test_local_gates_do_not_inherit_github_cli_credentials(self) -> None:
+        from scripts.check_product_readiness import _run_local_gates
+
+        completed = subprocess.CompletedProcess([sys.executable, "verify.py"], 0, "", "")
+        with (
+            patch.dict(os.environ, {"GH_TOKEN": "test-gh-token", "GITHUB_TOKEN": "test-github-token"}),
+            patch("scripts.check_product_readiness.subprocess.run", return_value=completed) as run,
+        ):
+            result = _run_local_gates(False)
+
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(result["status"], "pass")
+        self.assertNotIn("GH_TOKEN", environment)
+        self.assertNotIn("GITHUB_TOKEN", environment)
+        self.assertIn("PATH", environment)
+
     def test_public_live_probe_fails_after_retries(self) -> None:
         calls = 0
 
