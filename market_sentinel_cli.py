@@ -24,6 +24,7 @@ from core.json_validation import loads_strict_json
 from core.request_control import RequestCancelled, cancellation_scope, request_scope
 from core.storage import ConfigLoadError, DEFAULT_CONFIG_PATH, load_config, save_config
 from market_adapters import build_default_registry
+from polymarket import data_api
 from polymarket.http_client import PolymarketHTTPError, PolymarketRateLimitError
 from polymarket.leaderboard import LEADERBOARD_CATEGORIES, normalize_leaderboard_category
 from polymarket.leaderboard_state import LeaderboardStateStore, leaderboard_writer_lock_path
@@ -491,6 +492,74 @@ def _write_streamed_leaderboard_payload(
             stream.write(":")
             json.dump(value, stream, separators=(",", ":"), sort_keys=True)
         stream.write("}\n")
+
+
+def run_polymarket_leaderboard_v2(args: argparse.Namespace) -> int:
+    """Export raw ranked-board observations without treating share volume as USD."""
+    if args.max_pages < 1:
+        raise ValueError("--max-pages must be positive.")
+    cursor = args.cursor or None
+    if cursor and (
+        args.page_size != 1000 or args.sort != "PNL" or args.period != "all" or args.category != "OVERALL"
+    ):
+        raise ValueError("A v2 cursor binds the board; resume with --cursor and no board options.")
+    pages = data_api.iter_leaderboard_v2_pages(
+        limit=args.page_size,
+        cursor=cursor,
+        sort_by=args.sort,
+        period=args.period,
+        category=args.category,
+        max_pages=args.max_pages,
+    )
+    observed = 0
+    fetched = 0
+    next_cursor: Optional[str] = None
+    with _leaderboard_output(args.output) as stream:
+        stream.write('{"rows":[')
+        first = True
+        for page in pages:
+            for row in page["data"]:
+                if not first:
+                    stream.write(",")
+                json.dump(row, stream, separators=(",", ":"), sort_keys=True)
+                first = False
+                observed += 1
+            fetched += 1
+            next_cursor = page["pagination"]["next_cursor"]
+            if next_cursor is None or fetched >= args.max_pages:
+                break
+        metadata = {
+            "source": "polymarket_data_api_v2_leaderboard",
+            "category": None if cursor else args.category,
+            "period": None if cursor else args.period,
+            "sort_by": None if cursor else args.sort,
+            "board_parameters_known": cursor is None,
+            "volume_unit": "outcome_shares",
+            "pnl_basis": (
+                "unknown_cursor_bound_window" if cursor else
+                "realized_lifetime" if args.period == "all" else "marked_equity_change_net_flows"
+            ),
+            "pages_fetched": fetched,
+            "rows_observed": observed,
+            "page_budget": args.max_pages,
+            "completion_reason": "cursor_exhausted" if next_cursor is None else "page_budget_reached",
+            "cursor_exhausted": next_cursor is None,
+            "next_cursor": next_cursor,
+            "consistent_snapshot_verified": False,
+            "all_accounts_covered": False,
+            "source_scope_note": (
+                "Only the selected ranked board was walked. Its offset-shaped cursors can skip or repeat rows "
+                "across a data refresh; even cursor exhaustion does not establish every-account coverage."
+            ),
+        }
+        stream.write("]")
+        for key, value in metadata.items():
+            stream.write(",")
+            json.dump(key, stream)
+            stream.write(":")
+            json.dump(value, stream, separators=(",", ":"), sort_keys=True)
+        stream.write("}\n")
+    return 0
 
 
 def _disk_backed_mdd_options(args: argparse.Namespace) -> Dict[str, Any]:
@@ -3159,6 +3228,19 @@ def build_parser() -> argparse.ArgumentParser:
     leaderboard.add_argument("--output", "-o", default="-", help="Output file path, or - for stdout.")
     leaderboard.add_argument("--quiet", action="store_true", help="Suppress progress and summary messages on stderr.")
     leaderboard.set_defaults(func=run_polymarket_leaderboard)
+
+    leaderboard_v2 = subparsers.add_parser(
+        "polymarket-leaderboard-v2",
+        help="Read raw cursor-paged Polymarket v2 ranked-board rows; volume is shares, not USD.",
+    )
+    leaderboard_v2.add_argument("--sort", choices=["PNL", "VOLUME"], default="PNL")
+    leaderboard_v2.add_argument("--period", choices=["day", "week", "month", "all"], default="all")
+    leaderboard_v2.add_argument("--category", default="OVERALL")
+    leaderboard_v2.add_argument("--page-size", type=int, default=1000, help="First-page size, 1-1000.")
+    leaderboard_v2.add_argument("--max-pages", type=int, default=1, help="Maximum pages this invocation reads; partial results include next_cursor.")
+    leaderboard_v2.add_argument("--cursor", default="", help="Opaque next_cursor from a prior v2 export; omit board options on resume.")
+    leaderboard_v2.add_argument("--output", "-o", default="-", help="Atomic JSON output path, or - for stdout.")
+    leaderboard_v2.set_defaults(func=run_polymarket_leaderboard_v2)
 
     leaderboard_status = subparsers.add_parser(
         "polymarket-leaderboard-status",

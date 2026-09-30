@@ -467,16 +467,20 @@ def _apply_history_coverage(payload: Dict[str, Any], inputs: MddInputs) -> Dict[
         mdd_history_excluded_sources=excluded,
         mdd_source_quality=quality,
     )
-    # A full final page does not prove that the next page is empty. Never
-    # qualify a risk filter using a possibly truncated source window.
-    if capped or invalid_reasons:
-        payload["observed_drawdown"] = {
-            key: payload.get(key) for key in ("mdd_usd", "mdd_pct", "mdd_method", "equity_base_usd")
-        }
+    # A full final page does not prove that the next page is empty. Skipping a
+    # source also leaves an unknown risk window; neither result can qualify a
+    # drawdown filter. Keep the sampled value available as a diagnostic.
+    if capped or excluded or invalid_reasons:
+        if "observed_drawdown" not in payload:
+            payload["observed_drawdown"] = {
+                key: payload.get(key) for key in ("mdd_usd", "mdd_pct", "mdd_method", "equity_base_usd")
+            }
         payload.update(mdd_available=False, mdd_usd=None, mdd_pct=None)
         payload["mdd_unavailable_reasons"] = list(dict.fromkeys([
             *payload.get("mdd_unavailable_reasons", []),
-            *[f"history_limit_reached:{name}" for name in capped], *invalid_reasons,
+            *[f"history_limit_reached:{name}" for name in capped],
+            *[f"history_source_not_requested:{name}" for name in excluded],
+            *invalid_reasons,
         ]))
     return payload
 
@@ -1040,6 +1044,7 @@ def build_mark_replay_mdd_payload(
 
     drawdown = replay["drawdown"]
     incomplete_reasons = [f"history_limit_reached:{name}" for name in base["mdd_history_capped_sources"]]
+    incomplete_reasons.extend(f"history_source_not_requested:{name}" for name in base["mdd_history_excluded_sources"])
     if missing_history_tokens:
         incomplete_reasons.append("missing_price_history")
     if clipped_token_ids:
