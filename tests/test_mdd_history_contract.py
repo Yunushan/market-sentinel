@@ -69,6 +69,34 @@ class MddHistoryContractTests(unittest.TestCase):
         self.assertEqual(payload["mdd_history_status"], "sources_excluded")
         self.assertEqual(payload["mdd_history_excluded_sources"], ["open_positions"])
         self.assertEqual(payload["mdd_history_coverage"]["open_positions"]["returned"], 0)
+        self.assertFalse(payload["mdd_available"])
+        self.assertIsNone(payload["mdd_pct"])
+        self.assertEqual(payload["observed_drawdown"]["mdd_pct"], 5)
+        self.assertIn("history_source_not_requested:open_positions", payload["mdd_unavailable_reasons"])
+
+    def test_api_filter_excludes_unrequested_financial_sources(self):
+        with patch.object(web_api.data_api, "get_leaderboard", return_value=[{"proxyWallet": WALLET, "pnl": 10, "vol": 100}]), patch.object(
+            mdd.data_api, "get_closed_positions", return_value=[CLOSE]
+        ), patch.object(web_api, "attach_polymarket_mdd_audit_cache", return_value={}):
+            result = web_api.polymarket_leaderboard_payload({
+                "max_mdd_pct": ["20"], "equity_base_usd": ["100"], "mdd_history_limit": ["2"],
+                "mdd_open_limit": ["0"], "mdd_activity_limit": ["0"], "mdd_trade_limit": ["0"],
+                "mdd_cache_ttl_seconds": ["0"],
+            })
+        self.assertEqual(result["counts"]["returned"], 0)
+        self.assertEqual(result["counts"]["mdd_unavailable"], 1)
+        self.assertEqual(result["counts"]["mdd_qualified"], 0)
+
+    def test_mark_replay_with_unrequested_open_positions_stays_partial(self):
+        with patch.object(mdd.clob_rest, "get_batch_price_history", return_value={
+            "history": {"token": [{"t": 101, "p": 0.5}]},
+        }):
+            payload = mdd.build_mark_replay_mdd_payload(self.fetch(include_open=False), equity_base_usd=100)
+        self.assertFalse(payload["mdd_available"])
+        self.assertIsNone(payload["mdd_pct"])
+        self.assertEqual(payload["mark_replay"]["status"], "partial")
+        self.assertIn("history_source_not_requested:open_positions", payload["mark_replay"]["incomplete_reasons"])
+        self.assertIsNotNone(payload["mark_replay"]["observed_drawdown"]["mdd_pct"])
 
     def test_coverage_survives_cache_and_returned_mutation_is_isolated(self):
         inputs = self.fetch(closed_limit=1, cache_ttl_seconds=60)

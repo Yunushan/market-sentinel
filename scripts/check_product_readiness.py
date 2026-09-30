@@ -371,6 +371,7 @@ REQUIRED_OPERATIONS_FILES = (
     "scripts/verify_production_deployment.py",
     "scripts/review_deployment_evidence.py",
     "scripts/generate_deployment_evidence.py",
+    "scripts/initialize_production_config.py",
     "scripts/backup_state.py",
     "scripts/restore_state_backup.py",
     "scripts/verify_service_health.py",
@@ -722,6 +723,31 @@ def _base_sanitized_environment() -> dict[str, str]:
     return {"LANG": "C", "LC_ALL": "C", "NO_COLOR": "1"}
 
 
+def _windows_system_root() -> str:
+    """Get the OS Windows directory without trusting the caller's environment."""
+    import ctypes
+    from ctypes import wintypes
+
+    try:
+        get_system_windows_directory = ctypes.WinDLL(
+            "kernel32", use_last_error=True
+        ).GetSystemWindowsDirectoryW
+        get_system_windows_directory.argtypes = (wintypes.LPWSTR, wintypes.UINT)
+        get_system_windows_directory.restype = wintypes.UINT
+        size = 260
+        while size <= 32768:
+            buffer = ctypes.create_unicode_buffer(size)
+            copied = get_system_windows_directory(buffer, size)
+            if copied == 0:
+                break
+            if copied < size and buffer.value:
+                return buffer.value
+            size = copied + 1
+    except (AttributeError, OSError, ValueError) as exc:
+        raise _ToolTrustError("Windows system directory is unavailable") from exc
+    raise _ToolTrustError("Windows system directory is unavailable")
+
+
 def _trusted_tool_environment(name: str, work_directory: Path) -> dict[str, str]:
     environment = _base_sanitized_environment()
     if name == "git":
@@ -756,6 +782,8 @@ def _trusted_tool_environment(name: str, work_directory: Path) -> dict[str, str]
             "USERPROFILE": str(work_directory),
         }
     )
+    if os.name == "nt":
+        environment["SystemRoot"] = _windows_system_root()
     return environment
 
 
@@ -854,11 +882,15 @@ def _run_local_gates(full: bool) -> dict[str, Any]:
     command = [sys.executable, "-B", "verify.py", "--skip-pip-check"]
     if full:
         command.extend(("--frontend-build", "--frontend-live-smoke"))
+    local_environment = os.environ.copy()
+    for credential_name in ("GH_TOKEN", "GITHUB_TOKEN"):
+        local_environment.pop(credential_name, None)
     started = time.monotonic()
     try:
         result = subprocess.run(
             command,
             cwd=ROOT,
+            env=local_environment,
             capture_output=True,
             text=True,
             check=False,
@@ -2519,10 +2551,10 @@ REQUIRED_REPOSITORY_SETTINGS_CHECKS = (
     "branch_require_up_to_date",
     "branch_enforce_admins",
     "branch_require_pull_request",
-    "branch_minimum_approvals",
+    "branch_solo_zero_approvals",
     "branch_dismiss_stale_reviews",
-    "branch_require_code_owner_reviews",
-    "branch_require_last_push_approval",
+    "branch_solo_code_owner_gate_disabled",
+    "branch_solo_last_push_gate_disabled",
     "branch_require_signed_commits",
     "branch_conversation_resolution",
     "branch_linear_history",
@@ -2531,14 +2563,14 @@ REQUIRED_REPOSITORY_SETTINGS_CHECKS = (
 )
 REQUIRED_RELEASE_ENVIRONMENT_CHECKS = (
     "release_required_reviewers",
-    "release_independent_reviewers",
-    "release_prevent_self_review",
+    "release_owner_reviewer",
+    "release_allow_owner_approval",
     "release_deployment_refs",
     "release_signing_secrets",
     "release_windows_code_signing_required",
     "production_required_reviewers",
-    "production_independent_reviewers",
-    "production_prevent_self_review",
+    "production_owner_reviewer",
+    "production_allow_owner_approval",
     "production_protected_branches",
     "production_secrets",
     "production_variables",
@@ -5066,7 +5098,7 @@ def _build_report_with_configured_tools(args: argparse.Namespace) -> dict[str, A
         else "Collect GitHub-attested public-only evidence and keep credentialed/funded stages fail-closed.",
         []
         if live_ok and public_ok
-        else ["Run .github/workflows/polymarket-evidence.yml public-only evidence on the exact protected-main revision."],
+        else ["Dispatch .github/workflows/ci.yml on the exact protected-main revision and supply its attested public-polymarket-live report."],
     )
     if credentialed_ok:
         live["earned"] += 1

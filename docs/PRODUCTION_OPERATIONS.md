@@ -324,8 +324,11 @@ effective sandbox contract uses `ProtectProc=` and `ProcSubset=`, which are not
 available on the systemd 239 shipped by RHEL/Rocky 8. RHEL/Rocky 9+ is the
 supported enterprise baseline; use an Ubuntu release whose packaged systemd is
 also at least 247. Source-level compatibility checks on an older distribution
-do not certify these installed production units. Verify the host before
-installing anything:
+do not certify these installed production units. Install Git, Python 3.10 or
+newer with `venv` and `pip`, and Node.js 24 with npm before cloning the release.
+Node.js 24 matches the reviewed CI frontend build lane; an older distro Node
+package may not satisfy the locked Vite dependency's engine requirement.
+Verify the host toolchain before cloning the release:
 
 ```bash
 SYSTEMD_VERSION="$(systemctl --version | awk 'NR == 1 {print $2}')"
@@ -333,11 +336,16 @@ case "${SYSTEMD_VERSION}" in
   ''|*[!0-9]*) echo "unsupported systemd version: ${SYSTEMD_VERSION:-missing}" >&2; exit 1 ;;
 esac
 test "${SYSTEMD_VERSION}" -ge 247
+git --version >/dev/null
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else "Python 3.10+ required")'
+python3 -m venv --help >/dev/null
+test "$(node -p 'process.versions.node.split(".")[0]')" -eq 24
+npm --version >/dev/null
 ```
 
 ```bash
-sudo useradd --system --home /var/lib/market-sentinel --shell /sbin/nologin market-sentinel
-sudo useradd --system --home /nonexistent --shell /sbin/nologin market-sentinel-health
+sudo useradd --system --user-group --home /var/lib/market-sentinel --shell /sbin/nologin market-sentinel
+sudo useradd --system --user-group --home /nonexistent --shell /sbin/nologin market-sentinel-health
 sudo install -d -o market-sentinel -g market-sentinel -m 0700 /var/lib/market-sentinel
 sudo install -d -o root -g market-sentinel -m 0750 /etc/market-sentinel
 sudo install -m 0600 deploy/systemd/market-sentinel.env.example /etc/market-sentinel/market-sentinel.env
@@ -378,6 +386,24 @@ The bootstrap lock installs the exact setuptools version declared in
 `pyproject.toml` before either source install. Keep build isolation disabled and
 the build-dependency check enabled: permitting an isolated PEP 517 build would
 allow pip to fetch and execute a backend that is outside the reviewed lock.
+
+Initialize the private state file before enabling either worker timer or taking
+the first backup. Run this as the service account from the installed release:
+
+```bash
+sudo -u market-sentinel -g market-sentinel -- \
+  /opt/market-sentinel/.venv/bin/python \
+  /opt/market-sentinel/scripts/initialize_production_config.py
+```
+
+The initializer requires the state directory to be owned by
+`market-sentinel:market-sentinel` with mode `0700`. It creates a new default
+`config.json` through the application's atomic store, or validates an existing
+service-owned mode-`0600` file without rewriting it. An unsafe directory, link,
+malformed file, or competing first write fails closed. Review the output before
+starting services. A missing config is accepted by the read-only `doctor`
+command as defaults, but both bundled worker units require a regular config
+file and the restore drill requires that file in a recent backup.
 
 Before either unattended-worker timer is enabled, replace
 `MARKET_SENTINEL_SOURCE_REVISION` in
@@ -536,17 +562,38 @@ configuration through the host's secret-management and configuration process.
 
 Install Caddy from its official package repository, copy
 `deploy/caddy/Caddyfile.example` to `/etc/caddy/Caddyfile`, and replace the
-example hostname. Set these protected Caddy environment values:
+example hostname. The packaged `caddy.service` does not inherit variables set
+in an operator's shell. Install the reviewed systemd drop-in so both startup
+and reload receive the proxy credentials:
 
 ```bash
-MARKET_SENTINEL_API_TOKEN="$(openssl rand -hex 32)"
-MARKET_SENTINEL_CADDY_PASSWORD_HASH="$(caddy hash-password --plaintext 'replace-this-password')"
-MARKET_SENTINEL_ALLOWED_ORIGINS="https://analytics.example.com"
+sudo install -d -o root -g root -m 0755 /etc/systemd/system/caddy.service.d
+sudo install -o root -g root -m 0644 \
+  deploy/caddy/market-sentinel-env.conf \
+  /etc/systemd/system/caddy.service.d/market-sentinel-env.conf
+sudo test ! -L /etc/caddy/market-sentinel.env
+if ! sudo test -e /etc/caddy/market-sentinel.env; then
+  sudo install -o root -g root -m 0600 /dev/null /etc/caddy/market-sentinel.env
+fi
+caddy hash-password
+sudoedit /etc/caddy/market-sentinel.env
 ```
 
-Use the same `MARKET_SENTINEL_API_TOKEN` in
-`/etc/market-sentinel/market-sentinel.env`. Generate another value with
-`openssl rand -hex 32` and place the result in that file as
+The `caddy hash-password` command prompts for a password without echoing it;
+copy its hash into the root-owned environment file. Add exactly these two
+assignments, with no shell quotes or `export` prefix:
+
+```text
+MARKET_SENTINEL_API_TOKEN=<same admin token as market-sentinel.env>
+MARKET_SENTINEL_CADDY_PASSWORD_HASH=<hash printed by caddy hash-password>
+```
+
+Generate the admin token once with `openssl rand -hex 32` and put the exact
+same value in both this Caddy file and
+`/etc/market-sentinel/market-sentinel.env`; do not generate a second proxy
+token. Set `MARKET_SENTINEL_ALLOWED_ORIGINS=https://<public-hostname>` in the
+web service environment file, using the hostname in the Caddyfile. Generate
+another value with `openssl rand -hex 32` and place the result in that file as
 `MARKET_SENTINEL_OBSERVABILITY_TOKEN=<generated-value>`. Never reuse the admin
 token for this least-privilege credential. It is accepted only for
 `GET /api/health` and `GET /metrics`; it cannot read state or invoke mutations.
@@ -556,6 +603,26 @@ only `MARKET_SENTINEL_OBSERVABILITY_TOKEN`; the health unit does not load the
 admin environment and fails closed if the observer credential is absent. The
 standalone probe retains admin-token fallback only for local backward
 compatibility when observability-only mode is not requested.
+
+Check the protected Caddy file and service binding before allowing public
+traffic. Validation must use the same file that systemd loads; plain `caddy
+validate` in an interactive shell can expand different values. Restart Caddy
+after changing either the Caddyfile or its environment file, then run the
+public authentication probes described under Deployment evidence:
+
+```bash
+test "$(sudo stat -c '%U:%G:%a' /etc/caddy/market-sentinel.env)" = 'root:root:600'
+sudo systemctl daemon-reload
+sudo systemctl cat caddy.service
+sudo caddy validate --config /etc/caddy/Caddyfile --envfile /etc/caddy/market-sentinel.env
+sudo systemctl enable --now caddy.service
+sudo systemctl restart caddy.service
+sudo systemctl is-active caddy.service
+```
+
+Confirm the drop-in appears in `systemctl cat` with the exact non-optional
+`EnvironmentFile` path. A successful Caddy parse alone does not prove the two
+tokens agree; the authenticated public deployment probe checks that behavior.
 
 The bundled Prometheus scrape configuration reads a third copy from
 `/etc/prometheus/market-sentinel-observability-token`. Unlike the two systemd
@@ -624,6 +691,10 @@ URL, private addresses, and reserved example names are rejected. Configure the
 same origin as the protected production environment variable
 `MARKET_SENTINEL_ONCALL_RECEIPT_ORIGIN` and the same token as the protected
 secret `MARKET_SENTINEL_ONCALL_RECEIPT_TOKEN`.
+
+The independent SMTP-backed bridge, its separate-host service configuration,
+and the human acknowledgement procedure are in
+[`ONCALL_RECEIPT_BRIDGE.md`](ONCALL_RECEIPT_BRIDGE.md).
 
 ```bash
 sudo install -d -o root -g prometheus -m 0750 /var/lib/prometheus/market-sentinel-attestation
@@ -830,6 +901,77 @@ For a non-Linux or isolated local loopback smoke test only, add
 ownership checks while retaining versioned health and metrics validation; it is
 not production-host evidence.
 
+### Production rollback drill journal
+
+Run a real rollback drill on the production Linux host before the protected
+deployment-evidence workflow. Prepare complete, reviewed current and prior
+stable releases first: each needs its clean Git checkout, matching installed
+runtime dependencies and frontend build. Keep durable state and the root-owned
+service environment outside both release trees. Preserve a known way to
+reactivate the current release if the rollback fails. The release switch itself
+is an operator action in a second shell; `drill_production_rollback.py` never
+changes Git, service units, symlinks, or application state.
+
+Resolve the two revisions from their reviewed stable tags. Obtain each frontend
+SHA-256 from its reviewed release asset, not by hashing the mutable live tree at
+drill time. Use the protected production provider label, host-identity digest,
+and public origin that the deployment-evidence workflow will use. Put only the
+observability token in the drill process environment; do not pass a token on
+the command line or load the admin or venue environment file. Create the
+report directory before starting:
+
+```bash
+sudo install -d -o root -g root -m 0700 /var/lib/market-sentinel-rollback-drills
+CURRENT_VERSION='<deployed-stable-version>'
+CURRENT_REVISION='<reviewed-current-tag-commit-sha>'
+CURRENT_FRONTEND_SHA256='<reviewed-current-frontend-tree-sha256>'
+ROLLBACK_VERSION='<reviewed-prior-stable-version>'
+ROLLBACK_REVISION='<reviewed-prior-tag-commit-sha>'
+ROLLBACK_FRONTEND_SHA256='<reviewed-prior-frontend-tree-sha256>'
+DEPLOYMENT_PROVIDER='<protected-provider-slug>'
+HOST_ID_SHA256='<protected-machine-id-sha256>'
+PRODUCTION_ORIGIN='https://analytics.example.com'
+
+sudo --preserve-env=MARKET_SENTINEL_OBSERVABILITY_TOKEN \
+  /opt/market-sentinel/.venv/bin/python /opt/market-sentinel/scripts/drill_production_rollback.py \
+  --current-version "${CURRENT_VERSION}" \
+  --current-revision "${CURRENT_REVISION}" \
+  --current-frontend-sha256 "${CURRENT_FRONTEND_SHA256}" \
+  --rollback-version "${ROLLBACK_VERSION}" \
+  --rollback-revision "${ROLLBACK_REVISION}" \
+  --rollback-frontend-sha256 "${ROLLBACK_FRONTEND_SHA256}" \
+  --deployment-provider "${DEPLOYMENT_PROVIDER}" \
+  --expected-host-id-sha256 "${HOST_ID_SHA256}" \
+  --public-origin "${PRODUCTION_ORIGIN}" \
+  --confirm-production-drill I_UNDERSTAND_THIS_RESTARTS_PRODUCTION
+```
+
+The command requires an interactive root session on Linux; there is no dry-run
+mode that can write a successful journal. It first verifies the currently
+running release. At the first prompt, use the prepared release-switch procedure
+in the second shell to activate the prior release and restart
+`market-sentinel-web.service`; type the displayed `ACTIVATED <revision>` phrase
+only after that action. At the second prompt, reactivate the original release,
+restart the service, and type `REACTIVATED <revision>`. The script requires a
+new systemd invocation at each transition and verifies authenticated ready
+health, exact version/source/frontend fingerprints, a clean checked-out Git
+revision, and the frontend files on disk. It writes the verifier's exact five
+ordered observations only after the full current → prior → current sequence.
+Confirm public HTTPS health and both worker timers after the original release
+is restored, then collect deployment evidence within 24 hours.
+
+An existing `latest.json` is copied byte-for-byte to a unique root-private
+`latest.previous-<uuid>.json` before a new attempt invalidates `latest.json`.
+The active report remains `in_progress` or `failed` until every observation
+passes. If any stage fails or is interrupted, the script prompts for immediate
+reactivation and independently checks the current release again. If that
+recovery check cannot pass, follow the prepared manual recovery procedure and
+keep production evidence blocked. A failed journal, even with a verified final
+current release, is never success evidence. The script cannot guarantee
+recovery when a host, service, or operator action fails; an operator must remain
+present for the full drill. Preserve the previous journals and systemd logs for
+the operations record.
+
 ## Monitoring and recovery
 
 - Health: `market-sentinel-health.timer` polls `GET /api/health` through
@@ -923,6 +1065,42 @@ not production-host evidence.
   directory with private permissions, reducing final-component symlink races.
   Start the service loopback-only from the restored state, run the health
   check, and confirm no live trading is enabled by restored configuration.
+- Copied-backup drill: on a separate recovery host, obtain a backup archive and
+  its adjacent `.json` manifest through the operator's encrypted backup
+  transport. Record the archive SHA-256 and backup creation timestamp from the
+  trusted source inventory *before* transferring the pair; do not read either
+  expected value from the recovered manifest. Install the reviewed release and
+  frontend on the recovery host, make a private parent directory for the new
+  restore destination, then run:
+
+  ```bash
+  /opt/market-sentinel/.venv/bin/python /opt/market-sentinel/scripts/drill_state_recovery.py \
+    --archive /mnt/recovered-backups/<archive>.tar.gz \
+    --destination /var/lib/market-sentinel-recovery-drill/<new-state-directory> \
+    --expected-sha256 '<source-inventory-archive-sha256>' \
+    --expected-created-at '<source-inventory-created-at-utc>' \
+    --frontend-dir /opt/market-sentinel/frontend/dist \
+    --expected-version '<reviewed-release-version>' \
+    --expected-source-revision '<reviewed-release-commit>' \
+    --expected-frontend-sha256 '<reviewed-frontend-sha256>' \
+    --max-backup-age-seconds 93600 \
+    --max-restore-validation-seconds 300
+  ```
+
+  The command verifies the copied pair, refuses a pre-existing destination,
+  restores it privately, checks its file inventory, and boots the isolated
+  read-only application probe without credentials or venue access. It emits
+  backup age at drill start and elapsed time from local archive verification
+  through application validation, and exits unsuccessfully if either exceeds
+  the chosen limit. Preserve the JSON output, source inventory, transfer log,
+  and host identity in the operations record. A failed run can leave a private
+  partial restore for investigation; use a new destination for any retry. The
+  script cannot establish that the copy was truly off-host or authenticate the
+  source inventory by itself.
+  Backup age is a conservative freshness bound, not measured data-loss RPO;
+  elapsed restore-validation time excludes incident detection, host provisioning,
+  archive transfer, and public-service cutover, so it is not end-to-end RTO.
+  This diagnostic report is not accepted as production-readiness score evidence.
 - Configuration recovery: an existing malformed `config.json` now fails closed
   and is never silently replaced with defaults. Stop the service and use the
   restore command above to extract the most recent verified backup into a

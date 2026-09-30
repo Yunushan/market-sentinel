@@ -1,0 +1,13 @@
+# Run this on a host separate from the Market Sentinel production server.
+# Set a real public DNS name; Caddy obtains and renews its HTTPS certificate.
+receipts.example.com {
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        Cache-Control "no-store"
+        -Server
+    }
+
+    reverse_proxy 127.0.0.1:19095
+}

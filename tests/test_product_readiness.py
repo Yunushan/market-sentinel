@@ -633,6 +633,22 @@ class ProductReadinessTests(unittest.TestCase):
         self.assertNotIn("stdout-secret-value", serialized)
         self.assertNotIn("stderr-secret-value", serialized)
 
+    def test_local_gates_do_not_inherit_github_cli_credentials(self) -> None:
+        from scripts.check_product_readiness import _run_local_gates
+
+        completed = subprocess.CompletedProcess([sys.executable, "verify.py"], 0, "", "")
+        with (
+            patch.dict(os.environ, {"GH_TOKEN": "test-gh-token", "GITHUB_TOKEN": "test-github-token"}),
+            patch("scripts.check_product_readiness.subprocess.run", return_value=completed) as run,
+        ):
+            result = _run_local_gates(False)
+
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(result["status"], "pass")
+        self.assertNotIn("GH_TOKEN", environment)
+        self.assertNotIn("GITHUB_TOKEN", environment)
+        self.assertIn("PATH", environment)
+
     def test_public_live_probe_fails_after_retries(self) -> None:
         calls = 0
 
@@ -1174,6 +1190,31 @@ class ProductReadinessTests(unittest.TestCase):
                 required_checks=REQUIRED_RELEASE_ENVIRONMENT_CHECKS,
             )
 
+            legacy_checks = {
+                "release_owner_reviewer": "release_independent_reviewers",
+                "release_allow_owner_approval": "release_prevent_self_review",
+                "production_owner_reviewer": "production_independent_reviewers",
+                "production_allow_owner_approval": "production_prevent_self_review",
+            }
+            path.write_text(
+                json.dumps(
+                    {
+                        **base,
+                        "checks": [
+                            {"name": legacy_checks.get(name, name), "status": "pass"}
+                            for name in REQUIRED_RELEASE_ENVIRONMENT_CHECKS
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            legacy, legacy_detail = _reviewed_evidence(
+                str(path),
+                "release-environment",
+                evidence_type="release-environment",
+                required_checks=REQUIRED_RELEASE_ENVIRONMENT_CHECKS,
+            )
+
             path.write_text(
                 json.dumps(
                     {
@@ -1199,6 +1240,8 @@ class ProductReadinessTests(unittest.TestCase):
         self.assertFalse(incomplete)
         self.assertIn("missing required checks", detail)
         self.assertTrue(complete, complete_detail)
+        self.assertFalse(legacy)
+        self.assertIn("missing required checks", legacy_detail)
         self.assertFalse(unknown)
         self.assertIn("unknown checks", unknown_detail)
 
@@ -1737,9 +1780,11 @@ class ProductReadinessTests(unittest.TestCase):
             _ToolTrustContext,
             _resolve_executable_identity,
             _run_gh_json,
+            _windows_system_root,
         )
 
         identity = _resolve_executable_identity("git", require_pin=False)
+        expected_system_root = _windows_system_root() if os.name == "nt" else None
         context = _ToolTrustContext(
             external_awards_requested=True,
             pins={"gh": identity.sha256},
@@ -1758,6 +1803,8 @@ class ProductReadinessTests(unittest.TestCase):
                         "GH_DEBUG": "api",
                         "HTTPS_PROXY": "http://attacker.invalid",
                         "GIT_DIR": "attacker-git-dir",
+                        "SystemRoot": "attacker-system-root",
+                        "WINDIR": "attacker-windows-directory",
                     },
                     clear=False,
                 ),
@@ -1783,9 +1830,21 @@ class ProductReadinessTests(unittest.TestCase):
         self.assertEqual(environment["GH_HOST"], "github.com")
         self.assertEqual(environment["GH_PROMPT_DISABLED"], "1")
         self.assertEqual(environment["GH_TOKEN"], "test-token")
-        for name in ("GH_DEBUG", "HTTPS_PROXY", "GIT_DIR", "PATH"):
+        if expected_system_root is not None:
+            self.assertEqual(environment["SystemRoot"], expected_system_root)
+        else:
+            self.assertNotIn("SystemRoot", environment)
+        for name in ("GH_DEBUG", "HTTPS_PROXY", "GIT_DIR", "PATH", "WINDIR"):
             self.assertNotIn(name, environment)
         self.assertNotEqual(environment["GH_CONFIG_DIR"], "attacker-config")
+
+    @unittest.skipUnless(os.name == "nt", "Windows system directory API is Windows-only")
+    def test_trusted_gh_fails_closed_when_windows_system_directory_is_unavailable(self) -> None:
+        from scripts.check_product_readiness import _ToolTrustError, _windows_system_root
+
+        with patch("ctypes.WinDLL", side_effect=OSError("system API unavailable")):
+            with self.assertRaisesRegex(_ToolTrustError, "Windows system directory"):
+                _windows_system_root()
 
     def test_trusted_tool_replacement_after_execution_is_rejected(self) -> None:
         from scripts.check_product_readiness import (
