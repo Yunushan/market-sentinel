@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 import test_app_logic as helpers
 from app import App, CopyActivityOutcome, WalletActivityTask
-from core.models import AppConfig, PaperTradeRecord, PriceAlert, WalletWatch
+from core.models import AppConfig, MAX_ALERTS, PaperTradeRecord, PriceAlert, WalletWatch
 from core.storage import load_config, save_config
 
 
@@ -28,6 +28,107 @@ class DesktopConfigPersistenceTests(unittest.TestCase):
     def bind_store(self, harness) -> None:
         save_config(harness.cfg, self.path)
         self.writer = self.contexts.enter_context(patch("app.save_config", side_effect=lambda cfg: save_config(cfg, self.path)))
+
+    @staticmethod
+    def alert_creation_harness():
+        registry = Mock()
+        registry.create.return_value = SimpleNamespace(capabilities=SimpleNamespace(alerts=True))
+        return SimpleNamespace(
+            cfg=AppConfig(), adapter_registry=registry,
+            _selected_token_id="token", _selected_alert_market_id="polymarket",
+            alert_label_entry=helpers.FakeEntry("Price crossing"),
+            alert_threshold_entry=helpers.FakeEntry("0.5"),
+            alert_dir_var=helpers.FakeVar("above"), alert_src_var=helpers.FakeVar("last_trade"),
+            alert_once_var=helpers.FakeVar(True), market_ws=SimpleNamespace(subscribe=Mock()),
+            _refresh_alert_table=Mock(), status_var=helpers.FakeVar(), ui_queue=queue.Queue(),
+        )
+
+    def test_invalid_alert_input_preserves_storage_and_allows_corrected_add_without_restart(self) -> None:
+        invalid_inputs = (
+            ("label", "x" * 513), ("token", "x" * 257),
+            ("label", "Price\tcrossing"), ("token", "token\nsecond"),
+            ("direction", "sideways"), ("source", "unknown"),
+        )
+        for index, (field, value) in enumerate(invalid_inputs):
+            with self.subTest(field=field, value=value):
+                self.path = Path(self.directory.name) / f"invalid-alert-{index}.json"
+                harness = self.alert_creation_harness()
+                if field == "token":
+                    harness._selected_token_id = value
+                else:
+                    {
+                        "label": harness.alert_label_entry,
+                        "direction": harness.alert_dir_var,
+                        "source": harness.alert_src_var,
+                    }[field].set(value)
+                self.bind_store(harness)
+                before = self.path.read_bytes()
+                original = harness.cfg.to_dict()
+                self.error.reset_mock()
+                App.add_alert(harness)
+                self.writer.assert_not_called()
+                self.assertEqual(harness.cfg.to_dict(), original)
+                self.assertEqual(self.path.read_bytes(), before)
+                self.assertFalse(getattr(harness, "_config_persistence_error", ""))
+                self.error.assert_called_once()
+                self.assertEqual(self.error.call_args.args[0], "Invalid alert")
+                harness.market_ws.subscribe.assert_not_called()
+                harness._refresh_alert_table.assert_not_called()
+                self.assertTrue(harness.ui_queue.empty())
+
+                harness._selected_token_id = "corrected-token"
+                harness.alert_label_entry.set("Corrected crossing")
+                harness.alert_dir_var.set("above")
+                harness.alert_src_var.set("last_trade")
+                self.error.reset_mock()
+                App.add_alert(harness)
+                self.writer.assert_called_once()
+                self.error.assert_not_called()
+                self.assertFalse(getattr(harness, "_config_persistence_error", ""))
+                self.assertEqual(len(harness.cfg.alerts), 1)
+                self.assertEqual(harness.cfg.to_dict(), load_config(self.path).to_dict())
+                harness.market_ws.subscribe.assert_called_once_with(["corrected-token"])
+                harness._refresh_alert_table.assert_called_once()
+                self.assertEqual(harness.status_var.get(), "Alert added.")
+
+    def test_alert_text_and_probability_boundaries_persist_without_truncation(self) -> None:
+        for threshold in ("0", "1"):
+            with self.subTest(threshold=threshold):
+                self.path = Path(self.directory.name) / f"boundary-alert-{threshold}.json"
+                harness = self.alert_creation_harness()
+                harness._selected_token_id = "t" * 256
+                harness.alert_label_entry.set("x" * 512)
+                harness.alert_threshold_entry.set(threshold)
+                self.bind_store(harness)
+                App.add_alert(harness)
+                self.writer.assert_called_once()
+                self.error.assert_not_called()
+                saved = load_config(self.path).alerts[0]
+                self.assertEqual(saved.token_id, "t" * 256)
+                self.assertEqual(saved.label, "x" * 512)
+                self.assertEqual(saved.threshold, float(threshold))
+                self.assertFalse(getattr(harness, "_config_persistence_error", ""))
+
+    def test_alert_capacity_rejection_preserves_a_valid_store_without_pausing(self) -> None:
+        harness = self.alert_creation_harness()
+        harness.cfg.alerts = [
+            PriceAlert(id=f"alert-{index}", token_id=f"token-{index}", label="Existing",
+                       direction="above", threshold=0.5)
+            for index in range(MAX_ALERTS)
+        ]
+        self.bind_store(harness)
+        before = self.path.read_bytes()
+        original = harness.cfg.to_dict()
+        App.add_alert(harness)
+        self.writer.assert_not_called()
+        self.assertEqual(harness.cfg.to_dict(), original)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertFalse(getattr(harness, "_config_persistence_error", ""))
+        self.error.assert_called_once()
+        self.assertEqual(self.error.call_args.args[0], "Alert limit reached")
+        harness.market_ws.subscribe.assert_not_called()
+        harness._refresh_alert_table.assert_not_called()
+        self.assertTrue(harness.ui_queue.empty())
 
     @staticmethod
     def armed_copy_harness():
@@ -242,6 +343,82 @@ class DesktopConfigPersistenceTests(unittest.TestCase):
         alert = PriceAlert(token_id="token", label="test", direction="above", threshold=0.5)
         harness = helpers.AlertHarness(alert, 0.8)
         harness._config_persistence_error = "Restart required"
+        before = harness.cfg.to_dict()
+        with patch("app.save_config") as writer:
+            App._eval_alerts_for_contract(harness, "polymarket", "token")
+        self.assertEqual(harness.cfg.to_dict(), before)
+        self.assertEqual(harness.fired, [])
+        writer.assert_not_called()
+
+    def test_alert_popup_follows_complete_durable_notification_commit(self) -> None:
+        alert = PriceAlert(token_id="token", label="test", direction="above", threshold=0.5)
+        harness = helpers.AlertHarness(alert, 0.8)
+        self.bind_store(harness)
+
+        def observe(candidate):
+            self.assertEqual(harness.fired, [])
+            self.assertTrue(harness.cfg.alerts[0].enabled)
+            self.assertEqual(harness.cfg.alert_events, [])
+            self.assertEqual(len(candidate.alert_events), 1)
+            save_config(candidate, self.path)
+
+        self.writer.side_effect = observe
+        App._eval_alerts_for_contract(harness, "polymarket", "token")
+        self.assertEqual(harness.fired, [(alert.id, 0.8)])
+        self.assertEqual(harness.cfg.to_dict(), load_config(self.path).to_dict())
+        self.assertEqual(len(harness.cfg.alert_events), 1)
+
+    def test_failed_alert_commit_preserves_trigger_and_suppresses_popup(self) -> None:
+        alert = PriceAlert(token_id="token", label="test", direction="above", threshold=0.5)
+        harness = helpers.AlertHarness(alert, 0.8)
+        self.bind_store(harness)
+        before = harness.cfg.to_dict()
+        with patch("core.storage.replace_file", side_effect=OSError("disk unavailable")):
+            App._eval_alerts_for_contract(harness, "polymarket", "token")
+        self.assertEqual(harness.fired, [])
+        self.assertEqual(harness.cfg.to_dict(), before)
+        self.assertEqual(load_config(self.path).to_dict(), before)
+        self.assertTrue(harness._config_persistence_error)
+
+    def test_invalid_desktop_quotes_never_coerce_or_consume_a_crossing(self) -> None:
+        for source in ("last_trade", "midpoint", "best_bid", "best_ask"):
+            for value in (True, False, float("nan"), -1, 2, "bad"):
+                with self.subTest(source=source, value=value):
+                    alert = PriceAlert(token_id="token", label="test", direction="above", threshold=0.5, source=source)
+                    harness = helpers.AlertHarness(alert, 0.25)
+                    harness.ui_queue = queue.Queue()
+                    harness._eval_alerts_for_contract = lambda *args, target=harness: App._eval_alerts_for_contract(target, *args)
+                    before = harness.cfg.to_dict()
+                    price_before = {key: dict(values) for key, values in harness.price_state.items()}
+                    with patch("app.save_config") as writer:
+                        App._update_adapter_price_state(harness, {
+                            "market_id": "polymarket", "contract_id": "token", "values": {source: value},
+                        })
+                    self.assertEqual(harness.cfg.to_dict(), before)
+                    self.assertEqual(harness.price_state, price_before)
+                    self.assertEqual(harness.fired, [])
+                    writer.assert_not_called()
+        for update in (
+            {"event_type": "last_trade_price", "asset_id": "token", "price": True},
+            {"event_type": "best_bid_ask", "asset_id": "token", "best_bid": 0.75, "best_ask": True},
+            {"event_type": "price_change", "price_changes": [{"asset_id": "token", "best_bid": True}]},
+            {"event_type": "book", "asset_id": "token", "bids": [{"price": True}]},
+        ):
+            harness = helpers.AlertHarness(PriceAlert(token_id="token", label="test", direction="above", threshold=0.5), 0.25)
+            harness.ui_queue = queue.Queue()
+            harness._eval_alerts_for_contract = lambda *args, target=harness: App._eval_alerts_for_contract(target, *args)
+            before = harness.cfg.to_dict()
+            with patch("app.save_config") as writer:
+                App._update_price_state(harness, update)
+            self.assertEqual(harness.cfg.to_dict(), before)
+            self.assertEqual(harness.price_state, {"token": {"last_trade": 0.25}})
+            writer.assert_not_called()
+
+    def test_invalid_retained_desktop_price_preserves_config_without_popup(self) -> None:
+        alert = PriceAlert(token_id="token", label="test", direction="above", threshold=0.5)
+        alert.last_value = True
+        harness = helpers.AlertHarness(alert, 0.75)
+        harness.ui_queue = queue.Queue()
         before = harness.cfg.to_dict()
         with patch("app.save_config") as writer:
             App._eval_alerts_for_contract(harness, "polymarket", "token")

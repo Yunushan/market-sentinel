@@ -25,14 +25,18 @@ from dotenv import load_dotenv
 
 from core.atomic_files import atomic_text_writer
 from core.models import (
+    AlertEventCapacityError,
     AppConfig,
     CopyActivityOutboxEntry,
     CopyActivityState,
     CopyTradeSettings,
+    MAX_ALERTS,
+    MAX_WALLETS,
     MarketConfig,
     PaperTradeRecord,
     PriceAlert,
     WalletWatch,
+    alert_probability,
 )
 from core.storage import ConfigCommitError, ConfigConflictError, ConfigLoadError, load_config, save_config
 from market_adapters import build_default_registry
@@ -737,17 +741,9 @@ class AdapterPricePoller:
 
     @staticmethod
     def _snapshot_values(snapshot: PriceSnapshot) -> Dict[str, Optional[float]]:
-        bid = snapshot.bid
-        ask = snapshot.ask
-        midpoint = snapshot.midpoint
-        if midpoint is None and bid is not None and ask is not None:
-            midpoint = (bid + ask) / 2.0
-        return {
-            "last_trade": snapshot.last,
-            "midpoint": midpoint,
-            "best_bid": bid,
-            "best_ask": ask,
-        }
+        from web_api import price_snapshot_values
+
+        return price_snapshot_values(snapshot)
 
 
 # ---------------------------
@@ -2729,12 +2725,24 @@ class App(tk.Tk):
         user = self._selected_leaderboard_display_name() or str(row.get("wallet") or "").strip()
         self._copy_text_to_clipboard(user, "user")
 
+    def _can_add_wallet_watch(self) -> bool:
+        if len(self.cfg.wallets) < MAX_WALLETS:
+            return True
+        messagebox.showerror(
+            "Wallet watch limit",
+            f"The maximum of {MAX_WALLETS:,} wallet watches has been reached. "
+            "Remove an existing watch before adding another.",
+        )
+        return False
+
     def _ensure_wallet_watch_from_leaderboard(self, wallet: str, display_name: str = "") -> bool:
         wallet = wallet.lower().strip()
         if not is_wallet_address(wallet):
             messagebox.showerror("Polymarket analytics", "Selected row does not contain a valid wallet address.")
             return False
         if any(str(w.wallet).lower() == wallet for w in self.cfg.wallets):
+            return False
+        if not App._can_add_wallet_watch(self):
             return False
         watch = WalletWatch(wallet=wallet, display_name=display_name, enabled=True)
         if not App._persist_config_changes(self, wallets=[*self.cfg.wallets, watch]):
@@ -2753,6 +2761,8 @@ class App(tk.Tk):
         added = self._ensure_wallet_watch_from_leaderboard(wallet, display_name)
         if getattr(self, "_config_persistence_error", ""):
             return
+        if not added and not any(str(w.wallet).lower() == wallet for w in self.cfg.wallets):
+            return
         if added:
             message = f"Tracking wallet: {wallet}"
         else:
@@ -2770,6 +2780,8 @@ class App(tk.Tk):
         if follow_wallets is None:
             return
         tracked = not any(str(w.wallet).lower() == wallet for w in self.cfg.wallets)
+        if tracked and not App._can_add_wallet_watch(self):
+            return
         watches = list(self.cfg.wallets)
         if tracked:
             watches.append(WalletWatch(wallet=wallet, display_name=display_name, enabled=True))
@@ -3451,6 +3463,15 @@ class App(tk.Tk):
             enabled=True,
             market_id=market_id,
         )
+        try:
+            a.validate_notification_text()
+            a.validate_price_controls()
+        except ValueError as exc:
+            messagebox.showerror("Invalid alert", str(exc))
+            return
+        if len(self.cfg.alerts) >= MAX_ALERTS:
+            messagebox.showerror("Alert limit reached", f"Delete an alert before adding another (limit: {MAX_ALERTS}).")
+            return
         if not App._persist_config_changes(self, alerts=[*self.cfg.alerts, a]):
             return
         self._refresh_alert_table()
@@ -4675,6 +4696,8 @@ class App(tk.Tk):
         if any(w.wallet == wallet for w in self.cfg.wallets):
             messagebox.showinfo("Already tracked", "This wallet is already being tracked.")
             return
+        if not App._can_add_wallet_watch(self):
+            return
 
         ww = WalletWatch(wallet=wallet, display_name=display_name, enabled=True)
         if not App._persist_config_changes(self, wallets=[*self.cfg.wallets, ww]):
@@ -5133,70 +5156,38 @@ class App(tk.Tk):
 
         if et == "last_trade_price":
             token_id = str(ev.get("asset_id") or "")
-            price = safe_float(ev.get("price"))
-            if not token_id or price is None:
-                return
-            st = self.price_state.setdefault(self._price_state_key("polymarket", token_id), {})
-            st["last_trade"] = price
-            # Evaluate alerts
-            self._eval_alerts_for_contract("polymarket", token_id)
+            values = {"last_trade": ev.get("price")}
 
         elif et == "best_bid_ask":
             token_id = str(ev.get("asset_id") or "")
-            bid = safe_float(ev.get("best_bid"))
-            ask = safe_float(ev.get("best_ask"))
-            if not token_id:
-                return
-            st = self.price_state.setdefault(self._price_state_key("polymarket", token_id), {})
-            if bid is not None:
-                st["best_bid"] = bid
-            if ask is not None:
-                st["best_ask"] = ask
-            if st.get("best_bid") is not None and st.get("best_ask") is not None:
-                st["midpoint"] = (st["best_bid"] + st["best_ask"]) / 2.0  # type: ignore
-            self._eval_alerts_for_contract("polymarket", token_id)
+            values = {"best_bid": ev.get("best_bid"), "best_ask": ev.get("best_ask")}
 
         elif et == "price_change":
             changes = ev.get("price_changes") or []
             if not isinstance(changes, list):
                 return
             for ch in changes:
-                token_id = str(ch.get("asset_id") or "")
-                if not token_id:
-                    continue
-                bid = safe_float(ch.get("best_bid"))
-                ask = safe_float(ch.get("best_ask"))
-                st = self.price_state.setdefault(self._price_state_key("polymarket", token_id), {})
-                if bid is not None:
-                    st["best_bid"] = bid
-                if ask is not None:
-                    st["best_ask"] = ask
-                if st.get("best_bid") is not None and st.get("best_ask") is not None:
-                    st["midpoint"] = (st["best_bid"] + st["best_ask"]) / 2.0  # type: ignore
-                self._eval_alerts_for_contract("polymarket", token_id)
+                if isinstance(ch, dict):
+                    App._update_adapter_price_state(self, {
+                        "market_id": "polymarket", "contract_id": str(ch.get("asset_id") or ""),
+                        "values": {"best_bid": ch.get("best_bid"), "best_ask": ch.get("best_ask")},
+                    })
+            return
 
         elif et == "book":
             token_id = str(ev.get("asset_id") or "")
-            if not token_id:
-                return
-            bid = ask = None
             try:
                 bids = ev.get("bids") or ev.get("buys") or []
                 asks = ev.get("asks") or ev.get("sells") or []
-                if bids:
-                    bid = safe_float(bids[0].get("price"))
-                if asks:
-                    ask = safe_float(asks[0].get("price"))
-            except Exception:
-                pass
-            st = self.price_state.setdefault(self._price_state_key("polymarket", token_id), {})
-            if bid is not None:
-                st["best_bid"] = bid
-            if ask is not None:
-                st["best_ask"] = ask
-            if st.get("best_bid") is not None and st.get("best_ask") is not None:
-                st["midpoint"] = (st["best_bid"] + st["best_ask"]) / 2.0  # type: ignore
-            self._eval_alerts_for_contract("polymarket", token_id)
+                values = {"best_bid": bids[0].get("price") if bids else None,
+                          "best_ask": asks[0].get("price") if asks else None}
+            except (AttributeError, IndexError, KeyError, TypeError):
+                return
+        else:
+            return
+        App._update_adapter_price_state(self, {
+            "market_id": "polymarket", "contract_id": token_id, "values": values,
+        })
 
     def _eval_alerts_for_token(self, token_id: str):
         App._eval_alerts_for_contract(self, "polymarket", token_id)
@@ -5207,59 +5198,60 @@ class App(tk.Tk):
         values = payload.get("values") if isinstance(payload.get("values"), dict) else {}
         if not market_id or not contract_id:
             return
+        try:
+            validated = {
+                key: alert_probability(values.get(key), key, allow_unavailable=True)
+                for key in ("last_trade", "midpoint", "best_bid", "best_ask")
+            }
+        except ValueError as exc:
+            self.ui_queue.put(("log", f"[alerts] Invalid price update: {exc}"))
+            return
+        if all(value is None for value in validated.values()):
+            return
         st = self.price_state.setdefault(App._price_state_key(market_id, contract_id), {})
-        for key in ("last_trade", "midpoint", "best_bid", "best_ask"):
-            value = safe_float(values.get(key), None)
+        for key, value in validated.items():
             if value is not None:
                 st[key] = value
+        if validated["midpoint"] is None and st.get("best_bid") is not None and st.get("best_ask") is not None:
+            st["midpoint"] = (st["best_bid"] + st["best_ask"]) / 2.0
         self._eval_alerts_for_contract(market_id, contract_id)
 
     def _eval_alerts_for_contract(self, market_id: str, contract_id: str):
         if getattr(self, "_config_persistence_error", ""):
             return
+        from web_api import evaluate_alerts_for_contract
+
         normalized_market = str(market_id or "polymarket").strip().lower()
         st = self.price_state.get(App._price_state_key(normalized_market, contract_id)) or {}
-        # evaluate all alerts for this token
-        changed = False
-        for a in self.cfg.alerts:
-            if not a.enabled:
-                continue
-            if App._alert_market_id(a) != normalized_market:
-                continue
-            if a.token_id != contract_id:
-                continue
-
-            val = st.get(a.source)
-            if val is None:
-                continue
-
-            prev = a.last_value
-            a.last_value = float(val)
-
-            cond_now = (val >= a.threshold) if a.direction == "above" else (val <= a.threshold)
-            cond_prev = None
-            if prev is not None:
-                cond_prev = (prev >= a.threshold) if a.direction == "above" else (prev <= a.threshold)
-
-            # Trigger only on crossing into the condition
-            crossed = cond_now and (cond_prev is False or cond_prev is None)
-
-            if crossed and not a.triggered:
-                a.triggered = True
-                changed = True
-                self._fire_alert(a, val)
-
-                if a.once:
-                    a.enabled = False
-
-            # For repeat alerts: reset triggered flag when condition becomes false again
-            if not a.once and a.triggered and not cond_now:
-                a.triggered = False
-                changed = True
-
-        if changed:
-            App._save_runtime_config(self)
-            self._refresh_alert_table()
+        candidate = copy(self.cfg)
+        candidate.alerts = [copy(item) for item in self.cfg.alerts]
+        candidate.alert_events = list(self.cfg.alert_events)
+        previous_ids = {event.id for event in candidate.alert_events}
+        try:
+            evaluate_alerts_for_contract(
+                candidate, normalized_market, contract_id, {(normalized_market, contract_id): st},
+            )
+        except AlertEventCapacityError as exc:
+            messagebox.showwarning("Alert notifications full", str(exc))
+            return
+        except ValueError as exc:
+            self.ui_queue.put(("log", f"[alerts] Invalid price update: {exc}"))
+            return
+        if ([item.to_dict() for item in candidate.alerts] == [item.to_dict() for item in self.cfg.alerts]
+                and candidate.alert_events == self.cfg.alert_events):
+            return
+        original_alerts = self.cfg.alerts
+        if not App._persist_config_changes(self, alerts=candidate.alerts, alert_events=candidate.alert_events):
+            return
+        # Preserve existing alert references after the complete durable commit.
+        for original, committed in zip(original_alerts, candidate.alerts, strict=True):
+            original.__dict__.update(committed.__dict__)
+        self.cfg.alerts = original_alerts
+        self._refresh_alert_table()
+        for event in self.cfg.alert_events:
+            if event.id not in previous_ids:
+                committed = next(item for item in self.cfg.alerts if item.id == event.alert_id)
+                self._fire_alert(committed, event.value)
 
     def _fire_alert(self, alert: PriceAlert, value: float):
         msg = (

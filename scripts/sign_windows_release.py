@@ -251,6 +251,8 @@ def sign_files(
 
 
 def main() -> int:
+    if ".github/workflows/release.yml@" in os.environ.get("GITHUB_WORKFLOW_REF", ""):
+        raise SystemExit("Exportable PFX signing is a development utility and cannot sign the production release workflow.")
     parser = argparse.ArgumentParser(description="Sign and verify Windows MarketSentinel release files.")
     parser.add_argument("--path", action="append", required=True, type=Path, help="EXE or MSI file to sign.")
     parser.add_argument(

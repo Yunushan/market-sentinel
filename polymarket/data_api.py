@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 from .endpoints import DATA_ENDPOINTS
 from .http_client import PolymarketResponseError, PolymarketValidationError, comma_join, request_bytes, request_json
 from .leaderboard import LEADERBOARD_MAX_OFFSET, normalize_leaderboard_category
+from .leaderboard_validation import source_leaderboard_fields
 
 
 def _get_json(endpoint_name: str, *, params: Optional[Mapping[str, Any]] = None, timeout: float = 15.0) -> Any:
@@ -27,6 +28,46 @@ def _history_payload(data: Any, endpoint: str) -> List[Dict[str, Any]]:
     if not isinstance(data, list) or any(not isinstance(row, dict) for row in data):
         raise PolymarketResponseError(f"{endpoint} must return an array of history objects; completeness is unknown.")
     return data
+
+
+def _reject_leaderboard_error_envelope(data: Mapping[str, Any]) -> None:
+    for key in ("error", "errors", "errorMessage", "error_message"):
+        if key in data and data[key] is not None and data[key] != "" and not (key == "errors" and data[key] == []):
+            raise PolymarketResponseError("Leaderboard returned an error envelope; board coverage is unknown.")
+    failed = {"error", "failed", "failure", "fail", "unavailable", "invalid_request", "internal_error",
+              "unauthorized", "forbidden", "not_found", "rate_limited", "timeout"}
+    for key in ("status", "status_code", "statusCode", "code"):
+        value = data.get(key)
+        if value is False:
+            raise PolymarketResponseError("Leaderboard returned a failed status; board coverage is unknown.")
+        if isinstance(value, str):
+            clean = value.strip().lower()
+            if clean in failed or (clean.isdigit() and int(clean) >= 400):
+                raise PolymarketResponseError("Leaderboard returned a failed status; board coverage is unknown.")
+        elif isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 400:
+            raise PolymarketResponseError("Leaderboard returned a failed status; board coverage is unknown.")
+    for key in ("success", "ok"):
+        value = data.get(key)
+        if value is False or (isinstance(value, (int, float)) and value == 0) or (
+            isinstance(value, str) and value.strip().lower() in {"false", "0", "failed", "failure"}
+        ):
+            raise PolymarketResponseError("Leaderboard returned a failed status; board coverage is unknown.")
+
+
+def _leaderboard_payload(data: Any) -> List[Dict[str, Any]]:
+    """Do not turn upstream errors or discarded rows into source exhaustion."""
+    rows = data
+    if isinstance(data, dict):
+        _reject_leaderboard_error_envelope(data)
+        candidates = [data[key] for key in ("data", "leaderboard", "users", "results") if key in data]
+        if not candidates or any(candidate != candidates[0] for candidate in candidates[1:]):
+            raise PolymarketResponseError("Leaderboard row envelope is missing or contradictory; board coverage is unknown.")
+        rows = candidates[0]
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise PolymarketResponseError("Leaderboard must return an array of row objects; board coverage is unknown.")
+    for row in rows:
+        source_leaderboard_fields(row)
+    return rows
 
 
 def get_activity(
@@ -178,7 +219,7 @@ def get_leaderboard(
         "timePeriod": clean_period,
         "category": clean_category,
     }
-    return _list_payload(_get_json("leaderboard", params=params, timeout=timeout), ["data", "leaderboard", "users", "results"])
+    return _leaderboard_payload(_get_json("leaderboard", params=params, timeout=timeout))
 
 
 def get_leaderboard_v2_page(
@@ -224,10 +265,14 @@ def get_leaderboard_v2_page(
         params = {"limit": limit, "sort_by": clean_sort, "time_period": clean_period, "category": clean_category.lower()}
 
     data = _get_json("leaderboard_v2", params=params, timeout=timeout)
+    if isinstance(data, dict):
+        _reject_leaderboard_error_envelope(data)
     if not isinstance(data, dict) or not isinstance(data.get("data"), list) or any(
         not isinstance(row, dict) for row in data["data"]
     ):
         raise PolymarketResponseError("Leaderboard v2 must return an object with an array of rows; board coverage is unknown.")
+    for row in data["data"]:
+        source_leaderboard_fields(row, version=2)
     pagination = data.get("pagination")
     if not isinstance(pagination, dict) or not isinstance(pagination.get("has_more"), bool):
         raise PolymarketResponseError("Leaderboard v2 pagination metadata is missing or invalid; board coverage is unknown.")

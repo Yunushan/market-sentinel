@@ -20,6 +20,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 from .atomic_files import atomic_write_text
 from .json_validation import loads_strict_json
+from .models import AlertEventCapacityError
 from .storage import (
     ConfigCommitError,
     ConfigConflictError,
@@ -691,6 +692,8 @@ def execute_task_once(task: str, config_path: Path, wallet_limit: int) -> Attemp
         return AttemptResult(task, "succeeded", False, processed, problems, emitted, EXIT_OK)
     except ConfigConflictError:
         return AttemptResult(task, "config_conflict", True, exit_code=EXIT_TEMPFAIL)
+    except AlertEventCapacityError:
+        return AttemptResult(task, "alert_notification_history_full", False, exit_code=EXIT_TEMPFAIL)
     except ConfigCommitError:
         return AttemptResult(task, "config_durability_uncertain", False, exit_code=EXIT_IOERR)
     except (KeyboardInterrupt, WorkerInterrupted):

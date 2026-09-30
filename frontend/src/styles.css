@@ -980,6 +980,31 @@ select {
   overflow-x: auto;
 }
 
+.alert-event-list {
+  display: grid;
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.alert-event {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+
+.alert-event small {
+  color: var(--muted);
+}
+
+.alert-event p {
+  margin: 8px 0;
+}
+
+.alert-event .button-row {
+  flex-wrap: wrap;
+}
+
 .audit-actions {
   display: flex;
   flex-wrap: wrap;

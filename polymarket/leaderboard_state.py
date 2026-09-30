@@ -9,7 +9,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, BinaryIO, Dict, Iterator, Mapping, Optional
 
+from core.json_validation import loads_strict_json
 from .leaderboard import LEADERBOARD_MAX_OFFSET, performance_ratio_metadata, wallet_membership_fingerprint
+from .leaderboard_validation import validate_stored_leaderboard_row
 
 
 _SORT_COLUMNS = {
@@ -77,6 +79,7 @@ class LeaderboardStateStore:
                 self._writer_lock = _acquire_writer_lock(self.path)
                 self.connection = sqlite3.connect(self.path)
             self.connection.row_factory = sqlite3.Row
+            self._validate_durable_rows()
             if read_only:
                 index = self.connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'rows_wallet_unique_idx'"
@@ -99,6 +102,18 @@ class LeaderboardStateStore:
                 # The OS releases ownership even after an ungraceful process exit.
                 self._writer_lock.close()
                 self._writer_lock = None
+
+    def _validate_durable_rows(self) -> None:
+        exists = self.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='rows'").fetchone()
+        if exists is None:
+            return
+        for row in self.connection.execute("SELECT wallet, pnl_usd, volume_usd, roi_pct, mdd_usd, mdd_pct, raw_json FROM rows"):
+            fields = dict(row)
+            try:
+                fields["raw"] = loads_strict_json(fields.pop("raw_json"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Leaderboard state has invalid source JSON; start a fresh scan in a separate state file.") from exc
+            validate_stored_leaderboard_row(fields)
 
     @contextmanager
     def snapshot(self) -> Iterator[None]:
@@ -331,6 +346,8 @@ class LeaderboardStateStore:
         }
 
     def record_page(self, offset: int, limit: int, rows: list[Mapping[str, Any]]) -> bool:
+        for row in rows:
+            validate_stored_leaderboard_row(row)
         clean_offset = max(0, int(offset))
         clean_limit = max(1, int(limit))
         fingerprint = self._page_fingerprint(rows)
@@ -375,7 +392,7 @@ class LeaderboardStateStore:
                         row.get("volume_usd"),
                         row.get("roi_pct"),
                         row.get("trade_count"),
-                        json.dumps(dict(row.get("raw") or {}), separators=(",", ":"), sort_keys=True),
+                        json.dumps(dict(row.get("raw") or {}), separators=(",", ":"), sort_keys=True, allow_nan=False),
                     )
                     for index, row in enumerate(rows)
                 ],
@@ -512,6 +529,7 @@ class LeaderboardStateStore:
                         "incomplete_reasons", "trade_events_replayed", "trades_without_timestamp",
                         "trades_without_size_or_price", "negative_inventory_events", "timeline_truncated",
                         "display_points_truncated", "complete",
+                        "unsupported_activity", "current_snapshot_reconciliation",
                     )
                     if item_key in value
                 }

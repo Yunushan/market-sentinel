@@ -4,11 +4,14 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
+from packaging.requirements import Requirement
+
 from scripts.regenerate_dependency_locks import (
     LOCK_INPUTS,
     REQUIRED_PIP_TOOLS,
     REQUIRED_PYTHON,
     compile_command,
+    preserve_reviewed_markers,
     validate_toolchain,
 )
 from scripts.verify_dependency_lock import lock_issues
@@ -23,6 +26,43 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class DependencyLockTests(unittest.TestCase):
+    def test_regeneration_preserves_inactive_marker_only_while_source_constraint_holds(self) -> None:
+        previous = 'tomli==2.4.1 ; python_version < "3.11" \\\n    --hash=sha256:' + "a" * 64 + '\n    # via project\n'
+        direct = [Requirement('tomli>=2.4.1; python_version < "3.11"')]
+        self.assertIn(previous, preserve_reviewed_markers("", previous, direct))
+        for requirement in (
+            'tomli>=2.5.0; python_version < "3.11"',
+            'tomli>=2.4.1; python_version < "3.12"',
+            'tomli[new-extra]>=2.4.1; python_version < "3.11"',
+            'tomli @ https://packages.example.invalid/tomli.whl ; python_version < "3.11"',
+        ):
+            with self.subTest(requirement=requirement), self.assertRaisesRegex(RuntimeError, "target-platform"):
+                preserve_reviewed_markers("", previous, [Requirement(requirement)])
+        with self.assertRaisesRegex(RuntimeError, "target-platform"):
+            preserve_reviewed_markers("", previous, [])
+
+    def test_regeneration_reuses_exact_parent_pin_without_overriding_changed_direct_source(self) -> None:
+        child = 'async-timeout==5.0.1 ; python_version < "3.11" \\\n    --hash=sha256:' + "a" * 64 + '\n    # via aiohttp\n'
+        parent = 'aiohttp==3.13.0 \\\n    --hash=sha256:' + "b" * 64 + '\n'
+        self.assertIn(child, preserve_reviewed_markers(parent, child + parent, []))
+        for compiled in ("", parent.replace("3.13.0", "3.14.0")):
+            with self.assertRaisesRegex(RuntimeError, "target-platform"):
+                preserve_reviewed_markers(compiled, child + parent, [])
+        with self.assertRaisesRegex(RuntimeError, "target-platform"):
+            preserve_reviewed_markers(parent, child + parent, [Requirement('async-timeout>=6; python_version < "3.11"')])
+        with self.assertRaisesRegex(RuntimeError, "target-platform"):
+            preserve_reviewed_markers(child.replace('"3.11"', '"3.10"') + parent, child + parent, [])
+        with self.assertRaisesRegex(RuntimeError, "target-platform"):
+            preserve_reviewed_markers(parent, child + parent, [Requirement("aiohttp[new-extra]>=3.13")])
+
+    def test_regeneration_restores_windows_marker_and_rejects_changed_conditional_pin(self) -> None:
+        child = 'pywin32==312 ; platform_system == "Windows" \\\n    --hash=sha256:' + "a" * 64 + '\n    # via web3\n'
+        parent = 'web3==7.0.0 \\\n    --hash=sha256:' + "b" * 64 + '\n'
+        host_child = child.replace(' ; platform_system == "Windows"', '')
+        self.assertEqual(child + parent, preserve_reviewed_markers(host_child + parent, child + parent, []))
+        with self.assertRaisesRegex(RuntimeError, "target-platform"):
+            preserve_reviewed_markers(host_child.replace("312", "313") + parent, child + parent, [])
+
     def test_regeneration_covers_every_reviewed_lock_with_hardening_flags(self) -> None:
         expected_locks = {
             "requirements.lock",
@@ -143,8 +183,8 @@ class DependencyLockTests(unittest.TestCase):
     def test_security_audit_lock_is_hash_protected(self) -> None:
         source = (ROOT / "requirements-security.txt").read_text(encoding="utf-8")
         lock = (ROOT / "requirements-security.lock").read_text(encoding="utf-8")
-        self.assertEqual("pip-audit==2.10.1\n", source)
-        self.assertEqual([], lock_issues(lock, ["pip-audit==2.10.1"]))
+        self.assertEqual("pip-audit==2.10.1\nurllib3>=2.8.0,<3.0\n", source)
+        self.assertEqual([], lock_issues(lock, ["pip-audit==2.10.1", "urllib3>=2.8.0,<3.0"]))
 
     def test_bootstrap_installer_and_build_backend_are_hash_protected(self) -> None:
         source = (ROOT / "requirements-bootstrap.txt").read_text(encoding="utf-8")

@@ -28,6 +28,7 @@ from polymarket import data_api
 from polymarket.http_client import PolymarketHTTPError, PolymarketRateLimitError
 from polymarket.leaderboard import LEADERBOARD_CATEGORIES, normalize_leaderboard_category
 from polymarket.leaderboard_state import LeaderboardStateStore, leaderboard_writer_lock_path
+from polymarket.leaderboard_validation import source_leaderboard_fields
 from polymarket.mdd import MDD_CALCULATION_VERSION
 from polymarket.live_reports import (
     live_validation_coverage_promotion_proposal_markdown,
@@ -43,6 +44,7 @@ from web_api import (
     add_wallet_watch,
     adapter_for_market,
     alert_from_payload,
+    alert_events_payload,
     alerts_payload,
     app_state_payload,
     apply_config_patch,
@@ -876,8 +878,8 @@ def _load_leaderboard_checkpoint(path: Path, *, signature: Mapping[str, Any]) ->
     ignored = 0
     with path.open("r", encoding="utf-8") as stream:
         try:
-            header = json.loads(stream.readline())
-        except json.JSONDecodeError as exc:
+            header = loads_strict_json(stream.readline())
+        except ValueError as exc:
             raise ValueError("Checkpoint has no valid scan identity; start a new scan in a separate checkpoint file.") from exc
         if not isinstance(header, Mapping) or header.get("type") != "leaderboard_scan" or header.get("version") != 1:
             raise ValueError("Legacy checkpoint has no scan identity; start a new scan in a separate checkpoint file.")
@@ -888,7 +890,7 @@ def _load_leaderboard_checkpoint(path: Path, *, signature: Mapping[str, Any]) ->
             if not raw:
                 continue
             try:
-                record = json.loads(raw)
+                record = loads_strict_json(raw)
             except json.JSONDecodeError:
                 ignored += 1
                 continue
@@ -907,7 +909,9 @@ def _load_leaderboard_checkpoint(path: Path, *, signature: Mapping[str, Any]) ->
             if not isinstance(raw_rows, list):
                 ignored += 1
                 continue
-            rows = [dict(row) for row in raw_rows if isinstance(row, Mapping)]
+            for row in raw_rows:
+                source_leaderboard_fields(row)
+            rows = [dict(row) for row in raw_rows]
             pages[offset] = (limit, rows)
 
     rows: List[Dict[str, Any]] = []
@@ -2471,6 +2475,17 @@ def run_alerts_list(args: argparse.Namespace) -> int:
     return _write_command_payload(args, alerts_payload(_load_cfg(args), _registry()))
 
 
+def run_alert_events_list(args: argparse.Namespace) -> int:
+    return _write_command_payload(args, alert_events_payload(_load_cfg(args)))
+
+
+def run_alert_event_acknowledge(args: argparse.Namespace) -> int:
+    cfg = _load_cfg(args)
+    event = cfg.acknowledge_alert_event(args.event_id)
+    _save_cfg(args, cfg)
+    return _write_command_payload(args, {"acknowledged": event.to_dict(), **alert_events_payload(cfg)})
+
+
 def run_alert_add(args: argparse.Namespace) -> int:
     cfg = _load_cfg(args)
     registry = _registry()
@@ -3608,6 +3623,15 @@ def build_parser() -> argparse.ArgumentParser:
     alerts_list = alerts_sub.add_parser("list", parents=[common], help="List alerts.")
     _add_json_output_args(alerts_list)
     alerts_list.set_defaults(func=run_alerts_list)
+    alert_events = alerts_sub.add_parser("events", parents=[common], help="Read and acknowledge durable alert notifications.")
+    alert_events_sub = alert_events.add_subparsers(dest="events_command", required=True)
+    event_list = alert_events_sub.add_parser("list", parents=[common], help="List retained notifications, newest first.")
+    _add_json_output_args(event_list)
+    event_list.set_defaults(func=run_alert_events_list)
+    event_ack = alert_events_sub.add_parser("acknowledge", parents=[common], help="Acknowledge one notification by its stable id.")
+    event_ack.add_argument("event_id")
+    _add_json_output_args(event_ack)
+    event_ack.set_defaults(func=run_alert_event_acknowledge)
     alert_add = alerts_sub.add_parser("add", parents=[common], help="Add a price alert.")
     alert_add.add_argument("--market", default=None)
     alert_add.add_argument("--contract", required=True)

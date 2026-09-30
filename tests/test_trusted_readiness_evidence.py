@@ -121,6 +121,14 @@ def governance_api_documents() -> dict[str, dict[str, object]]:
             "total_count": len(REQUIRED_RELEASE_SECRETS),
             "secrets": [{"name": name} for name in sorted(REQUIRED_RELEASE_SECRETS)]
         },
+        f"{prefix}/environments/release/variables?per_page=100": {
+            "total_count": 3,
+            "variables": [
+                {"name": "WINDOWS_SIGNING_PROVIDER", "value": "signpath"},
+                {"name": "SIGNPATH_ORGANIZATION_ID", "value": "00000000-0000-4000-8000-000000000001"},
+                {"name": "WINDOWS_SIGNING_CERTIFICATE_SHA256", "value": "a" * 64},
+            ],
+        },
         f"{prefix}/environments/production": _governance_environment(release=False),
         f"{prefix}/environments/production/secrets?per_page=100": {
             "total_count": len(REQUIRED_PRODUCTION_SECRETS),

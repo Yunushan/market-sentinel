@@ -2039,7 +2039,7 @@ class MarketSentinelCliTests(unittest.TestCase):
 
     def test_polymarket_leaderboard_cli_runs_headless_json_output(self) -> None:
         payload = {
-            "rows": [{"rank": 1, "display_name": "alpha", "wallet": "0xabc", "roi_pct": 12.5}],
+            "rows": [{"rank": 1, "display_name": "alpha", "wallet": "0xabcabcabcabcabcabcabcabcabcabcabcabcabca", "roi_pct": 12.5}],
             "counts": {"returned": 1, "filtered": 1, "scanned": 5, "mdd_computed": 0},
             "warnings": [],
         }
@@ -2282,11 +2282,11 @@ class MarketSentinelCliTests(unittest.TestCase):
             writer = LeaderboardStateStore(state_path)
             try:
                 writer.prepare({}, resume=False)
-                writer.record_page(0, 1, [{"wallet": "0xaaa", "pnl_usd": 10.0}])
+                writer.record_page(0, 1, [{"wallet": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "pnl_usd": 10.0, "volume_usd": 100, "roi_pct": 10}])
                 original_write = market_sentinel_cli._write_streamed_leaderboard_payload
 
                 def write_during_export(payload, rows, **kwargs):
-                    writer.record_page(1, 1, [{"wallet": "0xbbb", "pnl_usd": 20.0}])
+                    writer.record_page(1, 1, [{"wallet": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "pnl_usd": 20.0, "volume_usd": 100, "roi_pct": 20}])
                     original_write(payload, rows, **kwargs)
 
                 stdout = io.StringIO()
@@ -2299,7 +2299,7 @@ class MarketSentinelCliTests(unittest.TestCase):
                 result = json.loads(stdout.getvalue())
                 self.assertEqual(result["counts"]["scanned"], 1)
                 self.assertEqual(result["counts"]["returned"], 1)
-                self.assertEqual([row["wallet"] for row in result["rows"]], ["0xaaa"])
+                self.assertEqual([row["wallet"] for row in result["rows"]], ["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"])
                 self.assertEqual(writer.progress()["rows"], 2)
             finally:
                 writer.close()
@@ -2312,7 +2312,7 @@ class MarketSentinelCliTests(unittest.TestCase):
                 try:
                     store.prepare({}, resume=False)
                     store.prepare_mdd({"calculation_version": market_sentinel_cli.MDD_CALCULATION_VERSION})
-                    page = [{"wallet": "0xaaa"}]
+                    page = [{"wallet": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "pnl_usd": 1, "volume_usd": 100, "roi_pct": 1}]
                     store.record_page(0, 50 if reason == "mdd_error" else 1, page)
                     row = next(store.iter_mdd_candidates({}, sort="roi_pct", direction="DESC", limit=None))
                     if reason == "mdd_error":
@@ -2356,7 +2356,7 @@ class MarketSentinelCliTests(unittest.TestCase):
                 output.write_text("previous", encoding="utf-8")
 
                 def interrupted_rows():
-                    yield {"wallet": "0xaaa"}
+                    yield {"wallet": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
                     raise OSError("snapshot read failed")
 
                 with self.assertRaisesRegex(OSError, "snapshot read failed"):
