@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 import test_app_logic as helpers
 from app import App, CopyActivityOutcome, WalletActivityTask
-from core.models import AppConfig, PaperTradeRecord, PriceAlert, WalletWatch
+from core.models import AppConfig, MAX_ALERTS, PaperTradeRecord, PriceAlert, WalletWatch
 from core.storage import load_config, save_config
 
 
@@ -28,6 +28,107 @@ class DesktopConfigPersistenceTests(unittest.TestCase):
     def bind_store(self, harness) -> None:
         save_config(harness.cfg, self.path)
         self.writer = self.contexts.enter_context(patch("app.save_config", side_effect=lambda cfg: save_config(cfg, self.path)))
+
+    @staticmethod
+    def alert_creation_harness():
+        registry = Mock()
+        registry.create.return_value = SimpleNamespace(capabilities=SimpleNamespace(alerts=True))
+        return SimpleNamespace(
+            cfg=AppConfig(), adapter_registry=registry,
+            _selected_token_id="token", _selected_alert_market_id="polymarket",
+            alert_label_entry=helpers.FakeEntry("Price crossing"),
+            alert_threshold_entry=helpers.FakeEntry("0.5"),
+            alert_dir_var=helpers.FakeVar("above"), alert_src_var=helpers.FakeVar("last_trade"),
+            alert_once_var=helpers.FakeVar(True), market_ws=SimpleNamespace(subscribe=Mock()),
+            _refresh_alert_table=Mock(), status_var=helpers.FakeVar(), ui_queue=queue.Queue(),
+        )
+
+    def test_invalid_alert_input_preserves_storage_and_allows_corrected_add_without_restart(self) -> None:
+        invalid_inputs = (
+            ("label", "x" * 513), ("token", "x" * 257),
+            ("label", "Price\tcrossing"), ("token", "token\nsecond"),
+            ("direction", "sideways"), ("source", "unknown"),
+        )
+        for index, (field, value) in enumerate(invalid_inputs):
+            with self.subTest(field=field, value=value):
+                self.path = Path(self.directory.name) / f"invalid-alert-{index}.json"
+                harness = self.alert_creation_harness()
+                if field == "token":
+                    harness._selected_token_id = value
+                else:
+                    {
+                        "label": harness.alert_label_entry,
+                        "direction": harness.alert_dir_var,
+                        "source": harness.alert_src_var,
+                    }[field].set(value)
+                self.bind_store(harness)
+                before = self.path.read_bytes()
+                original = harness.cfg.to_dict()
+                self.error.reset_mock()
+                App.add_alert(harness)
+                self.writer.assert_not_called()
+                self.assertEqual(harness.cfg.to_dict(), original)
+                self.assertEqual(self.path.read_bytes(), before)
+                self.assertFalse(getattr(harness, "_config_persistence_error", ""))
+                self.error.assert_called_once()
+                self.assertEqual(self.error.call_args.args[0], "Invalid alert")
+                harness.market_ws.subscribe.assert_not_called()
+                harness._refresh_alert_table.assert_not_called()
+                self.assertTrue(harness.ui_queue.empty())
+
+                harness._selected_token_id = "corrected-token"
+                harness.alert_label_entry.set("Corrected crossing")
+                harness.alert_dir_var.set("above")
+                harness.alert_src_var.set("last_trade")
+                self.error.reset_mock()
+                App.add_alert(harness)
+                self.writer.assert_called_once()
+                self.error.assert_not_called()
+                self.assertFalse(getattr(harness, "_config_persistence_error", ""))
+                self.assertEqual(len(harness.cfg.alerts), 1)
+                self.assertEqual(harness.cfg.to_dict(), load_config(self.path).to_dict())
+                harness.market_ws.subscribe.assert_called_once_with(["corrected-token"])
+                harness._refresh_alert_table.assert_called_once()
+                self.assertEqual(harness.status_var.get(), "Alert added.")
+
+    def test_alert_text_and_probability_boundaries_persist_without_truncation(self) -> None:
+        for threshold in ("0", "1"):
+            with self.subTest(threshold=threshold):
+                self.path = Path(self.directory.name) / f"boundary-alert-{threshold}.json"
+                harness = self.alert_creation_harness()
+                harness._selected_token_id = "t" * 256
+                harness.alert_label_entry.set("x" * 512)
+                harness.alert_threshold_entry.set(threshold)
+                self.bind_store(harness)
+                App.add_alert(harness)
+                self.writer.assert_called_once()
+                self.error.assert_not_called()
+                saved = load_config(self.path).alerts[0]
+                self.assertEqual(saved.token_id, "t" * 256)
+                self.assertEqual(saved.label, "x" * 512)
+                self.assertEqual(saved.threshold, float(threshold))
+                self.assertFalse(getattr(harness, "_config_persistence_error", ""))
+
+    def test_alert_capacity_rejection_preserves_a_valid_store_without_pausing(self) -> None:
+        harness = self.alert_creation_harness()
+        harness.cfg.alerts = [
+            PriceAlert(id=f"alert-{index}", token_id=f"token-{index}", label="Existing",
+                       direction="above", threshold=0.5)
+            for index in range(MAX_ALERTS)
+        ]
+        self.bind_store(harness)
+        before = self.path.read_bytes()
+        original = harness.cfg.to_dict()
+        App.add_alert(harness)
+        self.writer.assert_not_called()
+        self.assertEqual(harness.cfg.to_dict(), original)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertFalse(getattr(harness, "_config_persistence_error", ""))
+        self.error.assert_called_once()
+        self.assertEqual(self.error.call_args.args[0], "Alert limit reached")
+        harness.market_ws.subscribe.assert_not_called()
+        harness._refresh_alert_table.assert_not_called()
+        self.assertTrue(harness.ui_queue.empty())
 
     @staticmethod
     def armed_copy_harness():

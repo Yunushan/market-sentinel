@@ -30,6 +30,8 @@ from core.models import (
     CopyActivityOutboxEntry,
     CopyActivityState,
     CopyTradeSettings,
+    MAX_ALERTS,
+    MAX_WALLETS,
     MarketConfig,
     PaperTradeRecord,
     PriceAlert,
@@ -2723,12 +2725,24 @@ class App(tk.Tk):
         user = self._selected_leaderboard_display_name() or str(row.get("wallet") or "").strip()
         self._copy_text_to_clipboard(user, "user")
 
+    def _can_add_wallet_watch(self) -> bool:
+        if len(self.cfg.wallets) < MAX_WALLETS:
+            return True
+        messagebox.showerror(
+            "Wallet watch limit",
+            f"The maximum of {MAX_WALLETS:,} wallet watches has been reached. "
+            "Remove an existing watch before adding another.",
+        )
+        return False
+
     def _ensure_wallet_watch_from_leaderboard(self, wallet: str, display_name: str = "") -> bool:
         wallet = wallet.lower().strip()
         if not is_wallet_address(wallet):
             messagebox.showerror("Polymarket analytics", "Selected row does not contain a valid wallet address.")
             return False
         if any(str(w.wallet).lower() == wallet for w in self.cfg.wallets):
+            return False
+        if not App._can_add_wallet_watch(self):
             return False
         watch = WalletWatch(wallet=wallet, display_name=display_name, enabled=True)
         if not App._persist_config_changes(self, wallets=[*self.cfg.wallets, watch]):
@@ -2747,6 +2761,8 @@ class App(tk.Tk):
         added = self._ensure_wallet_watch_from_leaderboard(wallet, display_name)
         if getattr(self, "_config_persistence_error", ""):
             return
+        if not added and not any(str(w.wallet).lower() == wallet for w in self.cfg.wallets):
+            return
         if added:
             message = f"Tracking wallet: {wallet}"
         else:
@@ -2764,6 +2780,8 @@ class App(tk.Tk):
         if follow_wallets is None:
             return
         tracked = not any(str(w.wallet).lower() == wallet for w in self.cfg.wallets)
+        if tracked and not App._can_add_wallet_watch(self):
+            return
         watches = list(self.cfg.wallets)
         if tracked:
             watches.append(WalletWatch(wallet=wallet, display_name=display_name, enabled=True))
@@ -3445,6 +3463,15 @@ class App(tk.Tk):
             enabled=True,
             market_id=market_id,
         )
+        try:
+            a.validate_notification_text()
+            a.validate_price_controls()
+        except ValueError as exc:
+            messagebox.showerror("Invalid alert", str(exc))
+            return
+        if len(self.cfg.alerts) >= MAX_ALERTS:
+            messagebox.showerror("Alert limit reached", f"Delete an alert before adding another (limit: {MAX_ALERTS}).")
+            return
         if not App._persist_config_changes(self, alerts=[*self.cfg.alerts, a]):
             return
         self._refresh_alert_table()
@@ -4668,6 +4695,8 @@ class App(tk.Tk):
         wallet = normalized
         if any(w.wallet == wallet for w in self.cfg.wallets):
             messagebox.showinfo("Already tracked", "This wallet is already being tracked.")
+            return
+        if not App._can_add_wallet_watch(self):
             return
 
         ww = WalletWatch(wallet=wallet, display_name=display_name, enabled=True)
