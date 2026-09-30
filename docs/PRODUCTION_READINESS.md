@@ -9,8 +9,9 @@ GitHub repository.
 
 The full local scorer passed on the initial clean `4e4e122` checkout at
 **81/100**. Its source tree matches protected-main `efda651`; the local merge
-revision is not hosted production evidence. The remaining 19 points still
-require the fresh, exact-revision external artifacts listed below.
+revision is not hosted production evidence. That initial result lacked 19
+external points; later awards require the fresh, exact-revision artifacts listed
+below, rather than inferred results from a matching source tree.
 
 The current candidate closes reproduced gaps in leaderboard source validation,
 sampled mark-replay reconciliation, and durable alert notifications. Malformed
@@ -47,6 +48,14 @@ provider was provisioned. The corresponding external acceptance remains
 unearned. Local packaging review also reproduced browser cache files entering
 the source archive; the manifest now excludes them and distribution verification
 rejects cached artifacts.
+
+The candidate's hosted Python audit subsequently found three vulnerabilities
+in the pinned urllib3 2.7.0. The follow-up raises the floor and reviewed pins to
+2.8.0 and fixes lock regeneration that dropped Python 3.10 dependencies or
+erased platform markers. Conditional pins retain reviewed hashes only under
+the supported source and parent checks; changed or unsupported cases require
+target-platform resolution. The updated candidate must pass its own dependency
+audit and exact-revision verification before merge.
 
 ## Latest Historical Independent Assessment
 
