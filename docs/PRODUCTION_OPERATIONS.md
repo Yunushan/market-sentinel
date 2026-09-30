@@ -62,7 +62,31 @@ regional restrictions.
   read-only wallet-feed observation. Both tasks share one lock and one atomic status file,
   reload state before every bounded attempt, and treat partial feed failures as failures rather than fresh success.
   The alert task uses compare-and-swap configuration commits
-  for its refreshed state; the wallet observer
+  for its refreshed state and durable crossing notifications. Notification
+  identity, message and price context commit in the same configuration snapshot
+  as the consumed trigger; a terminated attempt or failed pre-commit save cannot
+  disable a one-shot alert without recording its notification. Read retained
+  notifications in the Alerts view, `GET /api/alerts/events`, or
+  `market-sentinel alerts events list`. Explicit acknowledgement uses the
+  view's acknowledgement action, `POST /api/alerts/events/{id}/acknowledge`, or
+  `market-sentinel alerts events acknowledge <id>`. Reading does not acknowledge.
+  History retains up to 1,000 notifications, including notifications for deleted
+  alerts, and reclaims only the oldest acknowledged entries. Full unread history
+  fails with `alert_notification_history_full` before consuming a crossing;
+  read and acknowledge it, then retry. The worker's `emitted` count measures
+  notifications queued durably, not delivery to a paging provider. Alert labels
+  are limited to 512 characters and identities to 256, without control
+  characters, so every accepted definition can retain its notification text.
+  Alert thresholds, remembered prices, and incoming quotes must be finite
+  probabilities between 0 and 1; booleans are rejected before numeric coercion.
+  Numeric strings remain supported, and missing optional quotes remain
+  unavailable. Legacy definitions with malformed thresholds or remembered
+  prices now fail configuration loading with the original file preserved.
+  Reconcile those definitions or restore a verified compatible backup before
+  restarting; invalid quotes never consume a crossing or create a notification.
+  Alert-create idempotency receipts retain the alert result without duplicating
+  the notification backlog; their responses and replays include the current
+  notification history. The wallet observer
   deliberately does not advance the durable wallet-delivery cursor because it
   has no activity consumer. Desktop/API polling owns cursor advancement and
   delivery, so an unattended observation cannot discard an event before that

@@ -180,6 +180,45 @@ test("wallet edit and delete persist, and failed saves preserve form input", asy
   await expect(row).toHaveCount(0);
 });
 
+test("saved alert events stay pending when acknowledgement fails", async ({ page }, testInfo) => {
+  const event = {
+    id: `notification-${testInfo.project.name}`, alert_id: "deleted-alert", market_id: "polymarket", contract_id: "123456789",
+    label: "Deleted threshold alert", direction: "above", threshold: 0.5, source: "last_trade", value: 0.75,
+    message: "Deleted threshold alert crossed above 0.5 at 0.75", created_at: 100, acknowledged_at: 0
+  };
+  const history = () => ({ events: [event], counts: { total: 1, unacknowledged: event.acknowledged_at ? 0 : 1 }, capacity: 1000 });
+  await page.route("**/api/state", async (route) => {
+    const response = await route.fetch();
+    const payload = await response.json();
+    payload.alerts.event_history = history();
+    await route.fulfill({ response, json: payload });
+  });
+  let failSave = true;
+  await page.route(`**/api/alerts/events/${event.id}/acknowledge`, async (route) => {
+    if (failSave) {
+      await route.fulfill({ status: 503, json: { error: "Acceptance event save failure" } });
+    } else {
+      event.acknowledged_at = 101;
+      await route.fulfill({ json: { acknowledged: event, ...history() } });
+    }
+  });
+  await page.reload();
+  await navigate(page, "Alerts");
+  const table = page.getByRole("region", { name: "Saved alert events" });
+  await expect(table).toContainText(event.message);
+  await table.getByRole("button", { name: "Acknowledge event for Deleted threshold alert", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Acceptance event save failure");
+  await expect(table).toContainText("Awaiting acknowledgement");
+  failSave = false;
+  await table.getByRole("button", { name: "Acknowledge event for Deleted threshold alert", exact: true }).click();
+  await expect(page.getByRole("status")).toHaveText("Alert event acknowledged.");
+  await expect(table).not.toContainText(event.message);
+  await page.getByRole("checkbox", { name: "Include acknowledged events", exact: true }).check();
+  await expect(table).toContainText(event.message);
+  await expect(table).toContainText("Acknowledged");
+  await page.screenshot({ path: testInfo.outputPath("alert-event-acknowledged.png"), fullPage: true });
+});
+
 test("invalid paper and analytics input cannot create orders or qualifying risk results", async ({ page }) => {
   await navigate(page, "Paper");
   await page.getByLabel("Metadata JSON (optional)", { exact: true }).fill("[]");

@@ -572,7 +572,9 @@ class StateBackupTests(unittest.TestCase):
             writer = LeaderboardStateStore(source / "scan.sqlite3")
             try:
                 writer.prepare({}, resume=False)
-                writer.record_page(0, 1, [{"wallet": "0xaaa"}])
+                row = {"wallet": "0x" + "a" * 40, "rank": 1,
+                       "pnl_usd": -5, "volume_usd": 100, "roi_pct": -5}
+                writer.record_page(0, 1, [row])
                 archive = destination / str(create_backup(source, destination)["archive"])
                 with tarfile.open(archive, "r:gz") as handle:
                     self.assertEqual(handle.getnames(), ["scan.sqlite3"])
@@ -580,6 +582,10 @@ class StateBackupTests(unittest.TestCase):
                 recovered = LeaderboardStateStore(root / "restored" / "scan.sqlite3", read_only=True)
                 try:
                     self.assertEqual(recovered.progress()["rows"], 1)
+                    restored_row = next(recovered.iter_results(
+                        {}, require_mdd=False, sort="roi_pct", direction="DESC", limit=None,
+                    ))
+                    self.assertEqual({key: restored_row[key] for key in row}, row)
                 finally:
                     recovered.close()
             finally:

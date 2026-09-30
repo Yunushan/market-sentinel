@@ -10,6 +10,7 @@ from unittest.mock import patch
 import market_sentinel_cli
 import web_api
 from polymarket import data_api
+from polymarket.http_client import PolymarketResponseError
 from polymarket.leaderboard import LEADERBOARD_MAX_OFFSET, wallet_membership_fingerprint
 from polymarket.leaderboard_state import LeaderboardStateStore
 
@@ -79,13 +80,12 @@ class LeaderboardPaginationTests(unittest.TestCase):
         self.assertEqual(wallet_membership_fingerprint([{"wallet": "0xabc"}, {"name": "unknown"}]), "")
         self.assertEqual(wallet_membership_fingerprint([]), "")
 
-    def test_unknown_wallets_do_not_make_distinct_pages_identical(self) -> None:
+    def test_unknown_wallets_cannot_claim_complete_discovery(self) -> None:
         with patch.object(data_api, "get_leaderboard", side_effect=[
             [{"rank": i} for i in range(50)], [{"rank": i} for i in range(50, 100)], []
         ]):
-            rows, _cancelled, summary, _warnings = self.scan()
-        self.assertEqual(len(rows), 100)
-        self.assertEqual(summary["completion_reason"], "end_of_results")
+            with self.assertRaisesRegex(PolymarketResponseError, "wallet identity"):
+                self.scan()
 
     def test_durable_membership_survives_resume_and_legacy_column_migration(self) -> None:
         for legacy in (False, True):
@@ -140,6 +140,23 @@ class LeaderboardPaginationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 data_api.get_leaderboard(offset=LEADERBOARD_MAX_OFFSET + 1)
             self.assertEqual(get.call_count, 1)
+
+    def test_malformed_upstream_pages_cannot_claim_source_exhaustion(self) -> None:
+        for raw in (None, {}, {"error": "temporary upstream failure"}, {"data": None},
+                    [page(0, 1)[0], None], {"data": [None]}, {"data": [], "users": page(0, 1)}):
+            with self.subTest(raw=raw), patch.object(data_api, "_get_json", return_value=raw):
+                with self.assertRaisesRegex(PolymarketResponseError, "coverage is unknown"):
+                    self.scan()
+
+    def test_valid_empty_and_legacy_wrapped_pages_keep_supported_semantics(self) -> None:
+        for key in (None, "data", "leaderboard", "users", "results"):
+            for rows in ([], page(0, 1)):
+                raw = rows if key is None else {key: rows}
+                with self.subTest(key=key, rows=rows), patch.object(data_api, "_get_json", return_value=raw):
+                    result, _cancelled, summary, _warnings = self.scan()
+                self.assertEqual(result, rows)
+                self.assertEqual(summary["completion_reason"], "end_of_results")
+                self.assertTrue(summary["source_enumeration_complete"])
 
 
 if __name__ == "__main__":

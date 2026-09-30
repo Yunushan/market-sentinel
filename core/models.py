@@ -21,6 +21,7 @@ DEFAULT_MARKET_ID = "polymarket"
 DEFAULT_UI_DESIGN: UIDesign = "aurora_2026"
 CONFIG_SCHEMA_VERSION = 1
 MAX_ALERTS = 10_000
+MAX_ALERT_EVENTS = 1_000
 MAX_PAPER_TRADES = 50_000
 MAX_WALLETS = 10_000
 MAX_COPY_ACTIVITY_OUTBOX_ENTRIES = 10_000
@@ -55,6 +56,13 @@ def _config_number(value: Any, key: str, minimum: float, maximum: float | None =
     if not math.isfinite(number) or number < minimum or (maximum is not None and number > maximum) or (positive and number <= 0):
         raise ValueError(f"Configuration field '{key}' is outside its supported range.")
     return number
+
+
+def alert_probability(value: Any, key: str, *, allow_unavailable: bool = False) -> Optional[float]:
+    """Validate source probabilities before coercion can turn booleans into prices."""
+    if allow_unavailable and (value is None or value == ""):
+        return None
+    return _config_number(value, key, 0.0, 1.0)
 
 
 def _config_integer(value: Any, key: str, maximum: int | None = None) -> int:
@@ -107,13 +115,86 @@ class PriceAlert:
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
+    def validate_notification_text(self) -> None:
+        for value, maximum, empty in (
+            (self.id, 256, False), (self.market_id, 256, False),
+            (self.token_id, 256, False), (self.label, 512, True),
+        ):
+            if (not isinstance(value, str) or (not empty and not value.strip())
+                    or len(value) > maximum or any(ord(char) < 32 for char in value)):
+                raise ValueError("Alert text or identity is invalid or exceeds the durable notification limit.")
+
+    def validate_price_controls(self) -> None:
+        if self.direction not in ("above", "below") or self.source not in (
+            "last_trade", "midpoint", "best_bid", "best_ask",
+        ):
+            raise ValueError("Alert price controls are invalid.")
+        alert_probability(self.threshold, "threshold")
+        if self.last_value is not None:
+            alert_probability(self.last_value, "last_value")
+
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "PriceAlert":
         data = dict(d)
         data["market_id"] = str(data.get("market_id") or DEFAULT_MARKET_ID).strip().lower()
         for key, default in (("enabled", True), ("once", True), ("triggered", False)):
             data[key] = _config_bool(data, key, default)
-        return PriceAlert(**data)
+        data["threshold"] = alert_probability(data.get("threshold"), "threshold")
+        if data.get("last_value") is not None:
+            data["last_value"] = alert_probability(data["last_value"], "last_value")
+        alert = PriceAlert(**data)
+        alert.validate_notification_text()
+        alert.validate_price_controls()
+        return alert
+
+
+class AlertEventCapacityError(ValueError):
+    """Unacknowledged notifications must be read before more can be committed."""
+
+
+@dataclass
+class AlertEvent:
+    alert_id: str
+    market_id: str
+    contract_id: str
+    label: str
+    direction: Direction
+    threshold: float
+    source: PriceSource
+    value: float
+    message: str
+    id: str = field(default_factory=_uuid)
+    created_at: int = field(default_factory=lambda: int(time.time()))
+    acknowledged_at: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> "AlertEvent":
+        fields = set(AlertEvent.__dataclass_fields__)
+        if set(data) != fields:
+            raise ValueError("Alert events require complete notification metadata.")
+        for key, maximum in (("id", 256), ("alert_id", 256), ("market_id", 256),
+                             ("contract_id", 256), ("label", 512), ("message", 2048)):
+            value = data[key]
+            if (not isinstance(value, str) or (key != "label" and not value.strip())
+                    or len(value) > maximum or any(ord(char) < 32 for char in value)):
+                raise ValueError("Alert event text or identity is invalid or exceeds its supported limit.")
+        if data["direction"] not in ("above", "below") or data["source"] not in (
+            "last_trade", "midpoint", "best_bid", "best_ask",
+        ):
+            raise ValueError("Alert event price controls are invalid.")
+        for key in ("threshold", "value"):
+            if type(data[key]) not in (int, float):
+                raise ValueError("Alert event prices must be finite probabilities.")
+            alert_probability(data[key], key)
+        for key in ("created_at", "acknowledged_at"):
+            if type(data[key]) is not int or data[key] < 0:
+                raise ValueError("Alert event timestamps must be nonnegative integers.")
+        if data["created_at"] < 1 or (data["acknowledged_at"] and data["acknowledged_at"] < data["created_at"]):
+            raise ValueError("Alert event acknowledgement predates its notification.")
+        return AlertEvent(**data)
 
 
 @dataclass
@@ -569,6 +650,7 @@ def _config_records(
 @dataclass
 class AppConfig:
     alerts: List[PriceAlert] = field(default_factory=list)
+    alert_events: List[AlertEvent] = field(default_factory=list)
     paper_trades: List[PaperTradeRecord] = field(default_factory=list)
     wallets: List[WalletWatch] = field(default_factory=list)
     copy_activity_outbox: List[CopyActivityOutboxEntry] = field(default_factory=list)
@@ -578,6 +660,33 @@ class AppConfig:
     selected_market_id: str = DEFAULT_MARKET_ID
     theme: Theme = "light"
     ui_design: UIDesign = DEFAULT_UI_DESIGN
+
+    def append_alert_events(self, events: List[AlertEvent]) -> None:
+        """Reserve capacity for a whole crossing evaluation before changing triggers."""
+        if not events:
+            return
+        validated = [AlertEvent.from_dict(event.to_dict()) for event in events]
+        combined = [*self.alert_events, *validated]
+        _unique_record_fields(combined, ("id",))
+        remove_count = max(0, len(combined) - MAX_ALERT_EVENTS)
+        removable = sorted(
+            (event for event in self.alert_events if event.acknowledged_at),
+            key=lambda event: (event.created_at, event.id),
+        )
+        if remove_count > len(removable):
+            raise AlertEventCapacityError(
+                "Alert notification history is full of unacknowledged events; read and acknowledge notifications before retrying. No crossing was consumed."
+            )
+        removed = {event.id for event in removable[:remove_count]}
+        self.alert_events = [event for event in combined if event.id not in removed]
+
+    def acknowledge_alert_event(self, event_id: str) -> AlertEvent:
+        event = next((item for item in self.alert_events if item.id == event_id), None)
+        if event is None:
+            raise ValueError("Alert notification was not found.")
+        if not event.acknowledged_at:
+            event.acknowledged_at = max(event.created_at, int(time.time()))
+        return event
 
     def reconcile_ambiguous_copy_activity(
         self,
@@ -697,6 +806,7 @@ class AppConfig:
         return {
             "schema_version": CONFIG_SCHEMA_VERSION,
             "alerts": [a.to_dict() for a in self.alerts],
+            "alert_events": [event.to_dict() for event in self.alert_events],
             "paper_trades": [t.to_dict() for t in self.paper_trades],
             "wallets": [w.to_dict() for w in self.wallets],
             "copy_activity_outbox": [entry.to_dict() for entry in self.copy_activity_outbox],
@@ -723,6 +833,7 @@ class AppConfig:
         known_fields = {
             "schema_version",
             "alerts",
+            "alert_events",
             "paper_trades",
             "wallets",
             "copy_activity_outbox",
@@ -743,6 +854,11 @@ class AppConfig:
             PriceAlert.from_dict(x)
             for x in _config_records(d, "alerts", maximum=MAX_ALERTS)
         ]
+        alert_events = [
+            AlertEvent.from_dict(x)
+            for x in _config_records(d, "alert_events", maximum=MAX_ALERT_EVENTS)
+        ]
+        _unique_record_fields(alert_events, ("id",))
         paper_trades = [
             PaperTradeRecord.from_dict(x)
             for x in _config_records(d, "paper_trades", maximum=MAX_PAPER_TRADES)
@@ -798,6 +914,7 @@ class AppConfig:
         )
         return AppConfig(
             alerts=alerts,
+            alert_events=alert_events,
             paper_trades=paper_trades,
             wallets=wallets,
             copy_activity_outbox=copy_activity_outbox,

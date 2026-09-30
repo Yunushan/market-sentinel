@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="nativeVersion" required="true" />
+    <parameter name="releaseTag" required="true" />
+    <parameter name="sourceRevision" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="market-sentinel.exe" product-name="MarketSentinel"
+             product-version="${nativeVersion}" file-version="${nativeVersion}"
+             original-filename="market-sentinel.exe">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

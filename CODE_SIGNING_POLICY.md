@@ -2,9 +2,9 @@
 
 ## Current status
 
-MarketSentinel is evaluating [SignPath Foundation](https://signpath.org/) as a
-possible code signing provider. The current release workflow does not use
-SignPath, and Foundation acceptance has not been verified. No download should
+MarketSentinel has implemented an optional, fail-closed integration with the
+official SignPath GitHub connector. No SignPath organization, signing project,
+certificate, or Foundation acceptance has been verified. No download should
 be described as Foundation-signed without artifact-specific verification.
 Check published release notes and checksums; verify a signature when present.
 
@@ -47,15 +47,17 @@ license text and attribution from the publisher, then generate and verify a
 notice inventory for the exact bundled Python and frontend dependencies before
 claiming that a signed distribution has complete third-party notices.
 
-Before Foundation signing is enabled, the release workflow must upload the
-unsigned artifact to GitHub Actions, submit that artifact through SignPath's
-trusted GitHub build integration, verify source and build origin, enforce
-product-name and version metadata, obtain manual approval, and verify the
-returned executable and installer signatures and timestamps. A release must
-come from an exact tag on protected `main` and pass its required checks. The
-existing stable-release signing gate stays closed until a publicly trusted
-signing integration is configured and verified. The current release setup and
-remaining gap are described in [CI/CD and Releases](docs/CI_CD.md) and
+The release workflow stores each unsigned artifact in GitHub Actions and submits
+its artifact ID through the pinned official SignPath connector. It verifies the
+completed request's exact source/build origin and policy, validates the returned
+signer, trusted signature, timestamp and product version, and rejects changes to
+the executable payload or MSI database, actions and cabinet streams. A release
+must come from an exact tag on protected `main` and pass its required checks.
+The stable-release signing gate stays closed until the external provider,
+manual approval policy and publicly trusted certificate are configured and an
+actual signed release is verified. Provider setup and acceptance limits are in
+[SignPath release signing](docs/SIGNPATH_RELEASE_SIGNING.md),
+[CI/CD and Releases](docs/CI_CD.md) and
 [Required GitHub Repository Settings](docs/REPOSITORY_SETTINGS.md).
 
 ## Privacy and installation

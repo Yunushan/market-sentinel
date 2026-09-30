@@ -5,7 +5,50 @@ readiness score. It reports a score out of 100 and separates repeatable local
 proof from evidence that can only be collected on a real host, account, or
 GitHub repository.
 
-## Current Independent Assessment
+## Current Readiness Campaign: 2026-09-30
+
+The full local scorer passed on the initial clean `4e4e122` checkout at
+**81/100**. Its source tree matches protected-main `efda651`; the local merge
+revision is not hosted production evidence. The remaining 19 points still
+require the fresh, exact-revision external artifacts listed below.
+
+The current candidate closes reproduced gaps in leaderboard source validation,
+sampled mark-replay reconciliation, and durable alert notifications. Malformed
+leaderboard pages cannot claim exhaustion; contradictory current inventory/PnL
+or unmodeled financial activity leaves replay risk unavailable. Alerts commit
+saved notification events together with consumed trigger state, expose explicit
+acknowledgement in the API, CLI and React UI, and preserve unread events during
+retention and recovery. See [mark replay reconciliation](MARK_REPLAY_RECONCILIATION.md)
+and [production operations](PRODUCTION_OPERATIONS.md). The Windows release
+candidate adds the reviewed SignPath integration, while actual provider
+registration, signing acceptance and installed-release evidence remain pending.
+
+All 72 Chromium, Firefox and WebKit browser acceptance cases passed at desktop
+and mobile widths in both themes, including the notification acknowledgement
+failure case. Firefox required execution outside this Windows sandbox's process
+restrictions; the earlier sandbox launch failure is not a passing matrix run.
+These checks use isolated state and forbid backend venue connections. They do
+not establish physical-device, financial-account or funded execution acceptance.
+
+Live GitHub inspection found zero registered self-hosted runners, no production
+environment secrets or variables, and no release signing secrets. The approved
+release-environment correction was applied and read back: `@Yunushan` remains
+the required reviewer, the run initiator may approve, and only branch `main`
+and tag pattern `v*.*.*` are allowed. Branch protections already require signed
+commits, strict successful checks, pull requests, linear history and resolved
+conversations. No unavailable host, signing account or venue evidence is inferred
+from these controls. The earlier independent assessment remains historical;
+these local corrections do not automatically grant a new independent score.
+
+The operator requested skipping infrastructure setup in this campaign. Four
+saved private SSH hosts did not answer read-only connection checks, and the
+current-user Windows store contained no code-signing certificates. No host or
+provider was provisioned. The corresponding external acceptance remains
+unearned. Local packaging review also reproduced browser cache files entering
+the source archive; the manifest now excludes them and distribution verification
+rejects cached artifacts.
+
+## Latest Historical Independent Assessment
 
 The latest independent review scored `533afc2` **77/100 on 2026-09-06**. This
 applies to the unmerged PR #79 candidate, not protected main or the published
