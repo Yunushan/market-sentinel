@@ -54,6 +54,18 @@ after(() => {
   restoreProperty("window", originalWindowDescriptor);
 });
 
+test("alert event acknowledgement encodes its identity and preserves failed-save errors", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return jsonResponse(503, { error: { code: "SAVE_FAILED", message: "Event remains unacknowledged." } });
+  };
+  await assert.rejects(api.acknowledgeAlertEvent("event/identity"), /Event remains unacknowledged/);
+  assert.equal(calls[0].url, "http://127.0.0.1:8765/api/alerts/events/event%2Fidentity/acknowledge");
+  assert.equal(calls[0].options.method, "POST");
+  assert.equal(calls[0].options.body, "{}");
+});
+
 test("ambiguous mutation failures reuse a canonical idempotency key until success", async () => {
   useUuidSequence("00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002");
   const calls = [];

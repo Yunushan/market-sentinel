@@ -27,6 +27,7 @@ import {
 import {
   ApiRequestError,
   apiSchemaValidation,
+  acknowledgeAlertEvent,
   createAlert,
   createWallet,
   clearPaperMarks,
@@ -37,6 +38,7 @@ import {
   deletePolymarketLiveValidationPromotionProposalSnapshot,
   deleteWallet,
   fillPaperQuoteLimit,
+  fetchAlerts,
   fetchLiveSafety,
   fetchMarketAccount,
   fetchMarketCandles,
@@ -100,6 +102,7 @@ import type { MarketPatch } from "./api";
 import { formatAuditValue, formatNumber } from "./formatting";
 import { LivePreflightAudit } from "./live-preflight-audit";
 import { MddHistoryCoverage } from "./mdd-history-coverage";
+import { AlertEventHistory } from "./alert-event-history";
 import { POLYMARKET_LEADERBOARD_CATEGORIES } from "./types";
 import type {
   AlertForm,
@@ -740,6 +743,7 @@ export default function App() {
   const [config, setConfig] = useState<ConfigPayload | null>(null);
   const [markets, setMarkets] = useState<MarketsPayload | null>(null);
   const [alerts, setAlerts] = useState<AlertsPayload | null>(null);
+  const [busyAlertEventId, setBusyAlertEventId] = useState<string | null>(null);
   const [alertForm, setAlertForm] = useState<AlertForm>({
     market_id: "polymarket",
     contract_id: "",
@@ -1898,6 +1902,22 @@ export default function App() {
     }
   }
 
+  async function handleAlertEventAcknowledge(eventId: string) {
+    if (busyAlertEventId !== null) return;
+    setBusyAlertEventId(eventId);
+    setError(null);
+    setAlertMessage("");
+    try {
+      const history = await acknowledgeAlertEvent(eventId);
+      setAlerts((previous) => previous ? { ...previous, event_history: history } : previous);
+      setAlertMessage("Alert event acknowledged.");
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusyAlertEventId(null);
+    }
+  }
+
   async function handleAlertAction(action: string, alert?: PriceAlert) {
     setError(null);
     setAlertMessage("");
@@ -1921,6 +1941,9 @@ export default function App() {
         const payload = await refreshAlerts();
         setAlerts(payload.alerts);
         setAlertMessage(payload.problems.length ? `${payload.message} ${payload.problems.length} problem(s).` : payload.message);
+      } else if (action === "refresh-history") {
+        setAlerts(await fetchAlerts());
+        setAlertMessage("Saved alert events refreshed.");
       } else if (action === "delete" && alert) {
         if (!window.confirm(`Delete alert "${alert.label}"?`)) {
           return;
@@ -2555,11 +2578,13 @@ export default function App() {
         {tab === "alerts" ? (
           <AlertsView
             alerts={alerts}
+            busyEventId={busyAlertEventId}
             editingAlertId={editingAlertId}
             form={alertForm}
             markets={markets}
             message={alertMessage}
             onAction={(action, alert) => void handleAlertAction(action, alert)}
+            onAcknowledge={(eventId) => void handleAlertEventAcknowledge(eventId)}
             onFormChange={setAlertForm}
             onSubmit={(event) => void handleAlertSubmit(event)}
           />
@@ -7044,20 +7069,24 @@ function LiveReportSchemaDiagnostics({
 
 function AlertsView({
   alerts,
+  busyEventId,
   editingAlertId,
   form,
   markets,
   message,
   onAction,
+  onAcknowledge,
   onFormChange,
   onSubmit
 }: {
   alerts: AlertsPayload | null;
+  busyEventId: string | null;
   editingAlertId: string | null;
   form: AlertForm;
   markets: MarketsPayload | null;
   message: string;
   onAction: (action: string, alert?: PriceAlert) => void;
+  onAcknowledge: (eventId: string) => void;
   onFormChange: (form: AlertForm) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
@@ -7142,6 +7171,8 @@ function AlertsView({
         </div>
       </form>
       {message ? <div className="info-banner" role="status">{message}</div> : null}
+      <AlertEventHistory history={alerts?.event_history} busyEventId={busyEventId} onAcknowledge={onAcknowledge}
+        onRefresh={() => onAction("refresh-history")} />
       <div className="metrics-grid four">
         <Metric label="Alerts" value={alerts?.counts.total ?? 0} />
         <Metric label="Enabled" value={alerts?.counts.enabled ?? 0} tone="good" />

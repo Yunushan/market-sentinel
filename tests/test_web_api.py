@@ -4372,11 +4372,11 @@ class WebApiTests(unittest.TestCase):
             {"rank": index, "proxyWallet": f"0x{index:040x}", "pseudonym": f"user-{index}", "pnl": "1", "volume": "100"}
             for index in range(1, 51)
         ]
-        first_page[0] = {"rank": 1, "proxyWallet": "0xaaa", "pseudonym": "alpha", "pnl": "10", "volume": "100"}
+        first_page[0] = {"rank": 1, "proxyWallet": "0x" + "a" * 40, "pseudonym": "alpha", "pnl": "10", "volume": "100"}
         pages = [
             first_page,
             [
-                {"rank": 51, "proxyWallet": "0xccc", "pseudonym": "gamma", "pnl": "4", "volume": "20"},
+                {"rank": 51, "proxyWallet": "0x" + "c" * 40, "pseudonym": "gamma", "pnl": "4", "volume": "20"},
             ],
         ]
 
@@ -4815,7 +4815,8 @@ class WebApiTests(unittest.TestCase):
         }
         with patch("web_api.data_api.get_closed_positions", return_value=[]), patch(
             "web_api.data_api.get_positions",
-            return_value=[],
+            return_value=[{"asset": "token-1", "size": 100, "avgPrice": 0.5,
+                           "currentValue": 80, "cashPnl": 30, "realizedPnl": 0}],
         ), patch(
             "web_api.data_api.get_activity",
             return_value=[trade],

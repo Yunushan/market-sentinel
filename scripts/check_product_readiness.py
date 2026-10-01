@@ -3077,6 +3077,7 @@ def _verify_live_governance_state(expected_sha256: str) -> tuple[bool, str]:
         f"{prefix}/environments/release",
         f"{prefix}/environments/release/deployment-branch-policies?per_page=100",
         f"{prefix}/environments/release/secrets?per_page=100",
+        f"{prefix}/environments/release/variables?per_page=100",
         f"{prefix}/environments/production",
         f"{prefix}/environments/production/secrets?per_page=100",
         f"{prefix}/environments/production/variables?per_page=100",

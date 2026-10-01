@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="nativeVersion" required="true" />
+    <parameter name="releaseTag" required="true" />
+    <parameter name="sourceRevision" required="true" />
+  </parameters>
+  <zip-file>
+    <msi-file path="market-sentinel-${releaseTag}-win-x64.msi">
+      <authenticode-sign />
+    </msi-file>
+  </zip-file>
+</artifact-configuration>

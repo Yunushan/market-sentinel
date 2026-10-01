@@ -520,7 +520,7 @@ on invested capital. Interfaces label it **PnL/volume %**; API/JSON/CSV rows
 also include `pnl_volume_pct` and `roi_pct_basis`. Existing sort/filter flags
 remain compatible. This ratio ranks only the fetched public candidates.
 
-MDD calculation version 7 independently maximizes dollar loss and percentage
+MDD calculation version 8 independently maximizes dollar loss and percentage
 loss over the sampled PnL curve. The observed window starts from a constructed
 zero-PnL baseline, so its initial loss is included. No PnL observations means
 unavailable MDD, not zero risk. `peak_value`/`trough_value` and their timestamps
@@ -550,6 +550,14 @@ every page; existing row caps and incomplete-history safeguards still apply.
 Every fetched trade and normalized mark contributes to replay; the replay
 point limit only bounds retained output. Incomplete inventory/marks return
 unknown top-level risk, with the partial calculation retained as diagnostics.
+Non-trade financial activity and disagreement with a supplied current position
+snapshot also make replay risk unavailable. Inventory and terminal-PnL
+comparisons retain their evidence in durable JSON; rejection reasons remain in
+CSV exports. See [Mark Replay Reconciliation](docs/MARK_REPLAY_RECONCILIATION.md).
+Leaderboard rows also require valid wallet identities and finite, consistent
+PnL/volume fields before pagination, normalization, persistence, or resumption.
+Malformed source responses cannot signal an exhausted board or publish a
+completed export; prior committed pages and output files remain available.
 `mdd_history_coverage` records each source's row count, limit, observed timestamp
 range, and whether it reached a limit, ended its results, or was not requested.
 A full final page conservatively counts as `limit_reached`: more history has
@@ -564,7 +572,7 @@ ordering make risk unavailable. `mdd_source_quality` records rejected-row
 counts/reasons; `mdd_unavailable_reasons` survives API, CLI, desktop CSV and
 SQLite exports. Invalid sources stop mark replay before price requests and
 cannot qualify through accounting reconciliation or diagnostic fallback. Version
-6 invalidates prior durable MDD enrichment when a scan resumes, including older
+8 invalidates prior durable MDD enrichment when a scan resumes, including older
 percentages rebased on a later accounting statement.
 Standalone risk-filtered exports reject qualifying saved results with obsolete
 or missing calculation signatures until the scan resumes and recomputes MDD.

@@ -28,7 +28,8 @@ class ProjectMetadataTests(unittest.TestCase):
                 dependencies = {requirement.name: requirement for requirement in map(Requirement, source)}
                 self.assertIn("urllib3", dependencies)
                 versions = dependencies["urllib3"].specifier
-                self.assertIn("2.7.0", versions)
+                self.assertIn("2.8.0", versions)
+                self.assertNotIn("2.7.0", versions)
                 self.assertNotIn("1.25.11", versions)
                 self.assertNotIn("3.0.0", versions)
 
