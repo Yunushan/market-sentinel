@@ -319,7 +319,7 @@ def controlled_response(_timeout: float, call: Callable[..., Any], *args: Any, *
                 and not phase_timeout_configured
             ):
                 remaining = control.deadline - time.monotonic()
-                if 0 < remaining <= TRANSPORT_TIMEOUT_DEADLINE_TOLERANCE_SECONDS:
+                if remaining <= TRANSPORT_TIMEOUT_DEADLINE_TOLERANCE_SECONDS:
                     try:
                         # Windows waits can themselves return a fraction early;
                         # re-check until the monotonic deadline is reached or
@@ -328,6 +328,11 @@ def controlled_response(_timeout: float, call: Callable[..., Any], *args: Any, *
                             control._finished.wait(remaining)
                             control.check()
                             remaining = control.deadline - time.monotonic()
+                        # The clock can reach the deadline between check()
+                        # and the next remaining-time read, including before
+                        # the first wait. Confirm expiration before re-raising
+                        # a transport timeout that callers might retry.
+                        control.check()
                     except RequestDeadlineExceeded as deadline:
                         raise deadline from exc
         finally:
