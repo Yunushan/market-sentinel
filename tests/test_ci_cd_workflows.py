@@ -865,8 +865,8 @@ jobs:
                     "actions/setup-python": (7, "5fda3b95a4ea91299a34e894583c3862153e4b97"),
                     "actions/setup-node": (7, "820762786026740c76f36085b0efc47a31fe5020"),
                     "actions/dependency-review-action": (5, "a1d282b36b6f3519aa1f3fc636f609c47dddb294"),
-                    "github/codeql-action/init": (4, "1c5b675653bb5c22dbe9b12b556ec555138e09fd"),
-                    "github/codeql-action/analyze": (4, "1c5b675653bb5c22dbe9b12b556ec555138e09fd"),
+                    "github/codeql-action/init": (4, "2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2"),
+                    "github/codeql-action/analyze": (4, "2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2"),
                 },
             ),
         )
