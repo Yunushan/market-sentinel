@@ -1974,5 +1974,229 @@ class ProductReadinessTests(unittest.TestCase):
             self.assertEqual(_repository_revision(), "")
 
 
+class WindowsToolCleanupTests(unittest.TestCase):
+    def test_cleanup_propagates_non_retryable_errors_without_another_delete(self) -> None:
+        from scripts import check_product_readiness as readiness
+
+        cases: list[tuple[str, OSError]] = []
+        for label, code in (
+            ("different Windows error", 2),
+            ("string Windows error", "5"),
+            ("float Windows error", 5.0),
+            ("boolean Windows error", True),
+            ("missing Windows error", None),
+        ):
+            error = PermissionError(13, "non-retryable fixture error")
+            if code is not None:
+                error.winerror = code
+            cases.append((label, error))
+        for code in (5, 32):
+            error = OSError("non-permission fixture error")
+            error.winerror = code
+            cases.append((f"non-PermissionError with code {code}", error))
+
+        with tempfile.TemporaryDirectory(prefix="market-sentinel-cleanup-errors-") as temporary:
+            owned = Path(temporary).resolve(strict=True)
+            self.assertEqual(owned.parent, Path(tempfile.gettempdir()).resolve(strict=True))
+            for label, error in cases:
+                with self.subTest(error=label):
+                    with (
+                        patch.object(readiness.shutil, "rmtree", side_effect=error) as remove,
+                        patch.object(readiness.time, "sleep") as sleep,
+                    ):
+                        with self.assertRaises(type(error)) as raised:
+                            readiness._cleanup_windows_tool_work_directory(owned)
+                    self.assertIs(raised.exception, error)
+                    remove.assert_called_once_with(owned)
+                    sleep.assert_not_called()
+                    self.assertTrue(owned.is_dir())
+            self.assertEqual(Path(temporary).resolve(strict=True), owned)
+
+    def test_cleanup_rejects_replacement_directory_before_deleting_its_contents(self) -> None:
+        from scripts import check_product_readiness as readiness
+
+        with tempfile.TemporaryDirectory(prefix="market-sentinel-cleanup-replacement-") as temporary:
+            owned_root = Path(temporary).resolve(strict=True)
+            self.assertEqual(owned_root.parent, Path(tempfile.gettempdir()).resolve(strict=True))
+            directory = owned_root / "private-tool-fixture"
+            directory.mkdir()
+            (directory / "original-fixture.txt").write_text("original owned fixture\n", encoding="utf-8")
+            metadata = os.lstat(directory)
+            expected_identity = (metadata.st_dev, metadata.st_ino)
+            displaced = owned_root / "displaced-owned-fixture"
+            directory.rename(displaced)
+            directory.mkdir()
+            sentinel = directory / "replacement-must-survive.txt"
+            sentinel.write_text("replacement directory content\n", encoding="utf-8")
+
+            with (
+                patch.object(readiness.shutil, "rmtree") as remove,
+                patch.object(readiness.time, "sleep") as sleep,
+            ):
+                with self.assertRaisesRegex(readiness._ToolTrustError, "working directory changed"):
+                    readiness._cleanup_windows_tool_work_directory(directory, expected_identity=expected_identity)
+            remove.assert_not_called()
+            sleep.assert_not_called()
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "replacement directory content\n")
+            self.assertEqual((displaced / "original-fixture.txt").read_text(encoding="utf-8"), "original owned fixture\n")
+            for path in (owned_root, directory, displaced):
+                self.assertEqual(path.resolve(strict=True), path)
+                self.assertTrue(path.is_relative_to(owned_root))
+
+    def _run_tool_with_real_locked_fixture(self, *, release_during_cleanup: bool) -> dict[str, Any]:
+        import ctypes
+        import shutil
+        import stat
+        import threading
+        from ctypes import wintypes
+        from types import SimpleNamespace
+
+        from scripts import check_product_readiness as readiness
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+        invalid_handle = ctypes.c_void_p(-1).value
+        handle_lock = threading.Lock()
+        released = threading.Event()
+        close_errors: list[int] = []
+        state: dict[str, Any] = {"handle": None, "directory": None}
+        timers: list[threading.Timer] = []
+        sharing_errors: list[int] = []
+        real_rmtree = shutil.rmtree
+        real_parse = readiness._strict_json_bytes
+        temporary_root = Path(tempfile.gettempdir()).resolve(strict=True)
+
+        def verify_owned_directory() -> Path:
+            directory = state["directory"]
+            self.assertIsInstance(directory, Path)
+            self.assertEqual(directory.resolve(strict=True), directory)
+            self.assertEqual(directory.parent, temporary_root)
+            self.assertTrue(directory.name.startswith("market-sentinel-tool-"))
+            for parent, directories, files in os.walk(directory, followlinks=False):
+                for entry in [Path(parent), *(Path(parent) / name for name in directories + files)]:
+                    metadata = os.lstat(entry)
+                    self.assertFalse(stat.S_ISLNK(metadata.st_mode))
+                    self.assertFalse(getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+                    self.assertTrue(entry.resolve(strict=True).is_relative_to(directory))
+            return directory
+
+        def release_handle() -> None:
+            with handle_lock:
+                handle = state["handle"]
+                if handle is not None:
+                    if not close_handle(handle):
+                        close_errors.append(ctypes.get_last_error())
+                    state["handle"] = None
+                released.set()
+
+        def completed_tool(command: list[str], *, cwd: Path, **_kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            self.assertIsNone(state["directory"], "cleanup must not execute the tool again")
+            state["directory"] = cwd.resolve(strict=True)
+            verify_owned_directory()
+            fixture = cwd / ".local/state/gh/non-secret-cleanup-fixture.txt"
+            fixture.parent.mkdir(parents=True)
+            fixture.write_text("non-secret Windows cleanup fixture\n", encoding="utf-8")
+            handle = create_file(str(fixture), 0x80000000, 0x00000001 | 0x00000002, None, 3, 0x00000080, None)
+            if handle is None or handle == invalid_handle:
+                raise ctypes.WinError(ctypes.get_last_error())
+            state["handle"] = handle
+            return subprocess.CompletedProcess(command, 0, b'{"ok": true}', b"")
+
+        def remove_owned_directory(directory: Path) -> None:
+            self.assertEqual(directory, verify_owned_directory())
+            try:
+                real_rmtree(directory)
+            except PermissionError as exc:
+                sharing_errors.append(exc.winerror)
+                if release_during_cleanup and not timers:
+                    # Start only after an actual failed delete, so the test always
+                    # crosses the sharing-violation boundary before release.
+                    timer = threading.Timer(0.05, release_handle)
+                    timers.append(timer)
+                    timer.start()
+                raise
+
+        def parse_after_cleanup(raw: bytes, **kwargs: Any) -> Any:
+            self.assertFalse(state["directory"].exists(), "payload acceptance must wait for private cleanup")
+            return real_parse(raw, **kwargs)
+
+        try:
+            with (
+                patch.object(readiness, "_trusted_executable_identity", return_value=SimpleNamespace(path=Path(sys.executable))),
+                patch.object(readiness, "_recheck_executable_identity") as recheck,
+                patch.object(readiness, "_trusted_tool_environment", return_value={}),
+                patch.object(readiness, "_run_bounded_process", side_effect=completed_tool) as run,
+                patch.object(readiness.shutil, "rmtree", side_effect=remove_owned_directory) as remove,
+                patch.object(readiness, "_strict_json_bytes", side_effect=parse_after_cleanup) as parse,
+            ):
+                payload, error = readiness._run_gh_json(["gh", "api", "repos/test/non-secret-fixture"])
+                result = {
+                    "payload": payload,
+                    "error": error,
+                    "tool_runs": run.call_count,
+                    "identity_checks": recheck.call_count,
+                    "payload_parses": parse.call_count,
+                    "delete_attempts": remove.call_count,
+                    "sharing_errors": sharing_errors.copy(),
+                    "released_before_return": released.is_set(),
+                    "directory_exists_before_teardown": state["directory"].exists(),
+                }
+        finally:
+            release_handle()
+            for timer in timers:
+                timer.join(timeout=2)
+                self.assertFalse(timer.is_alive(), "fixture release timer must finish")
+            self.assertEqual(close_errors, [], "fixture handles must close successfully")
+            directory = state["directory"]
+            if directory is not None and directory.exists():
+                real_rmtree(verify_owned_directory())
+            if directory is not None:
+                self.assertFalse(directory.exists(), "owned fixture must be removed after closing its handle")
+        return result
+
+    @unittest.skipUnless(os.name == "nt", "Windows delete-sharing handles are Windows-only")
+    def test_real_transient_handle_cleanup_accepts_payload_after_one_tool_run(self) -> None:
+        result = self._run_tool_with_real_locked_fixture(release_during_cleanup=True)
+
+        self.assertEqual(result["payload"], {"ok": True})
+        self.assertEqual(result["error"], "")
+        self.assertEqual(result["tool_runs"], 1)
+        self.assertEqual(result["identity_checks"], 2)
+        self.assertEqual(result["payload_parses"], 1)
+        self.assertGreaterEqual(result["delete_attempts"], 2)
+        self.assertLessEqual(result["delete_attempts"], 6)
+        self.assertTrue(result["sharing_errors"])
+        self.assertEqual(set(result["sharing_errors"]), {32})
+        self.assertTrue(result["released_before_return"])
+        self.assertFalse(result["directory_exists_before_teardown"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows delete-sharing handles are Windows-only")
+    def test_real_persistent_handle_cleanup_rejects_payload_without_reexecuting_tool(self) -> None:
+        result = self._run_tool_with_real_locked_fixture(release_during_cleanup=False)
+
+        self.assertIsNone(result["payload"])
+        self.assertIn("PermissionError", result["error"])
+        self.assertEqual(result["tool_runs"], 1)
+        self.assertEqual(result["identity_checks"], 2)
+        self.assertEqual(result["payload_parses"], 0)
+        self.assertEqual(result["delete_attempts"], 6)
+        self.assertEqual(result["sharing_errors"], [32] * 6)
+        self.assertFalse(result["released_before_return"])
+        self.assertTrue(result["directory_exists_before_teardown"])
+
+
 if __name__ == "__main__":
     unittest.main()
