@@ -680,9 +680,42 @@ def _recheck_executable_identity(identity: _ExecutableIdentity) -> None:
         raise _ToolTrustError("external tool identity changed")
 
 
+def _cleanup_windows_tool_work_directory(
+    path: Path,
+    *,
+    expected_identity: tuple[int, int] | None = None,
+) -> None:
+    """Remove the owned workdir after bounded retries for transient Windows locks."""
+
+    retry_delays = (0.05, 0.1, 0.2, 0.3, 0.35)
+    original_metadata = os.lstat(path)
+    original_identity = (
+        expected_identity if expected_identity is not None else (original_metadata.st_dev, original_metadata.st_ino)
+    )
+    for attempt in range(len(retry_delays) + 1):
+        metadata = original_metadata if attempt == 0 else os.lstat(path)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            or (metadata.st_dev, metadata.st_ino) != original_identity
+        ):
+            raise _ToolTrustError("private tool working directory changed before cleanup")
+        try:
+            shutil.rmtree(path)
+        except PermissionError as exc:
+            winerror = getattr(exc, "winerror", None)
+            if type(winerror) is not int or winerror not in {5, 32, 33} or attempt == len(retry_delays):
+                raise
+            time.sleep(retry_delays[attempt])
+        else:
+            return
+
+
 @contextmanager
 def _private_tool_work_directory() -> Iterator[Path]:
     windows_path: Path | None = None
+    windows_identity: tuple[int, int] | None = None
     temporary_directory: tempfile.TemporaryDirectory[str] | None = None
     if os.name == "nt":
         temporary_root = Path(tempfile.gettempdir()).resolve(strict=True)
@@ -711,12 +744,14 @@ def _private_tool_work_directory() -> Iterator[Path]:
             raise _ToolTrustError("private tool working directory is unsafe")
         if os.name == "posix" and (metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077):
             raise _ToolTrustError("private tool working directory permissions are unsafe")
+        if windows_path is not None:
+            windows_identity = (metadata.st_dev, metadata.st_ino)
         yield path
     finally:
         if temporary_directory is not None:
             temporary_directory.cleanup()
         elif windows_path is not None:
-            shutil.rmtree(windows_path)
+            _cleanup_windows_tool_work_directory(windows_path, expected_identity=windows_identity)
 
 
 def _base_sanitized_environment() -> dict[str, str]:
