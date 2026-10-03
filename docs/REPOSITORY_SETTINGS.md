@@ -45,7 +45,9 @@ Readiness assessments and release decisions must describe that limitation plainl
 4. In `Actions` -> `General`, allow selected actions only, permit GitHub-owned
    actions, and keep SHA pinning required. The `Security` workflow downloads
    the reviewed actionlint and gitleaks release binaries directly and verifies
-   their SHA-256 digests before execution, so no third-party GitHub Actions need
+   their SHA-256 digests before execution. The Windows release signer similarly
+   executes SignPath's official connector bundle at a reviewed commit and
+   verified SHA-256 digest, with bounded, suppressed provider output. No third-party GitHub Actions need
    to be added to the allowlist. Every checked-in action reference is pinned to
    a full commit SHA; do not broaden the allowlist without reviewing the new
    action's provenance and permissions.
@@ -62,23 +64,27 @@ protected branch `main` and tag pattern `v*.*.*`. Do not select **Protected
 branches only**: GitHub applies that setting to branches, so it can block the
 normal tag-triggered release job. The workflow
 uses this protected environment for every stable tag, including drafts, and whenever
-signing is independently required. The current release workflow expects
-`WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64`,
-`WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD`, and optional
-`WINDOWS_CODE_SIGNING_TIMESTAMP_URL`; set
-`REQUIRE_WINDOWS_CODE_SIGNING=true`. **This PFX-based signing path is an
-unresolved production integration gap.** Newly issued publicly trusted code
-signing keys must be protected by compliant hardware or a cloud signing
-service under the [CA/Browser Forum code signing requirements](https://cabforum.org/working-groups/code-signing/requirements/).
-The current workflow imports an exportable private key from a PFX into an
-ephemeral Windows runner. Merely adding a self-signed or exportable PFX secret
-does not establish public trust. Select a provider that can sign the EXE and MSI from
-protected hardware or a cloud service, integrate its supported method into
-the workflow, and verify the final signatures and timestamps before publishing
-a stable release. [SignPath Foundation](https://signpath.org/) is a possible
-no-cost route for an accepted open-source project; acceptance and integration
-are still unverified. Keep the stable-release signing gate fail-closed until
-that work is complete. Stable tags require signing even if the variable is
+signing is independently required. The reviewed provider selection is the
+protected variable `WINDOWS_SIGNING_PROVIDER=signpath`. Also configure
+`SIGNPATH_ORGANIZATION_ID` to the actual provider UUID and
+`WINDOWS_SIGNING_CERTIFICATE_SHA256` to the lowercase SHA-256 fingerprint of
+the reviewed public signing certificate's DER bytes. Store `SIGNPATH_API_TOKEN`
+as a protected environment secret and set `REQUIRE_WINDOWS_CODE_SIGNING=true`.
+The governance collector binds these three public provider variables and the
+required secret names into its canonical snapshot; missing and malformed
+configuration fails validation. This inventory does not prove provider acceptance.
+The API token can submit and read requests for the single `market-sentinel`
+project; it must not approve signing or administer the organization.
+
+The workflow uses SignPath's official trusted GitHub connector and verifies the
+completed request and returned EXE/MSI before replacing the staged unsigned
+files. An exportable PFX is rejected as a production provider. The provider
+account, project, origin verification, exact artifact configurations,
+manual signing approval and publicly trusted certificate still require real
+operator setup and acceptance. [SignPath release signing](SIGNPATH_RELEASE_SIGNING.md)
+describes that contract. [SignPath Foundation](https://signpath.org/) acceptance
+is unverified. Keep the stable gate closed until an actual protected signed
+release passes. Stable tags require signing even if the variable is
 absent or false because a draft can later be published manually.
 If credentials are unavailable, an explicitly unsigned testing/development run
 must use a validated prerelease tag; only prerelease artifacts can select the unprotected

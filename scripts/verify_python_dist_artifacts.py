@@ -19,6 +19,7 @@ REQUIRED_WHEEL_MEMBERS = {
     "market_adapters/registry.py",
     "polymarket/funded_policy.py",
     "polymarket/leaderboard_state.py",
+    "polymarket/leaderboard_validation.py",
 }
 
 REQUIRED_SDIST_MEMBERS = {
@@ -57,6 +58,9 @@ REQUIRED_SDIST_MEMBERS = {
     "deploy/systemd/market-sentinel-web.service",
     "docs/BLOCKERS.md",
     "docs/PRODUCTION_OPERATIONS.md",
+    "docs/SIGNPATH_RELEASE_SIGNING.md",
+    "deploy/signpath/market-sentinel-exe-v1.xml",
+    "deploy/signpath/market-sentinel-msi-v1.xml",
     "frontend/package-lock.json",
     "frontend/package.json",
     "frontend/playwright.config.mjs",
@@ -88,6 +92,9 @@ REQUIRED_SDIST_MEMBERS = {
     "scripts/initialize_production_config.py",
     "scripts/backup_state.py",
     "scripts/build_windows_release.py",
+    "scripts/signpath_release.py",
+    "scripts/windows_signing_policy.py",
+    "scripts/verify_msi_signing_payload.ps1",
     "scripts/smoke_windows_msi.ps1",
     "scripts/verify_windows_release_metadata.ps1",
     "scripts/create_reproducible_zip.py",
@@ -230,6 +237,7 @@ def verify_sdist(path: Path, expected_version: str) -> None:
         "frontend/dist/",
         "frontend/node_modules/",
         "frontend/.test-dist/",
+        ".cache/",
         "frontend/test-results/",
         "frontend/playwright-report/",
         ".coverage",

@@ -9,6 +9,7 @@
   },
   "include": [
     "src/api.ts",
+    "src/alert-event-history.tsx",
     "src/formatting.ts",
     "src/live-preflight-audit.tsx",
     "src/mdd-history-coverage.tsx",

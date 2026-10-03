@@ -206,7 +206,7 @@ class AccountingMddReconciliationTests(unittest.TestCase):
             path = Path(directory) / "scan.sqlite3"
             with closing(LeaderboardStateStore(path)) as store:
                 store.prepare({}, resume=False)
-                store.record_page(0, 50, [{"wallet": WALLET}])
+                store.record_page(0, 50, [{"wallet": WALLET, "pnl_usd": 10, "volume_usd": 100, "roi_pct": 10}])
                 row = next(store.iter_mdd_candidates({}, sort="roi_pct", direction="DESC", limit=1))
                 store.set_mdd(row["id"], {"mdd_pct": 5})
             with patch("sys.stderr", io.StringIO()) as errors, patch("sys.stdout", io.StringIO()) as output:

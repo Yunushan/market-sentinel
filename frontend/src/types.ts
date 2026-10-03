@@ -354,8 +354,30 @@ export interface PriceAlert {
   };
 }
 
+export interface AlertEvent {
+  id: string;
+  alert_id: string;
+  market_id: string;
+  contract_id: string;
+  label: string;
+  direction: AlertDirection;
+  threshold: number;
+  source: AlertSource;
+  value: number;
+  message: string;
+  created_at: number;
+  acknowledged_at: number;
+}
+
+export interface AlertEventHistory {
+  events: AlertEvent[];
+  counts: { total: number; unacknowledged: number };
+  capacity: number;
+}
+
 export interface AlertsPayload {
   alerts: PriceAlert[];
+  event_history: AlertEventHistory;
   source_options: AlertSourceOption[];
   counts: {
     total: number;

@@ -16,12 +16,25 @@ from scripts.verify_repository_settings import (
     check_branch_protection,
     check_production_environment,
     check_production_variables,
-    check_release_environment,
+    check_release_environment as _check_release_environment,
     check_release_variable,
     collect_governance_evidence,
     collect_checks,
     governance_state_sha256,
 )
+
+
+def _passing_signing_variables() -> dict[str, str]:
+    return {
+        "WINDOWS_SIGNING_PROVIDER": "signpath",
+        "SIGNPATH_ORGANIZATION_ID": "00000000-0000-4000-8000-000000000001",
+        "WINDOWS_SIGNING_CERTIFICATE_SHA256": "a" * 64,
+    }
+
+
+def check_release_environment(*args, **kwargs):
+    kwargs.setdefault("signing_variables", _passing_signing_variables())
+    return _check_release_environment(*args, **kwargs)
 
 
 def _passing_protection() -> dict:
@@ -95,6 +108,10 @@ def _passing_documents(repository: str = "acme/market-sentinel") -> dict[str, di
                 {"name": name, "value": "must-not-escape"}
                 for name in sorted(REQUIRED_RELEASE_SECRETS)
             ],
+        },
+        f"{prefix}/environments/release/variables?per_page=100": {
+            "total_count": 3,
+            "variables": [{"name": name, "value": value} for name, value in _passing_signing_variables().items()],
         },
         f"{prefix}/environments/production": _passing_environment(owner=owner),
         f"{prefix}/environments/production/secrets?per_page=100": {
@@ -251,6 +268,14 @@ class RepositorySettingsTests(unittest.TestCase):
                 )
                 self.assertEqual(ref_check["status"], "fail")
 
+    def test_release_environment_rejects_pfx_or_unconfigured_signing_provider(self) -> None:
+        for variables in ({}, {**_passing_signing_variables(), "WINDOWS_SIGNING_PROVIDER": "pfx"}):
+            checks = _check_release_environment(
+                _passing_environment(release=True), REQUIRED_RELEASE_SECRETS,
+                _passing_release_policies(), "main", "acme", variables,
+            )
+            self.assertEqual(next(check for check in checks if check["name"] == "release_signing_secrets")["status"], "fail")
+
     def test_environment_reviewer_must_be_exactly_the_repository_owner(self) -> None:
         for label, reviewers in (
             ("missing", []),
@@ -346,6 +371,7 @@ class RepositorySettingsTests(unittest.TestCase):
         for endpoint_suffix, collection_name in (
             ("environments/release/deployment-branch-policies?per_page=100", "branch_policies"),
             ("environments/release/secrets?per_page=100", "secrets"),
+            ("environments/release/variables?per_page=100", "variables"),
             ("environments/production/secrets?per_page=100", "secrets"),
             ("environments/production/variables?per_page=100", "variables"),
         ):

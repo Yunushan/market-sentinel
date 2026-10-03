@@ -1013,7 +1013,7 @@ store_live_validation_report(
         self.assertEqual(mock_get.call_args.kwargs["timeout"], 4)
 
     def test_leaderboard_request_clamps_page_and_accepts_wrapped_payload(self) -> None:
-        payload = {"data": [{"proxyWallet": "0xabc", "pnl": "12", "volume": "120"}]}
+        payload = {"data": [{"proxyWallet": "0x" + "a" * 40, "pnl": "12", "volume": "120"}]}
         with patch(HTTP_REQUEST, return_value=FakeResponse(payload)) as mock_get:
             result = data_api.get_leaderboard(
                 limit=100,

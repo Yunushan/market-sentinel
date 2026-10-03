@@ -1,5 +1,6 @@
 import type {
   AlertForm,
+  AlertEventHistory,
   AlertRefreshResponse,
   AlertsPayload,
   AppStatePayload,
@@ -324,6 +325,13 @@ export function manageMarketOrders(
 
 export function fetchAlerts(): Promise<AlertsPayload> {
   return request<AlertsPayload>("/api/alerts");
+}
+
+export function acknowledgeAlertEvent(eventId: string): Promise<AlertEventHistory> {
+  return request<AlertEventHistory>(`/api/alerts/events/${encodeURIComponent(eventId)}/acknowledge`, {
+    method: "POST",
+    body: JSON.stringify({})
+  });
 }
 
 export function fetchPaper(): Promise<PaperPayload> {

@@ -86,13 +86,29 @@ Jobs:
 - A reproducible `npm ci --ignore-scripts` followed by `npm audit --omit=dev
   --audit-level=high` on every security workflow run. This fails closed for
   high-severity vulnerabilities in the production frontend dependency tree.
-- Hash-locked `pip-audit` checks against `requirements.lock` and
-  `requirements-live.lock` on every security workflow run. These fail closed
-  when either supported Python runtime dependency graph has a known
+- Hash-locked `pip-audit` checks against every runtime, live, test, build,
+  bootstrap and security lock on every security workflow run. These fail closed
+  when any supported Python dependency graph has a known
   vulnerability.
 - CodeQL analysis for Python and JavaScript/TypeScript.
 
 The CodeQL job is the only job with `security-events: write`; all other jobs use least-privilege read permissions unless they need more. Dependency review runs with the pull-request permissions required by GitHub's action and fails on high-severity dependency changes.
+
+urllib3 has a minimum of 2.8.0 in both runtime and audit-tool sources because
+the [upstream release](https://github.com/urllib3/urllib3/releases/tag/2.8.0)
+fixes HTTPS proxy certificate-policy confusion, unbounded chunk-size buffering
+and a chunked Deflate loop. All four affected graphs use the verified PyPI
+wheel and source hashes. The existing Requests 2.34.2 pin supports urllib3
+`>=1.26,<3`, so its version remains unchanged.
+
+Regenerate locks with `scripts/regenerate_dependency_locks.py` using Python 3.14
+and pip-tools 7.6.1. The tool preserves exact reviewed conditional markers that
+this host cannot resolve, including Python 3.10 dependencies and Windows-only
+packages. Retention requires a compatible current direct constraint with the
+same marker and extras, or an unchanged resolved parent pin. An incompatible
+floor, changed marker, URL, extras, parent or active conditional pin fails and
+requires a new target-platform resolution. This
+also applies to `--upgrade`; inactive conditional pins do not upgrade by guess.
 
 ### Release
 
@@ -266,13 +282,13 @@ The portable zip contains:
 - bundled `frontend/dist` React assets
 - `README.md`, `README_WINDOWS.txt`, `LICENSE`, `.env.example`, and `data/config.example.json`
 
-The MSI installs the same payload under Program Files, creates Start Menu shortcuts for the Tkinter and React launchers, and supports normal Windows uninstall/upgrade behavior through MSI product metadata. Before upload, the release job installs the final MSI on its disposable GitHub-hosted Windows runner, checks the installed files and executable against the staged payload, runs the installed executable's smoke test from a separate temporary directory, then uninstalls and verifies cleanup even if the smoke test fails. Every stable tag, including a draft, requires signing; setting `REQUIRE_WINDOWS_CODE_SIGNING=true` extends the same requirement to prereleases. The protected `release` environment must provide `WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64`, `WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD`, and the separately scoped `READINESS_ADMIN_TOKEN` used for the governance-evidence recheck described in `docs/REPOSITORY_SETTINGS.md`. Before downloading build inputs or running WiX/PyInstaller, the release job verifies that the signing secret is a password-protected PFX with a private key and that the timestamp endpoint is HTTPS. `scripts/sign_windows_release.py` signs and verifies every EXE/MSI using an RFC 3161 timestamp URL; certificates are decoded only into a temporary file on the Windows runner. If signing is not required, the workflow may build unsigned portable ZIP/MSI artifacts only for a validated prerelease and labels that status in the release notes. Unsigned Windows artifacts are not production-trusted.
+The MSI installs the same payload under Program Files, creates Start Menu shortcuts, and supports normal Windows uninstall and upgrades. Before upload, the Windows job installs the final MSI on its disposable GitHub-hosted runner, checks installed files against the staged payload, runs the installed executable smoke test from a separate temporary directory, and verifies cleanup after uninstall.
 
-The PFX signing path above is an implementation gap for a new publicly trusted
-code-signing key: current issuers require hardware or cloud-protected private
-keys. Configure a supported signer and update the release workflow before a
-production-trusted stable release. Signing-secret names alone are not proof of
-that integration; see `docs/REPOSITORY_SETTINGS.md`.
+Every stable tag, including a draft, requires signing. Setting `REQUIRE_WINDOWS_CODE_SIGNING=true` extends the requirement to prereleases. The protected `release` environment selects `WINDOWS_SIGNING_PROVIDER=signpath`, the actual `SIGNPATH_ORGANIZATION_ID`, a reviewed `WINDOWS_SIGNING_CERTIFICATE_SHA256`, and secret `SIGNPATH_API_TOKEN`; the separately scoped `READINESS_ADMIN_TOKEN` serves the governance recheck. See [repository settings](REPOSITORY_SETTINGS.md).
+
+`scripts/signpath_release.py` runs the pinned official SignPath GitHub connector against stored unsigned GitHub artifact IDs. It checks artifact digest and workflow identity, requires the completed request's exact source/build origin and production policy, validates trusted signatures, signer fingerprint, timestamps and product metadata, and rejects payload changes. The EXE comparison preserves the PyInstaller overlay; the native MSI comparison preserves every database, custom-action, summary and cabinet stream except exact Authenticode signature metadata. An exportable PFX cannot select the stable production path. Provider output is suppressed and waits, downloads, extraction and verification are bounded.
+
+The SignPath organization, Foundation acceptance, provider-side policy and actual trusted signed release remain unverified. Operator configuration and acceptance steps are in [SignPath release signing](SIGNPATH_RELEASE_SIGNING.md). The stable gate fails closed until they succeed. If signing is not required, only a validated prerelease may produce explicitly unsigned Windows artifacts; release notes label them accordingly.
 
 The Windows launchers use `data/config.json` when the package folder is writable, which keeps the portable zip self-contained. If the app is installed under a protected folder such as Program Files, the launchers set `PREDICTION_MARKET_CONFIG_PATH` to `%APPDATA%\market-sentinel\data\config.json` so normal users can save settings without administrator privileges.
 
