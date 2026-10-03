@@ -292,6 +292,34 @@ def _successful_gh(
 
 
 class AttestedReleaseReadinessTests(unittest.TestCase):
+    def test_publish_evidence_requires_successful_distribution_content_reverification(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        report = _release_report(now)
+        for conclusion in (None, "failure", "skipped"):
+            trusted = _successful_gh(report, now)
+            def without_reverification(command, *, trusted=trusted, conclusion=conclusion, **kwargs):
+                payload, error = trusted(command, **kwargs)
+                if isinstance(payload, dict) and isinstance(payload.get("jobs"), list):
+                    for job in payload["jobs"]:
+                        if job.get("name") == "Publish GitHub release":
+                            steps = job["steps"]
+                            if conclusion is None:
+                                job["steps"] = [step for step in steps
+                                                if step["name"] != "Reverify downloaded Python distribution contents"]
+                            else:
+                                for step in steps:
+                                    if step["name"] == "Reverify downloaded Python distribution contents":
+                                        step["conclusion"] = conclusion
+                return payload, error
+            with self.subTest(conclusion=conclusion), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "release-evidence.json"
+                path.write_bytes((json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode())
+                with patch("scripts.check_product_readiness._run_gh_json", side_effect=without_reverification):
+                    result = _attested_release_report(str(path), expected_revision=REVISION,
+                                                      expected_version=VERSION, now=now)
+                self.assertEqual(result["status"], "fail")
+                self.assertIn("ordered safety steps", result["detail"])
+
     def test_accepts_exact_attested_release_and_rejects_live_asset_mutation(self) -> None:
         now = datetime.now(timezone.utc).replace(microsecond=0)
         report = _release_report(now)

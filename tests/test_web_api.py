@@ -42,6 +42,7 @@ from market_adapters.errors import MarketConfigurationError, UnsupportedFeatureE
 from market_adapters.outbound import OUTBOUND_ENDPOINT_SETTING_KEYS, OUTBOUND_POLICY_SETTING_KEYS
 from polymarket.analytics_cache import POLYMARKET_MDD_AUDIT_KIND, store_analytics_artifact
 from polymarket.gamma import ProfileResult
+from polymarket.history_v2 import PublicHistoryRows
 from polymarket.http_client import PolymarketRateLimitError
 from polymarket.live_reports import (
     LiveValidationStoreDurabilityError,
@@ -135,6 +136,11 @@ WALLET = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 WALLET_2 = "0xcccccccccccccccccccccccccccccccccccccccc"
 ROOT = Path(__file__).resolve().parent.parent
 LIVE_REPORT_FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "polymarket" / "live_reports"
+
+
+def _leaderboard_v2_page(rows, *, next_cursor=None, limit=50):
+    return {"data": rows, "pagination": {"limit": limit, "offset": 0,
+            "has_more": next_cursor is not None, "next_cursor": next_cursor}}
 
 
 class FakePaperAdapter(MarketAdapter):
@@ -341,11 +347,11 @@ class WebApiTests(unittest.TestCase):
                 self.assertEqual(status, 400)
                 self.assertIn("Unsupported leaderboard category", payload["error"]["message"])
                 fetch.assert_not_called()
-                with patch("polymarket.data_api._get_json", return_value=[]) as fetch:
+                with patch("polymarket.data_api._get_json", return_value=_leaderboard_v2_page([])) as fetch:
                     status, payload = self._request_json(base_url, "/api/polymarket/users/leaderboard?category=esports")
                 self.assertEqual(status, 200)
                 self.assertEqual(payload["category"], "ESPORTS")
-                self.assertEqual(fetch.call_args.kwargs["params"]["category"], "ESPORTS")
+                self.assertEqual(fetch.call_args.kwargs["params"]["category"], "esports")
             finally:
                 server.shutdown()
                 server.server_close()
@@ -399,9 +405,16 @@ class WebApiTests(unittest.TestCase):
     ) -> tuple[int, dict]:
         data = raw
         request_headers = dict(headers or {})
+        if method == "PATCH" and path.startswith("/api/markets/") and isinstance(payload, dict) and "expected_revision" not in payload:
+            status, current = self._request_json(base_url, "/api/markets", headers=request_headers)
+            if status == 200:
+                market_id = path.rsplit("/", 1)[-1]
+                market = next((row for row in current["markets"] if row["market_id"] == market_id), None)
+                if market is not None:
+                    payload = {**payload, "expected_revision": market["configuration_revision"]}
         route_parts = path.strip("/").split("/")
         durable_mutation = method == "POST" and (
-            path in {"/api/alerts", "/api/wallets", "/api/paper/orders"}
+            path in {"/api/alerts", "/api/wallets", "/api/wallets/poll", "/api/paper/orders"}
             or (
                 len(route_parts) == 5
                 and route_parts[:2] == ["api", "markets"]
@@ -448,7 +461,7 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(activity_key({"transactionHash": "0xABC"}), "tx:0xabc")
         self.assertEqual(
             activity_key({"activity_id": "Context:0xabc:0x1"}),
-            "activity-id:context:0xabc:0x1",
+            "activity-id:Context:0xabc:0x1",
         )
 
     def test_loopback_detection_and_remote_server_token_gate(self) -> None:
@@ -1098,7 +1111,7 @@ class WebApiTests(unittest.TestCase):
             config_path = root / "config.json"
             server, server_thread, base_url = self._serve_api(config_path, frontend_dir)
             try:
-                for route in ("/api/alerts", "/api/wallets", "/api/paper/orders"):
+                for route in ("/api/alerts", "/api/wallets", "/api/wallets/poll", "/api/paper/orders"):
                     with self.subTest(route=route):
                         status, response = self._request_json(
                             base_url,
@@ -1562,7 +1575,9 @@ class WebApiTests(unittest.TestCase):
                     server.server_close()
 
             outside_dir = Path(tmpdir).parent / f"{Path(tmpdir).name}-outside"
-            with self.assertRaisesRegex(ValueError, "deployment resource root"):
+            with patch("web_api._RESOURCE_ROOT", deployment_root), self.assertRaisesRegex(
+                ValueError, "deployment resource root"
+            ):
                 ReactGuiServer(
                     ("127.0.0.1", 0),
                     ReactGuiHandler,
@@ -3814,6 +3829,7 @@ class WebApiTests(unittest.TestCase):
         cfg.paper_trades = [
             PaperTradeRecord(
                 market_id="kalshi",
+                quote_currency="USD",
                 contract_id="KALSHI-CONTRACT",
                 side="BUY",
                 size=2,
@@ -3823,6 +3839,7 @@ class WebApiTests(unittest.TestCase):
             ),
             PaperTradeRecord(
                 market_id="kalshi",
+                quote_currency="USD",
                 contract_id="KALSHI-CONTRACT",
                 side="SELL",
                 size=0.5,
@@ -3832,6 +3849,7 @@ class WebApiTests(unittest.TestCase):
             ),
             PaperTradeRecord(
                 market_id="kalshi",
+                quote_currency="USD",
                 contract_id="REJECTED",
                 side="BUY",
                 size=1,
@@ -3851,7 +3869,9 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(position["market_id"], "kalshi")
         self.assertEqual(position["contract_id"], "KALSHI-CONTRACT")
         self.assertAlmostEqual(position["net_size"], 1.5)
-        self.assertAlmostEqual(position["notional"], 0.58)
+        self.assertAlmostEqual(position["notional"], 0.66)
+        self.assertAlmostEqual(position["average_price"], 0.44)
+        self.assertAlmostEqual(payload["summary"]["realized"], 0.08)
         self.assertEqual(payload["summary"]["positions"], 1)
 
     def test_paper_quote_and_side_aware_limit_use_adapter_data(self) -> None:
@@ -3878,6 +3898,7 @@ class WebApiTests(unittest.TestCase):
         cfg.paper_trades = [
             PaperTradeRecord(
                 market_id="kalshi",
+                quote_currency="USD",
                 contract_id="KALSHI-CONTRACT",
                 side="BUY",
                 size=2,
@@ -3910,6 +3931,7 @@ class WebApiTests(unittest.TestCase):
         cfg = AppConfig()
         record = PaperTradeRecord(
             market_id="kalshi",
+            quote_currency="USD",
             contract_id="KALSHI-CONTRACT",
             side="BUY",
             size=2,
@@ -3935,6 +3957,7 @@ class WebApiTests(unittest.TestCase):
         cfg.paper_trades = [
             PaperTradeRecord(
                 market_id="kalshi",
+                quote_currency="USD",
                 contract_id="KALSHI-CONTRACT",
                 side="BUY",
                 size=2,
@@ -4105,13 +4128,14 @@ class WebApiTests(unittest.TestCase):
         ]
         recent: list[dict] = []
 
-        with patch("web_api.data_api.get_activity", return_value=activity):
+        with patch("web_api.data_api.get_activity_page_v2", return_value={"data": activity, "pagination": {"next_cursor": None}}):
             result = poll_wallet_activity(cfg, FakeRegistry(FakePolymarketAdapter()), recent)
 
         self.assertEqual(result["problems"], [])
         self.assertEqual(len(result["activity"]), 2)
         self.assertEqual(cfg.wallets[0].last_seen_ts, 101)
-        self.assertEqual(set(cfg.wallets[0].seen_activity_keys), {"tx:tx1", "tx:tx2"})
+        self.assertEqual(cfg.wallets[0].seen_activity_keys, [activity_key(activity[0])])
+        self.assertEqual(cfg.wallets[0].activity_key_timestamps, {activity_key(activity[0]): 101})
         newest = result["activity"][0]
         self.assertEqual(newest["transaction_hash"], "tx2")
         preview = newest["copy_preview"]
@@ -4144,7 +4168,7 @@ class WebApiTests(unittest.TestCase):
         ]
         recent: list[dict] = []
 
-        with patch("web_api.data_api.get_activity", return_value=activity):
+        with patch("web_api.data_api.get_activity_page_v2", return_value={"data": activity, "pagination": {"next_cursor": None}}):
             result = poll_wallet_activity(
                 cfg,
                 FakeRegistry(FakePolymarketAdapter()),
@@ -4367,47 +4391,72 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(skipped["status"], "skipped")
         self.assertIn("duplicate", skipped["reason"])
 
-    def test_polymarket_leaderboard_payload_computes_roi_and_scans_pages(self) -> None:
+    def test_v2_leaderboard_rejects_unavailable_monetary_ratio_requests_before_fetch(self) -> None:
+        for params in (
+            {"sort": ["roi_pct"]}, {"sort": ["volume_usd"]},
+            {"min_volume_usd": ["1"]}, {"max_roi_pct": ["0"]},
+        ):
+            with self.subTest(params=params), patch("web_api.data_api.get_leaderboard_v2_page") as fetch:
+                with self.assertRaisesRegex(ValueError, "measured in shares"):
+                    polymarket_leaderboard_payload(params)
+                fetch.assert_not_called()
+
+    def test_v2_leaderboard_completed_checkpoint_never_restarts_source_scan(self) -> None:
+        rows = [{"user_id": WALLET, "pnl": 4, "volume": 100}]
+        with patch("web_api.data_api.get_leaderboard_v2_page") as fetch:
+            payload = polymarket_leaderboard_payload(
+                {"scan_start_offset": ["1"], "scan_limit": ["all"]},
+                initial_raw_rows=rows, checkpoint_complete=True,
+            )
+        fetch.assert_not_called()
+        self.assertTrue(payload["source_enumeration_complete"])
+        self.assertEqual(payload["rows"][0]["volume_shares"], 100)
+        self.assertIsNone(payload["rows"][0]["volume_usd"])
+        self.assertIsNone(payload["rows"][0]["pnl_volume_pct"])
+
+    def test_polymarket_leaderboard_payload_preserves_share_volume_and_scans_pages(self) -> None:
         first_page = [
-            {"rank": index, "proxyWallet": f"0x{index:040x}", "pseudonym": f"user-{index}", "pnl": "1", "volume": "100"}
+            {"rank": index, "user_id": f"0x{index:040x}", "user_name": f"user-{index}", "pnl": "1", "volume": "100"}
             for index in range(1, 51)
         ]
-        first_page[0] = {"rank": 1, "proxyWallet": "0x" + "a" * 40, "pseudonym": "alpha", "pnl": "10", "volume": "100"}
+        first_page[0] = {"rank": 1, "user_id": "0x" + "a" * 40, "user_name": "alpha", "pnl": "10", "volume": "100"}
         pages = [
             first_page,
             [
-                {"rank": 51, "proxyWallet": "0x" + "c" * 40, "pseudonym": "gamma", "pnl": "4", "volume": "20"},
+                {"rank": 51, "user_id": "0x" + "c" * 40, "user_name": "gamma", "pnl": "4", "volume": "20"},
             ],
         ]
 
         def fake_leaderboard(*_args, **kwargs):
-            return pages[0] if kwargs["offset"] == 0 else pages[1]
+            return _leaderboard_v2_page(pages[1] if kwargs.get("cursor") else pages[0], next_cursor=None if kwargs.get("cursor") else "fixture-next")
 
-        with patch("web_api.data_api.get_leaderboard", side_effect=fake_leaderboard) as mock_get:
+        with patch("web_api.data_api.get_leaderboard_v2_page", side_effect=fake_leaderboard) as mock_get:
             payload = polymarket_leaderboard_payload(
                 {
-                    "sort": ["roi_pct"],
+                    "sort": ["pnl_usd"],
                     "limit": ["2"],
                     "scan_limit": ["51"],
-                    "min_volume_usd": ["20"],
+                    "min_volume_shares": ["20"],
                 }
             )
 
         self.assertEqual(mock_get.call_count, 2)
         self.assertEqual(payload["counts"]["scanned"], 51)
-        self.assertEqual(payload["rows"][0]["display_name"], "gamma")
-        self.assertAlmostEqual(payload["rows"][0]["roi_pct"], 20.0)
-        self.assertEqual(payload["rows"][1]["display_name"], "alpha")
+        self.assertEqual(payload["rows"][0]["display_name"], "alpha")
+        self.assertIsNone(payload["rows"][0]["roi_pct"])
+        self.assertIsNone(payload["rows"][0]["volume_usd"])
+        self.assertEqual(payload["rows"][0]["volume_shares"], 100.0)
+        self.assertEqual(payload["rows"][1]["display_name"], "gamma")
         self.assertFalse(payload["mdd_available"])
         self.assertEqual(payload["source_sort"], "PNL")
 
     def test_polymarket_leaderboard_deduplicates_wallets_before_filtering_and_mdd(self) -> None:
         raw_rows = [
-            {"rank": 1, "proxyWallet": WALLET, "pnl": 10, "volume": 100},
-            {"rank": 2, "proxyWallet": WALLET.upper(), "pnl": 50, "volume": 100},
-            {"rank": 3, "proxyWallet": WALLET_2, "pnl": 20, "volume": 100},
+            {"rank": 1, "user_id": WALLET, "pnl": 10, "volume": 100},
+            {"rank": 2, "user_id": WALLET.upper(), "pnl": 50, "volume": 100},
+            {"rank": 3, "user_id": WALLET_2, "pnl": 20, "volume": 100},
         ]
-        with patch("web_api.data_api.get_leaderboard", return_value=raw_rows), patch(
+        with patch("web_api.data_api.get_leaderboard_v2_page", return_value=_leaderboard_v2_page(raw_rows)), patch(
             "web_api.polymarket_user_mdd_payload", return_value={
                 "mdd_pct": 10.0, "mdd_usd": 1.0, "mdd_method": "test", "mdd_pct_basis": "test",
                 "points": [], "closed_positions": 1, "open_positions": 0, "equity_base_usd": 10.0,
@@ -4422,15 +4471,15 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["counts"]["returned"], 2)
         self.assertEqual([row["pnl_usd"] for row in payload["rows"]], [20.0, 10.0])
 
-        with patch("web_api.data_api.get_leaderboard", return_value=raw_rows):
+        with patch("web_api.data_api.get_leaderboard_v2_page", return_value=_leaderboard_v2_page(raw_rows)):
             filtered = polymarket_leaderboard_payload({"min_pnl_usd": ["30"], "scan_limit": ["3"]})
         self.assertEqual(filtered["counts"]["returned"], 0)
 
     def test_polymarket_leaderboard_payload_uses_full_wallet_display_fallback(self) -> None:
-        leaderboard = [{"rank": 1, "proxyWallet": WALLET, "pnl": "10", "volume": "100"}]
+        leaderboard = [{"rank": 1, "user_id": WALLET, "pnl": "10", "volume": "100"}]
 
-        with patch("web_api.data_api.get_leaderboard", return_value=leaderboard):
-            payload = polymarket_leaderboard_payload({"sort": ["roi_pct"], "limit": ["1"], "scan_limit": ["1"]})
+        with patch("web_api.data_api.get_leaderboard_v2_page", return_value=_leaderboard_v2_page(leaderboard)):
+            payload = polymarket_leaderboard_payload({"sort": ["pnl_usd"], "limit": ["1"], "scan_limit": ["1"]})
 
         self.assertEqual(payload["rows"][0]["wallet"], WALLET)
         self.assertEqual(payload["rows"][0]["display_name"], WALLET)
@@ -4438,21 +4487,21 @@ class WebApiTests(unittest.TestCase):
     def test_polymarket_leaderboard_payload_can_cancel_after_current_page(self) -> None:
         page_calls = 0
         first_page = [
-            {"rank": index, "proxyWallet": f"0x{index:040x}", "pseudonym": f"user-{index}", "pnl": "1", "volume": "100"}
+            {"rank": index, "user_id": f"0x{index:040x}", "user_name": f"user-{index}", "pnl": "1", "volume": "100"}
             for index in range(1, 51)
         ]
 
         def fake_leaderboard(*_args, **_kwargs):
             nonlocal page_calls
             page_calls += 1
-            return first_page
+            return _leaderboard_v2_page(first_page, next_cursor="fixture-next")
 
         def cancel_after_first_page() -> bool:
             return page_calls >= 1
 
-        with patch("web_api.data_api.get_leaderboard", side_effect=fake_leaderboard) as mock_get:
+        with patch("web_api.data_api.get_leaderboard_v2_page", side_effect=fake_leaderboard) as mock_get:
             payload = polymarket_leaderboard_payload(
-                {"sort": ["roi_pct"], "limit": ["10"], "scan_limit": ["100"]},
+                {"sort": ["pnl_usd"], "limit": ["10"], "scan_limit": ["100"]},
                 cancel_check=cancel_after_first_page,
             )
 
@@ -4471,12 +4520,12 @@ class WebApiTests(unittest.TestCase):
             calls += 1
             if calls == 1:
                 raise RuntimeError("ssl eof")
-            return [{"rank": 1, "proxyWallet": WALLET, "pnl": "10", "volume": "100"}]
+            return _leaderboard_v2_page([{"rank": 1, "user_id": WALLET, "pnl": "10", "volume": "100"}])
 
-        with patch("web_api.data_api.get_leaderboard", side_effect=fake_leaderboard):
+        with patch("web_api.data_api.get_leaderboard_v2_page", side_effect=fake_leaderboard):
             payload = polymarket_leaderboard_payload(
                 {
-                    "sort": ["roi_pct"],
+                    "sort": ["pnl_usd"],
                     "limit": ["1"],
                     "scan_limit": ["1"],
                     "scan_retry_attempts": ["2"],
@@ -4494,9 +4543,9 @@ class WebApiTests(unittest.TestCase):
     def test_leaderboard_scanner_can_checkpoint_without_retaining_pages(self) -> None:
         captured_pages = []
         progress = []
-        page = [{"rank": 1, "proxyWallet": WALLET, "pnl": "10", "volume": "100"}]
+        page = [{"rank": 1, "user_id": WALLET, "pnl": "10", "volume": "100"}]
 
-        with patch("web_api.data_api.get_leaderboard", return_value=page):
+        with patch("web_api.data_api.get_leaderboard_v2_page", return_value=_leaderboard_v2_page(page, limit=1)):
             rows, cancelled = _fetch_polymarket_leaderboard_scan_rows(
                 scan_limit=1,
                 retain_rows=False,
@@ -4518,14 +4567,14 @@ class WebApiTests(unittest.TestCase):
 
     def test_leaderboard_scanner_stops_on_a_repeated_full_page(self) -> None:
         page = [
-            {"rank": index + 1, "proxyWallet": f"0x{index:040x}", "pnl": str(index), "volume": "100"}
+            {"rank": index + 1, "user_id": f"0x{index:040x}", "pnl": str(index), "volume": "100"}
             for index in range(50)
         ]
         progress = []
         warnings = []
         summary = {}
 
-        with patch("web_api.data_api.get_leaderboard", return_value=page) as mock_get:
+        with patch("web_api.data_api.get_leaderboard_v2_page", side_effect=[_leaderboard_v2_page(page, next_cursor="fixture-next"), _leaderboard_v2_page(page)]) as mock_get:
             rows, cancelled = _fetch_polymarket_leaderboard_scan_rows(
                 scan_limit=None,
                 retain_rows=True,
@@ -4550,11 +4599,11 @@ class WebApiTests(unittest.TestCase):
 
     def test_leaderboard_payload_marks_a_repeated_page_as_incomplete_source_enumeration(self) -> None:
         page = [
-            {"rank": index + 1, "proxyWallet": f"0x{index:040x}", "pnl": str(index), "volume": "100"}
+            {"rank": index + 1, "user_id": f"0x{index:040x}", "pnl": str(index), "volume": "100"}
             for index in range(50)
         ]
 
-        with patch("web_api.data_api.get_leaderboard", return_value=page) as mock_get:
+        with patch("web_api.data_api.get_leaderboard_v2_page", side_effect=[_leaderboard_v2_page(page, next_cursor="fixture-next"), _leaderboard_v2_page(page)]) as mock_get:
             payload = polymarket_leaderboard_payload({"limit": ["all"], "scan_limit": ["unlimited"]})
 
         self.assertEqual(mock_get.call_count, 2)
@@ -4564,22 +4613,23 @@ class WebApiTests(unittest.TestCase):
         self.assertIn("public Polymarket leaderboard", payload["source_scope_note"])
 
     def test_polymarket_leaderboard_payload_resumes_from_checkpoint_rows(self) -> None:
-        checkpoint_rows = [{"rank": 1, "proxyWallet": WALLET, "pnl": "10", "volume": "100"}]
+        checkpoint_rows = [{"rank": 1, "user_id": WALLET, "pnl": "10", "volume": "100"}]
         page_callbacks = []
 
         def fake_leaderboard(*_args, **kwargs):
-            self.assertEqual(kwargs["offset"], 1)
-            return []
+            self.assertEqual(kwargs, {"cursor": "fixture-next"})
+            return _leaderboard_v2_page([])
 
-        with patch("web_api.data_api.get_leaderboard", side_effect=fake_leaderboard) as mock_get:
+        with patch("web_api.data_api.get_leaderboard_v2_page", side_effect=fake_leaderboard) as mock_get:
             payload = polymarket_leaderboard_payload(
                 {
-                    "sort": ["roi_pct"],
+                    "sort": ["pnl_usd"],
                     "limit": ["all"],
                     "scan_limit": ["all"],
                     "scan_start_offset": ["1"],
                 },
                 initial_raw_rows=checkpoint_rows,
+                scan_start_cursor="fixture-next",
                 leaderboard_page_callback=lambda offset, limit, rows: page_callbacks.append((offset, limit, rows)),
             )
 
@@ -4592,7 +4642,7 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(page_callbacks[0][0], 1)
 
     def test_polymarket_leaderboard_payload_does_not_cap_deep_scan_values(self) -> None:
-        with patch("web_api.data_api.get_leaderboard", return_value=[]) as mock_get:
+        with patch("web_api.data_api.get_leaderboard_v2_page", return_value=_leaderboard_v2_page([])) as mock_get:
             payload = polymarket_leaderboard_payload(
                 {
                     "limit": ["2000000"],
@@ -4616,16 +4666,16 @@ class WebApiTests(unittest.TestCase):
 
     def test_polymarket_leaderboard_payload_accepts_unlimited_limits(self) -> None:
         full_page = [
-            {"rank": index, "proxyWallet": f"0x{index:040x}", "pseudonym": f"user-{index}", "pnl": "1", "volume": "100"}
+            {"rank": index, "user_id": f"0x{index:040x}", "user_name": f"user-{index}", "pnl": "1", "volume": "100"}
             for index in range(1, 51)
         ]
         tail_page = [
-            {"rank": 51, "proxyWallet": WALLET, "pseudonym": "alpha", "pnl": "10", "volume": "100"},
-            {"rank": 52, "proxyWallet": WALLET_2, "pseudonym": "beta", "pnl": "20", "volume": "500"},
+            {"rank": 51, "user_id": WALLET, "user_name": "alpha", "pnl": "10", "volume": "100"},
+            {"rank": 52, "user_id": WALLET_2, "user_name": "beta", "pnl": "20", "volume": "500"},
         ]
 
         def fake_leaderboard(*_args, **kwargs):
-            return full_page if kwargs["offset"] == 0 else tail_page
+            return _leaderboard_v2_page(tail_page if kwargs.get("cursor") else full_page, next_cursor=None if kwargs.get("cursor") else "fixture-next")
 
         def fake_mdd(wallet, **_kwargs):
             return {
@@ -4644,7 +4694,7 @@ class WebApiTests(unittest.TestCase):
                 "trough_timestamp": 20,
             }
 
-        with patch("web_api.data_api.get_leaderboard", side_effect=fake_leaderboard) as mock_get, patch(
+        with patch("web_api.data_api.get_leaderboard_v2_page", side_effect=fake_leaderboard) as mock_get, patch(
             "web_api.polymarket_user_mdd_payload",
             side_effect=fake_mdd,
         ) as mock_mdd:
@@ -4674,20 +4724,20 @@ class WebApiTests(unittest.TestCase):
 
     def test_polymarket_user_mdd_payload_computes_usd_and_percentage_drawdown(self) -> None:
         with patch(
-            "web_api.data_api.get_closed_positions",
-            return_value=[
+            "polymarket.mdd._fetch_closed_positions",
+            return_value=PublicHistoryRows([
                 {"timestamp": 10, "realizedPnl": "100", "totalBought": "1000", "avgPrice": "0.5"},
                 {"timestamp": 20, "realizedPnl": "-40", "totalBought": "500", "avgPrice": "0.5"},
-            ],
+            ], history_complete=True),
         ), patch(
-            "web_api.data_api.get_positions",
-            return_value=[{"totalPnl": "-10", "currentValue": "20", "initialValue": "100"}],
+            "polymarket.mdd._fetch_open_positions",
+            return_value=PublicHistoryRows([{"totalPnl": "-10", "currentValue": "20", "initialValue": "100"}], history_complete=True),
         ), patch(
-            "web_api.data_api.get_activity",
-            return_value=[],
+            "polymarket.mdd._fetch_activity_events",
+            return_value=PublicHistoryRows([], history_complete=True),
         ), patch(
-            "web_api.data_api.get_trades",
-            return_value=[],
+            "polymarket.mdd._fetch_trade_rows",
+            return_value=PublicHistoryRows([], history_complete=True),
         ):
             payload = polymarket_user_mdd_payload(WALLET, closed_limit=10)
 
@@ -4709,20 +4759,20 @@ class WebApiTests(unittest.TestCase):
             "asset,currentValue,realizedPnl\nasset-1,20,60\n",
         )
         with patch(
-            "web_api.data_api.get_closed_positions",
-            return_value=[
+            "polymarket.mdd._fetch_closed_positions",
+            return_value=PublicHistoryRows([
                 {"timestamp": 10, "realizedPnl": "100", "totalBought": "100", "avgPrice": "0.5"},
                 {"timestamp": 20, "realizedPnl": "-40", "totalBought": "100", "avgPrice": "0.5"},
-            ],
+            ], history_complete=True),
         ), patch(
-            "web_api.data_api.get_positions",
-            return_value=[{"totalPnl": "0", "currentValue": "20", "initialValue": "50"}],
+            "polymarket.mdd._fetch_open_positions",
+            return_value=PublicHistoryRows([{"totalPnl": "0", "currentValue": "20", "initialValue": "50"}], history_complete=True),
         ), patch(
-            "web_api.data_api.get_activity",
-            return_value=[],
+            "polymarket.mdd._fetch_activity_events",
+            return_value=PublicHistoryRows([], history_complete=True),
         ), patch(
-            "web_api.data_api.get_trades",
-            return_value=[],
+            "polymarket.mdd._fetch_trade_rows",
+            return_value=PublicHistoryRows([], history_complete=True),
         ), patch(
             "polymarket.accounting.data_api.download_accounting_snapshot",
             return_value=snapshot,
@@ -4764,23 +4814,23 @@ class WebApiTests(unittest.TestCase):
         ]
 
         def fake_activity(*_args, **kwargs):
-            return activity_pages[0] if kwargs["offset"] == 0 else activity_pages[1]
+            return PublicHistoryRows(activity_pages[0], history_complete=True)
 
         with patch(
-            "web_api.data_api.get_closed_positions",
-            return_value=[
+            "polymarket.mdd._fetch_closed_positions",
+            return_value=PublicHistoryRows([
                 {"timestamp": 10, "realizedPnl": "50", "totalBought": "25"},
                 {"timestamp": 20, "realizedPnl": "-20", "totalBought": "25"},
-            ],
+            ], history_complete=True),
         ), patch(
-            "web_api.data_api.get_positions",
-            return_value=[],
+            "polymarket.mdd._fetch_open_positions",
+            return_value=PublicHistoryRows([], history_complete=True),
         ), patch(
-            "web_api.data_api.get_activity",
+            "polymarket.mdd._fetch_activity_events",
             side_effect=fake_activity,
         ), patch(
-            "web_api.data_api.get_trades",
-            return_value=[],
+            "polymarket.mdd._fetch_trade_rows",
+            return_value=PublicHistoryRows([], history_complete=True),
         ):
             payload = polymarket_user_mdd_payload(WALLET, closed_limit=10, activity_limit=1000, trade_limit=10)
 
@@ -4813,16 +4863,16 @@ class WebApiTests(unittest.TestCase):
                 ]
             }
         }
-        with patch("web_api.data_api.get_closed_positions", return_value=[]), patch(
-            "web_api.data_api.get_positions",
-            return_value=[{"asset": "token-1", "size": 100, "avgPrice": 0.5,
-                           "currentValue": 80, "cashPnl": 30, "realizedPnl": 0}],
+        with patch("polymarket.mdd._fetch_closed_positions", return_value=PublicHistoryRows([], history_complete=True)), patch(
+            "polymarket.mdd._fetch_open_positions",
+            return_value=PublicHistoryRows([{"asset": "token-1", "size": 100, "avgPrice": 0.5,
+                           "currentValue": 80, "cashPnl": 30, "realizedPnl": 0}], history_complete=True),
         ), patch(
-            "web_api.data_api.get_activity",
-            return_value=[trade],
+            "polymarket.mdd._fetch_activity_events",
+            return_value=PublicHistoryRows([trade], history_complete=True),
         ), patch(
-            "web_api.data_api.get_trades",
-            return_value=[],
+            "polymarket.mdd._fetch_trade_rows",
+            return_value=PublicHistoryRows([], history_complete=True),
         ), patch(
             "polymarket.mdd.clob_rest.get_batch_price_history",
             return_value=history,
@@ -4855,15 +4905,15 @@ class WebApiTests(unittest.TestCase):
             for index in range(22)
         ]
         history = {"history": {"token-0": [{"t": 10, "p": 0.40}]}}
-        with patch("web_api.data_api.get_closed_positions", return_value=[]), patch(
-            "web_api.data_api.get_positions",
-            return_value=[],
+        with patch("polymarket.mdd._fetch_closed_positions", return_value=PublicHistoryRows([], history_complete=True)), patch(
+            "polymarket.mdd._fetch_open_positions",
+            return_value=PublicHistoryRows([], history_complete=True),
         ), patch(
-            "web_api.data_api.get_activity",
-            return_value=trade_rows,
+            "polymarket.mdd._fetch_activity_events",
+            return_value=PublicHistoryRows(trade_rows, history_complete=True),
         ), patch(
-            "web_api.data_api.get_trades",
-            return_value=[],
+            "polymarket.mdd._fetch_trade_rows",
+            return_value=PublicHistoryRows([], history_complete=True),
         ), patch(
             "polymarket.mdd.clob_rest.get_batch_price_history",
             return_value=history,
@@ -4878,8 +4928,8 @@ class WebApiTests(unittest.TestCase):
 
     def test_polymarket_leaderboard_payload_computes_and_sorts_mdd_filter(self) -> None:
         leaderboard = [
-            {"rank": 1, "proxyWallet": WALLET, "pseudonym": "alpha", "pnl": "10", "volume": "100"},
-            {"rank": 2, "proxyWallet": WALLET_2, "pseudonym": "beta", "pnl": "20", "volume": "500"},
+            {"rank": 1, "user_id": WALLET, "user_name": "alpha", "pnl": "10", "volume": "100"},
+            {"rank": 2, "user_id": WALLET_2, "user_name": "beta", "pnl": "20", "volume": "500"},
         ]
 
         def fake_mdd(wallet, **_kwargs):
@@ -4901,8 +4951,8 @@ class WebApiTests(unittest.TestCase):
             }
 
         with patch(
-            "web_api.data_api.get_leaderboard",
-            return_value=leaderboard,
+            "web_api.data_api.get_leaderboard_v2_page",
+            return_value=_leaderboard_v2_page(leaderboard),
         ), patch("web_api.polymarket_user_mdd_payload", side_effect=fake_mdd):
             payload = polymarket_leaderboard_payload(
                 {
@@ -4921,10 +4971,10 @@ class WebApiTests(unittest.TestCase):
         self.assertAlmostEqual(payload["rows"][0]["mdd_pct"], 12.0)
         self.assertTrue(payload["mdd_available"])
 
-    def test_polymarket_leaderboard_payload_applies_mdd_budget_after_local_roi_sort(self) -> None:
+    def test_polymarket_leaderboard_payload_applies_mdd_budget_after_local_share_volume_sort(self) -> None:
         leaderboard = [
-            {"rank": 1, "proxyWallet": WALLET, "pseudonym": "high-pnl-low-roi", "pnl": "1000", "volume": "100000"},
-            {"rank": 2, "proxyWallet": WALLET_2, "pseudonym": "lower-pnl-high-roi", "pnl": "100", "volume": "200"},
+            {"rank": 1, "user_id": WALLET, "user_name": "high-pnl-low-roi", "pnl": "1000", "volume": "100000"},
+            {"rank": 2, "user_id": WALLET_2, "user_name": "lower-pnl-high-roi", "pnl": "100", "volume": "200"},
         ]
 
         def fake_mdd(wallet, **_kwargs):
@@ -4944,14 +4994,14 @@ class WebApiTests(unittest.TestCase):
                 "trough_timestamp": 20,
             }
 
-        with patch("web_api.data_api.get_leaderboard", return_value=leaderboard), patch(
+        with patch("web_api.data_api.get_leaderboard_v2_page", return_value=_leaderboard_v2_page(leaderboard)), patch(
             "web_api.polymarket_user_mdd_payload",
             side_effect=fake_mdd,
         ) as mock_mdd:
             payload = polymarket_leaderboard_payload(
                 {
-                    "sort": ["roi_pct"],
-                    "direction": ["DESC"],
+                    "sort": ["volume_shares"],
+                    "direction": ["ASC"],
                     "limit": ["1"],
                     "scan_limit": ["2"],
                     "mdd_scan_limit": ["1"],
@@ -4966,8 +5016,8 @@ class WebApiTests(unittest.TestCase):
 
     def test_polymarket_leaderboard_payload_fast_mdd_stops_after_enough_qualified_rows(self) -> None:
         leaderboard = [
-            {"rank": 1, "proxyWallet": WALLET, "pseudonym": "top-roi", "pnl": "200", "volume": "400"},
-            {"rank": 2, "proxyWallet": WALLET_2, "pseudonym": "next-roi", "pnl": "100", "volume": "400"},
+            {"rank": 1, "user_id": WALLET, "user_name": "top-roi", "pnl": "200", "volume": "400"},
+            {"rank": 2, "user_id": WALLET_2, "user_name": "next-roi", "pnl": "100", "volume": "400"},
         ]
 
         def fake_mdd(wallet, **_kwargs):
@@ -4987,13 +5037,13 @@ class WebApiTests(unittest.TestCase):
                 "trough_timestamp": 20,
             }
 
-        with patch("web_api.data_api.get_leaderboard", return_value=leaderboard), patch(
+        with patch("web_api.data_api.get_leaderboard_v2_page", return_value=_leaderboard_v2_page(leaderboard)), patch(
             "web_api.polymarket_user_mdd_payload",
             side_effect=fake_mdd,
         ) as mock_mdd:
             payload = polymarket_leaderboard_payload(
                 {
-                    "sort": ["roi_pct"],
+                    "sort": ["pnl_usd"],
                     "direction": ["DESC"],
                     "limit": ["1"],
                     "scan_limit": ["2"],
@@ -5013,7 +5063,7 @@ class WebApiTests(unittest.TestCase):
         self.assertTrue(payload["mdd_stop_on_limit"])
 
     def test_polymarket_leaderboard_payload_persists_mdd_audit_cache_when_requested(self) -> None:
-        leaderboard = [{"rank": 1, "proxyWallet": WALLET, "pseudonym": "alpha", "pnl": "10", "volume": "100"}]
+        leaderboard = [{"rank": 1, "user_id": WALLET, "user_name": "alpha", "pnl": "10", "volume": "100"}]
 
         def fake_mdd(wallet, **_kwargs):
             return {
@@ -5036,7 +5086,7 @@ class WebApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             os.environ,
             {"POLYMARKET_ANALYTICS_CACHE_PATH": str(Path(tmp) / "analytics-cache.json")},
-        ), patch("web_api.data_api.get_leaderboard", return_value=leaderboard), patch(
+        ), patch("web_api.data_api.get_leaderboard_v2_page", return_value=_leaderboard_v2_page(leaderboard)), patch(
             "web_api.polymarket_user_mdd_payload", side_effect=fake_mdd
         ):
             payload = polymarket_leaderboard_payload(
@@ -5058,8 +5108,8 @@ class WebApiTests(unittest.TestCase):
 
     def test_polymarket_leaderboard_payload_reports_rate_limit_without_more_mdd_calls(self) -> None:
         leaderboard = [
-            {"rank": 1, "proxyWallet": WALLET, "pseudonym": "alpha", "pnl": "10", "volume": "100"},
-            {"rank": 2, "proxyWallet": WALLET_2, "pseudonym": "beta", "pnl": "20", "volume": "500"},
+            {"rank": 1, "user_id": WALLET, "user_name": "alpha", "pnl": "10", "volume": "100"},
+            {"rank": 2, "user_id": WALLET_2, "user_name": "beta", "pnl": "20", "volume": "500"},
         ]
         exc = PolymarketRateLimitError(
             "limited",
@@ -5068,7 +5118,7 @@ class WebApiTests(unittest.TestCase):
             url="https://data-api.polymarket.com/test",
             status_code=429,
         )
-        with patch("web_api.data_api.get_leaderboard", return_value=leaderboard), patch(
+        with patch("web_api.data_api.get_leaderboard_v2_page", return_value=_leaderboard_v2_page(leaderboard)), patch(
             "web_api.polymarket_user_mdd_payload",
             side_effect=exc,
         ) as mock_mdd:
@@ -5506,6 +5556,7 @@ class WebApiTests(unittest.TestCase):
         cfg.paper_trades = [
             PaperTradeRecord(
                 market_id="kalshi",
+                quote_currency="USD",
                 contract_id="KALSHI-CONTRACT",
                 side="BUY",
                 size=2,
@@ -6555,6 +6606,7 @@ class WebApiTests(unittest.TestCase):
         cfg.paper_trades = [
             PaperTradeRecord(
                 market_id="kalshi",
+                quote_currency="USD",
                 contract_id="KALSHI-CONTRACT",
                 side="BUY",
                 size=2,
@@ -6578,6 +6630,7 @@ class WebApiTests(unittest.TestCase):
         cfg.paper_trades = [
             PaperTradeRecord(
                 market_id="kalshi",
+                quote_currency="USD",
                 contract_id="KALSHI-CONTRACT",
                 side="BUY",
                 size=2,

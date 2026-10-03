@@ -1,0 +1,34 @@
+{
+  "data": [
+    {
+      "bio": "Offline wire fixture",
+      "condition_id": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event_slug": "fixture-event",
+      "icon": "https://example.invalid/fixture.png",
+      "name": "Fixture",
+      "outcome": "Yes",
+      "outcome_index": 0,
+      "price": 0.45,
+      "profile_image": "",
+      "profile_image_optimized": "",
+      "proxy_wallet": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "pseudonym": "fixture",
+      "side": "BUY",
+      "size": 100,
+      "slug": "fixture-market",
+      "timestamp": 100,
+      "title": "Offline activity fixture",
+      "token_id": "1234567890",
+      "transaction_hash": "0xfixturebuy",
+      "type": "TRADE",
+      "usdc_size": 45,
+      "is_combo": false
+    }
+  ],
+  "pagination": {
+    "has_more": true,
+    "limit": 2,
+    "offset": 0,
+    "next_cursor": "fixture-opaque-cursor"
+  }
+}

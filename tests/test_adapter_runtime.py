@@ -262,7 +262,7 @@ class AdapterRuntimeTests(unittest.TestCase):
         self.assertTrue(response.closed)
 
     def test_rate_limiter_uses_configured_delay_without_real_sleep(self) -> None:
-        clock_values = [0.0, 0.25, 0.25]
+        clock_values = [0.0, 0.25, 1.0]
         sleeps = []
         limiter = RateLimiter(
             1.0,

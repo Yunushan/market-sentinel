@@ -13,6 +13,7 @@ import app
 import market_sentinel_cli as cli
 import web_api
 from polymarket import mdd
+from polymarket.history_v2 import PublicHistoryRows
 from polymarket.accounting import reconcile_mdd_payload_with_accounting
 from polymarket.leaderboard_state import LeaderboardStateStore
 
@@ -26,23 +27,29 @@ LIMITS = {"closed_positions": "closed_limit", "open_positions": "open_limit",
           "activity_events": "activity_limit", "trade_rows": "trade_limit"}
 
 
+def leaderboard_page():
+    return {"data": [{"user_id": WALLET, "pnl": 10, "volume": 100}],
+            "pagination": {"limit": 50, "offset": 0, "has_more": False, "next_cursor": None}}
+
+
 class MddHistoryContractTests(unittest.TestCase):
     def setUp(self):
         mdd.clear_mdd_input_cache()
         self.addCleanup(mdd.clear_mdd_input_cache)
 
     def fetch(self, **options):
+        limits = {**{option: 2 for option in LIMITS.values()}, **options}
         with ExitStack() as stack:
             for name, rows in ROWS.items():
-                stack.enter_context(patch.object(mdd, "_fetch_" + name, return_value=rows))
-            return mdd.fetch_mdd_inputs(WALLET, **{
-                **{option: 2 for option in LIMITS.values()}, **options,
-            })
+                stack.enter_context(patch.object(mdd, "_fetch_" + name, return_value=PublicHistoryRows(
+                    rows, history_complete=len(rows) < limits[LIMITS[name]]
+                )))
+            return mdd.fetch_mdd_inputs(WALLET, **limits)
 
     def test_each_full_source_budget_invalidates_risk_without_erasing_diagnostics(self):
         for source, option in LIMITS.items():
             with self.subTest(source=source):
-                payload = mdd.build_historical_mdd_payload(self.fetch(**{option: 1}), equity_base_usd=100)
+                payload = mdd.build_historical_mdd_payload(self.fetch(**{option: 1}), equity_base_usd=100, equity_base_currency="USDC")
                 self.assertFalse(payload["mdd_available"])
                 self.assertIsNone(payload["mdd_pct"])
                 self.assertEqual(payload["observed_drawdown"]["mdd_pct"], 5)
@@ -50,7 +57,7 @@ class MddHistoryContractTests(unittest.TestCase):
                 self.assertEqual(payload["mdd_history_coverage"][source]["status"], "limit_reached")
 
     def test_short_source_windows_are_not_verified_account_history(self):
-        payload = mdd.build_historical_mdd_payload(self.fetch(), equity_base_usd=100)
+        payload = mdd.build_historical_mdd_payload(self.fetch(), equity_base_usd=100, equity_base_currency="USDC")
         self.assertTrue(payload["mdd_available"])
         self.assertEqual(payload["mdd_pct"], 5)
         self.assertEqual(payload["mdd_scope"], "observed_public_pnl")
@@ -65,7 +72,7 @@ class MddHistoryContractTests(unittest.TestCase):
         self.assertFalse(payload["mdd_account_equity_verified"])
 
     def test_excluded_open_positions_are_reported(self):
-        payload = mdd.build_historical_mdd_payload(self.fetch(include_open=False), equity_base_usd=100)
+        payload = mdd.build_historical_mdd_payload(self.fetch(include_open=False), equity_base_usd=100, equity_base_currency="USDC")
         self.assertEqual(payload["mdd_history_status"], "sources_excluded")
         self.assertEqual(payload["mdd_history_excluded_sources"], ["open_positions"])
         self.assertEqual(payload["mdd_history_coverage"]["open_positions"]["returned"], 0)
@@ -75,8 +82,8 @@ class MddHistoryContractTests(unittest.TestCase):
         self.assertIn("history_source_not_requested:open_positions", payload["mdd_unavailable_reasons"])
 
     def test_api_filter_excludes_unrequested_financial_sources(self):
-        with patch.object(web_api.data_api, "get_leaderboard", return_value=[{"proxyWallet": WALLET, "pnl": 10, "vol": 100}]), patch.object(
-            mdd.data_api, "get_closed_positions", return_value=[CLOSE]
+        with patch.object(web_api.data_api, "get_leaderboard_v2_page", return_value=leaderboard_page()), patch.object(
+            mdd, "_fetch_closed_positions", return_value=PublicHistoryRows([CLOSE], history_complete=True)
         ), patch.object(web_api, "attach_polymarket_mdd_audit_cache", return_value={}):
             result = web_api.polymarket_leaderboard_payload({
                 "max_mdd_pct": ["20"], "equity_base_usd": ["100"], "mdd_history_limit": ["2"],
@@ -91,7 +98,7 @@ class MddHistoryContractTests(unittest.TestCase):
         with patch.object(mdd.clob_rest, "get_batch_price_history", return_value={
             "history": {"token": [{"t": 101, "p": 0.5}]},
         }):
-            payload = mdd.build_mark_replay_mdd_payload(self.fetch(include_open=False), equity_base_usd=100)
+            payload = mdd.build_mark_replay_mdd_payload(self.fetch(include_open=False), equity_base_usd=100, equity_base_currency="USDC")
         self.assertFalse(payload["mdd_available"])
         self.assertIsNone(payload["mdd_pct"])
         self.assertEqual(payload["mark_replay"]["status"], "partial")
@@ -108,16 +115,22 @@ class MddHistoryContractTests(unittest.TestCase):
         self.assertEqual(restored.history_coverage["closed_positions"]["status"], "limit_reached")
 
     def test_actual_pagination_cap_and_short_page_are_distinguished(self):
-        with patch.object(mdd.data_api, "get_closed_positions", return_value=[CLOSE]), patch.object(
-            mdd.data_api, "get_positions", return_value=[]
-        ), patch.object(mdd.data_api, "get_activity", return_value=[]), patch.object(mdd.data_api, "get_trades", return_value=[]):
+        def positions_page(**kwargs):
+            rows = [CLOSE] if kwargs["status"] == "CLOSED" else []
+            cursor = "more" if kwargs["status"] == "CLOSED" and kwargs["limit"] == 1 else None
+            return {"data": rows, "pagination": {"next_cursor": cursor}}
+
+        empty = {"data": [], "pagination": {"next_cursor": None}}
+        with patch.object(mdd.data_api, "get_positions_page_v2", side_effect=positions_page), patch.object(
+            mdd.data_api, "get_activity_page_v2", return_value=empty
+        ), patch.object(mdd.data_api, "get_trades_page_v2", return_value=empty):
             capped = mdd.fetch_mdd_inputs(WALLET, closed_limit=1)
             exhausted = mdd.fetch_mdd_inputs(WALLET, closed_limit=2)
         self.assertEqual(capped.history_coverage["closed_positions"]["status"], "limit_reached")
         self.assertEqual(exhausted.history_coverage["closed_positions"]["status"], "end_of_results")
 
     def test_accounting_cannot_promote_a_capped_result(self):
-        payload = mdd.build_historical_mdd_payload(self.fetch(closed_limit=1), equity_base_usd=100)
+        payload = mdd.build_historical_mdd_payload(self.fetch(closed_limit=1), equity_base_usd=100, equity_base_currency="USDC")
         result = reconcile_mdd_payload_with_accounting(payload, {
             "status": "ok", "complete": True, "equity": {"base_equity_usd": 10000}, "positions": {},
         })
@@ -127,14 +140,14 @@ class MddHistoryContractTests(unittest.TestCase):
 
     def test_successful_mark_replay_does_not_promote_capped_inputs(self):
         with patch.object(mdd.clob_rest, "get_batch_price_history", return_value={"history": {"token": [{"t": 101, "p": 0.5}]}}):
-            result = mdd.build_mark_replay_mdd_payload(self.fetch(trade_limit=1), equity_base_usd=100)
+            result = mdd.build_mark_replay_mdd_payload(self.fetch(trade_limit=1), equity_base_usd=100, equity_base_currency="USDC")
         self.assertFalse(result["mdd_available"])
         self.assertIsNone(result["mdd_pct"])
         self.assertEqual(result["mark_replay"]["status"], "partial")
         self.assertIn("history_limit_reached:trade_rows", result["mark_replay"]["incomplete_reasons"])
 
     def test_api_filter_excludes_capped_result_and_reports_reason_count(self):
-        with patch.object(web_api.data_api, "get_leaderboard", return_value=[{"proxyWallet": WALLET, "pnl": 10, "vol": 100}]), patch.object(
+        with patch.object(web_api.data_api, "get_leaderboard_v2_page", return_value=leaderboard_page()), patch.object(
             mdd, "fetch_mdd_inputs", return_value=self.fetch(closed_limit=1)
         ), patch.object(web_api, "attach_polymarket_mdd_audit_cache", return_value={}):
             result = web_api.polymarket_leaderboard_payload({"max_mdd_pct": ["20"], "equity_base_usd": ["100"]})
@@ -146,16 +159,18 @@ class MddHistoryContractTests(unittest.TestCase):
     def test_sqlite_round_trip_and_csv_preserve_provenance(self):
         with tempfile.TemporaryDirectory() as temporary, closing(LeaderboardStateStore(Path(temporary) / "state.db")) as store:
             store.prepare({}, resume=False)
-            row = web_api.normalize_polymarket_leaderboard_row({"proxyWallet": WALLET, "pnl": 10, "vol": 100}, 1)
-            store.record_page(0, 1, [row])
-            saved = next(store.iter_results({}, require_mdd=False, sort="roi_pct", direction="DESC", limit=None))
-            store.set_mdd(saved["id"], mdd.build_historical_mdd_payload(self.fetch(closed_limit=1), equity_base_usd=100))
+            row = web_api.normalize_polymarket_leaderboard_row({"user_id": WALLET, "pnl": 10, "volume": 100}, 1)
+            store.record_page(0, 1, [row], source_version=2)
+            saved = next(store.iter_results({}, require_mdd=False, sort="pnl_usd", direction="DESC", limit=None))
+            store.set_mdd(saved["id"], mdd.build_historical_mdd_payload(self.fetch(closed_limit=1), equity_base_usd=100, equity_base_currency="USDC"))
             self.assertEqual(store.result_count({"max_mdd_pct": 20}, require_mdd=True), 0)
             self.assertEqual(store.status()["mdd_available"], 0)
             self.assertEqual(store.status()["mdd_unavailable"], 1)
-            exported = next(store.iter_results({}, require_mdd=False, sort="roi_pct", direction="DESC", limit=None))
-            self.assertEqual(exported["pnl_volume_pct"], 10)
-            self.assertIn("not return on invested capital", exported["roi_pct_basis"])
+            exported = next(store.iter_results({}, require_mdd=False, sort="pnl_usd", direction="DESC", limit=None))
+            self.assertEqual(exported["volume_shares"], 100)
+            self.assertIsNone(exported["pnl_volume_pct"])
+            self.assertIsNone(exported["volume_usd"])
+            self.assertEqual(exported["roi_pct_basis"], "unavailable")
             self.assertEqual(exported["mdd_history_status"], "limit_reached")
             output = Path(temporary) / "result.csv"
             cli._write_streamed_leaderboard_payload({}, [exported], output_format="csv", output=str(output))
@@ -168,12 +183,12 @@ class MddHistoryContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "result.json"
             args = ["polymarket-leaderboard", "--state-db", str(Path(temporary) / "state.db"),
-                    "--max-mdd-pct", "20", "--format", "json", "--output", str(output), "--quiet"]
-            with patch.object(web_api.data_api, "get_leaderboard", return_value=[{"proxyWallet": WALLET, "pnl": 10, "vol": 100}]), patch.object(
+                    "--max-mdd-pct", "20", "--sort", "pnl_usd", "--format", "json", "--output", str(output), "--quiet"]
+            with patch.object(web_api.data_api, "get_leaderboard_v2_page", return_value=leaderboard_page()), patch.object(
                 mdd, "fetch_mdd_inputs", return_value=self.fetch(closed_limit=1)
             ), patch.object(cli, "attach_polymarket_mdd_audit_cache", return_value={}), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 self.assertEqual(cli.main(args), 0)
-            with patch.object(cli, "polymarket_user_mdd_payload") as compute, patch.object(web_api.data_api, "get_leaderboard") as fetch:
+            with patch.object(cli, "polymarket_user_mdd_payload") as compute, patch.object(web_api.data_api, "get_leaderboard_v2_page") as fetch:
                 self.assertEqual(cli.main(args + ["--resume"]), 0)
             compute.assert_not_called()
             fetch.assert_not_called()
@@ -181,15 +196,17 @@ class MddHistoryContractTests(unittest.TestCase):
             self.assertEqual(result["counts"]["returned"], 0)
             self.assertFalse(result["mdd_available"])
 
-    def test_legacy_sort_keys_remain_compatible_with_new_metric_labels(self):
-        self.assertEqual(app.App._leaderboard_sort_value("PnL/volume %"), "roi_pct")
-        self.assertEqual(app.App._leaderboard_sort_value("ROI %"), "roi_pct")
+    def test_active_sort_labels_and_native_v2_help_state_their_units(self):
+        self.assertEqual(app.App._leaderboard_sort_value("PnL/volume %"), "pnl_usd")
+        self.assertEqual(app.App._leaderboard_sort_value("ROI %"), "pnl_usd")
         self.assertEqual(app.App._leaderboard_sort_value("Obs. MDD %"), "mdd_pct")
         for command in ("polymarket-leaderboard", "polymarket-leaderboard-export"):
             with redirect_stdout(io.StringIO()) as output, self.assertRaises(SystemExit) as exited:
                 cli.main([command, "--help"])
             self.assertEqual(exited.exception.code, 0)
-            self.assertIn("not investment ROI", output.getvalue())
+            self.assertIn("volume_shares", output.getvalue())
+            self.assertIn("V2 does not supply USD turnover" if command == "polymarket-leaderboard"
+                          else "legacy v1 stored observations", output.getvalue())
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ from unittest.mock import patch
 import market_sentinel_cli as cli
 import web_api
 from polymarket import data_api, mdd
+from polymarket.history_v2 import PublicHistoryRows
 from polymarket.accounting import reconcile_mdd_payload_with_accounting
 from polymarket.analytics_cache import mdd_payload_to_csv
 from polymarket.http_client import PolymarketResponseError
@@ -140,10 +141,15 @@ class MddSourceQualityTests(unittest.TestCase):
 
     def test_actual_fetch_and_filter_exclude_invalid_source_rows(self):
         with ExitStack() as stack:
-            stack.enter_context(patch.object(data_api, "get_closed_positions", return_value=[{"realizedPnl": 1000}, CLOSE]))
-            for method in ("get_positions", "get_activity", "get_trades"):
-                stack.enter_context(patch.object(data_api, method, return_value=[]))
-            stack.enter_context(patch.object(data_api, "get_leaderboard", return_value=[{"proxyWallet": WALLET, "pnl": 100, "vol": 10}]))
+            stack.enter_context(patch.object(mdd, "_fetch_closed_positions", return_value=PublicHistoryRows(
+                [{"realizedPnl": 1000}, CLOSE], history_complete=True
+            )))
+            for method in ("_fetch_open_positions", "_fetch_activity_events", "_fetch_trade_rows"):
+                stack.enter_context(patch.object(mdd, method, return_value=PublicHistoryRows([], history_complete=True)))
+            stack.enter_context(patch.object(data_api, "get_leaderboard_v2_page", return_value={
+                "data": [{"user_id": WALLET, "pnl": 100, "volume": 10}],
+                "pagination": {"limit": 50, "offset": 0, "has_more": False, "next_cursor": None},
+            }))
             stack.enter_context(patch.object(web_api, "attach_polymarket_mdd_audit_cache", return_value={}))
             result = web_api.polymarket_leaderboard_payload({"max_mdd_pct": ["20"], "equity_base_usd": ["100"]})
         self.assertEqual(result["counts"]["returned"], 0)
@@ -167,7 +173,7 @@ class MddSourceQualityTests(unittest.TestCase):
             self.assertEqual(json.loads(csv_row["mdd_source_quality"]), result["mdd_source_quality"])
             output = io.StringIO()
             with redirect_stdout(output), redirect_stderr(io.StringIO()):
-                self.assertEqual(cli.main(["leaderboard-export", "--state-db", str(state), "--require-mdd", "--format", "csv"]), 0)
+                self.assertEqual(cli.main(["leaderboard-export", "--state-db", str(state), "--require-mdd", "--sort", "pnl_usd", "--format", "csv"]), 0)
             self.assertEqual(len(list(csv.DictReader(io.StringIO(output.getvalue())))), 0)
         audit = next(csv.DictReader(io.StringIO(mdd_payload_to_csv(result))))
         self.assertEqual(audit["status"], "unavailable")

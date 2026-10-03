@@ -118,9 +118,10 @@ class AccountingMddReconciliationTests(unittest.TestCase):
             query = {"compute_mdd": ["true"], "max_mdd_pct": ["20"], "mdd_include_accounting": ["true"]}
             if base is not None:
                 query["equity_base_usd"] = [str(base)]
-            with self.subTest(base=base), patch("web_api.data_api.get_leaderboard", return_value=[
-                {"proxyWallet": WALLET, "pnl": 100, "vol": 100}
-            ]), patch("polymarket.mdd.fetch_mdd_inputs", return_value=inputs()), patch(
+            with self.subTest(base=base), patch("web_api.data_api.get_leaderboard_v2_page", return_value={
+                "data": [{"user_id": WALLET, "pnl": 100, "volume": 100}],
+                "pagination": {"limit": 50, "offset": 0, "has_more": False, "next_cursor": None},
+            }), patch("polymarket.mdd.fetch_mdd_inputs", return_value=inputs()), patch(
                 "polymarket.mdd.download_and_parse_accounting_snapshot", return_value=snapshot()
             ), patch("web_api.attach_polymarket_mdd_audit_cache", return_value={}):
                 result = web_api.polymarket_leaderboard_payload(query)
@@ -128,9 +129,10 @@ class AccountingMddReconciliationTests(unittest.TestCase):
             self.assertEqual(result["counts"]["mdd_computed"], 1)
 
     def test_accounting_does_not_disqualify_an_unchanged_valid_observed_result(self):
-        with patch("web_api.data_api.get_leaderboard", return_value=[
-            {"proxyWallet": WALLET, "pnl": 100, "vol": 100}
-        ]), patch("polymarket.mdd.fetch_mdd_inputs", return_value=inputs(-5)), patch(
+        with patch("web_api.data_api.get_leaderboard_v2_page", return_value={
+            "data": [{"user_id": WALLET, "pnl": 100, "volume": 100}],
+            "pagination": {"limit": 50, "offset": 0, "has_more": False, "next_cursor": None},
+        }), patch("polymarket.mdd.fetch_mdd_inputs", return_value=inputs(-5)), patch(
             "polymarket.mdd.download_and_parse_accounting_snapshot", return_value=snapshot()
         ), patch("web_api.attach_polymarket_mdd_audit_cache", return_value={}):
             result = web_api.polymarket_leaderboard_payload({
@@ -148,12 +150,13 @@ class AccountingMddReconciliationTests(unittest.TestCase):
             args = ["polymarket-leaderboard", "--state-db", str(Path(directory) / "scan.sqlite3"),
                     "--scanned", "unlimited", "--returned", "unlimited", "--compute-mdd",
                     "--mdd-scan", "unlimited", "--max-mdd-pct", "20", "--equity-base-usd", "100",
-                    "--mdd-include-accounting", "--format", "json", "--output", str(output), "--quiet"]
+                    "--mdd-include-accounting", "--sort", "pnl_usd", "--format", "json", "--output", str(output), "--quiet"]
             legacy = {**build_historical_mdd_payload(inputs(), equity_base_usd=100),
                       "mdd_pct": 30 / 10070 * 100, "equity_base_usd": 10070, "calculation_version": 5}
-            with patch("web_api.data_api.get_leaderboard", return_value=[
-                {"proxyWallet": WALLET, "pnl": 100, "vol": 100}
-            ]), patch("market_sentinel_cli.MDD_CALCULATION_VERSION", 5), patch(
+            with patch("web_api.data_api.get_leaderboard_v2_page", return_value={
+                "data": [{"user_id": WALLET, "pnl": 100, "volume": 100}],
+                "pagination": {"limit": 50, "offset": 0, "has_more": False, "next_cursor": None},
+            }), patch("market_sentinel_cli.MDD_CALCULATION_VERSION", 5), patch(
                 "market_sentinel_cli.polymarket_user_mdd_payload", return_value=legacy
             ), patch("market_sentinel_cli.attach_polymarket_mdd_audit_cache", return_value={}):
                 self.assertEqual(market_sentinel_cli.main(args), 0)
@@ -181,7 +184,7 @@ class AccountingMddReconciliationTests(unittest.TestCase):
                     historical = next(csv.DictReader(io.StringIO(output.read_text())))
                     self.assertEqual(historical["mdd_calculation_version"], "5")
                     self.assertEqual(historical["mdd_calculation_current"], "False")
-            with patch("web_api.data_api.get_leaderboard") as leaderboard, patch(
+            with patch("web_api.data_api.get_leaderboard_v2_page") as leaderboard, patch(
                 "polymarket.mdd.fetch_mdd_inputs", return_value=inputs()
             ) as history, patch("polymarket.mdd.download_and_parse_accounting_snapshot", return_value=snapshot()), patch(
                 "market_sentinel_cli.attach_polymarket_mdd_audit_cache", return_value={}

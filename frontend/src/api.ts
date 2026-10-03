@@ -58,6 +58,7 @@ import type {
 } from "./types";
 
 export interface MarketPatch {
+  expected_revision?: string;
   enabled?: boolean;
   live_trading_enabled?: boolean;
   live_trading_confirmed?: boolean;
@@ -117,27 +118,93 @@ const vitePorts = new Set(["5173", "4173"]);
 const defaultApiBase = vitePorts.has(window.location.port) ? "http://127.0.0.1:8765" : "";
 const apiBase = (import.meta.env?.VITE_API_BASE_URL ?? defaultApiBase).replace(/\/$/, "");
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${apiBase}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers ?? {})
+export interface ApiRequestOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+async function request<T>(path: string, options: RequestInit & ApiRequestOptions = {}): Promise<T> {
+  const { timeoutMs = 120_000, signal, ...fetchOptions } = options;
+  const controller = new AbortController();
+  const cancel = () => controller.abort(signal?.reason);
+  if (signal?.aborted) cancel();
+  else signal?.addEventListener("abort", cancel, { once: true });
+  const deadline = setTimeout(() => controller.abort(new DOMException("The request timed out. Retry or refresh to reconcile its outcome.", "TimeoutError")), timeoutMs);
+  try {
+    const response = await fetch(`${apiBase}${path}`, {
+      ...fetchOptions,
+      signal: controller.signal,
+      headers: { "Content-Type": "application/json", ...(options.headers ?? {}) }
+    });
+    let payload: T & ApiErrorBody;
+    try {
+      payload = (await response.json()) as T & ApiErrorBody;
+    } catch (error) {
+      if (controller.signal.aborted) throw controller.signal.reason;
+      throw new ApiRequestError(`The server returned an unreadable response (HTTP ${response.status}). Refresh or retry.`, "invalid_api_response", response.ok ? undefined : response.status);
     }
-  });
-  const payload = (await response.json()) as T & ApiErrorBody;
-  if (!response.ok) {
-    const error = payload.error;
-    const message = typeof error === "string" ? error : error?.message;
-    const code = typeof error === "object" ? error?.code : undefined;
-    const status = typeof error === "object" ? error?.status ?? response.status : response.status;
-    const details = typeof error === "object" ? error?.details : undefined;
-    throw new ApiRequestError(`${code ? `${code}: ` : ""}${message ?? `Request failed: ${response.status}`}`, code, status, details);
+    if (!response.ok) {
+      const error = payload.error;
+      const message = typeof error === "string" ? error : error?.message;
+      const code = typeof error === "object" ? error?.code : undefined;
+      const status = typeof error === "object" ? error?.status ?? response.status : response.status;
+      const details = typeof error === "object" ? error?.details : undefined;
+      throw new ApiRequestError(`${code ? `${code}: ` : ""}${message ?? `Request failed: ${response.status}`}`, code, status, details);
+    }
+    return payload;
+  } catch (error) {
+    if (controller.signal.aborted) throw controller.signal.reason;
+    throw error;
+  } finally {
+    clearTimeout(deadline);
+    signal?.removeEventListener("abort", cancel);
   }
-  return payload;
 }
 
 const pendingIdempotencyKeys = new Map<string, string>();
+const pendingMutationStorageKey = "market-sentinel.pending-mutations.v1";
+
+function mutationStorage(): Storage | null {
+  try {
+    return window.sessionStorage ?? null;
+  } catch {
+    throw new Error("Pending requests cannot be preserved in this browser. Enable session storage before submitting a durable operation.");
+  }
+}
+
+function storedMutationKeys(storage: Storage): Record<string, string> {
+  try {
+    const value: unknown = JSON.parse(storage.getItem(pendingMutationStorageKey) ?? "{}");
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid recovery data");
+    const entries = Object.entries(value);
+    if (entries.some(([identity, key]) => !/^[a-f0-9]{64}$/.test(identity) || typeof key !== "string" || !/^market-sentinel-[a-f0-9-]{36}$/i.test(key))) {
+      throw new Error("invalid recovery identity");
+    }
+    return Object.fromEntries(entries);
+  } catch {
+    throw new Error("Pending request recovery data cannot be read. Review pending operations before retrying them.");
+  }
+}
+
+function persistMutationKeys(storage: Storage, entries: Record<string, string>) {
+  try {
+    storage.setItem(pendingMutationStorageKey, JSON.stringify(entries));
+  } catch {
+    throw new Error("Pending request identity could not be saved. Review pending operations before retrying them.");
+  }
+}
+
+function forgetMutationKey(identity: string, key: string, storage: Storage | null) {
+  // An older overlapping request must not erase a newer ambiguous operation.
+  if (storage) {
+    const entries = storedMutationKeys(storage);
+    if (entries[identity] === key) {
+      delete entries[identity];
+      persistMutationKeys(storage, entries);
+    }
+  }
+  if (pendingIdempotencyKeys.get(identity) === key) pendingIdempotencyKeys.delete(identity);
+}
 
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== "object") {
@@ -161,20 +228,31 @@ function newIdempotencyKey(): string {
   return `market-sentinel-${globalThis.crypto.randomUUID()}`;
 }
 
-async function requestIdempotentMutation<T>(path: string, payload: object): Promise<T> {
-  const requestIdentity = `${path}:${canonicalJson(payload)}`;
-  let idempotencyKey = pendingIdempotencyKeys.get(requestIdentity);
+async function requestIdempotentMutation<T>(path: string, payload: object, acceptResponse?: (response: T) => void): Promise<T> {
+  const storage = mutationStorage();
+  const canonicalIdentity = `${path}:${canonicalJson(payload)}`;
+  // Browser recovery stores only a digest and random key; signed instructions,
+  // wallet identities, metadata, and reviewer notes are never written to storage.
+  const requestIdentity = storage
+    ? Array.from(new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonicalIdentity))))
+      .map((byte) => byte.toString(16).padStart(2, "0")).join("")
+    : canonicalIdentity;
+  const stored = storage ? storedMutationKeys(storage) : {};
+  let idempotencyKey = pendingIdempotencyKeys.get(requestIdentity) ?? stored[requestIdentity];
   if (!idempotencyKey) {
     idempotencyKey = newIdempotencyKey();
-    pendingIdempotencyKeys.set(requestIdentity, idempotencyKey);
   }
+  pendingIdempotencyKeys.set(requestIdentity, idempotencyKey);
+  if (storage) persistMutationKeys(storage, { ...stored, [requestIdentity]: idempotencyKey });
   try {
     const response = await request<T>(path, {
       method: "POST",
       headers: { "Idempotency-Key": idempotencyKey },
       body: JSON.stringify(payload)
     });
-    pendingIdempotencyKeys.delete(requestIdentity);
+    // Persist receipt recovery before discarding an ambiguous request identity.
+    acceptResponse?.(response);
+    forgetMutationKey(requestIdentity, idempotencyKey, storage);
     return response;
   } catch (error) {
     // A non-retryable 4xx response is terminal. Network/parse failures, 429,
@@ -185,18 +263,18 @@ async function requestIdempotentMutation<T>(path: string, payload: object): Prom
       error.status < 500 &&
       error.status !== 429
     ) {
-      pendingIdempotencyKeys.delete(requestIdentity);
+      forgetMutationKey(requestIdentity, idempotencyKey, storage);
     }
     throw error;
   }
 }
 
-export function fetchHealth(): Promise<HealthPayload> {
-  return request<HealthPayload>("/api/health");
+export function fetchHealth(options: ApiRequestOptions = {}): Promise<HealthPayload> {
+  return request<HealthPayload>("/api/health", options);
 }
 
-export function fetchState(): Promise<AppStatePayload> {
-  return request<AppStatePayload>("/api/state");
+export function fetchState(options: ApiRequestOptions = {}): Promise<AppStatePayload> {
+  return request<AppStatePayload>("/api/state", options);
 }
 
 export function fetchConfig(): Promise<ConfigPayload> {
@@ -243,27 +321,27 @@ function marketReadQuery(values: Record<string, string | number | boolean | unde
   return query ? `?${query}` : "";
 }
 
-export function fetchMarketEvents(marketId: string, query = "", limit = 50): Promise<MarketEventsPayload> {
+export function fetchMarketEvents(marketId: string, query = "", limit = 50, options: ApiRequestOptions = {}): Promise<MarketEventsPayload> {
   return request<MarketEventsPayload>(
-    `/api/markets/${encodeURIComponent(marketId)}/events${marketReadQuery({ query, limit })}`
+    `/api/markets/${encodeURIComponent(marketId)}/events${marketReadQuery({ query, limit })}`, options
   );
 }
 
-export function fetchMarketContracts(marketId: string, eventId: string): Promise<MarketContractsPayload> {
+export function fetchMarketContracts(marketId: string, eventId: string, options: ApiRequestOptions = {}): Promise<MarketContractsPayload> {
   return request<MarketContractsPayload>(
-    `/api/markets/${encodeURIComponent(marketId)}/contracts${marketReadQuery({ event_id: eventId })}`
+    `/api/markets/${encodeURIComponent(marketId)}/contracts${marketReadQuery({ event_id: eventId })}`, options
   );
 }
 
-export function fetchMarketPrice(marketId: string, contractId: string): Promise<MarketPricePayload> {
+export function fetchMarketPrice(marketId: string, contractId: string, options: ApiRequestOptions = {}): Promise<MarketPricePayload> {
   return request<MarketPricePayload>(
-    `/api/markets/${encodeURIComponent(marketId)}/price${marketReadQuery({ contract_id: contractId })}`
+    `/api/markets/${encodeURIComponent(marketId)}/price${marketReadQuery({ contract_id: contractId })}`, options
   );
 }
 
-export function fetchMarketOrderbook(marketId: string, contractId: string): Promise<MarketOrderbookPayload> {
+export function fetchMarketOrderbook(marketId: string, contractId: string, options: ApiRequestOptions = {}): Promise<MarketOrderbookPayload> {
   return request<MarketOrderbookPayload>(
-    `/api/markets/${encodeURIComponent(marketId)}/orderbook${marketReadQuery({ contract_id: contractId })}`
+    `/api/markets/${encodeURIComponent(marketId)}/orderbook${marketReadQuery({ contract_id: contractId })}`, options
   );
 }
 
@@ -272,10 +350,11 @@ export function fetchMarketTrades(
   contractId: string,
   limit = 50,
   before = "",
-  after = ""
+  after = "",
+  options: ApiRequestOptions = {}
 ): Promise<MarketTradesPayload> {
   return request<MarketTradesPayload>(
-    `/api/markets/${encodeURIComponent(marketId)}/trades${marketReadQuery({ contract_id: contractId, limit, before, after })}`
+    `/api/markets/${encodeURIComponent(marketId)}/trades${marketReadQuery({ contract_id: contractId, limit, before, after })}`, options
   );
 }
 
@@ -284,20 +363,22 @@ export function fetchMarketCandles(
   contractId: string,
   resolution = "1h",
   from = "",
-  to = ""
+  to = "",
+  options: ApiRequestOptions = {}
 ): Promise<MarketCandlesPayload> {
   return request<MarketCandlesPayload>(
-    `/api/markets/${encodeURIComponent(marketId)}/candles${marketReadQuery({ contract_id: contractId, resolution, from, to })}`
+    `/api/markets/${encodeURIComponent(marketId)}/candles${marketReadQuery({ contract_id: contractId, resolution, from, to })}`, options
   );
 }
 
 export function fetchMarketAccount(
   marketId: string,
   operation: MarketAccountOperation,
-  values: Record<string, string | number | boolean | undefined> = {}
+  values: Record<string, string | number | boolean | undefined> = {},
+  options: ApiRequestOptions = {}
 ): Promise<MarketAccountPayload> {
   return request<MarketAccountPayload>(
-    `/api/markets/${encodeURIComponent(marketId)}/account/${encodeURIComponent(operation)}${marketReadQuery(values)}`
+    `/api/markets/${encodeURIComponent(marketId)}/account/${encodeURIComponent(operation)}${marketReadQuery(values)}`, options
   );
 }
 
@@ -574,46 +655,77 @@ export function updateWalletPolling(pollIntervalSeconds: string | number): Promi
   });
 }
 
-export function pollWallets(limit = 25): Promise<WalletPollResponse> {
-  return request<WalletPollResponse>("/api/wallets/poll", {
-    method: "POST",
-    body: JSON.stringify({ limit })
+const walletPollReceiptStorageKey = "market-sentinel.wallet-poll-receipt.v1";
+let receivedWalletPollReceipt: string | null = null;
+let walletPollInFlight: Promise<WalletPollResponse> | null = null;
+const receiptUuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+
+export async function pollWallets(limit = 25): Promise<WalletPollResponse> {
+  // One batch may be accepted at a time. A late duplicate must never replace
+  // the newer receipt token and leave that newer batch permanently pinned.
+  if (walletPollInFlight) return walletPollInFlight;
+  const storage = mutationStorage();
+  let priorReceipt: string | null;
+  try {
+    priorReceipt = storage ? storage.getItem(walletPollReceiptStorageKey) : receivedWalletPollReceipt;
+    if (priorReceipt !== null && !receiptUuid.test(priorReceipt)) throw new Error("invalid receipt identity");
+  } catch {
+    throw new Error("The previous wallet activity receipt cannot be read. Review pending activity before polling again.");
+  }
+  const payload = priorReceipt ? { limit, acknowledge_receipt_id: priorReceipt } : { limit };
+  const operation = requestIdempotentMutation<WalletPollResponse>("/api/wallets/poll", payload, (response) => {
+    const receipt = response.delivery;
+    if (receipt?.mode !== "durable_replayable_batch" || receipt.acknowledge_with_next_poll !== true || !receiptUuid.test(receipt.receipt_id)) {
+      throw new Error("The wallet activity delivery receipt is invalid. Retry Poll Now to recover this batch safely.");
+    }
+    try {
+      storage?.setItem(walletPollReceiptStorageKey, receipt.receipt_id);
+    } catch {
+      throw new Error("The received wallet activity receipt could not be preserved. Retry Poll Now to recover this batch safely.");
+    }
+    receivedWalletPollReceipt = receipt.receipt_id;
   });
+  walletPollInFlight = operation;
+  try {
+    return await operation;
+  } finally {
+    if (walletPollInFlight === operation) walletPollInFlight = null;
+  }
 }
 
-export function searchPolymarketUsers(query: string, limit = 10): Promise<PolymarketUserSearchPayload> {
+export function searchPolymarketUsers(query: string, limit = 10, options: ApiRequestOptions = {}): Promise<PolymarketUserSearchPayload> {
   const params = new URLSearchParams({ q: query, limit: String(limit) });
-  return request<PolymarketUserSearchPayload>(`/api/polymarket/users/search?${params.toString()}`);
+  return request<PolymarketUserSearchPayload>(`/api/polymarket/users/search?${params.toString()}`, options);
 }
 
-export function fetchPolymarketLeaderboard(filters: PolymarketLeaderboardFilters): Promise<PolymarketLeaderboardPayload> {
+export function fetchPolymarketLeaderboard(filters: PolymarketLeaderboardFilters, options: ApiRequestOptions = {}): Promise<PolymarketLeaderboardPayload> {
   const params = new URLSearchParams();
   Object.entries(filters).forEach(([key, value]) => {
     if (value !== "") {
       params.set(key, String(value));
     }
   });
-  return request<PolymarketLeaderboardPayload>(`/api/polymarket/users/leaderboard?${params.toString()}`);
+  return request<PolymarketLeaderboardPayload>(`/api/polymarket/users/leaderboard?${params.toString()}`, options);
 }
 
-export function fetchPolymarketMdd(form: PolymarketMddForm): Promise<PolymarketMddPayload> {
+export function fetchPolymarketMdd(form: PolymarketMddForm, options: ApiRequestOptions = {}): Promise<PolymarketMddPayload> {
   const params = new URLSearchParams();
   Object.entries(form).forEach(([key, value]) => {
     if (value !== "") {
       params.set(key, String(value));
     }
   });
-  return request<PolymarketMddPayload>(`/api/polymarket/users/mdd?${params.toString()}`);
+  return request<PolymarketMddPayload>(`/api/polymarket/users/mdd?${params.toString()}`, options);
 }
 
-export function fetchPolymarketMddAudit(key: string): Promise<PolymarketMddAuditExport> {
+export function fetchPolymarketMddAudit(key: string, options: ApiRequestOptions = {}): Promise<PolymarketMddAuditExport> {
   const params = new URLSearchParams({ key });
-  return request<PolymarketMddAuditExport>(`/api/polymarket/users/mdd/export.json?${params.toString()}`);
+  return request<PolymarketMddAuditExport>(`/api/polymarket/users/mdd/export.json?${params.toString()}`, options);
 }
 
-export function fetchPolymarketMddCache(includeExpired = true): Promise<PolymarketMddCachePayload> {
+export function fetchPolymarketMddCache(includeExpired = true, options: ApiRequestOptions = {}): Promise<PolymarketMddCachePayload> {
   const params = new URLSearchParams({ include_expired: String(includeExpired) });
-  return request<PolymarketMddCachePayload>(`/api/polymarket/users/mdd/cache?${params.toString()}`);
+  return request<PolymarketMddCachePayload>(`/api/polymarket/users/mdd/cache?${params.toString()}`, options);
 }
 
 export function fetchPolymarketMddCacheHealth(): Promise<{ source: string; cache: PolymarketMddCachePayload["cache"] }> {
@@ -646,8 +758,9 @@ export function previewCopyTrade(form: CopyPreviewForm): Promise<CopyPreviewPayl
   });
 }
 
-export function previewLivePreflight(form: PaperOrderForm): Promise<LivePreflightPayload> {
+export function previewLivePreflight(form: PaperOrderForm, options: ApiRequestOptions = {}): Promise<LivePreflightPayload> {
   return request<LivePreflightPayload>("/api/live-safety/preflight", {
+    ...options,
     method: "POST",
     body: JSON.stringify(serializePaperOrderForm(form))
   });

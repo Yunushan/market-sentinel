@@ -142,7 +142,8 @@ class ProjectMetadataTests(unittest.TestCase):
             "include requirements-security.lock",
             "recursive-include .github",
             "recursive-include assets",
-            "recursive-include data",
+            "recursive-exclude [dD][aA][tT][aA] *",
+            "include data/config.example.json",
             "recursive-include docs",
             "recursive-include frontend",
             "recursive-include scripts",
@@ -152,6 +153,7 @@ class ProjectMetadataTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, manifest)
+        self.assertNotIn("recursive-include data *.json", manifest)
 
         self.assertTrue(
             {

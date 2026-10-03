@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .activity_history import activity_snapshot
+
 import math
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
@@ -153,7 +155,10 @@ class ContextV2Adapter(MarketAdapter):
             "/orders",
             params={"trader": wallet, "status": "filled", "limit": desired},
         )
-        return self._normalize_order_activity(wallet, payload, desired)
+        return activity_snapshot(
+            self._normalize_order_activity(wallet, payload, desired), payload,
+            effective_limit=desired, row_keys=("orders", "data"),
+        )
 
     def account_recovery(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
         """Read Context's documented, wallet-filtered order history."""

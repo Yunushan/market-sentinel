@@ -3,6 +3,12 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
+from .activity_v2 import activity_v2_page, activity_v2_params
+from .data_v2 import (
+    POSITION_SORTS, POSITION_STATUSES, amount_filter, finite_number, identifier_filter, identity_row,
+    invalid, native_position_row, native_trade_row, opaque_cursor, page_payload, reject_error_envelope,
+    validate_page_options, validate_user, window_params,
+)
 from .endpoints import DATA_ENDPOINTS
 from .http_client import PolymarketResponseError, PolymarketValidationError, comma_join, request_bytes, request_json
 from .leaderboard import LEADERBOARD_MAX_OFFSET, normalize_leaderboard_category
@@ -115,6 +121,165 @@ def get_activity(
 
     data = _get_json("activity", params=params, timeout=timeout)
     return _history_payload(data, "activity")
+
+
+def get_activity_page_v2(
+    user: str,
+    *,
+    limit: int = 100,
+    cursor: Optional[str] = None,
+    types: Optional[List[str]] = None,
+    side: Optional[str] = None,
+    market: Optional[List[str]] = None,
+    event_id: Optional[List[str]] = None,
+    start: int = 1,
+    end: Optional[int] = None,
+    sort_by: str = "TIMESTAMP",
+    sort_direction: str = "DESC",
+    exclude_deposits_withdrawals: bool = True,
+    timeout: float = 15.0,
+) -> Dict[str, Any]:
+    """Read one strict v2 feed page, preserving raw fields and legacy aliases.
+
+    Re-send identical filters and window bounds on every cursor page. Only
+    ``pagination.next_cursor is None`` proves exhaustion; short/empty pages
+    may continue. ``start=1`` requests full history; an explicit ``start=0``
+    uses the upstream three-year floor. This helper never falls back to v1.
+    """
+    params = activity_v2_params(
+        user, limit=limit, cursor=cursor, types=types, side=side, market=market, event_id=event_id,
+        start=start, end=end, sort_by=sort_by, sort_direction=sort_direction,
+        exclude_deposits_withdrawals=exclude_deposits_withdrawals,
+    )
+    data = _get_json("activity_v2", params=params, timeout=timeout)
+    return activity_v2_page(
+        data, user=user, start=start, end=end, sort_direction=sort_direction, cursor=cursor,
+    )
+
+
+def get_positions_page_v2(
+    user: Optional[str] = None,
+    *,
+    market: Optional[List[str]] = None,
+    event_id: Optional[List[str]] = None,
+    status: Optional[str] = None,
+    limit: int = 100,
+    cursor: Optional[str] = None,
+    title: Optional[str] = None,
+    filter_type: str = "TOKENS",
+    filter_amount: float = 0,
+    include_archived: bool = False,
+    sort_by: Optional[str] = None,
+    sort_direction: Optional[str] = None,
+    start: Optional[int] = None,
+    end: Optional[int] = None,
+    timeout: float = 15.0,
+) -> Dict[str, Any]:
+    """Read v2 lifecycle positions with native economic fields unchanged.
+
+    The cursor adopts its status/order. Keep the user/condition anchor and
+    narrowing filters on every page; title and time bounds are not cursor-bound.
+    ``total_size`` is shares and is never relabeled as dollars here.
+    """
+    validate_user(user)
+    validate_page_options(limit, cursor)
+    condition = identifier_filter(market, "condition")
+    events = identifier_filter(event_id, "event_id")
+    if user is None and condition is None:
+        raise PolymarketValidationError("Positions v2 requires a user or condition anchor.")
+    if user is None and market is not None and len(set(market)) != 1:
+        raise PolymarketValidationError("Positions v2 market anchor accepts exactly one condition.")
+    if user is None and events is not None:
+        raise PolymarketValidationError("Positions v2 event_id filtering requires a user.")
+    params: Dict[str, Any] = {"user": user, "condition": condition, "event_id": events}
+    params.update(amount_filter(filter_type, filter_amount))
+    params.update(window_params(start, end))
+    if not isinstance(include_archived, bool):
+        raise PolymarketValidationError("Positions v2 include_archived must be a boolean.")
+    params["include_archived"] = str(include_archived).lower()
+    if title is not None:
+        if not isinstance(title, str) or not title.strip() or len(title) > 200:
+            raise PolymarketValidationError("Positions v2 title must contain 1 to 200 characters.")
+        params["title"] = title
+    for label, value, allowed in (("status", status, POSITION_STATUSES), ("sort_by", sort_by, POSITION_SORTS),
+                                   ("sort_direction", sort_direction, {"ASC", "DESC"})):
+        if value is not None:
+            if not isinstance(value, str) or value.upper() not in allowed:
+                raise PolymarketValidationError(f"Positions v2 {label} is unsupported.")
+            params[label] = value.upper()
+    if params.get("status") == "CLOSED" and include_archived:
+        raise PolymarketValidationError("Positions v2 CLOSED cannot be combined with include_archived.")
+    if params.get("status") == "REDEEMABLE_LOST" and user is None:
+        raise PolymarketValidationError("Positions v2 REDEEMABLE_LOST requires a user.")
+    params["limit" if cursor is None else "cursor"] = limit if cursor is None else cursor
+    params = {key: value for key, value in params.items() if value is not None}
+    data = page_payload(_get_json("positions_v2", params=params, timeout=timeout), "Positions v2", cursor=cursor)
+    rows = [native_position_row(row, user=user, start=start, end=end) for row in data["data"]]
+    return {**data, "data": rows, "pagination": dict(data["pagination"])}
+
+
+def get_trades_page_v2(
+    user: Optional[str] = None,
+    *,
+    limit: int = 100,
+    cursor: Optional[str] = None,
+    taker_only: bool = True,
+    market: Optional[List[str]] = None,
+    event_id: Optional[List[str]] = None,
+    side: Optional[str] = None,
+    filter_type: str = "TOKENS",
+    filter_amount: float = 0.01,
+    start: int = 1,
+    end: Optional[int] = None,
+    timeout: float = 15.0,
+) -> Dict[str, Any]:
+    """Read one v2 keyset trade page; bounds apply only to a user-anchored feed.
+
+    Keep filters on cursor pages. Set taker_only=False to include wallet maker
+    fills; default true serves each fill on its taker side only.
+    """
+    validate_user(user)
+    validate_page_options(limit, cursor)
+    if start is None:
+        raise PolymarketValidationError("Trades v2 start must be an explicit int64 timestamp.")
+    if not isinstance(taker_only, bool):
+        raise PolymarketValidationError("Trades v2 taker_only must be a boolean.")
+    condition = identifier_filter(market, "condition")
+    events = identifier_filter(event_id, "event_id")
+    if condition is not None and events is not None:
+        raise PolymarketValidationError("Trades v2 condition and event_id filters are mutually exclusive.")
+    params: Dict[str, Any] = {"user": user, "condition": condition, "event_id": events,
+                              "taker_only": str(taker_only).lower()}
+    params.update(amount_filter(filter_type, filter_amount))
+    params.update(window_params(start, end))
+    if side is not None:
+        if not isinstance(side, str) or side.upper() not in {"BUY", "SELL"}:
+            raise PolymarketValidationError("Trades v2 side must be BUY or SELL.")
+        params["side"] = side.upper()
+    params["limit" if cursor is None else "cursor"] = limit if cursor is None else cursor
+    params = {key: value for key, value in params.items() if value is not None}
+    data = page_payload(_get_json("trades_v2", params=params, timeout=timeout), "Trades v2", cursor=cursor)
+    rows = [native_trade_row(row, user=user, start=start, end=end) for row in data["data"]]
+    if [row["timestamp"] for row in rows] != sorted((row["timestamp"] for row in rows), reverse=True):
+        raise invalid("Trades v2", "rows are not in descending timestamp order")
+    return {**data, "data": rows, "pagination": dict(data["pagination"])}
+
+
+def get_value_v2(user: str, *, market: Optional[List[str]] = None, timeout: float = 15.0) -> Dict[str, Any]:
+    """Read native portfolio value; condition-scoped reads exclude combos."""
+    validate_user(user, required=True)
+    condition = identifier_filter(market, "condition")
+    params = {"user": user}
+    if condition is not None:
+        params["condition"] = condition
+    data = _get_json("value_v2", params=params, timeout=timeout)
+    if not isinstance(data, dict) or not isinstance(data.get("data"), dict) or "pagination" in data:
+        raise invalid("Value v2", "must return a single object in data without pagination", scope="portfolio value")
+    reject_error_envelope(data, "Value v2", scope="portfolio value")
+    row = data["data"]
+    if row.get("proxy_wallet") is None or not finite_number(row.get("value"), nonnegative=True):
+        raise invalid("Value v2", "wallet or portfolio value is missing or invalid", scope="portfolio value")
+    return {**data, "data": identity_row(row, "Value v2", user=user)}
 
 
 def get_positions(
@@ -239,7 +404,7 @@ def get_leaderboard_v2_page(
     must not consume these raw rows as v1 leaderboard rows.
     """
     if cursor is not None:
-        if not isinstance(cursor, str) or not cursor or cursor.strip() != cursor:
+        if not opaque_cursor(cursor):
             raise PolymarketValidationError("Leaderboard v2 cursor must be a nonempty opaque string.")
         if limit != 1000 or sort_by != "PNL" or period != "all" or category != "OVERALL":
             raise PolymarketValidationError("Leaderboard v2 cursor binds the board; resume with cursor only.")
@@ -273,15 +438,7 @@ def get_leaderboard_v2_page(
         raise PolymarketResponseError("Leaderboard v2 must return an object with an array of rows; board coverage is unknown.")
     for row in data["data"]:
         source_leaderboard_fields(row, version=2)
-    pagination = data.get("pagination")
-    if not isinstance(pagination, dict) or not isinstance(pagination.get("has_more"), bool):
-        raise PolymarketResponseError("Leaderboard v2 pagination metadata is missing or invalid; board coverage is unknown.")
-    next_cursor = pagination.get("next_cursor")
-    if (pagination["has_more"] and (not isinstance(next_cursor, str) or not next_cursor)) or (
-        not pagination["has_more"] and next_cursor is not None
-    ):
-        raise PolymarketResponseError("Leaderboard v2 cursor and has_more disagree; board coverage is unknown.")
-    return data
+    return page_payload(data, "Leaderboard v2", cursor=cursor, scope="board coverage")
 
 
 def iter_leaderboard_v2_pages(

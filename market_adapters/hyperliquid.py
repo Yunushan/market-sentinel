@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .activity_history import activity_snapshot
+
 from decimal import Decimal, InvalidOperation
 import math
 import re
@@ -599,7 +601,10 @@ class HyperliquidAdapter(MarketAdapter):
             activities.append(activity)
             if len(activities) >= desired:
                 break
-        return activities
+        return activity_snapshot(
+            activities, payload, effective_limit=desired, row_keys=(), complete_window=False,
+            history_contiguous=True,
+        )
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
         """Build a simulation-first paper order from a normalized HIP-4 fill."""

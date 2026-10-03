@@ -641,6 +641,14 @@ jobs:
           name: python-dist
           path: release-assets
 
+      - name: Reverify downloaded Python distribution contents
+        env:
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          python scripts/verify_python_dist_artifacts.py \
+            --dist-dir release-assets \
+            --expected-version "${RELEASE_VERSION}"
+
       - name: Download frontend bundle
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:

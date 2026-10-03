@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import {
   Activity,
@@ -44,6 +44,7 @@ import {
   fetchMarketCandles,
   fetchMarketContracts,
   fetchMarketEvents,
+  fetchMarkets,
   fetchMarketOrderbook,
   fetchMarketPrice,
   fetchMarketTrades,
@@ -98,8 +99,8 @@ import {
   usePaperHistory,
   usePaperPosition
 } from "./api";
-import type { MarketPatch } from "./api";
-import { formatAuditValue, formatNumber } from "./formatting";
+import { marketConfigurationFormValues, marketConfigurationPatch } from "./market-configuration";
+import { formatAssetAmount, formatAuditValue, formatNumber } from "./formatting";
 import { LivePreflightAudit } from "./live-preflight-audit";
 import { MddHistoryCoverage } from "./mdd-history-coverage";
 import { AlertEventHistory } from "./alert-event-history";
@@ -352,11 +353,6 @@ function formatTime(seconds: number): string {
 function formatUnknownTime(value: unknown): string {
   const numeric = typeof value === "number" ? value : Number(value);
   return Number.isFinite(numeric) && numeric > 0 ? formatTime(numeric) : "-";
-}
-
-function formatUnknownNumber(value: unknown, digits = 4): string {
-  const numeric = typeof value === "number" ? value : Number(value);
-  return formatNumber(numeric, digits);
 }
 
 function formatBytes(value: number | null | undefined): string {
@@ -685,7 +681,7 @@ function emptyCopyPreviewForm(followWallet = ""): CopyPreviewForm {
 
 function defaultLeaderboardFilters(): PolymarketLeaderboardFilters {
   return {
-    sort: "roi_pct",
+    sort: "pnl_usd",
     direction: "DESC",
     category: "OVERALL",
     limit: "100",
@@ -706,6 +702,7 @@ function defaultLeaderboardFilters(): PolymarketLeaderboardFilters {
     mdd_persist_cache: false,
     mdd_cache_ttl_seconds: "60",
     equity_base_usd: "",
+    equity_base_currency: "USDC",
     min_pnl_usd: "",
     max_pnl_usd: "",
     min_volume_usd: "",
@@ -729,6 +726,7 @@ function defaultMddForm(): PolymarketMddForm {
     open_limit: "500",
     max_points: "100",
     equity_base_usd: "",
+    equity_base_currency: "USDC",
     mark_replay_token_limit: "10",
     mark_replay_interval: "1h",
     mark_replay_fidelity: "60",
@@ -819,15 +817,131 @@ export default function App() {
   const [busyMarket, setBusyMarket] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [marketFormVersion, setMarketFormVersion] = useState(0);
+  const stateRequest = useRef<AbortController | null>(null);
+  const marketReadRequest = useRef<AbortController | null>(null);
+  const marketSelectionVersion = useRef(0);
+  const preflightRequest = useRef<AbortController | null>(null);
+  const analyticsRequest = useRef<AbortController | null>(null);
+
+  function invalidateAnalytics() {
+    analyticsRequest.current?.abort();
+    analyticsRequest.current = null;
+    setAnalyticsLoading(false);
+    setAnalyticsMessage("Analytics inputs changed. Run the request again for the current inputs.");
+  }
+
+  function handleUserSearchQueryChange(query: string) {
+    invalidateAnalytics();
+    setUserSearchQuery(query);
+    setUserSearch(null);
+  }
+
+  function handleLeaderboardFiltersChange(filters: PolymarketLeaderboardFilters) {
+    invalidateAnalytics();
+    setLeaderboardFilters(filters);
+    setLeaderboard(null);
+    setMddAuditDetail(null);
+  }
+
+  function handleMddFormChange(form: PolymarketMddForm) {
+    invalidateAnalytics();
+    setMddForm(form);
+    setWalletMdd(null);
+    setMddAuditDetail(null);
+  }
+
+  async function handleAnalyticsRead<T>(read: (options: { signal: AbortSignal }) => Promise<T>, publish: (payload: T) => void) {
+    analyticsRequest.current?.abort();
+    const controller = new AbortController();
+    analyticsRequest.current = controller;
+    const isCurrent = () => analyticsRequest.current === controller && !controller.signal.aborted;
+    setError(null);
+    setAnalyticsMessage("Loading analytics for the current inputs…");
+    setAnalyticsLoading(true);
+    try {
+      const payload = await read({ signal: controller.signal });
+      if (isCurrent()) publish(payload);
+    } catch (exc) {
+      if (isCurrent()) {
+        setAnalyticsMessage("Analytics could not be loaded. Run the request again to retry.");
+        setError(exc instanceof Error ? exc.message : String(exc));
+      }
+    } finally {
+      if (isCurrent()) {
+        analyticsRequest.current = null;
+        setAnalyticsLoading(false);
+      }
+    }
+  }
+
+  function invalidatePreflight() {
+    preflightRequest.current?.abort();
+    preflightRequest.current = null;
+    setLivePreflight(null);
+    setLiveMessage("");
+  }
+
+  function handlePaperFormChange(form: PaperOrderForm) {
+    invalidatePreflight();
+    setPaperForm(form);
+  }
+
+  function invalidateMarketRead() {
+    marketReadRequest.current?.abort();
+    marketReadRequest.current = null;
+    setMarketRead(emptyMarketReadState());
+    setMarketReadBusy(null);
+    setMarketReadMessage("");
+  }
+
+  function handleMarketReadFormChange(patch: Partial<MarketReadForm>) {
+    const changed = (Object.keys(patch) as (keyof MarketReadForm)[])
+      .filter((key) => patch[key] !== marketReadForm[key]);
+    if (changed.length === 0) return;
+    const changedField = (name: keyof MarketReadForm) => changed.includes(name);
+    const accountChanged = changed.some((key) => key.startsWith("account_"));
+    const quoteChanged = changedField("contract_id");
+    const timeChanged = changedField("from") || changedField("to");
+    const readChanged = changedField("query") || changedField("event_id") || quoteChanged || timeChanged
+      || changedField("resolution") || accountChanged;
+    if (readChanged) {
+      marketReadRequest.current?.abort();
+      marketReadRequest.current = null;
+      setMarketReadBusy((current) => ["selection", "position-intent", "order_management"].includes(current ?? "") ? current : null);
+    }
+    setMarketReadForm((current) => ({ ...current, ...patch }));
+    setMarketRead((current) => ({
+      ...current,
+      events: changedField("query") ? null : current.events,
+      contracts: changedField("event_id") ? null : current.contracts,
+      price: quoteChanged ? null : current.price,
+      orderbook: quoteChanged ? null : current.orderbook,
+      trades: quoteChanged || timeChanged ? null : current.trades,
+      candles: quoteChanged || timeChanged || changedField("resolution") ? null : current.candles,
+      account: accountChanged || quoteChanged || timeChanged || changedField("event_id") ? null : current.account,
+      position_intent: changed.some((key) => key.startsWith("position_")) ? null : current.position_intent,
+      order_management: changed.some((key) => key.startsWith("order_management_")) || quoteChanged ? null : current.order_management
+    }));
+    setMarketReadMessage("");
+  }
 
   async function loadAll() {
+    marketSelectionVersion.current += 1;
+    stateRequest.current?.abort();
+    const controller = new AbortController();
+    stateRequest.current = controller;
+    invalidatePreflight();
+    invalidateMarketRead();
     setLoading(true);
     setError(null);
     try {
-      const state = await fetchState();
+      const state = await fetchState({ signal: controller.signal });
+      if (stateRequest.current !== controller || controller.signal.aborted) return;
       setHealth(state.health);
       setConfig(state.config);
       setMarkets(state.markets);
+      setMarketFormVersion((version) => version + 1);
       setAlerts(state.alerts);
       setWallets(state.wallets);
       setCopyState(state.copy);
@@ -839,14 +953,25 @@ export default function App() {
       setLiveValidationReportSchemaValidation(state.polymarket_live_validation_reports.entries[0]?.schema_validation ?? null);
       setPaper(state.paper);
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc));
+      if (stateRequest.current === controller && !controller.signal.aborted) {
+        setError(exc instanceof Error ? exc.message : String(exc));
+      }
     } finally {
-      setLoading(false);
+      if (stateRequest.current === controller) {
+        stateRequest.current = null;
+        setLoading(false);
+      }
     }
   }
 
   useEffect(() => {
     void loadAll();
+    return () => {
+      stateRequest.current?.abort();
+      marketReadRequest.current?.abort();
+      preflightRequest.current?.abort();
+      analyticsRequest.current?.abort();
+    };
   }, []);
 
   useEffect(() => {
@@ -897,11 +1022,18 @@ export default function App() {
     return markets.markets.find((market) => market.market_id === config.selected_market_id) ?? null;
   }, [config, markets]);
 
+  const preflightConfigurationRevision = markets?.markets.find((market) => market.market_id === paperForm.market_id)?.configuration_revision;
+  useEffect(() => {
+    invalidatePreflight();
+  }, [paperForm, preflightConfigurationRevision]);
+
   async function handleMarketToggle(market: Market) {
+    invalidatePreflight();
     setBusyMarket(market.market_id);
     setError(null);
     try {
-      const payload = await updateMarket(market.market_id, { enabled: !market.enabled });
+      if (!market.configuration_revision) throw new Error("Refresh market settings before changing this market.");
+      const payload = await updateMarket(market.market_id, { enabled: !market.enabled, expected_revision: market.configuration_revision });
       setMarkets(payload);
       if (market.market_id === config?.selected_market_id) {
         setLiveSafety(await fetchLiveSafety());
@@ -911,6 +1043,14 @@ export default function App() {
       }
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
+      if (exc instanceof ApiRequestError && exc.code === "market_config_conflict") {
+        try {
+          setMarkets(await fetchMarkets());
+          setMarketFormVersion((version) => version + 1);
+        } catch {
+          setError(`${exc.message} Current settings could not be loaded; refresh before trying again.`);
+        }
+      }
     } finally {
       setBusyMarket(null);
     }
@@ -921,95 +1061,13 @@ export default function App() {
     if (!selectedMarket) {
       return;
     }
-    const form = new FormData(event.currentTarget);
-    const patch: MarketPatch = {
-      enabled: form.get("enabled") === "on",
-      live_trading_enabled: form.get("live_trading_enabled") === "on",
-      live_trading_confirmed: form.get("live_trading_confirmed") === "on",
-      live_trading_kill_switch: form.get("live_trading_kill_switch") === "on",
-      live_trading_max_size: String(form.get("live_trading_max_size") ?? "").trim(),
-      live_trading_max_notional: String(form.get("live_trading_max_notional") ?? "").trim()
-    };
-    if (selectedMarket.market_id === "betfair_exchange") {
-      patch.settings = {
-        betfair_order_management_enabled: form.get("betfair_order_management_enabled") === "on"
-      };
-    } else if (selectedMarket.market_id === "kalshi") {
-      patch.settings = {
-        kalshi_order_management_enabled: form.get("kalshi_order_management_enabled") === "on"
-      };
-    } else if (selectedMarket.market_id === "polymarket") {
-      patch.settings = {
-        polymarket_order_management_enabled: form.get("polymarket_order_management_enabled") === "on"
-      };
-    } else if (selectedMarket.market_id === "gemini_titan") {
-      patch.settings = {
-        gemini_order_management_enabled: form.get("gemini_order_management_enabled") === "on"
-      };
-    } else if (selectedMarket.market_id === "matchbook") {
-      patch.settings = {
-        matchbook_order_management_enabled: form.get("matchbook_order_management_enabled") === "on"
-      };
-    } else if (selectedMarket.market_id === "myriad_markets") {
-      patch.settings = {
-        myriad_order_management_enabled: form.get("myriad_order_management_enabled") === "on"
-      };
-    } else if (selectedMarket.market_id === "opinion_labs") {
-      patch.settings = {
-        opinion_order_management_enabled: form.get("opinion_order_management_enabled") === "on"
-      };
-    } else if (selectedMarket.market_id === "limitless_exchange") {
-      patch.settings = {
-        limitless_order_management_enabled: form.get("limitless_order_management_enabled") === "on"
-      };
-    } else if (selectedMarket.market_id === "smarkets") {
-      patch.settings = {
-        smarkets_order_management_enabled: form.get("smarkets_order_management_enabled") === "on"
-      };
-    } else if (selectedMarket.market_id === "context_v2") {
-      patch.settings = {
-        context_order_management_enabled: form.get("context_order_management_enabled") === "on"
-      };
-    } else if (selectedMarket.market_id === "probable") {
-      patch.settings = {
-        probable_order_management_enabled: form.get("probable_order_management_enabled") === "on"
-      };
-    } else if (selectedMarket.market_id === "hyperliquid") {
-      patch.settings = {
-        hyperliquid_order_management_enabled: form.get("hyperliquid_order_management_enabled") === "on"
-      };
-    } else if (selectedMarket.market_id === "predict_fun") {
-      patch.settings = {
-        predict_fun_order_management_enabled: form.get("predict_fun_order_management_enabled") === "on"
-      };
-    } else if (selectedMarket.market_id === "xmarket") {
-      patch.settings = {
-        xmarket_order_management_enabled: form.get("xmarket_order_management_enabled") === "on"
-      };
-    } else if (["ibkr_forecasttrader", "forecastex", "cme_prediction_markets"].includes(selectedMarket.market_id)) {
-      patch.settings = {
-        ibkr_order_management_enabled: form.get("ibkr_order_management_enabled") === "on"
-      };
-    } else if (selectedMarket.market_id === "manifold") {
-      patch.settings = {
-        manifold_order_management_enabled: form.get("manifold_order_management_enabled") === "on"
-      };
-    } else if (selectedMarket.market_id === "prophet_exchange") {
-      patch.settings = {
-        prophet_exchange_order_management_enabled: form.get("prophet_exchange_order_management_enabled") === "on"
-      };
-    } else if (selectedMarket.market_id === "sx_bet") {
-      patch.settings = {
-        sx_bet_order_management_enabled: form.get("sx_bet_order_management_enabled") === "on"
-      };
-    } else if (selectedMarket.market_id === "xo_market") {
-      patch.settings = {
-        xo_order_management_enabled: form.get("xo_order_management_enabled") === "on"
-      };
-    }
+    const values = marketConfigurationFormValues(event.currentTarget);
+    invalidatePreflight();
     setBusyMarket(selectedMarket.market_id);
     setError(null);
     try {
+      const patch = marketConfigurationPatch(selectedMarket, values);
+      if (!patch) return;
       const payload = await updateMarket(selectedMarket.market_id, patch);
       setMarkets(payload);
       setLiveSafety(await fetchLiveSafety());
@@ -1018,15 +1076,28 @@ export default function App() {
       }
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
+      if (exc instanceof ApiRequestError && exc.code === "market_config_conflict") {
+        try {
+          setMarkets(await fetchMarkets());
+          setMarketFormVersion((version) => version + 1);
+        } catch {
+          setError(`${exc.message} Current settings could not be loaded; refresh before trying again.`);
+        }
+      }
     } finally {
       setBusyMarket(null);
     }
   }
 
   async function handleSelectedMarketChange(marketId: string) {
+    const selectionVersion = ++marketSelectionVersion.current;
+    invalidateMarketRead();
+    invalidatePreflight();
+    setMarketReadBusy("selection");
     setError(null);
     try {
       const payload = await updateConfig({ selected_market_id: marketId });
+      if (selectionVersion !== marketSelectionVersion.current) return;
       setConfig(payload);
       setPaperForm((current) => ({ ...current, market_id: marketId }));
       setAlertForm((current) => ({ ...current, market_id: marketId }));
@@ -1042,14 +1113,21 @@ export default function App() {
       setMarketReadMessage("");
       setLivePreflight(null);
       setLiveMessage("");
-      setLiveSafety(await fetchLiveSafety());
-      setLiveValidation(await fetchPolymarketLiveValidation());
+      const safety = await fetchLiveSafety();
+      if (selectionVersion !== marketSelectionVersion.current) return;
+      setLiveSafety(safety);
+      const validation = await fetchPolymarketLiveValidation();
+      if (selectionVersion !== marketSelectionVersion.current) return;
+      setLiveValidation(validation);
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc));
+      if (selectionVersion === marketSelectionVersion.current) setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      if (selectionVersion === marketSelectionVersion.current) setMarketReadBusy(null);
     }
   }
 
   async function handleMarketRead(action: "events" | "contracts" | "price" | "orderbook" | "trades" | "candles" | "account") {
+    if (marketReadBusy !== null) return;
     const marketId = selectedMarket?.market_id;
     if (!marketId) {
       setError("Select an enabled market before reading market data.");
@@ -1068,24 +1146,33 @@ export default function App() {
       setError("Enter a candle resolution before loading history.");
       return;
     }
+    marketReadRequest.current?.abort();
+    const controller = new AbortController();
+    marketReadRequest.current = controller;
+    const isCurrent = () => marketReadRequest.current === controller && !controller.signal.aborted;
+    const requestOptions = { signal: controller.signal };
     setMarketReadBusy(action);
     setMarketReadMessage("");
     setError(null);
     try {
       if (action === "events") {
-        const payload = await fetchMarketEvents(marketId, form.query);
+        const payload = await fetchMarketEvents(marketId, form.query, 50, requestOptions);
+        if (!isCurrent()) return;
         setMarketRead((current) => ({ ...current, events: payload }));
         setMarketReadMessage(`${payload.events.length} event(s) loaded.`);
       } else if (action === "contracts") {
-        const payload = await fetchMarketContracts(marketId, form.event_id.trim());
+        const payload = await fetchMarketContracts(marketId, form.event_id.trim(), requestOptions);
+        if (!isCurrent()) return;
         setMarketRead((current) => ({ ...current, contracts: payload }));
         setMarketReadMessage(`${payload.contracts.length} contract(s) loaded.`);
       } else if (action === "price") {
-        const payload = await fetchMarketPrice(marketId, form.contract_id.trim());
+        const payload = await fetchMarketPrice(marketId, form.contract_id.trim(), requestOptions);
+        if (!isCurrent()) return;
         setMarketRead((current) => ({ ...current, price: payload }));
         setMarketReadMessage("Price snapshot loaded.");
       } else if (action === "orderbook") {
-        const payload = await fetchMarketOrderbook(marketId, form.contract_id.trim());
+        const payload = await fetchMarketOrderbook(marketId, form.contract_id.trim(), requestOptions);
+        if (!isCurrent()) return;
         setMarketRead((current) => ({ ...current, orderbook: payload }));
         setMarketReadMessage("Orderbook loaded.");
       } else if (action === "trades") {
@@ -1094,8 +1181,10 @@ export default function App() {
           form.contract_id.trim(),
           50,
           form.to.trim(),
-          form.from.trim()
+          form.from.trim(),
+          requestOptions
         );
+        if (!isCurrent()) return;
         setMarketRead((current) => ({ ...current, trades: payload }));
         setMarketReadMessage(`${payload.trades.length} trade(s) loaded.`);
       } else {
@@ -1105,8 +1194,10 @@ export default function App() {
             form.contract_id.trim(),
             form.resolution.trim(),
             form.from.trim(),
-            form.to.trim()
+            form.to.trim(),
+            requestOptions
           );
+          if (!isCurrent()) return;
           setMarketRead((current) => ({ ...current, candles: payload }));
           setMarketReadMessage(`${payload.candles.length} candle(s) loaded.`);
         } else {
@@ -1202,19 +1293,24 @@ export default function App() {
             from: form.from.trim() || undefined,
             to: form.to.trim() || undefined,
             ...(marketId === "opinion_labs" ? { page: 1 } : {})
-          });
+          }, requestOptions);
+          if (!isCurrent()) return;
           setMarketRead((current) => ({ ...current, account: payload }));
           setMarketReadMessage(`${payload.operation.replaceAll("_", " ")} loaded.`);
         }
       }
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc));
+      if (isCurrent()) setError(exc instanceof Error ? exc.message : String(exc));
     } finally {
-      setMarketReadBusy(null);
+      if (isCurrent()) {
+        marketReadRequest.current = null;
+        setMarketReadBusy(null);
+      }
     }
   }
 
   async function handleMarketPositionIntent() {
+    const selectionVersion = marketSelectionVersion.current;
     const marketId = selectedMarket?.market_id;
     if (marketId !== "myriad_markets") {
       setError("Unsigned position intents are currently available only for Myriad.");
@@ -1249,16 +1345,18 @@ export default function App() {
         requestPayload.market_id = form.position_market_id.trim();
       }
       const payload = await requestMarketPositionIntent(marketId, operation, requestPayload);
+      if (selectionVersion !== marketSelectionVersion.current) return;
       setMarketRead((current) => ({ ...current, position_intent: payload }));
       setMarketReadMessage("Unsigned transaction calldata loaded for external review/signing.");
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc));
+      if (selectionVersion === marketSelectionVersion.current) setError(exc instanceof Error ? exc.message : String(exc));
     } finally {
-      setMarketReadBusy(null);
+      if (selectionVersion === marketSelectionVersion.current) setMarketReadBusy(null);
     }
   }
 
   async function handleMarketOrderManagement() {
+    const selectionVersion = marketSelectionVersion.current;
     const marketId = selectedMarket?.market_id;
     if (!marketId) {
       setError("Select an enabled market before managing orders.");
@@ -1744,12 +1842,13 @@ export default function App() {
     setError(null);
     try {
       const result = await manageMarketOrders(marketId, operation, payload);
+      if (selectionVersion !== marketSelectionVersion.current) return;
       setMarketRead((current) => ({ ...current, order_management: result }));
       setMarketReadMessage(`${operation.replaceAll("_", " ")} request accepted by the API.`);
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc));
+      if (selectionVersion === marketSelectionVersion.current) setError(exc instanceof Error ? exc.message : String(exc));
     } finally {
-      setMarketReadBusy(null);
+      if (selectionVersion === marketSelectionVersion.current) setMarketReadBusy(null);
     }
   }
 
@@ -1775,27 +1874,17 @@ export default function App() {
 
   async function handleUserSearch(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
-    setError(null);
-    setAnalyticsMessage("");
-    setAnalyticsLoading(true);
-    try {
-      const payload = await searchPolymarketUsers(userSearchQuery, 10);
+    setUserSearch(null);
+    await handleAnalyticsRead((options) => searchPolymarketUsers(userSearchQuery, 10, options), (payload) => {
       setUserSearch(payload);
       setAnalyticsMessage(payload.counts.profiles ? `Found ${payload.counts.profiles} profile(s).` : "No matching profiles found.");
-    } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc));
-    } finally {
-      setAnalyticsLoading(false);
-    }
+    });
   }
 
   async function handleLeaderboardRefresh(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
-    setError(null);
-    setAnalyticsMessage("");
-    setAnalyticsLoading(true);
-    try {
-      const payload = await fetchPolymarketLeaderboard(leaderboardFilters);
+    setLeaderboard(null);
+    await handleAnalyticsRead((options) => fetchPolymarketLeaderboard(leaderboardFilters, options), (payload) => {
       setLeaderboard(payload);
       const warning = payload.warnings.length ? ` ${payload.warnings[0]}` : "";
       const cache = payload.analytics_cache.enabled ? ` Audit cache entries: ${payload.analytics_cache.entries}.` : "";
@@ -1803,20 +1892,14 @@ export default function App() {
       setAnalyticsMessage(
         `Loaded ${payload.counts.returned} trader row(s) from ${payload.counts.scanned} scanned rows; computed MDD for ${payload.counts.mdd_computed}.${cache}${completion}${warning}`
       );
-    } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc));
-    } finally {
-      setAnalyticsLoading(false);
-    }
+    });
   }
 
   async function handleMddLookup(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
-    setError(null);
-    setAnalyticsMessage("");
-    setAnalyticsLoading(true);
-    try {
-      const payload = await fetchPolymarketMdd(mddForm);
+    setWalletMdd(null);
+    setMddAuditDetail(null);
+    await handleAnalyticsRead((options) => fetchPolymarketMdd(mddForm, options), (payload) => {
       setWalletMdd(payload);
       if (payload.audit_cache?.key) {
         setMddAuditDetail({
@@ -1826,44 +1909,25 @@ export default function App() {
         });
       }
       const cache = payload.audit_cache?.key ? ` Audit cache key ${payload.audit_cache.key.slice(0, 8)}.` : "";
-      setAnalyticsMessage(`Computed wallet MDD ${formatUsd(payload.mdd_usd)} / ${formatPercent(payload.mdd_pct)}.${cache}`);
-    } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc));
-    } finally {
-      setAnalyticsLoading(false);
-    }
+      setAnalyticsMessage(`Computed wallet MDD ${formatAssetAmount(payload.mdd_usd, payload.quote_currency)} / ${formatPercent(payload.mdd_pct)}.${cache}`);
+    });
   }
 
   async function handleAuditDetailLoad(cacheKey: string) {
-    setError(null);
-    setAnalyticsMessage("");
-    setAnalyticsLoading(true);
-    try {
-      const payload = await fetchPolymarketMddAudit(cacheKey);
+    setMddAuditDetail(null);
+    await handleAnalyticsRead((options) => fetchPolymarketMddAudit(cacheKey, options), (payload) => {
       setMddAuditDetail(payload);
       setAnalyticsMessage(`Loaded cached MDD audit ${cacheKey.slice(0, 8)}.`);
-    } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc));
-    } finally {
-      setAnalyticsLoading(false);
-    }
+    });
   }
 
   async function handleMddCacheRefresh() {
-    setError(null);
-    setAnalyticsMessage("");
-    setAnalyticsLoading(true);
-    try {
-      const payload = await fetchPolymarketMddCache(true);
+    await handleAnalyticsRead((options) => fetchPolymarketMddCache(true, options), (payload) => {
       setMddCache(payload);
       setAnalyticsMessage(
         `MDD audit cache has ${payload.counts.entries} artifact(s), ${payload.counts.expired_entries} expired.`
       );
-    } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc));
-    } finally {
-      setAnalyticsLoading(false);
-    }
+    });
   }
 
   async function handleMddCachePurge(request: PolymarketMddCachePurgeRequest) {
@@ -2003,17 +2067,21 @@ export default function App() {
           setWalletForm(emptyWalletForm());
         }
       } else if (action === "poll") {
+        setWalletMessage("Polling a bounded activity batch. Retry the same request if delivery is interrupted.");
         const payload = await pollWallets();
         setWallets(payload.wallets);
         setCopyState(payload.copy);
         setCopyForm(copyToForm(payload.copy));
-        setWalletMessage(payload.problems.length ? `${payload.message} ${payload.problems.length} problem(s).` : payload.message);
+        const backlog = payload.has_more ? ` ${payload.remaining_activity === null ? "Additional queued activity remains." : `${payload.remaining_activity} queued event(s) remain.`} Poll again to request the next batch.` : "";
+        const problems = payload.problems.length ? ` ${payload.problems.length} problem(s).` : "";
+        setWalletMessage(`${payload.message}${backlog}${problems}`);
       } else if (action === "save-polling") {
         const payload = await updateWalletPolling(wallets?.polling.poll_interval_seconds ?? 10);
         setWallets(payload);
         setWalletMessage(payload.polling.last_message);
       }
     } catch (exc) {
+      if (action === "poll") setWalletMessage("Polling failed. Review the error, then retry Poll Now to reconcile this activity batch.");
       setError(exc instanceof Error ? exc.message : String(exc));
     }
   }
@@ -2061,16 +2129,23 @@ export default function App() {
   }
 
   async function handleLivePreflight() {
+    invalidatePreflight();
+    const controller = new AbortController();
+    preflightRequest.current = controller;
+    const isCurrent = () => preflightRequest.current === controller && !controller.signal.aborted;
     setError(null);
     setLiveMessage("");
     try {
-      const payload = await previewLivePreflight(paperForm);
+      const payload = await previewLivePreflight(paperForm, { signal: controller.signal });
+      if (!isCurrent()) return;
       setLivePreflight(payload);
       setLiveSafety(payload.live_safety);
       setLiveMessage(payload.message);
       setPaperMessage(payload.message);
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc));
+      if (isCurrent()) setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      if (isCurrent()) preflightRequest.current = null;
     }
   }
 
@@ -2369,7 +2444,7 @@ export default function App() {
       } else if (action === "refresh-marks") {
         const result = await refreshPaperMarks();
         setPaper(result.paper);
-        setPaperMessage(result.message);
+        setPaperMessage([result.message, ...result.problems].join(" "));
       } else if (action === "clear-marks") {
         const result = await clearPaperMarks();
         setPaper(result.paper);
@@ -2474,6 +2549,8 @@ export default function App() {
         ) : null}
         {tab === "markets" ? (
           <MarketsView
+            marketFormVersion={marketFormVersion}
+            onSettingsChange={invalidatePreflight}
             busyMarket={busyMarket}
             filteredMarkets={filteredMarkets}
             marketQuery={marketQuery}
@@ -2486,7 +2563,7 @@ export default function App() {
             onMarketPositionIntent={() => void handleMarketPositionIntent()}
             onQueryChange={setMarketQuery}
             onMarketRead={(action) => void handleMarketRead(action)}
-            onMarketReadFormChange={(patch) => setMarketReadForm((current) => ({ ...current, ...patch }))}
+            onMarketReadFormChange={handleMarketReadFormChange}
             onSelectedMarketChange={(marketId) => void handleSelectedMarketChange(marketId)}
             onSettingsSave={(event) => void handleMarketSettingsSave(event)}
             onToggle={(market) => void handleMarketToggle(market)}
@@ -2507,12 +2584,12 @@ export default function App() {
             onAuditDetailLoad={(cacheKey) => void handleAuditDetailLoad(cacheKey)}
             onMddCachePurge={(request) => void handleMddCachePurge(request)}
             onMddCacheRefresh={() => void handleMddCacheRefresh()}
-            onFiltersChange={setLeaderboardFilters}
+            onFiltersChange={handleLeaderboardFiltersChange}
             onLeaderboardRefresh={(event) => void handleLeaderboardRefresh(event)}
-            onMddFormChange={setMddForm}
+            onMddFormChange={handleMddFormChange}
             onMddLookup={(event) => void handleMddLookup(event)}
             onUserSearch={(event) => void handleUserSearch(event)}
-            onUserSearchQueryChange={setUserSearchQuery}
+            onUserSearchQueryChange={handleUserSearchQueryChange}
             searchQuery={userSearchQuery}
             searchResults={userSearch}
             leaderboard={leaderboard}
@@ -2520,6 +2597,8 @@ export default function App() {
         ) : null}
         {tab === "live" ? (
           <LiveSafetyView
+            marketFormVersion={marketFormVersion}
+            onSettingsChange={invalidatePreflight}
             busyMarket={busyMarket}
             form={paperForm}
             livePreflight={livePreflight}
@@ -2540,7 +2619,7 @@ export default function App() {
             liveValidationReports={liveValidationReports}
             markets={markets}
             message={liveMessage}
-            onFormChange={setPaperForm}
+            onFormChange={handlePaperFormChange}
             onPreview={() => void handleLivePreflight()}
             onValidationImport={() => void handleLiveValidationReportImport()}
             onValidationAllowDuplicateChange={setLiveValidationAllowDuplicate}
@@ -2571,7 +2650,7 @@ export default function App() {
             message={paperMessage}
             onAction={(action, target) => void handlePaperAction(action, target)}
             onClearHistory={() => void handleClearHistory()}
-            onFormChange={setPaperForm}
+            onFormChange={handlePaperFormChange}
             paper={paper}
           />
         ) : null}
@@ -2746,6 +2825,8 @@ function OverviewView({
 
 function MarketsView({
   busyMarket,
+  marketFormVersion,
+  onSettingsChange,
   filteredMarkets,
   marketQuery,
   marketRead,
@@ -2765,6 +2846,8 @@ function MarketsView({
   selectedMarketId
 }: {
   busyMarket: string | null;
+  marketFormVersion: number;
+  onSettingsChange: () => void;
   filteredMarkets: Market[];
   marketQuery: string;
   marketRead: MarketReadState;
@@ -2804,7 +2887,7 @@ function MarketsView({
         </select>
       </div>
       {selectedMarket ? (
-        <form className="market-detail" key={selectedMarket.market_id} onSubmit={onSettingsSave}>
+        <form className="market-detail" key={`${selectedMarket.market_id}:${selectedMarket.configuration_revision}:${marketFormVersion}`} onChange={onSettingsChange} onSubmit={onSettingsSave}>
           <div className="market-detail-main">
             <div>
               <h2>{selectedMarket.display_name}</h2>
@@ -5189,7 +5272,7 @@ function PolymarketAnalyticsView({
             <input inputMode="numeric" min="1" max="1000" type="number" value={mddForm.max_points} onChange={(event) => updateMddForm("max_points", event.target.value)} />
           </label>
           <label>
-            <span>Equity base</span>
+            <span>Equity base (USDC)</span>
             <input inputMode="decimal" value={mddForm.equity_base_usd} onChange={(event) => updateMddForm("equity_base_usd", event.target.value)} />
           </label>
           <label>
@@ -5244,10 +5327,10 @@ function PolymarketAnalyticsView({
         {mddPayload ? (
           <>
             <div className="metrics-grid four">
-              <Metric label="Observed MDD USD" value={formatUsd(mddPayload.mdd_usd)} tone={mddPayload.mdd_available ? "warn" : "neutral"} />
+              <Metric label="Observed MDD amount" value={formatAssetAmount(mddPayload.mdd_usd, mddPayload.quote_currency)} tone={mddPayload.mdd_available ? "warn" : "neutral"} />
               <Metric label="Observed MDD %" value={formatPercent(mddPayload.mdd_pct)} />
-              <Metric label="Peak" value={formatUsd(mddPayload.peak_value)} />
-              <Metric label="Trough" value={formatUsd(mddPayload.trough_value)} />
+              <Metric label="Peak" value={formatAssetAmount(mddPayload.peak_value, mddPayload.quote_currency)} />
+              <Metric label="Trough" value={formatAssetAmount(mddPayload.trough_value, mddPayload.quote_currency)} />
             </div>
             <MddHistoryCoverage payload={mddPayload} />
             <div className="audit-summary">
@@ -5257,7 +5340,7 @@ function PolymarketAnalyticsView({
               </div>
               <div>
                 <span>Equity base</span>
-                <strong>{formatUsd(mddPayload.equity_base_usd)}</strong>
+                <strong>{formatAssetAmount(mddPayload.equity_base_usd, mddPayload.equity_base_currency)}</strong>
               </div>
               <div>
                 <span>Positions</span>
@@ -5347,7 +5430,7 @@ function PolymarketAnalyticsView({
               <tr>
                 <th>Stored</th>
                 <th>Wallet</th>
-                <th className="numeric">MDD USD</th>
+                <th className="numeric">MDD amount</th>
                 <th className="numeric">MDD %</th>
                 <th>Retention</th>
                 <th>Status</th>
@@ -5362,7 +5445,7 @@ function PolymarketAnalyticsView({
                   <tr key={cacheKey || `${entry.wallet}-${entry.stored_at}`}>
                     <td>{formatUnknownTime(entry.stored_at)}</td>
                     <td>{entry.wallet || "-"}</td>
-                    <td className="numeric">{formatUsd(entry.mdd_usd)}</td>
+                    <td className="numeric">{formatAssetAmount(entry.mdd_usd, entry.quote_currency)}</td>
                     <td className="numeric">{formatPercent(entry.mdd_pct)}</td>
                     <td>
                       <strong>{entry.ttl_remaining_seconds === null || entry.ttl_remaining_seconds === undefined ? "-" : `${entry.ttl_remaining_seconds}s`}</strong>
@@ -5417,6 +5500,7 @@ function PolymarketAnalyticsView({
           <Trophy size={18} />
           <h2>Leaderboard</h2>
         </div>
+        <div className="info-banner warn">Polymarket v2 reports share volume. USD turnover and PnL / USD volume percentages are unavailable.</div>
         <form className="analytics-form leaderboard-form" onSubmit={onLeaderboardRefresh}>
           <label>
             <span>Category</span>
@@ -5427,11 +5511,12 @@ function PolymarketAnalyticsView({
           <label>
             <span>Sort</span>
             <select value={filters.sort} onChange={(event) => updateFilter("sort", event.target.value as PolymarketLeaderboardSort)}>
-              <option value="roi_pct">PnL/volume %</option>
-              <option value="pnl_usd">PnL USD</option>
-              <option value="volume_usd">Volume USD</option>
+              <option value="pnl_usd">PnL USDC</option>
+              <option value="volume_shares">Volume shares</option>
+              <option value="roi_pct" disabled>PnL / USD volume % unavailable</option>
+              <option value="volume_usd" disabled>Volume USD unavailable</option>
               <option value="mdd_pct">Observed MDD %</option>
-              <option value="mdd_usd">Observed MDD USD</option>
+              <option value="mdd_usd">Observed MDD amount</option>
             </select>
           </label>
           <label>
@@ -5577,39 +5662,39 @@ function PolymarketAnalyticsView({
             <span>Audit cache</span>
           </label>
           <label>
-            <span>Equity base</span>
+            <span>Equity base (USDC)</span>
             <input inputMode="decimal" value={filters.equity_base_usd} onChange={(event) => updateFilter("equity_base_usd", event.target.value)} />
           </label>
           <label>
-            <span>Min PnL</span>
+            <span>Min PnL USDC</span>
             <input inputMode="decimal" value={filters.min_pnl_usd} onChange={(event) => updateFilter("min_pnl_usd", event.target.value)} />
           </label>
           <label>
-            <span>Max PnL</span>
+            <span>Max PnL USDC</span>
             <input inputMode="decimal" value={filters.max_pnl_usd} onChange={(event) => updateFilter("max_pnl_usd", event.target.value)} />
           </label>
           <label>
-            <span>Min Volume</span>
-            <input inputMode="decimal" value={filters.min_volume_usd} onChange={(event) => updateFilter("min_volume_usd", event.target.value)} />
+            <span>Min volume USD</span>
+            <input disabled title="USD turnover is unavailable in Polymarket v2." inputMode="decimal" value={filters.min_volume_usd} onChange={(event) => updateFilter("min_volume_usd", event.target.value)} />
           </label>
           <label>
-            <span>Max Volume</span>
-            <input inputMode="decimal" value={filters.max_volume_usd} onChange={(event) => updateFilter("max_volume_usd", event.target.value)} />
+            <span>Max volume USD</span>
+            <input disabled title="USD turnover is unavailable in Polymarket v2." inputMode="decimal" value={filters.max_volume_usd} onChange={(event) => updateFilter("max_volume_usd", event.target.value)} />
           </label>
           <label>
-            <span>Min PnL/volume %</span>
-            <input inputMode="decimal" value={filters.min_roi_pct} onChange={(event) => updateFilter("min_roi_pct", event.target.value)} />
+            <span>Min PnL / USD volume %</span>
+            <input disabled title="PnL / USD volume percentages are unavailable in Polymarket v2." inputMode="decimal" value={filters.min_roi_pct} onChange={(event) => updateFilter("min_roi_pct", event.target.value)} />
           </label>
           <label>
-            <span>Max PnL/volume %</span>
-            <input inputMode="decimal" value={filters.max_roi_pct} onChange={(event) => updateFilter("max_roi_pct", event.target.value)} />
+            <span>Max PnL / USD volume %</span>
+            <input disabled title="PnL / USD volume percentages are unavailable in Polymarket v2." inputMode="decimal" value={filters.max_roi_pct} onChange={(event) => updateFilter("max_roi_pct", event.target.value)} />
           </label>
           <label>
-            <span>Min MDD USD</span>
+            <span>Min MDD USDC</span>
             <input inputMode="decimal" value={filters.min_mdd_usd} onChange={(event) => updateFilter("min_mdd_usd", event.target.value)} />
           </label>
           <label>
-            <span>Max MDD USD</span>
+            <span>Max MDD USDC</span>
             <input inputMode="decimal" value={filters.max_mdd_usd} onChange={(event) => updateFilter("max_mdd_usd", event.target.value)} />
           </label>
           <label>
@@ -5625,7 +5710,7 @@ function PolymarketAnalyticsView({
           </button>
         </form>
 
-        {message ? <div className={`info-banner ${leaderboard?.warnings.length ? "warn" : ""}`}>{message}</div> : null}
+        {message ? <div className={`info-banner ${leaderboard?.warnings.length ? "warn" : ""}`} role="status">{message}</div> : null}
         {leaderboard ? (
           <>
             <div className="metrics-grid four">
@@ -5645,11 +5730,12 @@ function PolymarketAnalyticsView({
                   <tr>
                     <th>Rank</th>
                     <th>User</th>
-                    <th className="numeric">PnL</th>
-                    <th className="numeric">Volume</th>
-                    <th className="numeric" title="PnL / trading volume * 100; not investment ROI">PnL/volume %</th>
+                    <th className="numeric">PnL ({leaderboard.source_api_version === 2 ? "USDC" : leaderboard.source_api_version === 1 ? "USD" : "unit unavailable"})</th>
+                    <th className="numeric">Volume shares</th>
+                    <th className="numeric">Volume USD</th>
+                    <th className="numeric" title="Requires verified USD turnover; not investment ROI.">PnL / USD volume %</th>
                     <th className="numeric">Trades</th>
-                    <th className="numeric">Observed MDD USD</th>
+                    <th className="numeric">Observed MDD amount</th>
                     <th className="numeric">Observed MDD %</th>
                     <th>MDD source</th>
                     <th>Audit</th>
@@ -5663,11 +5749,12 @@ function PolymarketAnalyticsView({
                         <strong>{row.display_name}</strong>
                         <small>{row.wallet || "-"}</small>
                       </td>
-                      <td className="numeric">{formatUsd(row.pnl_usd)}</td>
-                      <td className="numeric">{formatUsd(row.volume_usd)}</td>
-                      <td className="numeric">{formatPercent(row.roi_pct)}</td>
+                      <td className="numeric">{formatAssetAmount(row.pnl_usd, (row.source_api_version ?? leaderboard.source_api_version) === 2 ? "USDC" : (row.source_api_version ?? leaderboard.source_api_version) === 1 ? "USD" : null)}</td>
+                      <td className="numeric">{formatNumber(row.volume_shares)}</td>
+                      <td className="numeric">{(row.source_api_version ?? leaderboard.source_api_version) === 2 || row.volume_usd === null ? "Unavailable" : formatUsd(row.volume_usd)}</td>
+                      <td className="numeric" title={row.roi_pct_basis}>{(row.source_api_version ?? leaderboard.source_api_version) === 2 || row.roi_pct === null ? "Unavailable" : formatPercent(row.roi_pct)}</td>
                       <td className="numeric">{row.trade_count || "-"}</td>
-                      <td className="numeric">{row.mdd_available ? formatUsd(row.mdd_usd) : "-"}</td>
+                      <td className="numeric">{row.mdd_available ? formatAssetAmount(row.mdd_usd, row.mdd_quote_currency) : "-"}</td>
                       <td className="numeric">{row.mdd_available ? formatPercent(row.mdd_pct) : "-"}</td>
                       <td>
                         <small>{(row.mdd_history_status ?? "history unverified").replaceAll("_", " ")}</small>
@@ -5696,7 +5783,7 @@ function PolymarketAnalyticsView({
                   ))}
                   {!leaderboard.rows.length ? (
                     <tr>
-                      <td colSpan={10} className="empty-cell">
+                      <td colSpan={11} className="empty-cell">
                         No leaderboard rows matched the filters.
                       </td>
                     </tr>
@@ -5718,9 +5805,9 @@ function PolymarketAnalyticsView({
             {auditCacheKey ? <StatusPill tone="good">cached</StatusPill> : <StatusPill>direct</StatusPill>}
           </div>
           <div className="metrics-grid four">
-            <Metric label="Observed MDD USD" value={formatUsd(auditPayload.mdd_usd)} tone={auditPayload.mdd_available ? "warn" : "neutral"} />
+            <Metric label="Observed MDD amount" value={formatAssetAmount(auditPayload.mdd_usd, auditPayload.quote_currency)} tone={auditPayload.mdd_available ? "warn" : "neutral"} />
             <Metric label="Observed MDD %" value={formatPercent(auditPayload.mdd_pct)} />
-            <Metric label="Equity base" value={formatUsd(auditPayload.equity_base_usd)} />
+            <Metric label="Equity base" value={formatAssetAmount(auditPayload.equity_base_usd, auditPayload.equity_base_currency)} />
             <Metric label="Points" value={auditPayload.points_total ?? auditPayload.points?.length ?? 0} />
           </div>
           <MddHistoryCoverage payload={auditPayload} />
@@ -5736,13 +5823,13 @@ function PolymarketAnalyticsView({
             <div>
               <span>Peak</span>
               <strong>
-                {formatUsd(auditPayload.peak_value)} at {formatUnknownTime(auditPayload.peak_timestamp)}
+                {formatAssetAmount(auditPayload.peak_value, auditPayload.quote_currency)} at {formatUnknownTime(auditPayload.peak_timestamp)}
               </strong>
             </div>
             <div>
               <span>Trough</span>
               <strong>
-                {formatUsd(auditPayload.trough_value)} at {formatUnknownTime(auditPayload.trough_timestamp)}
+                {formatAssetAmount(auditPayload.trough_value, auditPayload.quote_currency)} at {formatUnknownTime(auditPayload.trough_timestamp)}
               </strong>
             </div>
             <div>
@@ -5789,7 +5876,7 @@ function PolymarketAnalyticsView({
                 {auditPoints.map((point, index) => (
                   <tr key={`${point.timestamp ?? index}-${index}`}>
                     <td>{formatUnknownTime(point.timestamp)}</td>
-                    <td className="numeric">{formatUnknownNumber(point.value, 4)}</td>
+                    <td className="numeric">{formatAssetAmount(point.value, auditPayload.quote_currency)}</td>
                     <td>{point.source ?? point.kind ?? "-"}</td>
                   </tr>
                 ))}
@@ -5821,6 +5908,8 @@ function PolymarketAnalyticsView({
 
 function LiveSafetyView({
   busyMarket,
+  marketFormVersion,
+  onSettingsChange,
   form,
   livePreflight,
   liveSafety,
@@ -5864,6 +5953,8 @@ function LiveSafetyView({
   selectedMarketId
 }: {
   busyMarket: string | null;
+  marketFormVersion: number;
+  onSettingsChange: () => void;
   form: PaperOrderForm;
   livePreflight: LivePreflightPayload | null;
   liveSafety: LiveSafetyPayload | null;
@@ -5927,7 +6018,7 @@ function LiveSafetyView({
         </div>
 
         {selectedMarket ? (
-          <form className="market-detail" key={`live-${selectedMarket.market_id}`} onSubmit={onSettingsSave}>
+          <form className="market-detail" key={`live-${selectedMarket.market_id}:${selectedMarket.configuration_revision}:${marketFormVersion}`} onChange={onSettingsChange} onSubmit={onSettingsSave}>
             <div className="market-detail-main">
               <div>
                 <h2>{selectedMarket.display_name}</h2>
@@ -7698,7 +7789,7 @@ function PaperView({
             <Database size={17} /> Submit Paper Order
           </button>
         </div>
-        {message ? <div className="info-banner">{message}</div> : null}
+        {message ? <div className="info-banner" role="status">{message}</div> : null}
       </section>
 
       <section className="panel span-2">
@@ -7713,7 +7804,17 @@ function PaperView({
           <Metric label="Net notional" value={formatNumber(paper?.summary.net_notional, 4)} />
           <Metric label="Marked" value={`${paper?.summary.marked ?? 0}/${paper?.summary.positions ?? 0}`} />
           <Metric label="Unrealized" value={formatNumber(paper?.summary.unrealized, 4)} />
+          <Metric label="Realized" value={formatNumber(paper?.summary.realized, 4)} />
+          <Metric label="Currency" value={paper?.summary.quote_currency ?? "unavailable"} />
         </div>
+        {paper?.accounting ? (
+          <div className={`info-banner ${paper.accounting.status === "incomplete" ? "warn" : ""}`}>
+            <strong>Retained paper ledger simulation — {paper.accounting.status}</strong>
+            <p>Opening inventory is assumed empty. Paper outcomes do not establish actual venue fills, fees, or account performance.</p>
+            {paper.accounting.execution_assumptions.includes("assumed_full_fill_at_limit") ? <p>Some orders assume a full fill at their limit price.</p> : null}
+            {paper.accounting.incomplete_reasons.length ? <p>Unavailable totals: {paper.accounting.incomplete_reasons.join("; ")}</p> : null}
+          </div>
+        ) : null}
       </section>
 
       <section className="panel full">
@@ -7723,7 +7824,7 @@ function PaperView({
             <h2>Open Positions</h2>
           </div>
           <div className="button-row compact">
-            <button className="icon-button" onClick={() => onAction("refresh-marks")}>
+            <button className="icon-button" disabled={!paper?.positions.some((position) => position.net_size !== null)} onClick={() => onAction("refresh-marks")}>
               <RefreshCw size={17} /> Refresh Marks
             </button>
             <button className="icon-button" onClick={() => onAction("clear-marks")}>
@@ -7737,6 +7838,7 @@ function PaperView({
               <tr>
                 <th>Market</th>
                 <th>Contract</th>
+                <th>Accounting</th>
                 <th className="numeric">Net size</th>
                 <th className="numeric">Avg price</th>
                 <th className="numeric">Notional</th>
@@ -7752,6 +7854,11 @@ function PaperView({
                 <tr key={`${position.market_id}:${position.contract_id}`}>
                   <td>{position.market_id}</td>
                   <td>{position.contract_id}</td>
+                  <td>
+                    <strong>{position.net_size === null ? "Quantity unavailable" : position.accounting_status ?? "unverified"}</strong>
+                    <small>{position.currency ?? "Currency unavailable"}</small>
+                    {position.incomplete_reasons?.length ? <small>{position.incomplete_reasons.join("; ")}</small> : null}
+                  </td>
                   <td className="numeric">{formatNumber(position.net_size)}</td>
                   <td className="numeric">{formatNumber(position.average_price)}</td>
                   <td className="numeric">{formatNumber(position.notional)}</td>
@@ -7761,8 +7868,8 @@ function PaperView({
                   <td className="numeric">{position.trades}</td>
                   <td>
                     <div className="row-actions">
-                      <button onClick={() => onAction("use-position", position)}>Use</button>
-                      <button onClick={() => onAction("refresh-selected-mark", position)}>Mark</button>
+                      <button disabled={position.net_size === null} onClick={() => onAction("use-position", position)}>Use</button>
+                      <button disabled={position.net_size === null} onClick={() => onAction("refresh-selected-mark", position)}>Mark</button>
                       <button onClick={() => onAction("clear-selected-mark", position)}>Clear</button>
                     </div>
                   </td>
@@ -7770,7 +7877,7 @@ function PaperView({
               ))}
               {!paper?.positions.length ? (
                 <tr>
-                  <td colSpan={10} className="empty-cell">
+                  <td colSpan={11} className="empty-cell">
                     No open paper exposure.
                   </td>
                 </tr>

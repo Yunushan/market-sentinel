@@ -1953,7 +1953,7 @@ class MarketSentinelCliTests(unittest.TestCase):
             [
                 "polymarket-leaderboard",
                 "--sort",
-                "roi",
+                "pnl",
                 "--returned",
                 "unlimited",
                 "--scanned",
@@ -1971,7 +1971,7 @@ class MarketSentinelCliTests(unittest.TestCase):
 
         params = market_sentinel_cli.build_polymarket_leaderboard_params(args)
 
-        self.assertEqual(params["sort"], ["roi_pct"])
+        self.assertEqual(params["sort"], ["pnl_usd"])
         self.assertEqual(params["limit"], ["unlimited"])
         self.assertEqual(params["scan_limit"], ["all"])
         self.assertEqual(params["compute_mdd"], ["true"])
@@ -2374,16 +2374,16 @@ class MarketSentinelCliTests(unittest.TestCase):
         }
         checkpoint_row = {
             "rank": 1,
-            "proxyWallet": "0x" + "1" * 40,
-            "pnl": "10",
-            "volume": "100",
+            "user_id": "0x" + "1" * 40,
+            "pnl": 10,
+            "volume": 100,
         }
 
         with tempfile.TemporaryDirectory() as tmp:
             checkpoint = Path(tmp) / "leaderboard.checkpoint.jsonl"
 
             def fake_payload(_params, **kwargs):
-                kwargs["leaderboard_page_callback"](0, 1, [checkpoint_row])
+                kwargs["leaderboard_cursor_page_callback"](0, 1, [checkpoint_row], None, "fixture-checkpoint-next")
                 return payload
 
             stdout = io.StringIO()
@@ -2425,21 +2425,22 @@ class MarketSentinelCliTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             called_params = mock_payload.call_args.args[0]
             self.assertEqual(called_params["scan_start_offset"], ["1"])
+            self.assertEqual(mock_payload.call_args.kwargs["scan_start_cursor"], "fixture-checkpoint-next")
             self.assertEqual(mock_payload.call_args.kwargs["initial_raw_rows"], [checkpoint_row])
-            self.assertTrue(callable(mock_payload.call_args.kwargs["leaderboard_page_callback"]))
+            self.assertTrue(callable(mock_payload.call_args.kwargs["leaderboard_cursor_page_callback"]))
 
     def test_polymarket_leaderboard_cli_state_db_streams_csv_and_resumes(self) -> None:
         raw_rows = [
-            {"rank": 2, "proxyWallet": "0x" + "2" * 40, "pseudonym": "second", "pnl": "20", "volume": "200", "trades": 4},
-            {"rank": 1, "proxyWallet": "0x" + "1" * 40, "pseudonym": "first", "pnl": "30", "volume": "100", "trades": 7},
+            {"rank": 2, "user_id": "0x" + "2" * 40, "user_name": "second", "pnl": 20, "volume": 200, "trades": 4},
+            {"rank": 1, "user_id": "0x" + "1" * 40, "user_name": "first", "pnl": 30, "volume": 100, "trades": 7},
         ]
         with tempfile.TemporaryDirectory() as tmp:
             state_db = Path(tmp) / "leaderboard.sqlite3"
             output = Path(tmp) / "leaderboard.csv"
 
             def fake_scan(*_args, **kwargs):
-                kwargs["page_callback"](0, 50, raw_rows)
-                kwargs["page_callback"](2, 50, [])
+                kwargs["cursor_page_callback"](0, 50, raw_rows, None, "fixture-page-one")
+                kwargs["cursor_page_callback"](1, 50, [], "fixture-page-one", None)
                 return [], False
 
             with patch("market_sentinel_cli._fetch_polymarket_leaderboard_scan_rows", side_effect=fake_scan) as mock_scan:
@@ -2492,16 +2493,16 @@ class MarketSentinelCliTests(unittest.TestCase):
 
     def test_polymarket_leaderboard_state_db_resumes_mdd_filtering(self) -> None:
         raw_rows = [
-            {"rank": 1, "proxyWallet": "0x" + "1" * 40, "pnl": "30", "volume": "100"},
-            {"rank": 2, "proxyWallet": "0x" + "2" * 40, "pnl": "20", "volume": "100"},
+            {"rank": 1, "user_id": "0x" + "1" * 40, "pnl": 30, "volume": 100},
+            {"rank": 2, "user_id": "0x" + "2" * 40, "pnl": 20, "volume": 100},
         ]
         with tempfile.TemporaryDirectory() as tmp:
             state_db = Path(tmp) / "leaderboard.sqlite3"
             output = Path(tmp) / "leaderboard.json"
 
             def fake_scan(*_args, **kwargs):
-                kwargs["page_callback"](0, 50, raw_rows)
-                kwargs["page_callback"](2, 50, [])
+                kwargs["cursor_page_callback"](0, 50, raw_rows, None, "fixture-page-one")
+                kwargs["cursor_page_callback"](1, 50, [], "fixture-page-one", None)
                 return [], False
 
             def fake_mdd(wallet, **_kwargs):
@@ -2551,7 +2552,8 @@ class MarketSentinelCliTests(unittest.TestCase):
         wallet = "0x" + "a" * 40
         changes = [
             ["--mdd-mode", "mark_replay"],
-            ["--equity-base-usd", "500"],
+            ["--equity-base-usd", "500", "--equity-base-currency", "USDC"],
+            ["--equity-base-currency", "USDC"],
             ["--mdd-history-limit", "200"],
             ["--mdd-trade-limit", "200"],
             ["--mdd-mark-replay-fidelity", "120"],
@@ -2569,7 +2571,7 @@ class MarketSentinelCliTests(unittest.TestCase):
                 ]
 
                 def fake_scan(*_args, **kwargs):
-                    kwargs["page_callback"](0, 50, [{"proxyWallet": wallet, "pnl": 30, "volume": 100}])
+                    kwargs["cursor_page_callback"](0, 50, [{"user_id": wallet, "pnl": 30, "volume": 100}], None, None)
                     return [], False
 
                 with patch("market_sentinel_cli._fetch_polymarket_leaderboard_scan_rows", side_effect=fake_scan), patch(
@@ -2609,14 +2611,14 @@ class MarketSentinelCliTests(unittest.TestCase):
             ]
 
             def fake_scan(*_args, **kwargs):
-                kwargs["page_callback"](0, 2, [
-                    {"rank": 1, "proxyWallet": wallet, "pnl": 30, "volume": 100},
-                    {"rank": 2, "proxyWallet": "0x" + "b" * 40, "pnl": 10, "volume": 100},
-                ])
-                kwargs["page_callback"](2, 2, [
-                    {"rank": 3, "proxyWallet": wallet.upper(), "pnl": 40, "volume": 100},
-                    {"rank": 4, "proxyWallet": "0x" + "c" * 40, "pnl": 10, "volume": 100},
-                ])
+                kwargs["cursor_page_callback"](0, 2, [
+                    {"rank": 1, "user_id": wallet, "pnl": 30, "volume": 100},
+                    {"rank": 2, "user_id": "0x" + "b" * 40, "pnl": 10, "volume": 100},
+                ], None, "fixture-page-one")
+                kwargs["cursor_page_callback"](1, 2, [
+                    {"rank": 3, "user_id": wallet.upper(), "pnl": 40, "volume": 100},
+                    {"rank": 4, "user_id": "0x" + "c" * 40, "pnl": 10, "volume": 100},
+                ], "fixture-page-one", "fixture-page-two")
                 return [], False
 
             with patch("market_sentinel_cli._fetch_polymarket_leaderboard_scan_rows", side_effect=fake_scan), patch(
@@ -2640,7 +2642,8 @@ class MarketSentinelCliTests(unittest.TestCase):
             with patch("market_sentinel_cli._fetch_polymarket_leaderboard_scan_rows") as fetch:
                 self.assertEqual(market_sentinel_cli.main(args + ["--resume", "--scanned", "5"]), 0)
             self.assertEqual(fetch.call_args.kwargs["initial_scanned"], 4)
-            self.assertEqual(fetch.call_args.kwargs["scan_start_offset"], 4)
+            self.assertEqual(fetch.call_args.kwargs["scan_start_offset"], 2)
+            self.assertEqual(fetch.call_args.kwargs["scan_start_cursor"], "fixture-page-two")
 
     def test_config_and_market_cli_update_persisted_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

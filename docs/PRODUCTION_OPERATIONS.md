@@ -19,13 +19,18 @@ regional restrictions.
   no-sniff, no-referrer, restricted browser permissions, and opener isolation.
   Caddy remains responsible for public HTTPS-only HSTS, resource isolation, and
   removing the `Server` header at the internet-facing boundary.
-- The threaded loopback server gives each connection 15 seconds to make
-  progress, admits at most 32 concurrent request workers, rejects overload with
+- The threaded loopback server gives request headers and JSON bodies separate
+  absolute 15-second receive budgets, even when a sender keeps dripping bytes.
+  It admits at most 32 concurrent request workers, rejects overload with
   `503` and `Retry-After`, and does not wait on stalled daemon workers during
   shutdown. It rejects ambiguous or incomplete request framing and caps every
   JSON, text, and static response at 16 MiB before sending response headers.
   The systemd unit retains its 30-second stop deadline as a final process-level
   safeguard.
+- Requests must name a trusted `Host`: the local service authority or an exact
+  authority from `MARKET_SENTINEL_ALLOWED_ORIGINS`. Configure the public Caddy
+  origin before exposing browser access. Foreign hostnames are rejected even
+  when no `Origin` header is present and local token authentication is disabled.
 - A broken pipe, reset or abort while writing a response is recorded once as
   `outcome=client_disconnected`, with local log/metric status `499` and the
   attempted HTTP status in `response_status`. No 499 or replacement 500 response
@@ -35,7 +40,8 @@ regional restrictions.
   Upstream connection failures remain backend errors, not client disconnects.
 - When an API token is configured, the server permits ten failed token attempts
   per client per minute, then returns `429` with `Retry-After`. A valid token
-  immediately clears that client record. This is a backstop for the proxy's
+  remains usable without clearing failures from other clients sharing the
+  proxy's socket peer. This is a backstop for the proxy's
   authentication controls, not a replacement for Caddy Basic Auth or firewall
   policy.
 - Run under the dedicated `market-sentinel` user. Use `/var/lib/market-sentinel`
@@ -206,6 +212,14 @@ Managed HTTP requests use a monotonic budget shared by DNS admission,
 rate-limiter waits, response headers/body reads, and internal retry backoff.
 The configured `timeout` is the budget for one HTTP operation, including its
 internal retries; it is not the duration limit for an entire unlimited scan.
+Adapter `min_request_interval_seconds` pacing is shared across adapter instances
+in the same process and conservatively across accounts for each venue. Creating
+a new API request does not reset the schedule. Reserved intervals survive
+collection of a short-lived adapter; at most 1,024 live venue schedules are
+retained, with new identities rejected while all slots remain in use. An
+existing venue schedule retains the largest configured interval until it can be
+retired or the process restarts. Separate CLI and service processes still need
+an aggregate quota at the outbound proxy or venue account boundary.
 Response byte limits remain independent. Socket ownership lasts through
 HTTP/1.0 and `Connection: close` bodies, and a completed request disarms its
 pooled socket before another request can borrow it.
@@ -268,6 +282,15 @@ deployment verifier; the verifier inspects the running process environment and
 fails if its effective paths or backup source differ from this boundary.
 
 ### Durable-mutation idempotency window
+
+Wallet polls use the same durable idempotency window. `POST /api/wallets/poll`
+requires an `Idempotency-Key`; reuse it after a timeout or interrupted response
+to recover the committed bounded activity batch. Use a new key only after a
+successful response when `has_more` reports another pending batch. The API
+commits the batch receipt with the consumed cursor, validates response size
+before persistence, and bounds the aggregate history/enrichment work. Remaining
+events stay eligible for subsequent polls. This observer route returns copy
+previews and never dispatches live orders.
 
 Configuration loading rejects duplicate JSON keys, non-finite numbers,
 malformed record collections and market/safety-setting containers. Existing

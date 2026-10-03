@@ -565,6 +565,7 @@ def mdd_payload_to_csv(payload: Mapping[str, Any]) -> str:
     quality_fields = ["mdd_history_status", "mdd_source_quality", "mdd_unavailable_reasons", "mdd_history_coverage",
                       "position_capital_basis"]
     provenance_fields = [
+        "source_economics_currency", "quote_currency", "equity_base_currency", "mdd_currency_status",
         "calculation_version", "calculation_current", "pct_drawdown_usd",
         "pct_peak_value", "pct_trough_value", "pct_peak_timestamp", "pct_trough_timestamp", "drawdown_baseline",
     ]
@@ -616,6 +617,8 @@ def mdd_payload_to_csv(payload: Mapping[str, Any]) -> str:
                 "mdd_usd": "",
                 "mdd_pct": "",
                 "equity_base_usd": payload.get("equity_base_usd"),
+                "quote_currency": payload.get("quote_currency"),
+                "equity_base_currency": payload.get("equity_base_currency"),
                 "peak_value": "",
                 "trough_value": "",
                 "source": point.get("source") or point.get("kind") or "",
@@ -703,6 +706,11 @@ def _payload_summary(payload: Mapping[str, Any]) -> Dict[str, Any]:
         "mdd_usd",
         "mdd_pct",
         "equity_base_usd",
+        "source_economics_currency",
+        "quote_currency",
+        "equity_base_currency",
+        "mdd_currency_status",
+        "mdd_percentage_available",
         "peak_value",
         "trough_value",
         "peak_timestamp",

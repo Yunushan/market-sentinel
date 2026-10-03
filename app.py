@@ -24,6 +24,23 @@ from tkinter import ttk, messagebox, filedialog
 from dotenv import load_dotenv
 
 from core.atomic_files import atomic_text_writer
+from core.wallet_activity import (
+    activity_key as wallet_activity_key,
+    collect_adapter_activity,
+    collect_polymarket_activity_v2,
+    cursor_for_market,
+    legacy_transaction_key,
+    remember_activity,
+)
+from core.paper_accounting import (
+    SHARE_QUOTE_CURRENCIES,
+    ensure_paper_history_capacity,
+    paper_accounting,
+    paper_order_impact as account_paper_order_impact,
+    paper_position_rows as account_paper_position_rows,
+    paper_summary,
+    paper_unrealized,
+)
 from core.models import (
     AlertEventCapacityError,
     AppConfig,
@@ -104,15 +121,7 @@ def safe_float(s: Any, default: Optional[float] = None) -> Optional[float]:
 
 
 def activity_key(item: Dict[str, Any]) -> str:
-    """Stable local identity for a Data API activity item."""
-    tx = str(item.get("transactionHash") or "").strip().lower()
-    if tx:
-        return f"tx:{tx}"
-    activity_id = str(item.get("activityId") or item.get("activity_id") or "").strip().lower()
-    if activity_id:
-        return f"activity-id:{activity_id}"
-    fields = ("timestamp", "proxyWallet", "asset", "side", "price", "size", "slug", "outcome")
-    return "activity:" + "|".join(str(item.get(k) or "").strip().lower() for k in fields)
+    return wallet_activity_key(item)
 
 
 def market_choice_label(metadata: MarketMetadata) -> str:
@@ -310,7 +319,7 @@ class CopyActivityOutcome:
 class WalletActivityCheckpoint:
     cfg: AppConfig
     watch: WalletWatch
-    previous_watch: Tuple[Optional[int], str, List[str]]
+    previous_watch: Tuple[Optional[int], str, List[str], Dict[str, int], str, Dict[str, Dict[str, Any]]]
     previous_outbox: List[CopyActivityOutboxEntry]
     changed: bool = False
 
@@ -318,6 +327,11 @@ class WalletActivityCheckpoint:
 _COPY_ACTIVITY_FIELDS = (
     "timestamp",
     "transactionHash",
+    "transaction_hash",
+    "logIndex",
+    "log_index",
+    "fillId",
+    "trade_id",
     "activityId",
     "activity_id",
     "proxyWallet",
@@ -423,49 +437,46 @@ def _apply_wallet_activity_checkpoint(
     if (
         existing is None
         and any_outbox_match is None
-        and task.checkpoint_key in set(watch.seen_activity_keys or [])
+        and task.checkpoint_key in set(cursor_for_market(watch, source_market_id)["seen_activity_keys"] or [])
     ):
         # Legacy checkpoints did not include outbox state. Preserve their
         # historical at-most-once behavior instead of guessing whether a live
         # order was placed.
         return None
-    previous = (watch.last_seen_ts, watch.last_seen_tx, list(watch.seen_activity_keys))
+    previous = (watch.last_seen_ts, watch.last_seen_tx, list(watch.seen_activity_keys), dict(watch.activity_key_timestamps),
+                watch.activity_cursor_market_id, deepcopy(watch.activity_cursors))
     checkpoint = WalletActivityCheckpoint(cfg, watch, previous, list(cfg.copy_activity_outbox))
-    if existing is None:
-        if len(cfg.copy_activity_outbox) >= _COPY_OUTBOX_HISTORY_LIMIT:
-            required_slots = len(cfg.copy_activity_outbox) - _COPY_OUTBOX_HISTORY_LIMIT + 1
-            oldest_conclusive = sorted(
-                (
-                    entry
-                    for entry in cfg.copy_activity_outbox
-                    if entry.state in _COPY_OUTBOX_CONCLUSIVE_STATES
-                ),
-                key=lambda entry: (entry.updated_at, entry.created_at, entry.id),
-            )
-            if len(oldest_conclusive) < required_slots:
-                raise RuntimeError(
-                    "Copy activity outbox is full of unresolved entries; reconcile them before polling."
+    try:
+        if existing is None:
+            if len(cfg.copy_activity_outbox) >= _COPY_OUTBOX_HISTORY_LIMIT:
+                required_slots = len(cfg.copy_activity_outbox) - _COPY_OUTBOX_HISTORY_LIMIT + 1
+                oldest_conclusive = sorted(
+                    (entry for entry in cfg.copy_activity_outbox if entry.state in _COPY_OUTBOX_CONCLUSIVE_STATES),
+                    key=lambda entry: (entry.updated_at, entry.created_at, entry.id),
                 )
-            removable_ids = {entry.id for entry in oldest_conclusive[:required_slots]}
-            cfg.copy_activity_outbox = [
-                entry for entry in cfg.copy_activity_outbox if entry.id not in removable_ids
-            ]
-        watch.last_seen_ts = max(watch.last_seen_ts or 0, int(task.activity.get("timestamp") or 0))
-        watch.last_seen_tx = str(task.activity.get("transactionHash") or watch.last_seen_tx or "")
-        watch.seen_activity_keys.append(task.checkpoint_key)
-        if len(watch.seen_activity_keys) > 200:
-            watch.seen_activity_keys = watch.seen_activity_keys[-200:]
-        cfg.copy_activity_outbox.append(
-            CopyActivityOutboxEntry(
-                watch_id=task.watch_id,
-                activity_key=task.checkpoint_key,
-                activity=_copy_activity_snapshot(task.activity),
-                market_id=source_market_id,
-                execution_policy=_copy_execution_policy(cfg.copytrading),
+                if len(oldest_conclusive) < required_slots:
+                    raise RuntimeError(
+                        "Copy activity outbox is full of unresolved entries; reconcile them before polling."
+                    )
+                removable_ids = {entry.id for entry in oldest_conclusive[:required_slots]}
+                cfg.copy_activity_outbox = [
+                    entry for entry in cfg.copy_activity_outbox if entry.id not in removable_ids
+                ]
+            remember_activity(watch, task.activity, task.checkpoint_key, market_id=source_market_id)
+            cfg.copy_activity_outbox.append(
+                CopyActivityOutboxEntry(
+                    watch_id=task.watch_id,
+                    activity_key=task.checkpoint_key,
+                    activity=_copy_activity_snapshot(task.activity),
+                    market_id=source_market_id,
+                    execution_policy=_copy_execution_policy(cfg.copytrading),
+                )
             )
-        )
-        checkpoint.changed = True
-        _prune_copy_activity_outbox(cfg)
+            checkpoint.changed = True
+            _prune_copy_activity_outbox(cfg)
+    except BaseException:
+        _restore_wallet_activity_checkpoint(checkpoint)
+        raise
     return checkpoint
 
 
@@ -473,8 +484,10 @@ def _restore_wallet_activity_checkpoint(
     checkpoint: WalletActivityCheckpoint,
 ) -> None:
     watch = checkpoint.watch
-    watch.last_seen_ts, watch.last_seen_tx, previous_keys = checkpoint.previous_watch
+    (watch.last_seen_ts, watch.last_seen_tx, previous_keys, previous_timestamps,
+     watch.activity_cursor_market_id, watch.activity_cursors) = checkpoint.previous_watch
     watch.seen_activity_keys = previous_keys
+    watch.activity_key_timestamps = previous_timestamps
     checkpoint.cfg.copy_activity_outbox = checkpoint.previous_outbox
 
 
@@ -515,7 +528,7 @@ class WalletPoller:
     def stop(self):
         self._stop.set()
 
-    def _list_activity(self, wallet: str, *, market_id: str = "") -> List[Dict[str, Any]]:
+    def _list_activity(self, wallet: str, *, market_id: str = "", since: int = 0) -> List[Dict[str, Any]]:
         """Read wallet trades through the selected market's official adapter feed."""
 
         market_id = str(
@@ -526,10 +539,9 @@ class WalletPoller:
             adapter = self.adapter_registry.create(market_id, market_cfg.settings if market_cfg else {})
             list_activity = getattr(adapter, "list_activity", None)
             if callable(list_activity):
-                items = list_activity(wallet, limit=25)
-                return list(items or [])
+                return collect_adapter_activity(list_activity, wallet, since=since)
         if market_id == "polymarket":
-            return list(data_api.get_activity(wallet, limit=25, types=["TRADE"]) or [])
+            return collect_polymarket_activity_v2(data_api.get_activity_page_v2, wallet, since=since, page_size=25)
         raise UnsupportedFeatureError(
             market_id,
             "copy_trading",
@@ -594,14 +606,20 @@ class WalletPoller:
                         continue
 
                     source_market_id = str(self.cfg.selected_market_id or "polymarket").strip().lower()
-                    items = self._list_activity(w.wallet, market_id=source_market_id)
+                    cursor = cursor_for_market(w, source_market_id)
+                    items = self._list_activity(w.wallet, market_id=source_market_id, since=cursor["last_seen_ts"])
                     # Items are sorted DESC per API; process oldest->newest
                     new_items = []
-                    seen_keys = set(w.seen_activity_keys or [])
+                    seen_keys = set(cursor["seen_activity_keys"] or [])
                     for it in reversed(items):
                         ts = int(it.get("timestamp") or 0)
-                        tx = str(it.get("transactionHash") or "")
                         key = activity_key(it)
+                        legacy_key = legacy_transaction_key(it)
+                        if legacy_key and legacy_key != key and legacy_key in seen_keys:
+                            legacy_entry = _find_copy_activity_entry(self.cfg, w.id, legacy_key, source_market_id)
+                            if legacy_entry is None or activity_key(legacy_entry.activity) != key:
+                                raise RuntimeError("Legacy transaction checkpoint cannot distinguish these fills; reconcile before copying.")
+                            continue
                         if key in seen_keys:
                             same_market_entry = _find_copy_activity_entry(
                                 self.cfg,
@@ -617,19 +635,15 @@ class WalletPoller:
                             # signal instead of silently dropping it.
                             new_items.append((key, it))
                             continue
-                        if ts > (w.last_seen_ts or 0):
+                        if ts > (cursor["last_seen_ts"] or 0):
                             new_items.append((key, it))
                             seen_keys.add(key)
-                        elif ts == (w.last_seen_ts or 0) and (not tx or tx != (w.last_seen_tx or "")):
+                        elif ts == (cursor["last_seen_ts"] or 0):
                             # Same timestamp but different activity; still emit once.
                             new_items.append((key, it))
                             seen_keys.add(key)
 
                     for key, it in new_items:
-                        # market slug filter (optional)
-                        if w.only_market_slug:
-                            if str(it.get("slug") or "") != w.only_market_slug:
-                                continue
                         # Queue one activity at a time and wait until the UI
                         # thread has durably checkpointed exactly this item.
                         # This prevents a later item in the same API batch from
@@ -2422,7 +2436,7 @@ class App(tk.Tk):
         ttk.Label(hero, text="Polymarket trader analytics", style="HeroTitle.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(
             hero,
-            text="Public leaderboard candidates. PnL/volume is not investment ROI; observed MDD is not verified account-equity risk.",
+            text="Public leaderboard candidates. Volume is measured in shares; PnL/volume ratios are unavailable. Observed MDD uses public history.",
             style="HeroSubtitle.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(4, 0))
 
@@ -2430,12 +2444,12 @@ class App(tk.Tk):
         metric_bar.grid(row=0, column=1, rowspan=2, sticky="e", padx=(18, 0))
         self.lb_returned_metric_var = tk.StringVar(value="0")
         self.lb_scanned_metric_var = tk.StringVar(value="0")
-        self.lb_best_roi_metric_var = tk.StringVar(value="-")
+        self.lb_best_pnl_metric_var = tk.StringVar(value="-")
         self.lb_mdd_metric_var = tk.StringVar(value="0")
         metrics = (
             ("Returned", self.lb_returned_metric_var),
             ("Scanned", self.lb_scanned_metric_var),
-            ("Best PnL/vol", self.lb_best_roi_metric_var),
+            ("Best PnL USDC", self.lb_best_pnl_metric_var),
             ("MDD runs", self.lb_mdd_metric_var),
         )
         for idx, (label, var) in enumerate(metrics):
@@ -2449,7 +2463,7 @@ class App(tk.Tk):
         for col in range(10):
             controls.columnconfigure(col, weight=1)
 
-        self.lb_sort_var = tk.StringVar(value="PnL/volume %")
+        self.lb_sort_var = tk.StringVar(value="PnL USDC")
         self.lb_direction_var = tk.StringVar(value="High to low")
         self.lb_limit_var = tk.StringVar(value="1000")
         self.lb_scan_limit_var = tk.StringVar(value="1000")
@@ -2459,13 +2473,13 @@ class App(tk.Tk):
         self.lb_fast_scan_var = tk.BooleanVar(value=True)
         self.lb_mdd_mode_var = tk.StringVar(value="Fast public curve")
         self.lb_mdd_scan_limit_var = tk.StringVar(value="100")
-        self.lb_min_roi_var = tk.StringVar(value="")
-        self.lb_max_roi_var = tk.StringVar(value="")
+        self.lb_min_pnl_var = tk.StringVar(value="")
+        self.lb_max_pnl_var = tk.StringVar(value="")
         self.lb_min_mdd_pct_var = tk.StringVar(value="")
         self.lb_max_mdd_pct_var = tk.StringVar(value="")
 
         fields = (
-            ("Sort", self.lb_sort_var, ["PnL/volume %", "PnL USD", "Volume USD", "Obs. MDD %", "Obs. MDD USD"], 0, 0, 14),
+            ("Sort", self.lb_sort_var, ["PnL USDC", "Volume shares", "Obs. MDD %", "Obs. MDD USDC"], 0, 0, 14),
             ("Direction", self.lb_direction_var, ["High to low", "Low to high"], 0, 1, 12),
             ("Period", self.lb_period_var, ["All", "Day", "Week", "Month"], 0, 2, 10),
             ("Category", self.lb_category_var, LEADERBOARD_CATEGORIES, 0, 3, 14),
@@ -2481,8 +2495,8 @@ class App(tk.Tk):
             ("Returned", self.lb_limit_var, "1", "1000000", 0, 4),
             ("Scanned", self.lb_scan_limit_var, "1", "1000000", 0, 5),
             ("MDD scan", self.lb_mdd_scan_limit_var, "1", "1000000", 1, 4),
-            ("Min PnL/volume %", self.lb_min_roi_var, None, None, 1, 0),
-            ("Max PnL/volume %", self.lb_max_roi_var, None, None, 1, 1),
+            ("Min PnL USDC", self.lb_min_pnl_var, None, None, 1, 0),
+            ("Max PnL USDC", self.lb_max_pnl_var, None, None, 1, 1),
             ("Min MDD %", self.lb_min_mdd_pct_var, None, None, 1, 2),
             ("Max MDD %", self.lb_max_mdd_pct_var, None, None, 1, 5),
         )
@@ -2514,16 +2528,16 @@ class App(tk.Tk):
         actions = ttk.Frame(controls, style="PanelBody.TFrame")
         actions.grid(row=0, column=7, columnspan=3, rowspan=2, sticky="nsew", padx=(10, 0), pady=4)
         ttk.Label(actions, text="Search", style="Muted.TLabel").pack(anchor="w")
-        self.lb_fast_roi_btn = ttk.Button(
+        self.lb_fast_pnl_btn = ttk.Button(
             actions,
-            text="Top PnL/volume | Observed MDD <=20%",
+            text="Top PnL | Observed MDD <=20%",
             style="Accent.TButton",
-            command=self.load_fast_polymarket_roi_mdd,
+            command=self.load_fast_polymarket_pnl_mdd,
         )
-        self.lb_fast_roi_btn.pack(fill="x", pady=(3, 6))
+        self.lb_fast_pnl_btn.pack(fill="x", pady=(3, 6))
         self.lb_load_btn = ttk.Button(
             actions,
-            text="Load Top PnL/volume",
+            text="Load leaderboard",
             style="Accent.TButton",
             command=self.load_polymarket_leaderboard,
         )
@@ -2564,11 +2578,11 @@ class App(tk.Tk):
             "rank": "Rank",
             "user": "User",
             "wallet": "Wallet",
-            "pnl": "PnL",
-            "volume": "Volume",
-            "roi": "PnL/vol %",
+            "pnl": "PnL USDC",
+            "volume": "Volume shares",
+            "roi": "PnL/vol unavailable",
             "trades": "Trades",
-            "mdd_usd": "MDD USD",
+            "mdd_usd": "MDD loss",
             "mdd_pct": "Obs. MDD %",
             "source": "MDD source",
         }
@@ -2626,15 +2640,15 @@ class App(tk.Tk):
     def _leaderboard_sort_value(label: str) -> str:
         normalized = str(label or "").strip().lower()
         return {
-            "roi %": "roi_pct",
-            "pnl/volume %": "roi_pct",
             "obs. mdd %": "mdd_pct",
             "obs. mdd usd": "mdd_usd",
+            "obs. mdd usdc": "mdd_usd",
             "pnl usd": "pnl_usd",
-            "volume usd": "volume_usd",
+            "pnl usdc": "pnl_usd",
+            "volume shares": "volume_shares",
             "mdd %": "mdd_pct",
             "mdd usd": "mdd_usd",
-        }.get(normalized, "roi_pct")
+        }.get(normalized, "pnl_usd")
 
     @staticmethod
     def _leaderboard_direction_value(label: str) -> str:
@@ -2650,6 +2664,13 @@ class App(tk.Tk):
         if number is None:
             return "-"
         return f"{number:,.{decimals}f}{suffix}"
+
+    @staticmethod
+    def _format_table_amount(value: Any, currency: Any) -> str:
+        if currency not in {"USD", "USDC"}:
+            return "-"
+        number = App._format_table_number(value)
+        return number + " " + currency if number != "-" else "-"
 
     def _show_leaderboard_context_menu(self, event) -> None:
         row_id = self.leaderboard_tree.identify_row(event.y)
@@ -2674,8 +2695,9 @@ class App(tk.Tk):
             "display_name": values[1] if len(values) > 1 else "",
             "wallet": values[2] if len(values) > 2 else "",
             "pnl_usd": values[3] if len(values) > 3 else "",
-            "volume_usd": values[4] if len(values) > 4 else "",
-            "roi_pct": values[5] if len(values) > 5 else "",
+            "volume_shares": values[4] if len(values) > 4 else "",
+            "source_api_version": 2,
+            "roi_pct": None,
         }
 
     def _selected_leaderboard_wallet(self) -> Optional[str]:
@@ -2827,10 +2849,10 @@ class App(tk.Tk):
         params["fast_scan"] = ["true" if fast_scan else "false"]
         params["scan_concurrency"] = ["6" if fast_scan else "1"]
         params["mdd_concurrency"] = ["3" if fast_scan else "1"]
-        params["mdd_stop_on_limit"] = ["true" if fast_scan and sort_value == "roi_pct" and direction_value == "DESC" else "false"]
+        params["mdd_stop_on_limit"] = ["true" if fast_scan and sort_value == "pnl_usd" and direction_value == "DESC" else "false"]
         optional = {
-            "min_roi_pct": self.lb_min_roi_var.get(),
-            "max_roi_pct": self.lb_max_roi_var.get(),
+            "min_pnl_usd": self.lb_min_pnl_var.get(),
+            "max_pnl_usd": self.lb_max_pnl_var.get(),
             "min_mdd_pct": self.lb_min_mdd_pct_var.get(),
             "max_mdd_pct": self.lb_max_mdd_pct_var.get(),
         }
@@ -2840,10 +2862,10 @@ class App(tk.Tk):
                 params[key] = [text]
         return params
 
-    def load_fast_polymarket_roi_mdd(self):
+    def load_fast_polymarket_pnl_mdd(self):
         if self._leaderboard_loading:
             return
-        self.lb_sort_var.set("PnL/volume %")
+        self.lb_sort_var.set("PnL USDC")
         self.lb_direction_var.set("High to low")
         self.lb_period_var.set("All")
         self.lb_category_var.set("OVERALL")
@@ -2863,8 +2885,8 @@ class App(tk.Tk):
         self._leaderboard_loading = True
         self._leaderboard_cancel_event.clear()
         self.lb_load_btn.configure(state="disabled")
-        if hasattr(self, "lb_fast_roi_btn"):
-            self.lb_fast_roi_btn.configure(state="disabled")
+        if hasattr(self, "lb_fast_pnl_btn"):
+            self.lb_fast_pnl_btn.configure(state="disabled")
         if hasattr(self, "lb_cancel_btn"):
             self.lb_cancel_btn.configure(state="normal")
         params = self._polymarket_leaderboard_params()
@@ -2968,10 +2990,10 @@ class App(tk.Tk):
                     row.get("display_name") or "-",
                     str(row.get("wallet") or "-"),
                     App._format_table_number(row.get("pnl_usd"), decimals=2),
-                    App._format_table_number(row.get("volume_usd"), decimals=2),
-                    App._format_table_number(row.get("roi_pct"), decimals=2, suffix="%"),
+                    App._format_table_number(row.get("volume_shares") if row.get("source_api_version") == 2 else row.get("volume_usd"), decimals=2),
+                    "-" if row.get("source_api_version") == 2 else App._format_table_number(row.get("roi_pct"), decimals=2, suffix="%"),
                     row.get("trade_count") or "-",
-                    App._format_table_number(row.get("mdd_usd"), decimals=2) if row.get("mdd_available") else "-",
+                    App._format_table_amount(row.get("mdd_usd"), row.get("mdd_quote_currency")) if row.get("mdd_available") else "-",
                     App._format_table_number(row.get("mdd_pct"), decimals=2, suffix="%") if row.get("mdd_available") else "-",
                     mdd_source,
                 ),
@@ -2981,9 +3003,9 @@ class App(tk.Tk):
         self.lb_returned_metric_var.set(str(counts.get("returned", len(rows))))
         self.lb_scanned_metric_var.set(str(counts.get("scanned", 0)))
         self.lb_mdd_metric_var.set(str(counts.get("mdd_computed", 0)))
-        roi_values = [safe_float(row.get("roi_pct"), None) for row in rows]
-        roi_values = [value for value in roi_values if value is not None]
-        self.lb_best_roi_metric_var.set(App._format_table_number(max(roi_values), decimals=2, suffix="%") if roi_values else "-")
+        pnl_values = [safe_float(row.get("pnl_usd"), None) for row in rows]
+        pnl_values = [value for value in pnl_values if value is not None]
+        self.lb_best_pnl_metric_var.set(App._format_table_number(max(pnl_values), decimals=2) if pnl_values else "-")
 
         warnings = payload.get("warnings") or []
         cancelled = bool(payload.get("cancelled"))
@@ -3022,7 +3044,7 @@ class App(tk.Tk):
             title="Export Polymarket leaderboard",
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-            initialfile="polymarket-top-roi.csv",
+            initialfile="polymarket-leaderboard.csv",
         )
         if not path:
             return
@@ -3032,9 +3054,16 @@ class App(tk.Tk):
             "wallet",
             "pnl_usd",
             "volume_usd",
+            "volume_shares",
+            "source_api_version",
+            "quote_currency",
+            "volume_unit",
             "roi_pct",
             "trade_count",
             "mdd_usd",
+            "mdd_quote_currency",
+            "mdd_source_economics_currency",
+            "mdd_equity_base_currency",
             "mdd_pct",
             "mdd_method",
             "mdd_pct_basis",
@@ -3656,6 +3685,7 @@ class App(tk.Tk):
             return
         try:
             order = App._paper_order_from_form(self)
+            ensure_paper_history_capacity(self.cfg.paper_trades)
             if not App._require_market_enabled(self, order.market_id, "paper orders"):
                 return
             adapter = App._adapter_for_market(self, order.market_id)
@@ -3895,6 +3925,7 @@ class App(tk.Tk):
         raise ValueError("No quote price is available for the selected side.")
 
     def _record_paper_trade(self, order: PaperOrderRequest, result: PaperOrderResult) -> Optional[PaperTradeRecord]:
+        ensure_paper_history_capacity(self.cfg.paper_trades)
         record = PaperTradeRecord(
             market_id=order.market_id,
             contract_id=order.contract_id,
@@ -3905,9 +3936,10 @@ class App(tk.Tk):
             message=str(result.message),
             filled_size=float(result.filled_size or 0.0),
             average_price=result.average_price,
+            quote_currency=SHARE_QUOTE_CURRENCIES.get(order.market_id),
             raw=dict(result.raw or {}),
         )
-        if not App._persist_config_changes(self, paper_trades=[record, *self.cfg.paper_trades][:200]):
+        if not App._persist_config_changes(self, paper_trades=[record, *self.cfg.paper_trades]):
             return None
         App._refresh_paper_trade_table(self)
         return record
@@ -3998,6 +4030,9 @@ class App(tk.Tk):
         for row in rows:
             market_id = str(row["market_id"] or "").strip().lower()
             contract_id = str(row["contract_id"] or "").strip()
+            if row.get("net_size") is None:
+                problems.append(f"{market_id}:{contract_id}: quantity accounting unavailable")
+                continue
             if not market_config_enabled(self.cfg, market_id):
                 problems.append(f"{market_id}: disabled")
                 continue
@@ -4164,7 +4199,9 @@ class App(tk.Tk):
         marks = App._paper_marks_for_rows(getattr(self, "_paper_position_marks", {}) or {}, rows)
         self._paper_position_marks = marks
         if hasattr(self, "paper_position_summary_var"):
-            self.paper_position_summary_var.set(App._format_paper_position_summary(rows, marks))
+            self.paper_position_summary_var.set(
+                App._format_paper_position_summary(rows, marks, paper_accounting(self.cfg.paper_trades))
+            )
         for row in rows:
             iid = f"{row['market_id']}:{row['contract_id']}"
             mark = marks.get((str(row["market_id"]), str(row["contract_id"])), {})
@@ -4179,7 +4216,7 @@ class App(tk.Tk):
                 values=(
                     row["market_id"],
                     row["contract_id"],
-                    f"{row['net_size']:.4f}",
+                    "unavailable" if row["net_size"] is None else f"{row['net_size']:.4f}",
                     "" if row["average_price"] is None else f"{row['average_price']:.4f}",
                     "" if row["notional"] is None else f"{row['notional']:.4f}",
                     "" if mark_price is None else f"{float(mark_price):.4f}",
@@ -4192,86 +4229,33 @@ class App(tk.Tk):
 
     @staticmethod
     def _paper_position_rows(records: List[PaperTradeRecord]) -> List[Dict[str, Any]]:
-        grouped: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        for record in records:
-            if not record.accepted:
-                continue
-            signed_size = App._paper_record_signed_size(record)
-            if signed_size == 0:
-                continue
-            price = record.average_price if record.average_price is not None else record.limit_price
-            key = (record.market_id, record.contract_id)
-            row = grouped.setdefault(
-                key,
-                {
-                    "market_id": record.market_id,
-                    "contract_id": record.contract_id,
-                    "net_size": 0.0,
-                    "notional": 0.0,
-                    "priced_size": 0.0,
-                    "trades": 0,
-                },
-            )
-            row["net_size"] += signed_size
-            row["trades"] += 1
-            if price is not None:
-                row["notional"] += signed_size * float(price)
-                row["priced_size"] += abs(signed_size)
-
-        rows: List[Dict[str, Any]] = []
-        for row in grouped.values():
-            priced_size = float(row.pop("priced_size"))
-            notional = float(row["notional"])
-            net_size = float(row["net_size"])
-            row["average_price"] = abs(notional) / abs(net_size) if priced_size > 0 and net_size != 0 else None
-            row["notional"] = notional if priced_size > 0 else None
-            rows.append(row)
-        return sorted(rows, key=lambda item: (str(item["market_id"]), str(item["contract_id"])))
+        return account_paper_position_rows(records)
 
     @staticmethod
-    def _format_paper_position_summary(rows: List[Dict[str, Any]], marks: Dict[Tuple[str, str], Dict[str, Any]]) -> str:
-        if not rows:
+    def _format_paper_position_summary(
+        rows: List[Dict[str, Any]], marks: Dict[Tuple[str, str], Dict[str, Any]],
+        accounting: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        summary = paper_summary(rows, marks, accounting)
+        if not rows and not accounting:
             return "No paper exposure."
-
-        gross_size = sum(abs(float(row["net_size"])) for row in rows)
-        priced_rows = [row for row in rows if row.get("notional") is not None]
-        gross_entry = sum(abs(float(row["notional"])) for row in priced_rows)
-        net_entry = sum(float(row["notional"]) for row in priced_rows)
-
-        marked_count = 0
-        last_marked_at: Optional[float] = None
-        unrealized_values: List[float] = []
-        mark_sources: Dict[str, int] = {}
-        for row in rows:
-            mark = marks.get((str(row["market_id"]), str(row["contract_id"])), {})
-            mark_price = safe_float(mark.get("mark_price"), None)
-            if mark_price is not None:
-                marked_count += 1
-            marked_at = safe_float(mark.get("marked_at"), None)
-            if marked_at is not None:
-                last_marked_at = marked_at if last_marked_at is None else max(last_marked_at, marked_at)
-            unrealized = App._paper_position_mark_unrealized(row, mark)
-            if unrealized is not None:
-                unrealized_values.append(float(unrealized))
-            source = str(mark.get("source") or "")
-            if source:
-                mark_sources[source] = mark_sources.get(source, 0) + 1
-
-        parts = [
-            f"Positions: {len(rows)}",
-            f"gross_size={gross_size:.4f}",
-            f"entry_notional={gross_entry:.4f}",
-            f"net_notional={net_entry:.4f}",
-            f"marked={marked_count}/{len(rows)}",
-        ]
-        if unrealized_values:
-            parts.append(f"unrealized={sum(unrealized_values):.4f}")
-        if last_marked_at is not None:
-            parts.append(f"last_mark={time.strftime('%H:%M:%S', time.localtime(last_marked_at))}")
-        if mark_sources:
-            parts.append(
-                "mark_sources=" + ",".join(f"{source}:{mark_sources[source]}" for source in sorted(mark_sources))
-            )
+        parts = [f"Positions: {len(rows)}"]
+        for key in ("gross_size", "entry_notional", "net_notional"):
+            value = summary[key]
+            parts.append(f"{key}=" + ("unavailable" if value is None else f"{value:.4f}"))
+        parts.append(f"marked={summary['marked']}/{len(rows)}")
+        for key in ("unrealized", "realized"):
+            value = summary.get(key)
+            if value is not None:
+                parts.append(f"{key}={value:.4f}")
+        if summary["accounting_status"] != "complete":
+            parts.append("accounting incomplete: " + ", ".join(summary["incomplete_reasons"]))
+        if accounting and accounting.get("execution_assumptions"):
+            parts.append("hypothetical full fills at limits; fees and settlement excluded")
+        if summary["last_marked_at"] is not None:
+            parts.append(f"last_mark={time.strftime('%H:%M:%S', time.localtime(summary['last_marked_at']))}")
+        if summary["mark_sources"]:
+            parts.append("mark_sources=" + ",".join(f"{key}:{value}" for key,value in sorted(summary["mark_sources"].items())))
         return "; ".join(parts)
 
     @staticmethod
@@ -4291,52 +4275,20 @@ class App(tk.Tk):
 
     @staticmethod
     def _paper_order_impact(records: List[PaperTradeRecord], order: PaperOrderRequest) -> Dict[str, Any]:
-        current_row = next(
-            (
-                row
-                for row in App._paper_position_rows(records)
-                if row["market_id"] == order.market_id and row["contract_id"] == order.contract_id
-            ),
-            None,
-        )
-        current_net = float(current_row["net_size"]) if current_row else 0.0
-        current_notional = current_row.get("notional") if current_row else None
-        signed_size = App._paper_order_signed_size(order)
-        projected_net = current_net + signed_size
-        order_notional = signed_size * float(order.limit_price) if order.limit_price is not None else None
-        projected_notional = (
-            float(current_notional) + float(order_notional)
-            if current_notional is not None and order_notional is not None
-            else None
-        )
-        projected_average = (
-            abs(projected_notional) / abs(projected_net)
-            if projected_notional is not None and projected_net != 0
-            else None
-        )
-        return {
-            "market_id": order.market_id,
-            "contract_id": order.contract_id,
-            "side": order.side,
-            "size": order.size,
-            "limit_price": order.limit_price,
-            "current_net": current_net,
-            "signed_size": signed_size,
-            "projected_net": projected_net,
-            "effect": App._paper_order_impact_effect(current_net, signed_size, projected_net),
-            "order_notional": order_notional,
-            "projected_notional": projected_notional,
-            "projected_average": projected_average,
-        }
+        return account_paper_order_impact(records, order)
 
     @staticmethod
     def _format_paper_order_impact(impact: Dict[str, Any]) -> str:
+        def quantity(key: str) -> str:
+            value = impact.get(key)
+            return "unavailable" if value is None else f"{float(value):.4f}"
+
         parts = [
             f"Impact: {impact['market_id']}:{impact['contract_id']}",
             f"{impact['side']} size={float(impact['size']):g}",
-            f"current_net={float(impact['current_net']):.4f}",
-            f"order_net={float(impact['signed_size']):.4f}",
-            f"projected_net={float(impact['projected_net']):.4f}",
+            f"current_net={quantity('current_net')}",
+            f"order_net={quantity('signed_size')}",
+            f"projected_net={quantity('projected_net')}",
             f"effect={impact['effect']}",
         ]
         if impact.get("order_notional") is None:
@@ -4347,6 +4299,8 @@ class App(tk.Tk):
             parts.append(f"projected_notional={float(impact['projected_notional']):.4f}")
         if impact.get("projected_average") is not None:
             parts.append(f"projected_avg={float(impact['projected_average']):.4f}")
+        if impact.get("incomplete_reasons"):
+            parts.append("accounting incomplete: " + ", ".join(impact["incomplete_reasons"]))
         return "; ".join(parts)
 
     @staticmethod
@@ -4412,10 +4366,7 @@ class App(tk.Tk):
 
     @staticmethod
     def _paper_position_unrealized_pnl(row: Dict[str, Any], mark_price: float) -> Optional[float]:
-        notional = row.get("notional")
-        if notional is None:
-            return None
-        return float(row["net_size"]) * float(mark_price) - float(notional)
+        return paper_unrealized(row, mark_price)
 
     @staticmethod
     def _paper_position_mark_unrealized(row: Dict[str, Any], mark: Dict[str, Any]) -> Optional[float]:
@@ -4570,7 +4521,8 @@ class App(tk.Tk):
         for iid in self.wallet_tree.get_children():
             self.wallet_tree.delete(iid)
         for w in self.cfg.wallets:
-            last_seen = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(w.last_seen_ts)) if w.last_seen_ts else ""
+            cursor_timestamp = cursor_for_market(w, self.cfg.selected_market_id)["last_seen_ts"]
+            last_seen = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(cursor_timestamp)) if cursor_timestamp else ""
             name = w.display_name or w.wallet[:10] + "..."
             self.wallet_tree.insert(
                 "",
@@ -5434,8 +5386,8 @@ class App(tk.Tk):
                     self._leaderboard_loading = False
                     if hasattr(self, "lb_load_btn"):
                         self.lb_load_btn.configure(state="normal")
-                    if hasattr(self, "lb_fast_roi_btn"):
-                        self.lb_fast_roi_btn.configure(state="normal")
+                    if hasattr(self, "lb_fast_pnl_btn"):
+                        self.lb_fast_pnl_btn.configure(state="normal")
                     if hasattr(self, "lb_cancel_btn"):
                         self.lb_cancel_btn.configure(state="disabled")
                     self._refresh_polymarket_leaderboard_table(a or {})
@@ -5445,8 +5397,8 @@ class App(tk.Tk):
                     self._leaderboard_loading = False
                     if hasattr(self, "lb_load_btn"):
                         self.lb_load_btn.configure(state="normal")
-                    if hasattr(self, "lb_fast_roi_btn"):
-                        self.lb_fast_roi_btn.configure(state="normal")
+                    if hasattr(self, "lb_fast_pnl_btn"):
+                        self.lb_fast_pnl_btn.configure(state="normal")
                     if hasattr(self, "lb_cancel_btn"):
                         self.lb_cancel_btn.configure(state="disabled")
                     self._handle_polymarket_leaderboard_error(str(a))
@@ -5469,6 +5421,9 @@ class App(tk.Tk):
         replay_authorized_at: int = 0,
         before_live_dispatch: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> CopyActivityOutcome:
+        watch = next((wallet for wallet in self.cfg.wallets if wallet.id == watch_id), None)
+        if watch and watch.only_market_slug and str(item.get("slug") or "") != watch.only_market_slug:
+            return CopyActivityOutcome("completed", "market_filter_skipped", "Activity durably consumed outside the configured market filter.")
         # Add to activity UI
         ts = int(item.get("timestamp") or 0)
         tss = time.strftime("%H:%M:%S", time.localtime(ts)) if ts else "?"
