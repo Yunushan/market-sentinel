@@ -144,6 +144,21 @@ jobs:
             with self.subTest(path=relative_path):
                 self.assertLess(verified, installed)
 
+    def test_release_rechecks_downloaded_python_contents_before_publication(self) -> None:
+        text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        publish = text.split("  publish:\n", 1)[1]
+        downloaded = publish.index("      - name: Download Python distributions\n")
+        checked = publish.index("      - name: Reverify downloaded Python distribution contents\n")
+        attested = publish.index("      - name: Attest release assets\n")
+        published = publish.index("      - name: Reconcile and publish GitHub release\n")
+        self.assertLess(downloaded, checked)
+        self.assertLess(checked, attested)
+        self.assertLess(attested, published)
+        verifier = publish[checked:publish.index("      - name: Download frontend bundle\n", checked)]
+        self.assertIn("scripts/verify_python_dist_artifacts.py", verifier)
+        self.assertIn("--dist-dir release-assets", verifier)
+        self.assertIn('--expected-version "${RELEASE_VERSION}"', verifier)
+
     def test_browser_workflows_gate_frontend_artifact_publication(self) -> None:
         text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         frontend = text.split("  frontend:\n", 1)[1].split("  mobile-web:\n", 1)[0]

@@ -23,6 +23,12 @@ V2_ROW = {"rank": 1, "user_id": WALLET, "pnl": -5, "volume": 200}
 STORED_ROW = {"rank": 1, "wallet": WALLET, "pnl_usd": -5, "volume_usd": 100, "roi_pct": -5}
 
 
+def v2_page(rows, *, cursor=None, limit=1000):
+    return {"data": rows, "pagination": {
+        "has_more": cursor is not None, "next_cursor": cursor, "limit": limit, "offset": 0,
+    }}
+
+
 def invalid_rows(version=1):
     valid = V2_ROW if version == 2 else ROW
     wallet_key, volume_key = ("user_id", "volume") if version == 2 else ("proxyWallet", "vol")
@@ -49,7 +55,7 @@ class LeaderboardSourceIntegrityTests(unittest.TestCase):
     def test_both_data_api_versions_reject_untrustworthy_dictionary_rows(self):
         for version in (1, 2):
             for row in invalid_rows(version):
-                raw = [row] if version == 1 else {"data": [row], "pagination": {"has_more": False, "next_cursor": None}}
+                raw = [row] if version == 1 else v2_page([row])
                 with self.subTest(version=version, row=row), patch.object(data_api, "_get_json", return_value=raw):
                     with self.assertRaisesRegex(PolymarketResponseError, "coverage is unknown"):
                         (data_api.get_leaderboard if version == 1 else data_api.get_leaderboard_v2_page)()
@@ -59,7 +65,7 @@ class LeaderboardSourceIntegrityTests(unittest.TestCase):
             for error in ({"error": "upstream failure"}, {"errors": ["failure"]}, {"status": "failed"},
                           {"status": "ERROR"}, {"status_code": 503}, {"code": "invalid_request"},
                           {"success": False}, {"success": 0}, {"status": False}, {"ok": "false"}):
-                raw = {"data": [], "pagination": {"has_more": False, "next_cursor": None}, **error}
+                raw = {**v2_page([]), **error}
                 with self.subTest(version=version, error=error), patch.object(data_api, "_get_json", return_value=raw):
                     with self.assertRaisesRegex(PolymarketResponseError, "coverage is unknown"):
                         (data_api.get_leaderboard if version == 1 else data_api.get_leaderboard_v2_page)()
@@ -68,7 +74,7 @@ class LeaderboardSourceIntegrityTests(unittest.TestCase):
         for version in (1, 2):
             for metadata in ({"error": None}, {"error": "", "errors": []}, {"status": "success", "success": True},
                              {"status_code": 200, "ok": True}):
-                raw = {"data": [], "pagination": {"has_more": False, "next_cursor": None}, **metadata}
+                raw = {"data": [], "pagination": {"has_more": False, "next_cursor": None, "limit": 1000, "offset": 0}, **metadata}
                 with self.subTest(version=version, metadata=metadata), patch.object(data_api, "_get_json", return_value=raw):
                     result = (data_api.get_leaderboard if version == 1 else data_api.get_leaderboard_v2_page)()
                 self.assertEqual(result if version == 1 else result["data"], [])
@@ -92,7 +98,11 @@ class LeaderboardSourceIntegrityTests(unittest.TestCase):
             with self.subTest(row=row):
                 with self.assertRaises(PolymarketResponseError):
                     web_api.normalize_polymarket_leaderboard_row(row, 1)
-                with patch.object(data_api, "get_leaderboard", return_value=[row]), patch.object(
+        for row in invalid_rows(version=2):
+            with self.subTest(v2_row=row):
+                with self.assertRaises(PolymarketResponseError):
+                    web_api.normalize_polymarket_leaderboard_row(row, 1)
+                with patch.object(data_api, "get_leaderboard_v2_page", return_value=v2_page([row])), patch.object(
                     web_api, "polymarket_user_mdd_payload"
                 ) as mdd:
                     with self.assertRaises(PolymarketResponseError):
@@ -100,11 +110,12 @@ class LeaderboardSourceIntegrityTests(unittest.TestCase):
                     mdd.assert_not_called()
 
     def test_invalid_later_page_preserves_committed_progress_and_previous_export(self):
-        first = [{**ROW, "rank": index + 1, "proxyWallet": f"0x{index + 1:040x}"} for index in range(50)]
+        first = [{**V2_ROW, "rank": index + 1, "user_id": f"0x{index + 1:040x}"} for index in range(50)]
         with tempfile.TemporaryDirectory() as temporary:
             state, output = Path(temporary) / "scan.db", Path(temporary) / "result.json"
             output.write_text("previous completed export", encoding="utf-8")
-            with patch.object(data_api, "_get_json", side_effect=[first, [{}]]), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            pages = [v2_page(first, cursor="fixture-next-page"), v2_page([{}])]
+            with patch.object(data_api, "_get_json", side_effect=pages), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 code = cli.main(["polymarket-leaderboard", "--state-db", str(state), "--scanned", "unlimited",
                                  "--returned", "unlimited", "--output", str(output), "--format", "json", "--quiet",
                                  "--scan-retry-attempts", "1"])
@@ -112,34 +123,48 @@ class LeaderboardSourceIntegrityTests(unittest.TestCase):
             self.assertEqual(output.read_text(encoding="utf-8"), "previous completed export")
             with closing(LeaderboardStateStore(state, read_only=True)) as store:
                 progress = store.progress()
-                self.assertEqual((progress["rows"], progress["pages"], progress["next_offset"]), (50, 1, 50))
+                self.assertEqual((progress["rows"], progress["pages"], progress["next_offset"]), (50, 1, 1))
+                self.assertEqual(progress["source_api_version"], 2)
+                self.assertEqual(progress["next_cursor"], "fixture-next-page")
                 self.assertFalse(progress["scan_complete"])
 
     def test_v2_invalid_export_preserves_previous_file_without_claiming_cursor_exhaustion(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "result.json"
             output.write_text("previous completed export", encoding="utf-8")
-            with patch.object(data_api, "_get_json", return_value={"data": [{}], "pagination": {"has_more": False, "next_cursor": None}}), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            with patch.object(data_api, "_get_json", return_value=v2_page([{}])), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 code = cli.main(["polymarket-leaderboard-v2", "--output", str(output)])
             self.assertEqual(code, 1)
             self.assertEqual(output.read_text(encoding="utf-8"), "previous completed export")
 
+    def test_active_native_v2_normalization_keeps_share_volume_and_unknown_turnover(self):
+        result = web_api.normalize_polymarket_leaderboard_row(V2_ROW, 1)
+        self.assertEqual((result["wallet"], result["pnl_usd"], result["volume_shares"]), (WALLET, -5, 200))
+        self.assertEqual(result["source_api_version"], 2)
+        self.assertEqual(result["quote_currency"], "USDC")
+        self.assertIsNone(result["volume_usd"])
+        self.assertIsNone(result["roi_pct"])
+        self.assertIsNone(result["pnl_volume_pct"])
+
     def test_checkpoint_dictionary_integrity_is_required_before_resuming(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "checkpoint.jsonl"
-            for rows in ([{}], [ROW, None], [{**ROW, "pnl": True}], [{**ROW, "proxyWallet": "bad"}]):
-                content = json.dumps({"type": "leaderboard_scan", "version": 1, "signature": {}}) + "\n"
-                content += json.dumps({"type": "leaderboard_page", "offset": 0, "limit": 50, "rows": rows}) + "\n"
+            signature = {"source_api_version": 2}
+            for rows in ([{}], [V2_ROW, None], [{**V2_ROW, "pnl": True}], [{**V2_ROW, "user_id": "bad"}]):
+                content = json.dumps({"type": "leaderboard_scan", "version": 2, "signature": signature}) + "\n"
+                content += json.dumps({"type": "leaderboard_page", "page_index": 0, "limit": 50,
+                                       "source_api_version": 2,
+                                       "source_cursor": None, "next_cursor": None, "row_count": len(rows), "rows": rows}) + "\n"
                 path.write_text(content, encoding="utf-8")
                 with self.subTest(rows=rows), self.assertRaises(PolymarketResponseError):
-                    cli._load_leaderboard_checkpoint(path, signature={})
+                    cli._load_leaderboard_checkpoint(path, signature=signature)
                 self.assertEqual(path.read_text(encoding="utf-8"), content)
-            content = json.dumps({"type": "leaderboard_scan", "version": 1, "signature": {}}) + "\n"
-            content += '{"type":"leaderboard_page","offset":0,"limit":50,"rows":['
-            content += '{"proxyWallet":"' + WALLET + '","pnl":-5,"pnl":100,"vol":100}]}\n'
+            content = json.dumps({"type": "leaderboard_scan", "version": 2, "signature": signature}) + "\n"
+            content += '{"type":"leaderboard_page","source_api_version":2,"page_index":0,"limit":50,"source_cursor":null,"next_cursor":null,"row_count":1,"rows":['
+            content += '{"user_id":"' + WALLET + '","pnl":-5,"pnl":100,"volume":100}]}\n'
             path.write_text(content, encoding="utf-8")
             with self.assertRaises(ValueError):
-                cli._load_leaderboard_checkpoint(path, signature={})
+                cli._load_leaderboard_checkpoint(path, signature=signature)
 
     def test_state_writer_rejects_invalid_rows_before_storing_page_or_risk(self):
         bad = [{}, {**STORED_ROW, "wallet": "bad"}, {**STORED_ROW, "pnl_usd": True},

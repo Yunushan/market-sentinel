@@ -12,7 +12,7 @@ from core.models import AppConfig, MarketConfig
 from core.storage import ConfigLoadError, load_config, save_config
 import market_sentinel_cli
 import test_web_api
-from web_api import apply_copy_settings_patch, apply_market_patch, optional_positive_float
+from web_api import apply_copy_settings_patch, apply_market_patch, market_configuration_revision, optional_positive_float
 
 
 WALLET = "0x" + "1" * 40
@@ -190,6 +190,11 @@ class MutationInputValidationTests(unittest.TestCase):
                 for route, raw in cases:
                     with self.subTest(route=route, raw=raw):
                         before = path.read_bytes()
+                        if route.startswith("/api/markets/"):
+                            # Supply the valid concurrency precondition so this
+                            # still exercises malformed flag rejection.
+                            raw = json.dumps({**json.loads(raw), "expected_revision":
+                                              market_configuration_revision(load_config(path), "kalshi")})
                         status, _ = helper._request_json(origin, route, method="PATCH", raw=raw.encode(), headers={"Authorization": "Bearer test-only"})
                         self.assertEqual(status, 400)
                         self.assertEqual(path.read_bytes(), before)

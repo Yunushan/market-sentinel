@@ -57,6 +57,7 @@ export interface MarketSupportEntry {
 
 export interface Market {
   market_id: string;
+  configuration_revision: string;
   display_name: string;
   enabled: boolean;
   default_enabled: boolean;
@@ -495,6 +496,16 @@ export interface WalletPollResponse {
   activity: WalletActivity[];
   problems: string[];
   polled_wallets: number;
+  has_more: boolean;
+  remaining_activity: number | null;
+  consumed_filtered: number;
+  delivered_activity: number;
+  batch_limit: number;
+  delivery: {
+    mode: "durable_replayable_batch";
+    receipt_id: string;
+    acknowledge_with_next_poll: true;
+  };
 }
 
 export interface PolymarketUserProfile {
@@ -513,7 +524,7 @@ export interface PolymarketUserSearchPayload {
   source: string;
 }
 
-export type PolymarketLeaderboardSort = "roi_pct" | "pnl_usd" | "volume_usd" | "mdd_usd" | "mdd_pct";
+export type PolymarketLeaderboardSort = "roi_pct" | "pnl_usd" | "volume_usd" | "volume_shares" | "mdd_usd" | "mdd_pct";
 export type PolymarketMddMode = "fast" | "mark_replay";
 
 export const POLYMARKET_LEADERBOARD_CATEGORIES = [
@@ -543,6 +554,7 @@ export interface PolymarketLeaderboardFilters {
   mdd_persist_cache: boolean;
   mdd_cache_ttl_seconds: string;
   equity_base_usd: string;
+  equity_base_currency: "USD" | "USDC";
   min_pnl_usd: string;
   max_pnl_usd: string;
   min_volume_usd: string;
@@ -556,6 +568,11 @@ export interface PolymarketLeaderboardFilters {
 }
 
 export interface PolymarketLeaderboardRow {
+  source_api_version?: number;
+  quote_currency?: string | null;
+  mdd_quote_currency?: string | null;
+  mdd_equity_base_currency?: string | null;
+  volume_shares?: number | null;
   rank: number;
   wallet: string;
   display_name: string;
@@ -638,6 +655,9 @@ export interface PolymarketMddPoint {
 }
 
 export interface PolymarketMddPayload {
+  source_economics_currency?: string | null;
+  quote_currency?: string | null;
+  equity_base_currency?: string | null;
   mdd_source_quality?: {
     status: string;
     sources: Record<string, { status: string; rows: number; invalid_rows: number; reasons: Record<string, number> }>;
@@ -691,6 +711,7 @@ export interface PolymarketMddForm {
   open_limit: string;
   max_points: string;
   equity_base_usd: string;
+  equity_base_currency: "USD" | "USDC";
   mark_replay_token_limit: string;
   mark_replay_interval: string;
   mark_replay_fidelity: string;
@@ -708,6 +729,8 @@ export interface PolymarketMddAuditExport {
 }
 
 export interface PolymarketMddCacheEntry extends PolymarketMddCacheMetadata {
+  quote_currency?: string | null;
+  equity_base_currency?: string | null;
   params?: Record<string, unknown>;
   wallet?: string | null;
   mdd_method?: string | null;
@@ -759,6 +782,8 @@ export interface PolymarketMddCachePurgeRequest {
 }
 
 export interface PolymarketLeaderboardPayload {
+  source_api_version?: number;
+  financial_basis?: Record<string, unknown>;
   rows: PolymarketLeaderboardRow[];
   counts: {
     returned: number;
@@ -1366,7 +1391,7 @@ export interface HealthPayload {
 export interface PaperPosition {
   market_id: string;
   contract_id: string;
-  net_size: number;
+  net_size: number | null;
   average_price: number | null;
   notional: number | null;
   trades: number;
@@ -1374,6 +1399,11 @@ export interface PaperPosition {
   mark_source: string;
   marked_at: number | null;
   unrealized: number | null;
+  realized?: number | null;
+  accounting_status?: "complete" | "incomplete";
+  incomplete_reasons?: string[];
+  currency?: string | null;
+  quantity_unit?: "shares" | "unavailable";
 }
 
 export interface PaperTrade {
@@ -1388,19 +1418,34 @@ export interface PaperTrade {
   message: string;
   filled_size: number;
   average_price: number | null;
+  quote_currency?: string | null;
   raw: Record<string, unknown>;
 }
 
 export interface PaperPayload {
   summary: {
     positions: number;
-    gross_size: number;
-    entry_notional: number;
-    net_notional: number;
+    gross_size: number | null;
+    entry_notional: number | null;
+    net_notional: number | null;
     marked: number;
     unrealized: number | null;
     mark_sources: Record<string, number>;
     last_marked_at: number | null;
+    realized?: number | null;
+    unavailable_positions?: number;
+    incomplete_reasons?: string[];
+    quote_currency?: string | null;
+  };
+  accounting?: {
+    method: string;
+    status: "complete" | "incomplete";
+    scope?: string;
+    opening_inventory_assumption?: string;
+    incomplete_reasons: string[];
+    execution_assumptions: string[];
+    quote_currency: string | null;
+    closed_positions: number;
   };
   positions: PaperPosition[];
   history: PaperTrade[];

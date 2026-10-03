@@ -80,9 +80,15 @@ def validate_stored_leaderboard_row(row: Mapping[str, Any]) -> None:
     if not isinstance(row, Mapping) or not isinstance(row.get("wallet"), str) or not normalize_wallet(row["wallet"].strip().lower()):
         raise _invalid("stored wallet identity")
     pnl = _number(row.get("pnl_usd"), "stored PnL")
-    volume = _number(row.get("volume_usd"), "stored volume", nonnegative=True)
+    raw = row.get("raw")
+    version = 2 if isinstance(raw, Mapping) and "user_id" in raw else 1
+    if "source_api_version" in row and (type(row["source_api_version"]) is not int or row["source_api_version"] != version):
+        raise _invalid("stored source version")
+    volume = None if version == 2 else _number(row.get("volume_usd"), "stored volume", nonnegative=True)
+    if version == 2 and (row.get("volume_usd") is not None or row.get("roi_pct") is not None):
+        raise _invalid("v2 share volume represented as monetary turnover")
     ratio = row.get("roi_pct")
-    expected = pnl / volume * 100 if volume > 0 else None
+    expected = pnl / volume * 100 if volume is not None and volume > 0 else None
     if expected is not None and not math.isfinite(expected):
         raise _invalid("derived PnL/volume ratio")
     if ratio is not None:
@@ -92,10 +98,11 @@ def validate_stored_leaderboard_row(row: Mapping[str, Any]) -> None:
     for key in ("mdd_usd", "mdd_pct"):
         if row.get(key) is not None:
             _number(row[key], "stored drawdown", nonnegative=True)
-    raw = row.get("raw")
     if "raw" in row and not isinstance(raw, Mapping):
         raise _invalid("stored source object")
-    if isinstance(raw, Mapping) and _alias_values(raw, (*WALLET_ALIASES, *PNL_ALIASES, *VOLUME_ALIASES)):
-        fields = source_leaderboard_fields(raw)
-        if fields["wallet"] != normalize_wallet(row["wallet"].strip().lower()) or fields["pnl"] != pnl or fields["volume"] != volume:
+    if isinstance(raw, Mapping) and (version == 2 or _alias_values(raw, (*WALLET_ALIASES, *PNL_ALIASES, *VOLUME_ALIASES))):
+        fields = source_leaderboard_fields(raw, version=version)
+        if fields["wallet"] != normalize_wallet(row["wallet"].strip().lower()) or fields["pnl"] != pnl or (version == 1 and fields["volume"] != volume):
             raise _invalid("stored source binding")
+        if version == 2 and _number(row.get("volume_shares"), "stored share volume", nonnegative=True) != fields["volume"]:
+            raise _invalid("stored share volume binding")

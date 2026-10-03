@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from core.wallet_activity import ActivitySnapshot
+from .activity_history import raw_activity_rows
+
 import math
 import re
 from typing import Any, Dict, List, Mapping, Optional, Tuple
@@ -272,7 +275,20 @@ class AzuroAdapter(MarketAdapter):
         wallet = require_activity_identity(self.market_id, wallet_address)
         desired = self._bounded_bet_history_int(limit, "limit", default=25)
         payload = self.account_recovery("bet_history", wallet=wallet, limit=desired, offset=0)
-        return self._normalize_activity_payload(wallet, payload, desired)
+        activities = self._normalize_activity_payload(wallet, payload, desired)
+        source = payload.get("data")
+        v3 = raw_activity_rows(source, "v3Bets") if isinstance(source, Mapping) else raw_activity_rows(payload, "v3_bets")
+        live = raw_activity_rows(source, "liveBets") if isinstance(source, Mapping) else raw_activity_rows(payload, "live_bets")
+        # Both independent feeds must be exhausted, with no combined output
+        # clipped by the normalization limit.
+        complete = (
+            v3 is not None and live is not None and len(v3) < desired and len(live) < desired
+            and (
+                len(self._normalize_activity_payload(wallet, {"v3_bets": v3, "live_bets": []}, desired))
+                + len(self._normalize_activity_payload(wallet, {"v3_bets": [], "live_bets": live}, desired))
+            ) <= desired
+        )
+        return ActivitySnapshot(activities, history_complete=complete)
 
     def list_trades(
         self,

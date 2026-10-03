@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .activity_history import activity_snapshot
+
 import json
 import math
 import re
@@ -925,7 +927,10 @@ class OmenAdapter(_GraphQLAdapter):
         )
         rows = data.get("fpmmTrades")
         if not isinstance(rows, list):
-            return []
+            return activity_snapshot(
+                [], data, effective_limit=desired, row_keys=("fpmmTrades",),
+                complete_window=False, history_contiguous=True,
+            )
 
         activities: List[Dict[str, Any]] = []
         token_scales: Dict[str, int] = {}
@@ -996,7 +1001,10 @@ class OmenAdapter(_GraphQLAdapter):
             key=lambda row: (int(row.get("timestamp") or 0), str(row.get("activityId") or "")),
             reverse=True,
         )
-        return activities[:desired]
+        return activity_snapshot(
+            activities[:desired], data, effective_limit=desired, row_keys=("fpmmTrades",),
+            complete_window=False, history_contiguous=True,
+        )
 
     def account_recovery(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
         """Read the bounded public FPMM creator-activity feed.

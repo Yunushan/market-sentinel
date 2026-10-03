@@ -5,7 +5,51 @@ readiness score. It reports a score out of 100 and separates repeatable local
 proof from evidence that can only be collected on a real host, account, or
 GitHub repository.
 
-## Current Readiness Campaign: 2026-09-30
+## Current Readiness Campaign: 2026-10-03
+
+The independent initial review of clean `2a729c7` scored **67/100**; the
+repository's full local checklist reported **81/100**, with 19 external points
+unearned. These assessments use different criteria. Neither is a claim that
+the current modified candidate has passed its final checks or achieved 100.
+
+The candidate fixes reproduced stale market-gate updates, incomplete wallet
+backlog delivery, transaction-only deduplication, cross-venue wallet cursors,
+paper cost/PnL accounting, silently truncated paper holdings, reversed candle
+ordering, per-instance rate limiting, slow HTTP headers, untrusted Host headers,
+stale browser preflight/analytics results, and private files entering Python
+source distributions. Revision-checked updates, complete-history collection,
+durable per-fill checkpoints, currency-aware paper accounting, bounded ingress,
+and final archive reverification now have focused regressions.
+
+Production financial reads also migrate to the native Data API v2 contract
+before the provider's October 24 retirement. Cursor pages preserve their exact
+provenance; share volume remains distinct from cash turnover. MDD version 9
+retains incomplete or ambiguous history as unavailable. See the
+[migration contract](POLYMARKET_DATA_V2.md),
+[financial consumer notes](DATA_API_V2_FINANCIAL_CONSUMERS.md),
+[paper accounting](PAPER_ACCOUNTING.md), and
+[adapter wallet history](ADAPTER_WALLET_HISTORY.md).
+
+The final frontend build passed **180/180** browser acceptance cases across
+Chromium, Firefox, and WebKit, desktop/mobile layouts, and both themes, with
+zero skips or flaky cases. It includes currency labels, bounded poll delivery,
+and receipt recovery/acknowledgement across reloads. The matching backend
+restart-replay display correction has separate HTTP regressions. The full
+combined backend, coverage, packaging and
+exact-revision hosted checks are still required before assigning an updated
+score. Local tests do not supply actual-host recovery, installed signed-release,
+credentialed or explicitly approved funded-lifecycle evidence.
+
+Wallet polling now commits bounded batches and exact replay receipts with the
+consumed cursor, pins unacknowledged receipts against unrelated journal eviction,
+and acknowledges a received batch only with the next successful explicit poll.
+The finite capacity fails closed before more upstream work. See the
+[delivery contract](WALLET_ACTIVITY_DELIVERY.md). Native CLOSED-token duplicates
+invalidate MDD before replay rather than double-counting lifetime PnL. Local
+diagnostic checks passed the four v2 financial clients and 300 public activity
+rows; these uncredentialed samples do not earn attested acceptance points.
+
+## Historical Readiness Campaign: 2026-09-30
 
 The full local scorer passed on the initial clean `4e4e122` checkout at
 **81/100**. Its source tree matches protected-main `efda651`; the local merge

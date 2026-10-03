@@ -73,6 +73,10 @@ class LeaderboardV2Tests(unittest.TestCase):
             {"data": [None], "pagination": {"has_more": False, "next_cursor": None}},
             {"data": [ROW]},
             {"data": [ROW], "pagination": {"has_more": 0, "next_cursor": None}},
+            {"data": [], "pagination": {"has_more": False, "limit": 1, "offset": 0}},
+            {"data": [], "pagination": {"has_more": False, "next_cursor": None, "limit": 1, "offset": True}},
+            {"data": [], "pagination": {"has_more": True, "next_cursor": " padded ", "limit": 1, "offset": 0}},
+            {"data": [ROW, ROW], "pagination": {"has_more": False, "next_cursor": None, "limit": 1, "offset": 0}},
             page(has_more=True, cursor=None),
             page(has_more=False, cursor="unexpected"),
         )

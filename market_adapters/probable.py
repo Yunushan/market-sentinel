@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .activity_history import activity_snapshot
+
 import base64
 import hashlib
 import hmac
@@ -399,7 +401,9 @@ class ProbableAdapter(MarketAdapter):
             )
             if len(activities) >= desired:
                 break
-        return activities
+        return activity_snapshot(
+            activities, payload, effective_limit=desired, row_keys=("activity", "transactions", "data"),
+        )
 
     def list_candles(
         self,

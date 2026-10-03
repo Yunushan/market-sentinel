@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .activity_history import activity_snapshot
+
 import base64
 import binascii
 import math
@@ -286,7 +288,9 @@ class MetaDAOAdapter(MarketAdapter):
                 )
 
         activities.sort(key=lambda row: (int(row.get("timestamp") or 0), str(row.get("activityId") or "")), reverse=True)
-        return activities[:desired]
+        return activity_snapshot(
+            activities[:desired], rows, effective_limit=desired, row_keys=(), complete_window=False,
+        )
 
     def account_recovery(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
         """Read MetaDAO's bounded public maker-activity feed.

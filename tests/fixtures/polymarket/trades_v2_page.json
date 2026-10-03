@@ -1,0 +1,20 @@
+{
+  "data": [
+    {
+      "condition_id": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event_slug": "fixture-event",
+      "outcome": "Yes",
+      "outcome_index": 0,
+      "price": 0.45,
+      "proxy_wallet": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "side": "BUY",
+      "size": 100,
+      "slug": "fixture-market",
+      "timestamp": 100,
+      "title": "Offline trade fixture",
+      "token_id": "1234567890",
+      "transaction_hash": "0xfixturebuy"
+    }
+  ],
+  "pagination": {"has_more": false, "limit": 2, "offset": 0, "next_cursor": null}
+}

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .activity_history import activity_snapshot
+
 import math
 import os
 from typing import Any, Dict, List, Mapping, Optional, Tuple
@@ -284,7 +286,9 @@ class DFlowAdapter(MarketAdapter):
                 activities.append(activity)
             if len(activities) >= desired:
                 break
-        return activities
+        return activity_snapshot(
+            activities, payload, effective_limit=desired, row_keys=("trades", "data"),
+        )
 
     def account_recovery(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
         """Read DFlow's documented wallet-filtered on-chain fill feed."""

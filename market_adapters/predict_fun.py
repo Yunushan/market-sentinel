@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .activity_history import activity_snapshot
+
 import math
 import re
 from datetime import datetime, timezone
@@ -381,7 +383,10 @@ class PredictFunAdapter(MarketAdapter):
             )
         payload = self.account_recovery("account_activity", limit=desired)
         rows = self._list_from_payload(payload, "data", "activities", "activity")
-        return self._normalize_account_activity(rows, wallet, desired)
+        return activity_snapshot(
+            self._normalize_account_activity(rows, wallet, desired), payload,
+            effective_limit=desired, row_keys=("data", "activities", "activity"),
+        )
 
     def manage_orders(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
         """Remove open orders through Predict.fun's documented REST boundary.

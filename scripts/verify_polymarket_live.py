@@ -34,6 +34,7 @@ from polymarket.constants import (
     POLYMARKET_CLOB_V2_MIGRATION_URL,
 )
 from polymarket.credential_runbook import build_polymarket_credential_runbook
+from polymarket.data_v2 import finite_number, page_payload
 from polymarket.funded_policy import (
     FUNDED_TOKEN_ALLOWLIST_VARIABLE,
     funded_token_allowlist_sha256,
@@ -742,19 +743,17 @@ def _validate_gamma_markets(value: Any) -> Dict[str, Any]:
 
 
 def _validate_leaderboard(value: Any) -> Dict[str, Any]:
-    if not isinstance(value, list) or not value or not isinstance(value[0], Mapping):
+    page = page_payload(value, "Leaderboard v2", scope="board coverage")
+    rows = page["data"]
+    if not rows:
         raise ValueError("Data leaderboard response contains no trader record")
-    row = value[0]
-    wallet = row.get("proxyWallet")
+    row = rows[0]
+    wallet = row.get("user_id")
     if not isinstance(wallet, str) or re.fullmatch(r"0x[0-9A-Fa-f]{40}", wallet) is None:
-        raise ValueError("Data leaderboard record lacks a documented proxy wallet")
-    numeric_values = [row.get("pnl"), row.get("vol")]
-    if not any(
-        not isinstance(item, bool) and isinstance(item, (int, float)) and math.isfinite(float(item))
-        for item in numeric_values
-    ):
-        raise ValueError("Data leaderboard record lacks a finite PnL or volume value")
-    return {"semantic_check": "leaderboard_identity", "records_observed": len(value)}
+        raise ValueError("Data leaderboard record lacks a documented user identity")
+    if not finite_number(row.get("pnl")) or not finite_number(row.get("volume"), nonnegative=True):
+        raise ValueError("Data leaderboard record lacks finite native PnL and share volume")
+    return {"semantic_check": "leaderboard_identity", "records_observed": len(rows)}
 
 
 def _validate_supported_assets(value: Any) -> Dict[str, Any]:
@@ -815,8 +814,8 @@ def _public_checks(timeout: float) -> Dict[str, Any]:
             _validate_gamma_markets,
         ),
         "data_leaderboard": _probe(
-            lambda: data_api.get_leaderboard(limit=1, timeout=timeout),
-            "Data /v1/leaderboard returned an identified trader row.",
+            lambda: data_api.get_leaderboard_v2_page(limit=1, timeout=timeout),
+            "Data /v2/leaderboard returned an identified trader row with native share volume.",
             _validate_leaderboard,
         ),
         "bridge_supported_assets": _probe(

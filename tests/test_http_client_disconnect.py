@@ -26,16 +26,22 @@ from web_api import (
 class MemoryClient:
     def __init__(self, request: bytes, failure_at: int = 0, error: Exception | None = None) -> None:
         self.reader = io.BytesIO(request)
+        self.timeout = None
         self.sent: list[bytes] = []
         self.attempts = 0
         self.failure_at = failure_at
         self.error = error or ConnectionResetError("client closed")
 
     def makefile(self, *_args):
-        return self.reader
+        # Socket.makefile("rb") supplies a buffered reader with a detachable
+        # raw stream; the handler wraps that raw stream for receive deadlines.
+        return io.BufferedReader(self.reader)
 
-    def settimeout(self, _timeout):
-        pass
+    def settimeout(self, timeout):
+        self.timeout = timeout
+
+    def gettimeout(self):
+        return self.timeout
 
     def sendall(self, data):
         self.attempts += 1

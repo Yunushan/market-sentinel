@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { after, afterEach, test } from "node:test";
+import { webcrypto } from "node:crypto";
 
 const originalWindowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
 const originalCryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
@@ -233,4 +234,158 @@ test("schema diagnostics reject malformed values and normalize safe arrays", () 
       accepted_modes: ["dry_run"]
     }
   );
+});
+
+test("bounded requests time out while consuming the response body", async () => {
+  globalThis.fetch = async (_url, options) => ({
+    ok: true, status: 200,
+    json: () => new Promise((_resolve, reject) => options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true }))
+  });
+  await assert.rejects(api.fetchHealth({ timeoutMs: 5 }), (error) => error.name === "TimeoutError" && /timed out/.test(error.message));
+});
+
+test("caller cancellation reaches the underlying read and is distinguishable from failures", async () => {
+  let observedSignal;
+  globalThis.fetch = (_url, options) => {
+    observedSignal = options.signal;
+    return new Promise((_resolve, reject) => options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true }));
+  };
+  const controller = new AbortController();
+  const request = api.fetchMarketEvents("polymarket", "", 50, { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(request, (error) => error.name === "AbortError");
+  assert.equal(observedSignal.aborted, true);
+});
+
+test("unreadable proxy failures retain HTTP status and ambiguous mutation identity", async () => {
+  useUuidSequence("00000000-0000-4000-8000-000000000099");
+  const keys = [];
+  globalThis.fetch = async (_url, options) => {
+    keys.push(options.headers["Idempotency-Key"]);
+    return { ok: false, status: 503, async json() { throw new SyntaxError("upstream HTML response"); } };
+  };
+  const payload = { order_id: "proxy-ambiguous" };
+  await assert.rejects(api.manageMarketOrders("kalshi", "cancel_order", payload),
+    (error) => error instanceof api.ApiRequestError && error.code === "invalid_api_response" && error.status === 503);
+  await assert.rejects(api.manageMarketOrders("kalshi", "cancel_order", payload), api.ApiRequestError);
+  assert.equal(keys[0], keys[1]);
+});
+
+test("an overlapping older response cannot erase a newer ambiguous mutation key", async () => {
+  useUuidSequence("00000000-0000-4000-8000-000000000081", "00000000-0000-4000-8000-000000000082");
+  const calls = [];
+  const replies = [];
+  globalThis.fetch = async (_url, options) => {
+    calls.push(options.headers["Idempotency-Key"]);
+    return new Promise((resolve) => replies.push(resolve));
+  };
+  const payload = { order_id: "overlap-recovery" };
+  const first = api.manageMarketOrders("kalshi", "cancel_order", payload);
+  const overlap = api.manageMarketOrders("kalshi", "cancel_order", payload);
+  replies[0](jsonResponse(200, { ok: true })); await first;
+  const newer = api.manageMarketOrders("kalshi", "cancel_order", payload);
+  replies[2](jsonResponse(503, { error: "ambiguous newer operation" }));
+  await assert.rejects(newer, api.ApiRequestError);
+  replies[1](jsonResponse(200, { ok: true })); await overlap;
+  const retry = api.manageMarketOrders("kalshi", "cancel_order", payload);
+  replies[3](jsonResponse(200, { ok: true })); await retry;
+  assert.equal(calls[0], calls[1]);
+  assert.notEqual(calls[0], calls[2]);
+  assert.equal(calls[2], calls[3]);
+});
+
+test("blocked browser recovery storage prevents transmitting a durable operation", async () => {
+  let transmitted = false;
+  globalThis.fetch = async () => { transmitted = true; return jsonResponse(200, {}); };
+  Object.defineProperty(window, "sessionStorage", { configurable: true, get() { throw new Error("storage blocked"); } });
+  try {
+    await assert.rejects(api.createWallet({ wallet: "storage-blocked" }), /cannot be preserved/);
+    assert.equal(transmitted, false);
+  } finally {
+    delete window.sessionStorage;
+  }
+});
+
+test("interrupted wallet batch delivery retries the same receipt and advances only after success", async () => {
+  useUuidSequence("00000000-0000-4000-8000-000000000091", "00000000-0000-4000-8000-000000000092");
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    if (calls.length === 1) throw new TypeError("receipt response was lost");
+    return jsonResponse(200, { has_more: true, remaining_activity: 3, consumed_filtered: 1,
+      delivery: { mode: "durable_replayable_batch", receipt_id: "00000000-0000-4000-8000-000000000101", acknowledge_with_next_poll: true } });
+  };
+  await assert.rejects(api.pollWallets(25), TypeError);
+  const receipt = await api.pollWallets(25);
+  assert.equal(receipt.remaining_activity, 3);
+  await api.pollWallets(25);
+  assert.equal(calls[0].url, "http://127.0.0.1:8765/api/wallets/poll");
+  assert.equal(calls[0].options.body, '{"limit":25}');
+  assert.equal(calls[0].options.headers["Idempotency-Key"], calls[1].options.headers["Idempotency-Key"]);
+  assert.notEqual(calls[1].options.headers["Idempotency-Key"], calls[2].options.headers["Idempotency-Key"]);
+  assert.equal(JSON.parse(calls[2].options.body).acknowledge_receipt_id, "00000000-0000-4000-8000-000000000101");
+});
+
+test("analytics requests transmit the explicitly selected equity base asset", async () => {
+  const calls = [];
+  globalThis.fetch = async (url) => { calls.push(new URL(url)); return jsonResponse(200, {}); };
+  await api.fetchPolymarketMdd({ wallet: "0xfixture", equity_base_usd: "500", equity_base_currency: "USDC" });
+  await api.fetchPolymarketLeaderboard({ sort: "pnl_usd", equity_base_usd: "500", equity_base_currency: "USDC" });
+  for (const url of calls) {
+    assert.equal(url.searchParams.get("equity_base_usd"), "500");
+    assert.equal(url.searchParams.get("equity_base_currency"), "USDC");
+  }
+});
+
+test("receipt storage failures and malformed deliveries keep the original batch recovery key", async () => {
+  useUuidSequence("00000000-0000-4000-8000-000000000111");
+  globalThis.crypto.subtle = webcrypto.subtle;
+  const stored = new Map();
+  let failReceiptStorage = true;
+  const receiptStorageKey = "market-sentinel.wallet-poll-receipt.v1";
+  Object.defineProperty(window, "sessionStorage", { configurable: true, value: {
+    getItem(key) { return stored.get(key) ?? null; },
+    setItem(key, value) {
+      if (key === receiptStorageKey && failReceiptStorage) throw new Error("quota unavailable");
+      stored.set(key, value);
+    }
+  } });
+  const calls = [];
+  globalThis.fetch = async (_url, options) => {
+    calls.push(options);
+    return jsonResponse(200, { delivery: { mode: "durable_replayable_batch", acknowledge_with_next_poll: true,
+      receipt_id: calls.length === 1 ? "malformed" : "00000000-0000-4000-8000-000000000112" } });
+  };
+  try {
+    await assert.rejects(api.pollWallets(31), /delivery receipt is invalid/);
+    await assert.rejects(api.pollWallets(31), /could not be preserved/);
+    assert.equal(stored.has(receiptStorageKey), false);
+    failReceiptStorage = false;
+    await api.pollWallets(31);
+    assert.equal(stored.get(receiptStorageKey), "00000000-0000-4000-8000-000000000112");
+    assert.equal(Object.keys(JSON.parse(stored.get("market-sentinel.pending-mutations.v1"))).length, 0);
+    assert.equal(new Set(calls.map((call) => call.headers["Idempotency-Key"])).size, 1);
+    assert.equal(new Set(calls.map((call) => call.body)).size, 1);
+  } finally { delete window.sessionStorage; }
+});
+
+test("concurrent poll clicks share one delivery so late replies cannot orphan a newer pinned receipt", async () => {
+  useUuidSequence("00000000-0000-4000-8000-000000000121", "00000000-0000-4000-8000-000000000122");
+  const calls = [];
+  let finish;
+  globalThis.fetch = async (_url, options) => {
+    calls.push(options);
+    if (calls.length === 1) await new Promise((resolve) => { finish = resolve; });
+    return jsonResponse(200, { delivery: { mode: "durable_replayable_batch", acknowledge_with_next_poll: true,
+      receipt_id: `00000000-0000-4000-8000-00000000013${calls.length}` } });
+  };
+  const first = api.pollWallets(37);
+  const duplicate = api.pollWallets(37);
+  assert.equal(calls.length, 1);
+  finish();
+  assert.equal(await first, await duplicate);
+  await api.pollWallets(37);
+  assert.equal(calls.length, 2);
+  assert.equal(JSON.parse(calls[1].body).acknowledge_receipt_id, "00000000-0000-4000-8000-000000000131");
+  assert.notEqual(calls[0].headers["Idempotency-Key"], calls[1].headers["Idempotency-Key"]);
 });
