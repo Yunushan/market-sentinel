@@ -25,6 +25,7 @@ recursive-include scripts *.py
 recursive-include scripts *.ps1
 recursive-include tests *.csv *.json *.py *.txt
 prune frontend/dist
+prune frontend/.cache
 prune frontend/node_modules
 prune frontend/.test-dist
 prune frontend/test-results

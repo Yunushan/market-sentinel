@@ -339,7 +339,10 @@ jobs:
   windows-app:
     name: Build Windows EXE and MSI
     runs-on: windows-2025-vs2026
-    timeout-minutes: 45
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
     # Every stable tag, including a draft, is forced through the protected
     # signing environment. Only prerelease tags may use the unsigned
     # environment when repository policy does not independently require signing.
@@ -350,6 +353,9 @@ jobs:
     env:
       SOURCE_DATE_EPOCH: ${{ needs.metadata.outputs.source_date_epoch }}
       WINDOWS_SIGNING_REQUIRED: ${{ needs.metadata.outputs.windows_signing_required }}
+      WINDOWS_SIGNING_PROVIDER: ${{ vars.WINDOWS_SIGNING_PROVIDER }}
+      SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+      WINDOWS_SIGNING_CERTIFICATE_SHA256: ${{ vars.WINDOWS_SIGNING_CERTIFICATE_SHA256 }}
     needs:
       - metadata
       - frontend-dist
@@ -365,70 +371,24 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Set up reviewed SignPath runtime
+        if: ${{ env.WINDOWS_SIGNING_REQUIRED == 'true' }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24"
+
       - name: Verify Windows signing configuration
+        if: ${{ env.WINDOWS_SIGNING_REQUIRED == 'true' }}
         env:
-          WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64 }}
-          WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD }}
-          WINDOWS_CODE_SIGNING_TIMESTAMP_URL: ${{ vars.WINDOWS_CODE_SIGNING_TIMESTAMP_URL }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
         shell: pwsh
-        run: |
-          if ($env:WINDOWS_SIGNING_REQUIRED -ne "true") {
-            Write-Warning "Windows code signing is disabled; this release will contain unsigned Windows artifacts."
-            exit 0
-          }
-
-          $missing = [System.Collections.Generic.List[string]]::new()
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64)) {
-            $missing.Add("release-environment secret WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64")
-          }
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD)) {
-            $missing.Add("release-environment secret WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD")
-          }
-
-          if ($missing.Count -eq 0) {
-            try {
-              $encodedCertificate = $env:WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64.Trim()
-              if ($encodedCertificate -match "\s") {
-                throw "certificate base64 contains internal whitespace"
-              }
-              $certificateBytes = [Convert]::FromBase64String($encodedCertificate)
-              $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
-                $certificateBytes,
-                $env:WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD,
-                [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
-              )
-              if (-not $certificate.HasPrivateKey) {
-                $missing.Add("a PFX certificate with a private key")
-              }
-              $certificate.Dispose()
-            } catch {
-              $missing.Add("a valid password-protected PFX in WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64")
-            }
-          }
-
-          $timestampUrl = if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODE_SIGNING_TIMESTAMP_URL)) {
-            "https://timestamp.digicert.com"
-          } else {
-            $env:WINDOWS_CODE_SIGNING_TIMESTAMP_URL
-          }
-          try {
-            $timestampUri = [System.Uri]$timestampUrl
-            if (-not $timestampUri.IsAbsoluteUri -or $timestampUri.Scheme -cne "https") {
-              throw "timestamp URL must use HTTPS"
-            }
-          } catch {
-            $missing.Add("an HTTPS WINDOWS_CODE_SIGNING_TIMESTAMP_URL")
-          }
-
-          if ($missing.Count -gt 0) {
-            throw "Protected release signing preflight failed. Configure: " + ($missing -join "; ")
-          }
+        run: python scripts/signpath_release.py preflight
 
       - name: Download frontend bundle
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: frontend-dist-zip
-          path: release-inputs
+          path: build/release-inputs
 
       - name: Install Python build dependencies
         shell: pwsh
@@ -461,8 +421,8 @@ jobs:
           python scripts/build_windows_release.py `
             --version "${{ needs.metadata.outputs.version }}" `
             --tag "${{ needs.metadata.outputs.tag_name }}" `
-            --frontend-zip "release-inputs/release-frontend-dist.zip" `
-            --output-dir "release-assets" `
+            --frontend-zip "build/release-inputs/release-frontend-dist.zip" `
+            --output-dir "build/windows-release-assets" `
             --prepare-only
 
       - name: Smoke test staged Windows executable
@@ -471,16 +431,32 @@ jobs:
           $executable = "build/windows-release/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64/market-sentinel.exe"
           & $executable --smoke-test
 
+      - name: Upload unsigned staged executable for origin-verified signing
+        if: ${{ env.WINDOWS_SIGNING_REQUIRED == 'true' }}
+        id: unsigned_exe
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: unsigned-exe-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/windows-release/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64/market-sentinel.exe
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Sign staged Windows executable
         if: ${{ env.WINDOWS_SIGNING_REQUIRED == 'true' }}
         env:
-          WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64 }}
-          WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD }}
-          WINDOWS_CODE_SIGNING_TIMESTAMP_URL: ${{ vars.WINDOWS_CODE_SIGNING_TIMESTAMP_URL }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          SIGNING_ARTIFACT_ID: ${{ steps.unsigned_exe.outputs.artifact-id }}
+          SIGNING_ARTIFACT_DIGEST: ${{ steps.unsigned_exe.outputs.artifact-digest }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag_name }}
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
         shell: pwsh
         run: |
-          $executable = "build/windows-release/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64/market-sentinel.exe"
-          python scripts/sign_windows_release.py --path $executable
+          $executable = "build/windows-release/market-sentinel-$($env:RELEASE_TAG)-win-x64/market-sentinel.exe"
+          python scripts/signpath_release.py sign --kind exe --path $executable `
+            --version $env:RELEASE_VERSION --tag $env:RELEASE_TAG `
+            --artifact-id $env:SIGNING_ARTIFACT_ID --artifact-digest $env:SIGNING_ARTIFACT_DIGEST `
+            --artifact-name "unsigned-exe-$($env:GITHUB_SHA)-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)"
 
       - name: Package Windows portable zip and MSI
         shell: pwsh
@@ -488,7 +464,7 @@ jobs:
           python scripts/build_windows_release.py `
             --version "${{ needs.metadata.outputs.version }}" `
             --tag "${{ needs.metadata.outputs.tag_name }}" `
-            --output-dir "release-assets" `
+            --output-dir "build/windows-release-assets" `
             --package-only
 
       - name: Remove WiX debug database
@@ -497,19 +473,35 @@ jobs:
           # WiX emits a .wixpdb alongside the MSI by default. It is a build
           # debug database, not a release asset, so remove it before the exact
           # release inventory and upload steps run.
-          Get-ChildItem -LiteralPath "release-assets" -File -Filter "*.wixpdb" |
+          Get-ChildItem -LiteralPath "build/windows-release-assets" -File -Filter "*.wixpdb" |
             Remove-Item -Force
+
+      - name: Upload unsigned MSI for origin-verified signing
+        if: ${{ env.WINDOWS_SIGNING_REQUIRED == 'true' }}
+        id: unsigned_msi
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: unsigned-msi-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/windows-release-assets/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64.msi
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Sign Windows MSI package
         if: ${{ env.WINDOWS_SIGNING_REQUIRED == 'true' }}
         env:
-          WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64 }}
-          WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD }}
-          WINDOWS_CODE_SIGNING_TIMESTAMP_URL: ${{ vars.WINDOWS_CODE_SIGNING_TIMESTAMP_URL }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          SIGNING_ARTIFACT_ID: ${{ steps.unsigned_msi.outputs.artifact-id }}
+          SIGNING_ARTIFACT_DIGEST: ${{ steps.unsigned_msi.outputs.artifact-digest }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag_name }}
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
         shell: pwsh
         run: |
-          $installer = "release-assets/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64.msi"
-          python scripts/sign_windows_release.py --path $installer
+          $installer = "build/windows-release-assets/market-sentinel-$($env:RELEASE_TAG)-win-x64.msi"
+          python scripts/signpath_release.py sign --kind msi --path $installer `
+            --version $env:RELEASE_VERSION --tag $env:RELEASE_TAG `
+            --artifact-id $env:SIGNING_ARTIFACT_ID --artifact-digest $env:SIGNING_ARTIFACT_DIGEST `
+            --artifact-name "unsigned-msi-$($env:GITHUB_SHA)-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)"
 
       - name: Verify Windows release metadata
         env:
@@ -518,7 +510,7 @@ jobs:
         shell: pwsh
         run: |
           $executable = "build/windows-release/market-sentinel-$($env:RELEASE_TAG_NAME)-win-x64/market-sentinel.exe"
-          $installer = "release-assets/market-sentinel-$($env:RELEASE_TAG_NAME)-win-x64.msi"
+          $installer = "build/windows-release-assets/market-sentinel-$($env:RELEASE_TAG_NAME)-win-x64.msi"
           & ./scripts/verify_windows_release_metadata.ps1 `
             -ExecutablePath $executable `
             -InstallerPath $installer `
@@ -530,8 +522,8 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ needs.metadata.outputs.tag_name }}"
-          $installer = "release-assets/market-sentinel-$tag-win-x64.msi"
-          $portable = "release-assets/market-sentinel-$tag-win-x64.zip"
+          $installer = "build/windows-release-assets/market-sentinel-$tag-win-x64.msi"
+          $portable = "build/windows-release-assets/market-sentinel-$tag-win-x64.zip"
           $extractDirectory = Join-Path $env:RUNNER_TEMP "market-sentinel-portable-signature-check"
           Expand-Archive -LiteralPath $portable -DestinationPath $extractDirectory
           $embeddedExecutables = @(
@@ -540,23 +532,15 @@ jobs:
           if ($embeddedExecutables.Count -ne 1) {
             throw "Expected exactly one embedded market-sentinel.exe; found $($embeddedExecutables.Count)."
           }
-          $signTool = (Get-Command signtool.exe -ErrorAction Stop).Source
-          & $signTool verify /pa /all $embeddedExecutables[0].FullName
-          if ($LASTEXITCODE -ne 0) {
-            throw "The executable embedded in the portable ZIP failed Authenticode verification."
-          }
-          & $signTool verify /pa /all $installer
-          if ($LASTEXITCODE -ne 0) {
-            throw "The final MSI failed Authenticode verification."
-          }
+          python -c 'import os,sys; from pathlib import Path; from scripts.signpath_release import verify_windows_signature; from scripts.build_windows_release import msi_product_version; [verify_windows_signature(Path(p),msi_product_version(sys.argv[1]),os.environ) for p in sys.argv[2:]]' "${{ needs.metadata.outputs.version }}" $embeddedExecutables[0].FullName $installer
 
       - name: Verify unsigned Windows artifacts
         if: ${{ env.WINDOWS_SIGNING_REQUIRED != 'true' }}
         shell: pwsh
         run: |
           $tag = "${{ needs.metadata.outputs.tag_name }}"
-          $installer = "release-assets/market-sentinel-$tag-win-x64.msi"
-          $portable = "release-assets/market-sentinel-$tag-win-x64.zip"
+          $installer = "build/windows-release-assets/market-sentinel-$tag-win-x64.msi"
+          $portable = "build/windows-release-assets/market-sentinel-$tag-win-x64.zip"
           foreach ($path in @($portable, $installer)) {
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
               throw "Unsigned Windows release artifact is missing: $path"
@@ -583,7 +567,7 @@ jobs:
         run: |
           $packageName = "market-sentinel-$($env:RELEASE_TAG_NAME)-win-x64"
           & ./scripts/smoke_windows_msi.ps1 `
-            -InstallerPath "release-assets/${packageName}.msi" `
+            -InstallerPath "build/windows-release-assets/${packageName}.msi" `
             -StagedExecutablePath "build/windows-release/$packageName/market-sentinel.exe" `
             -Version $env:RELEASE_VERSION
 
@@ -601,7 +585,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: windows-dist
-          path: release-assets/*
+          path: build/windows-release-assets/*
           if-no-files-found: error
           retention-days: 14
 

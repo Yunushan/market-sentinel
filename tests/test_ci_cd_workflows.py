@@ -448,12 +448,14 @@ jobs:
             "Verify Windows signing configuration",
             "REQUIRE_WINDOWS_CODE_SIGNING",
             "WINDOWS_SIGNING_REQUIRED",
-            "WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64",
-            "WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD",
-            "X509Certificate2",
-            "EphemeralKeySet",
-            "certificate base64 contains internal whitespace",
-            "scripts/sign_windows_release.py",
+            "WINDOWS_SIGNING_PROVIDER",
+            "SIGNPATH_ORGANIZATION_ID",
+            "WINDOWS_SIGNING_CERTIFICATE_SHA256",
+            "SIGNPATH_API_TOKEN",
+            "scripts/signpath_release.py",
+            "Upload unsigned staged executable for origin-verified signing",
+            "Upload unsigned MSI for origin-verified signing",
+            "artifact-digest",
             "gh release create",
             "uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${asset_name}",
             "--method POST",
@@ -585,11 +587,11 @@ jobs:
         self.assertIn("if: ${{ env.WINDOWS_SIGNING_REQUIRED != 'true' }}", windows_app)
         self.assertIn("build/windows-release/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64/market-sentinel.exe", windows_app)
         self.assertIn("& $executable --smoke-test", windows_app)
-        self.assertIn("release-assets/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64.msi", windows_app)
+        self.assertIn("build/windows-release-assets/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64.msi", windows_app)
         self.assertIn('Get-ChildItem -LiteralPath $extractDirectory -Recurse -File -Filter "market-sentinel.exe"', windows_app)
-        self.assertIn("verify /pa /all $embeddedExecutables[0].FullName", windows_app)
-        self.assertIn("verify /pa /all $installer", windows_app)
-        self.assertIn("-InstallerPath \"release-assets/${packageName}.msi\"", windows_app)
+        self.assertIn("verify_windows_signature", windows_app)
+        self.assertIn("$embeddedExecutables[0].FullName $installer", windows_app)
+        self.assertIn("-InstallerPath \"build/windows-release-assets/${packageName}.msi\"", windows_app)
         self.assertIn("-StagedExecutablePath \"build/windows-release/$packageName/market-sentinel.exe\"", windows_app)
         self.assertNotIn("Get-ChildItem release-assets -File", windows_app)
         checksum_index = text.index("sha256sum -- * > SHA256SUMS.txt")
@@ -863,8 +865,8 @@ jobs:
                     "actions/setup-python": (7, "5fda3b95a4ea91299a34e894583c3862153e4b97"),
                     "actions/setup-node": (7, "820762786026740c76f36085b0efc47a31fe5020"),
                     "actions/dependency-review-action": (5, "a1d282b36b6f3519aa1f3fc636f609c47dddb294"),
-                    "github/codeql-action/init": (4, "1c5b675653bb5c22dbe9b12b556ec555138e09fd"),
-                    "github/codeql-action/analyze": (4, "1c5b675653bb5c22dbe9b12b556ec555138e09fd"),
+                    "github/codeql-action/init": (4, "2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2"),
+                    "github/codeql-action/analyze": (4, "2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2"),
                 },
             ),
         )

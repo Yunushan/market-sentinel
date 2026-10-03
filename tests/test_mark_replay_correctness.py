@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import io
 import json
 import tempfile
@@ -11,6 +12,7 @@ from unittest.mock import patch
 import market_sentinel_cli
 import web_api
 from polymarket.accounting import reconcile_mdd_payload_with_accounting
+from polymarket.analytics_cache import mdd_payload_to_csv
 from polymarket.drawdown import max_drawdown
 from polymarket.leaderboard_state import LeaderboardStateStore
 from polymarket.mdd import MddInputs, _build_mark_replay_points, build_mark_replay_mdd_payload
@@ -143,6 +145,164 @@ class MarkReplayCorrectnessTests(unittest.TestCase):
         self.assertEqual(result["mark_replay"]["status"], "unavailable")
         self.assertFalse(result["mdd_available"])
 
+    def test_unmodelled_financial_activity_cannot_qualify_a_trade_only_replay(self):
+        for kind in ("REDEEM", "SPLIT", "MERGE", "CONVERSION", "REWARD", "MAKER_REBATE", "REFERRAL_REWARD", "NEW_FINANCIAL_EVENT"):
+            with self.subTest(kind=kind):
+                data = MddInputs(WALLET, [], [], [{"type": kind, "timestamp": 3, "usdcSize": 50}],
+                                 [trade(2, "BUY", 0.5)])
+                result = self.build(inputs=data, history={"history": {"token": [{"t": 3, "p": 0.5}]}})
+                self.assertFalse(result["mdd_available"])
+                self.assertIsNone(result["mdd_pct"])
+                self.assertEqual(result["mark_replay"]["status"], "partial")
+                self.assertEqual(result["mark_replay"]["unsupported_activity"], {kind: 1})
+                self.assertIn("unsupported_activity_type:" + kind, result["mdd_unavailable_reasons"])
+                self.assertEqual(result["mark_replay"]["observed_drawdown"]["mdd_pct"], 0)
+
+    def test_current_loss_cannot_be_hidden_by_stale_terminal_marks(self):
+        opened = {"asset": "token", "size": 100, "cashPnl": -49, "realizedPnl": 0,
+                  "avgPrice": 0.5, "currentValue": 1}
+        data = MddInputs(WALLET, [], [opened], [], [trade(2, "BUY", 0.5)])
+        result = self.build(inputs=data, history={"history": {"token": [{"t": 3, "p": 0.5}]}})
+        self.assertFalse(result["mdd_available"])
+        self.assertIsNone(result["mdd_pct"])
+        self.assertEqual(result["fallback_v2"]["mdd_pct"], 49)
+        self.assertEqual(result["mark_replay"]["observed_drawdown"]["mdd_pct"], 0)
+        reconciliation = result["mark_replay"]["current_snapshot_reconciliation"]
+        self.assertEqual(reconciliation["snapshot_terminal_pnl_usd"], -49)
+        self.assertEqual(reconciliation["replay_terminal_pnl_usd"], 0)
+        self.assertIn("current_pnl_mismatch", result["mdd_unavailable_reasons"])
+
+    def test_reported_current_value_must_agree_even_when_snapshot_pnl_matches(self):
+        for field in ("currentValue", "current_value"):
+            opened = {"asset": "token", "size": 100, "cashPnl": 0, "realizedPnl": 0,
+                      "avgPrice": 0.5, "initialValue": 50, field: 1}
+            data = MddInputs(WALLET, [], [opened], [], [trade(2, "BUY", 0.5)])
+            with self.subTest(field=field):
+                result = self.build(inputs=data, history={"history": {"token": [{"t": 3, "p": 0.5}]}},
+                                    mark_replay_point_limit=1, max_points=1)
+                self.assertFalse(result["mdd_available"])
+                self.assertIsNone(result["mdd_pct"])
+                self.assertEqual(result["mark_replay"]["observed_drawdown"]["mdd_pct"], 0)
+                reconciliation = result["mark_replay"]["current_snapshot_reconciliation"]
+                self.assertEqual(reconciliation["snapshot_terminal_pnl_usd"], 0)
+                self.assertEqual(reconciliation["replay_terminal_pnl_usd"], 0)
+                self.assertEqual(reconciliation["current_value_mismatch_tokens"], ["token"])
+                self.assertEqual(reconciliation["position_current_value_by_token_usd"], {"token": 1})
+                self.assertEqual(reconciliation["replay_current_value_by_token_usd"], {"token": 50})
+                self.assertIn("current_position_value_mismatch", result["mdd_unavailable_reasons"])
+
+    def test_offsetting_current_value_errors_do_not_pass_an_aggregate_comparison(self):
+        positions = [{"asset": token, "size": 100, "cashPnl": 0, "realizedPnl": 0,
+                      "currentValue": value} for token, value in (("token", 1), ("second", 99))]
+        data = MddInputs(WALLET, [], positions, [],
+                         [trade(2, "BUY", 0.5), trade(4, "BUY", 0.5, token="second")])
+        histories = {"history": {token: [{"t": 5, "p": 0.5}] for token in ("token", "second")}}
+        result = self.build(inputs=data, history=histories)
+        self.assertFalse(result["mdd_available"])
+        reconciliation = result["mark_replay"]["current_snapshot_reconciliation"]
+        self.assertEqual(reconciliation["current_value_mismatch_tokens"], ["second", "token"])
+        self.assertEqual(sum(reconciliation["position_current_value_by_token_usd"].values()), 100)
+        self.assertEqual(sum(reconciliation["replay_current_value_by_token_usd"].values()), 100)
+
+    def test_contradictory_current_value_aliases_fail_source_quality_before_replay(self):
+        opened = {"asset": "token", "size": 100, "cashPnl": 0,
+                  "currentValue": 50, "current_value": 1}
+        data = MddInputs(WALLET, [], [opened], [], [trade(2, "BUY", 0.5)])
+        with patch("polymarket.mdd.clob_rest.get_batch_price_history") as fetch_prices:
+            result = build_mark_replay_mdd_payload(data, equity_base_usd=100)
+        fetch_prices.assert_not_called()
+        self.assertFalse(result["mdd_available"])
+        self.assertEqual(result["mdd_source_quality"]["status"], "invalid")
+        self.assertIn("inconsistent_current_position_value", result["mdd_source_quality"]["sources"]["open_positions"]["reasons"])
+
+    def test_null_current_value_alias_cannot_hide_another_supplied_value(self):
+        opened = {"asset": "token", "size": 100, "cashPnl": 0,
+                  "currentValue": None, "current_value": 1}
+        data = MddInputs(WALLET, [], [opened], [], [trade(2, "BUY", 0.5)])
+        result = self.build(inputs=data, history={"history": {"token": [{"t": 3, "p": 0.5}]}})
+        self.assertFalse(result["mdd_available"])
+        self.assertIn("current_position_value_mismatch", result["mdd_unavailable_reasons"])
+
+    def test_consistent_remaining_inventory_values_after_partial_sale_are_supported(self):
+        opened = {"asset": "token", "size": "40", "cashPnl": 8, "realizedPnl": 18,
+                  "currentValue": "28", "current_value": 28.0000004}
+        data = MddInputs(WALLET, [], [opened], [], [trade(2, "BUY", 0.5), trade(4, "SELL", 0.8, size=60)])
+        result = self.build(inputs=data, history={"history": {"token": [{"t": 5, "p": 0.7}]}})
+        self.assertTrue(result["mdd_available"])
+        reconciliation = result["mark_replay"]["current_snapshot_reconciliation"]
+        self.assertEqual(reconciliation["status"], "matched")
+        self.assertEqual(reconciliation["position_current_value_by_token_usd"], {"token": 28})
+        self.assertEqual(reconciliation["replay_current_value_by_token_usd"], {"token": 28})
+        self.assertEqual(reconciliation["snapshot_terminal_pnl_usd"], 26)
+        self.assertEqual(reconciliation["replay_terminal_pnl_usd"], 26)
+
+    def test_current_inventory_mismatch_is_unknown_even_if_pnl_agrees(self):
+        coverage = {"open_positions": {"status": "end_of_results"},
+                    "closed_positions": {"status": "end_of_results"}}
+        data = MddInputs(WALLET, [], [], [], [trade(2, "BUY", 0.5)], history_coverage=coverage)
+        result = self.build(inputs=data, history={"history": {"token": [{"t": 3, "p": 0.5}]}})
+        self.assertFalse(result["mdd_available"])
+        self.assertIn("current_inventory_mismatch", result["mdd_unavailable_reasons"])
+        self.assertEqual(result["mark_replay"]["current_snapshot_reconciliation"]["inventory_mismatch_tokens"], ["token"])
+
+    def test_snapshot_identity_gaps_and_duplicate_positions_do_not_qualify(self):
+        opened = {"asset": "token", "size": 100, "cashPnl": 0}
+        for positions, reason in (([{"cashPnl": 0}], "current_position_identity_or_size_unavailable"),
+                                  ([opened, dict(opened)], "duplicate_current_position")):
+            with self.subTest(positions=positions):
+                data = MddInputs(WALLET, [], positions, [], [trade(2, "BUY", 0.5)])
+                result = self.build(inputs=data, history={"history": {"token": [{"t": 3, "p": 0.5}]}})
+                self.assertFalse(result["mdd_available"])
+                self.assertIn(reason, result["mdd_unavailable_reasons"])
+
+    def test_consistent_current_snapshot_preserves_observed_replay(self):
+        opened = {"asset": "token", "size": 100, "cashPnl": -30, "realizedPnl": 0,
+                  "avgPrice": 0.5, "currentValue": 20}
+        data = MddInputs(WALLET, [], [opened], [], [trade(2, "BUY", 0.5)])
+        result = self.build(inputs=data, history={"history": {"token": [{"t": 3, "p": 0.2}]}})
+        self.assertTrue(result["mdd_available"])
+        self.assertEqual(result["mdd_pct"], 30)
+        self.assertEqual(result["mark_replay"]["current_snapshot_reconciliation"]["status"], "matched")
+        self.assertFalse(result["mdd_account_equity_verified"])
+
+    def test_reconciliation_failure_survives_durable_resume_and_csv_export(self):
+        opened = {"asset": "token", "size": 100, "cashPnl": 0, "realizedPnl": 0, "currentValue": 1}
+        data = MddInputs(WALLET, [], [opened], [], [trade(2, "BUY", 0.5)])
+        result = self.build(inputs=data, history={"history": {"token": [{"t": 3, "p": 0.5}]}})
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state.sqlite3"
+            with closing(LeaderboardStateStore(state)) as store:
+                store.prepare({}, resume=False)
+                store.record_page(0, 1, [{"wallet": WALLET, "rank": 1, "pnl_usd": 10, "volume_usd": 100, "roi_pct": 10}])
+                row = next(store.iter_results({}, require_mdd=False, sort="roi_pct", direction="DESC", limit=None))
+                store.set_mdd(row["id"], result)
+            with closing(LeaderboardStateStore(state)) as store:
+                self.assertEqual(store.result_count({"max_mdd_pct": 20}, require_mdd=True), 0)
+                restored = next(store.iter_results({}, require_mdd=False, sort="roi_pct", direction="DESC", limit=None))
+            self.assertEqual(restored["mark_replay"]["current_snapshot_reconciliation"],
+                             result["mark_replay"]["current_snapshot_reconciliation"])
+            self.assertFalse(restored["mdd_available"])
+            self.assertIn("current_position_value_mismatch", next(market_sentinel_cli._csv_rows([restored]))["mdd_unavailable_reasons"])
+        audit = next(csv.DictReader(io.StringIO(mdd_payload_to_csv(result))))
+        self.assertEqual(audit["mdd_pct"], "")
+        self.assertEqual(audit["status"], "unavailable")
+        self.assertIn("current_position_value_mismatch", json.loads(audit["mdd_unavailable_reasons"]))
+
+    def test_api_risk_filter_rejects_stale_zero_replay_and_preserves_reason(self):
+        opened = {"asset": "token", "size": 100, "cashPnl": 0, "realizedPnl": 0, "currentValue": 1}
+        data = MddInputs(WALLET, [], [opened], [], [trade(2, "BUY", 0.5)])
+        with patch("web_api.data_api.get_leaderboard", return_value=[{"proxyWallet": WALLET, "pnl": 10, "vol": 100}]), patch(
+            "polymarket.mdd.fetch_mdd_inputs", return_value=data
+        ), patch("polymarket.mdd.clob_rest.get_batch_price_history", return_value={"history": {"token": [{"t": 3, "p": 0.5}]}}), patch(
+            "web_api.attach_polymarket_mdd_audit_cache", return_value={}
+        ):
+            result = web_api.polymarket_leaderboard_payload({
+                "mdd_mode": ["mark_replay"], "max_mdd_pct": ["20"], "equity_base_usd": ["100"],
+            })
+        self.assertEqual(result["counts"]["returned"], 0)
+        self.assertEqual(result["counts"]["mdd_unavailable"], 1)
+        self.assertEqual(result["counts"]["mdd_qualified"], 0)
+
     def test_accounting_cannot_promote_incomplete_replay(self):
         data = MddInputs(WALLET, [], [], [], [trade(1, "SELL", 0.5)])
         result = self.build(inputs=data, max_points=1000)
@@ -191,7 +351,7 @@ class MarkReplayCorrectnessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             with closing(LeaderboardStateStore(Path(temporary) / "state.sqlite3")) as store:
                 store.prepare({}, resume=False)
-                store.record_page(0, 1, [{"wallet": WALLET, "rank": 1, "roi_pct": 10}])
+                store.record_page(0, 1, [{"wallet": WALLET, "rank": 1, "pnl_usd": 10, "volume_usd": 100, "roi_pct": 10}])
                 row = next(store.iter_results({}, require_mdd=False, sort="roi_pct", direction="DESC", limit=None))
                 store.set_mdd(row["id"], {"mdd_available": False, "mdd_pct": 0, "mdd_usd": 0,
                     "mark_replay": {"status": "partial", "incomplete_reasons": ["negative_inventory_events"]}})

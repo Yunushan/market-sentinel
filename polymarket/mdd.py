@@ -17,7 +17,7 @@ from .util import normalize_wallet
 MDD_METHOD_V2 = "public_data_historical_equity_curve_v2"
 MDD_METHOD_MARK_REPLAY = "clob_price_history_inventory_mark_replay_v1"
 # Increment when changing calculations to invalidate durable scan enrichment.
-MDD_CALCULATION_VERSION = 7
+MDD_CALCULATION_VERSION = 8
 MDD_PCT_BASIS_V2 = "max_t(drawdown_usd[t] / (equity_base_usd + running_peak_pnl_usd[t])) * 100"
 MAX_CLOSED_POSITIONS = 1000
 MAX_OPEN_POSITIONS = 1000
@@ -50,12 +50,14 @@ MDD_MARK_REPLAY_ASSUMPTIONS = [
     "CLOB price-history points mark reconstructed inventory at sampled historical timestamps.",
     "The replay uses trade cash plus marked token inventory as a PnL curve, not a full account-equity ledger.",
     "When equity_base_usd is not supplied, percentage MDD reuses the public capital basis from the v2 payload.",
+    "A supplied current position snapshot must agree with reconstructed inventory and terminal PnL before the sampled replay can qualify a risk filter.",
 ]
 MDD_MARK_REPLAY_LIMITATIONS = [
     "Positions opened before the fetched trade window cannot be reconstructed unless the missing trades are supplied by the public API window.",
     "Resolved/redeemed markets, split/merge conversions, fees, rewards, deposits, and withdrawals are reported as limitations unless represented in trade cash flows.",
     "CLOB price history is sampled by the requested interval/fidelity, so valleys between samples can still be missed.",
     "Only the first 20 trade-derived asset ids are replayed per request to honor the documented batch price-history cap.",
+    "Non-trade activity and disagreement with current positions leave replay risk unavailable; sampled trade-only drawdown remains a diagnostic.",
 ]
 MDD_ACCOUNTING_ASSUMPTIONS = [
     "When requested, the public accounting snapshot ZIP is parsed for equity and position CSV rows.",
@@ -206,6 +208,12 @@ def _finite_number(value: Any) -> Optional[float]:
     return number if math.isfinite(number) else None
 
 
+def _position_current_values(row: Mapping[str, Any]) -> List[float]:
+    return [number for key, value in row.items()
+            if str(key).lower() in {"currentvalue", "current_value"}
+            and (number := _finite_number(value)) is not None]
+
+
 def _event_timestamp(value: Any, *, latest: Optional[int] = None) -> Optional[int]:
     number = _finite_number(value)
     ceiling = int(time.time()) + 300 if latest is None else latest
@@ -282,6 +290,10 @@ def _source_quality(inputs: MddInputs) -> Dict[str, Any]:
             elif name == "open_positions":
                 if _finite_number(_position_total_pnl(row)) is None:
                     issues.add("invalid_open_pnl")
+                current_values = _position_current_values(row)
+                if current_values and any(not math.isclose(value, current_values[0], rel_tol=0, abs_tol=1.000001e-6)
+                                          for value in current_values[1:]):
+                    issues.add("inconsistent_current_position_value")
             elif name == "trade_rows" or str(_lookup(row, "type") or "TRADE").upper() == "TRADE":
                 if timestamp is None:
                     issues.add("invalid_timestamp")
@@ -785,6 +797,7 @@ def _build_mark_replay_points(
 
     retained_points: deque[Dict[str, Any]] = deque(maxlen=_clamp(point_limit, 1, MAX_MARK_REPLAY_POINTS))
     quantities: Dict[str, float] = {}
+    last_prices: Dict[str, float] = {}
     counts = {
         "points_total": 0,
         "trade_events_replayed": 0,
@@ -796,7 +809,6 @@ def _build_mark_replay_points(
 
     def replay_points():
         cash = 0.0
-        last_prices: Dict[str, float] = {}
         for timestamp, _order, kind, payload in timeline:
             if kind == "trade":
                 token_id = _trade_token_id(payload)
@@ -857,6 +869,9 @@ def _build_mark_replay_points(
         "timeline_truncated": False,
         "display_points_truncated": counts["points_total"] > len(retained_points),
         "final_inventory": final_inventory,
+        "final_inventory_value_by_token_usd": {
+            token: quantity * last_prices[token] for token, quantity in final_inventory.items()
+        },
     }
 
 
@@ -880,6 +895,63 @@ def _base_payload_summary(payload: Mapping[str, Any]) -> Dict[str, Any]:
         "open_current_value",
     ]
     return {key: payload.get(key) for key in keys}
+
+
+def _reconcile_replay_snapshot(inputs: MddInputs, replay: Mapping[str, Any], base: Mapping[str, Any]) -> Dict[str, Any]:
+    """Compare current public observations without inventing cash or marks."""
+    open_coverage = inputs.history_coverage.get("open_positions", {})
+    if not inputs.open_positions and open_coverage.get("status") != "end_of_results":
+        return {"status": "not_supplied", "scope": "point_in_time_comparison", "incomplete_reasons": []}
+    reasons = []
+    positions: Dict[str, float] = {}
+    current_values: Dict[str, float] = {}
+    for row in inputs.open_positions:
+        token = _trade_token_id(row)
+        size = _finite_number(_lookup(row, "size"))
+        if not token or size is None or size < 0:
+            reasons.append("current_position_identity_or_size_unavailable")
+            continue
+        if token in positions:
+            reasons.append("duplicate_current_position")
+        positions[token] = size
+        value_aliases = _position_current_values(row)
+        if value_aliases:
+            current_values[token] = value_aliases[0]
+    # Source components are rounded to six decimals; bound accumulated rounding
+    # by the number of observations rather than by the magnitude of a balance.
+    tolerance = 1.000001e-6 * max(1, len(inputs.open_positions) + int(replay["trade_events_replayed"]))
+    inventory = replay["final_inventory"]
+    mismatches = [token for token in sorted(set(positions) | set(inventory))
+                  if not math.isclose(positions.get(token, 0), inventory.get(token, 0), rel_tol=0, abs_tol=tolerance)]
+    if mismatches:
+        reasons.append("current_inventory_mismatch")
+    replay_values = replay["final_inventory_value_by_token_usd"]
+    value_mismatches = [token for token in sorted(current_values)
+                        if not math.isclose(current_values[token], replay_values.get(token, 0), rel_tol=0, abs_tol=tolerance)]
+    if value_mismatches:
+        reasons.append("current_position_value_mismatch")
+    final_pnl = replay["points"][-1]["value"] if replay["points"] else None
+    closed_coverage = inputs.history_coverage.get("closed_positions", {})
+    pnl_known = bool(inputs.open_positions or inputs.closed_positions) or closed_coverage.get("status") == "end_of_results"
+    snapshot_pnl = float(base["cumulative_realized_pnl"]) + float(base["open_pnl"]) if pnl_known else None
+    if snapshot_pnl is not None and final_pnl is not None:
+        pnl_tolerance = tolerance + 1.000001e-6 * len(inputs.closed_positions)
+        if not math.isclose(snapshot_pnl, final_pnl, rel_tol=0, abs_tol=pnl_tolerance):
+            reasons.append("current_pnl_mismatch")
+    return {
+        "status": "mismatch" if reasons else "matched",
+        "scope": "point_in_time_comparison",
+        "incomplete_reasons": list(dict.fromkeys(reasons)),
+        "inventory_mismatch_tokens": mismatches,
+        "current_value_mismatch_tokens": value_mismatches,
+        "position_inventory": positions,
+        "position_current_value_by_token_usd": current_values,
+        "replay_current_value_by_token_usd": replay_values,
+        "replay_terminal_pnl_usd": final_pnl,
+        "snapshot_terminal_pnl_usd": snapshot_pnl,
+        "quantity_rounding_tolerance": tolerance,
+        "current_value_rounding_tolerance_usd": tolerance,
+    }
 
 
 def _apply_accounting_snapshot_if_requested(
@@ -1045,6 +1117,14 @@ def build_mark_replay_mdd_payload(
     drawdown = replay["drawdown"]
     incomplete_reasons = [f"history_limit_reached:{name}" for name in base["mdd_history_capped_sources"]]
     incomplete_reasons.extend(f"history_source_not_requested:{name}" for name in base["mdd_history_excluded_sources"])
+    unsupported_activity: Dict[str, int] = {}
+    for row in inputs.activity_events:
+        activity_type = str(_lookup(row, "type") or "TRADE").strip().upper()
+        if activity_type != "TRADE":
+            unsupported_activity[activity_type] = unsupported_activity.get(activity_type, 0) + 1
+    incomplete_reasons.extend(f"unsupported_activity_type:{kind}" for kind in sorted(unsupported_activity))
+    reconciliation = _reconcile_replay_snapshot(inputs, replay, base)
+    incomplete_reasons.extend(reconciliation["incomplete_reasons"])
     if missing_history_tokens:
         incomplete_reasons.append("missing_price_history")
     if clipped_token_ids:
@@ -1088,6 +1168,8 @@ def build_mark_replay_mdd_payload(
                 "trades_without_size_or_price": replay["trades_without_size_or_price"],
                 "negative_inventory_events": replay["negative_inventory_events"],
                 "final_inventory": replay["final_inventory"],
+                "unsupported_activity": unsupported_activity,
+                "current_snapshot_reconciliation": reconciliation,
             },
             "fallback_v2": fallback_summary,
         }
@@ -1095,6 +1177,9 @@ def build_mark_replay_mdd_payload(
     if incomplete_reasons:
         base["mark_replay"]["observed_drawdown"] = drawdown
         base.update(mdd_available=False, mdd_usd=None, mdd_pct=None)
+        base["mdd_unavailable_reasons"] = list(dict.fromkeys([
+            *base.get("mdd_unavailable_reasons", []), *incomplete_reasons,
+        ]))
     return _apply_history_coverage(base, inputs)
 
 

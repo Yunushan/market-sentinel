@@ -34,6 +34,8 @@ except ModuleNotFoundError:  # Python 3.10 compatibility.
     import tomli as tomllib
 
 from core.models import (
+    AlertEvent,
+    AlertEventCapacityError,
     AppConfig,
     CopyTradeSettings,
     MarketConfig,
@@ -42,8 +44,10 @@ from core.models import (
     PriceAlert,
     UIDesign,
     WalletWatch,
+    alert_probability,
     bounded_mutation_result,
     MAX_MUTATION_RESULT_BYTES,
+    MAX_ALERT_EVENTS,
     MARKET_SAFETY_BOOLEAN_FIELDS,
     MARKET_SAFETY_LIMIT_FIELDS,
 )
@@ -87,7 +91,7 @@ from polymarket.analytics_cache import (
 from polymarket.auth_readiness import build_clob_auth_readiness
 from polymarket.coverage import polymarket_official_api_coverage
 from polymarket.credential_runbook import build_polymarket_credential_runbook
-from polymarket.http_client import PolymarketHTTPError, PolymarketRateLimitError
+from polymarket.http_client import PolymarketHTTPError, PolymarketRateLimitError, PolymarketResponseError
 from polymarket.live_verification import (
     ABSOLUTE_MAX_VERIFY_NOTIONAL,
     ABSOLUTE_MAX_VERIFY_SIZE,
@@ -133,6 +137,7 @@ from polymarket.leaderboard import (
     LEADERBOARD_MAX_OFFSET, PNL_VOLUME_BASIS, normalize_leaderboard_category,
     performance_ratio_metadata, wallet_membership_fingerprint,
 )
+from polymarket.leaderboard_validation import source_leaderboard_fields
 from polymarket.mdd import (
     DEFAULT_CACHE_TTL_SECONDS as POLYMARKET_MDD_CACHE_TTL_SECONDS,
     MDD_CALCULATION_VERSION,
@@ -465,6 +470,7 @@ API_ROUTES = {
         "/api/markets/{market_id}/candles",
         "/api/markets/{market_id}/account/{operation}",
         "/api/alerts",
+        "/api/alerts/events",
         "/api/wallets",
         "/api/copy",
         "/api/live-safety",
@@ -509,6 +515,7 @@ API_ROUTES = {
     "POST": [
         "/api/alerts",
         "/api/alerts/refresh",
+        "/api/alerts/events/{event_id}/acknowledge",
         "/api/alerts/{alert_id}/refresh",
         "/api/wallets",
         "/api/wallets/poll",
@@ -953,15 +960,16 @@ def _alert_price_state_key(market_id: str, contract_id: str) -> Tuple[str, str]:
 
 
 def price_snapshot_values(snapshot: PriceSnapshot) -> Dict[str, Optional[float]]:
-    midpoint = snapshot.midpoint
-    if midpoint is None and snapshot.bid is not None and snapshot.ask is not None:
-        midpoint = (float(snapshot.bid) + float(snapshot.ask)) / 2.0
-    return {
-        "last_trade": _safe_float(snapshot.last, None),
-        "midpoint": _safe_float(midpoint, None),
-        "best_bid": _safe_float(snapshot.bid, None),
-        "best_ask": _safe_float(snapshot.ask, None),
+    values = {
+        source: alert_probability(value, source, allow_unavailable=True)
+        for source, value in (
+            ("last_trade", snapshot.last), ("midpoint", snapshot.midpoint),
+            ("best_bid", snapshot.bid), ("best_ask", snapshot.ask),
+        )
     }
+    if values["midpoint"] is None and values["best_bid"] is not None and values["best_ask"] is not None:
+        values["midpoint"] = (values["best_bid"] + values["best_ask"]) / 2.0
+    return values
 
 
 def _alert_values(
@@ -970,7 +978,7 @@ def _alert_values(
 ) -> Dict[str, Optional[float]]:
     key = _alert_price_state_key(_alert_market_id(alert), alert.token_id)
     raw_values = dict((price_state or {}).get(key, {}))
-    return {source: _safe_float(raw_values.get(source), None) for source in ALERT_SOURCE_IDS}
+    return {source: alert_probability(raw_values.get(source), source, allow_unavailable=True) for source in ALERT_SOURCE_IDS}
 
 
 def _alert_current_value(
@@ -981,7 +989,7 @@ def _alert_current_value(
     value = values.get(str(alert.source))
     if value is not None:
         return value
-    return _safe_float(alert.last_value, None)
+    return alert_probability(alert.last_value, "last_value", allow_unavailable=True)
 
 
 def _alert_condition(alert: PriceAlert, value: float) -> bool:
@@ -2033,11 +2041,25 @@ def alerts_payload(
     return {
         "alerts": alerts,
         "source_options": ALERT_SOURCE_OPTIONS,
+        "event_history": alert_events_payload(cfg),
         "counts": {
             "total": len(alerts),
             "enabled": sum(1 for alert in cfg.alerts if alert.enabled),
             "triggered": sum(1 for alert in cfg.alerts if alert.triggered),
         },
+    }
+
+
+def alert_events_payload(cfg: AppConfig) -> Dict[str, Any]:
+    return {
+        "events": [event.to_dict() for event in sorted(
+            cfg.alert_events, key=lambda event: (event.created_at, event.id), reverse=True,
+        )],
+        "counts": {
+            "total": len(cfg.alert_events),
+            "unacknowledged": sum(1 for event in cfg.alert_events if not event.acknowledged_at),
+        },
+        "capacity": MAX_ALERT_EVENTS,
     }
 
 
@@ -2057,7 +2079,9 @@ def alert_from_payload(
     label = str(payload.get("label") if "label" in payload else (existing.label if existing else "")).strip()
     direction = str(payload.get("direction") or (existing.direction if existing else "above")).strip().lower()
     source = str(payload.get("source") or (existing.source if existing else "last_trade")).strip().lower()
-    threshold = _safe_float(payload.get("threshold") if "threshold" in payload else (existing.threshold if existing else None), None)
+    threshold = alert_probability(
+        payload.get("threshold") if "threshold" in payload else (existing.threshold if existing else None), "threshold",
+    )
 
     if not market_id:
         raise ValueError("market_id is required.")
@@ -2075,6 +2099,18 @@ def alert_from_payload(
     once = bool_from_setting(payload.get("once"), existing.once if existing else True)
     enabled = bool_from_setting(payload.get("enabled"), existing.enabled if existing else True)
     label = label or f"Alert {token_id[:8]}"
+    candidate = PriceAlert(
+        token_id=token_id,
+        label=label,
+        direction=direction,  # type: ignore[arg-type]
+        threshold=float(threshold),
+        source=source,  # type: ignore[arg-type]
+        once=once,
+        enabled=enabled,
+        market_id=market_id,
+    )
+    candidate.validate_notification_text()
+    candidate.validate_price_controls()
     watched_change_requested = existing is None or any(
         key in payload for key in ("market_id", "contract_id", "token_id", "direction", "threshold", "source")
     )
@@ -2087,16 +2123,7 @@ def alert_from_payload(
             raise UnsupportedFeatureError(market_id, "price_reading", f"{adapter.display_name} has no price feed for alerts.")
 
     if existing is None:
-        return PriceAlert(
-            token_id=token_id,
-            label=label,
-            direction=direction,  # type: ignore[arg-type]
-            threshold=float(threshold),
-            source=source,  # type: ignore[arg-type]
-            once=once,
-            enabled=enabled,
-            market_id=market_id,
-        )
+        return candidate
 
     watched_before = (existing.market_id, existing.token_id, existing.direction, existing.threshold, existing.source)
     existing.market_id = market_id
@@ -2121,32 +2148,54 @@ def evaluate_alerts_for_contract(
     price_state: Mapping[Tuple[str, str], Mapping[str, Any]],
 ) -> List[str]:
     normalized_market, normalized_contract = _alert_price_state_key(market_id, contract_id)
-    values = dict(price_state.get((normalized_market, normalized_contract), {}))
+    raw_values = dict(price_state.get((normalized_market, normalized_contract), {}))
+    values = {
+        source: alert_probability(raw_values.get(source), source, allow_unavailable=True)
+        for source in ALERT_SOURCE_IDS
+    }
     messages: List[str] = []
+    changes: List[Tuple[PriceAlert, float, bool, bool]] = []
+    events: List[AlertEvent] = []
     for alert in cfg.alerts:
         if not alert.enabled:
             continue
         if _alert_market_id(alert) != normalized_market or alert.token_id != normalized_contract:
             continue
-        value = _safe_float(values.get(str(alert.source)), None)
+        alert.validate_price_controls()
+        value = values.get(str(alert.source))
         if value is None:
             continue
         previous = alert.last_value
-        alert.last_value = float(value)
         condition_now = _alert_condition(alert, float(value))
         condition_previous = None
         if previous is not None:
             condition_previous = _alert_condition(alert, float(previous))
         crossed = condition_now and (condition_previous is False or condition_previous is None)
+        triggered = alert.triggered
+        enabled = alert.enabled
         if crossed and not alert.triggered:
-            alert.triggered = True
-            messages.append(
-                f"{normalized_market}:{alert.label} {alert.source}={float(value):g} crossed {alert.direction} {float(alert.threshold):g}"
+            message = f"{normalized_market}:{alert.label} {alert.source}={float(value):g} crossed {alert.direction} {float(alert.threshold):g}"
+            events.append(
+                AlertEvent(
+                    alert_id=alert.id, market_id=normalized_market, contract_id=normalized_contract,
+                    label=alert.label, source=alert.source, direction=alert.direction,
+                    threshold=float(alert.threshold), value=float(value), message=message,
+                )
             )
+            messages.append(message)
+            triggered = True
             if alert.once:
-                alert.enabled = False
-        if not alert.once and alert.triggered and not condition_now:
-            alert.triggered = False
+                enabled = False
+        if not alert.once and triggered and not condition_now:
+            triggered = False
+        changes.append((alert, float(value), triggered, enabled))
+    # The config CAS commit publishes notifications and their consumed trigger
+    # state together. Full unread history fails before any trigger is changed.
+    cfg.append_alert_events(events)
+    for alert, value, triggered, enabled in changes:
+        alert.last_value = value
+        alert.triggered = triggered
+        alert.enabled = enabled
     return messages
 
 
@@ -2193,6 +2242,8 @@ def refresh_all_alert_prices(
         seen.add(key)
         try:
             refreshed.append(refresh_alert_price(cfg, registry, alert, price_state))
+        except AlertEventCapacityError:
+            raise
         except Exception as exc:
             problems.append(f"{key[0]}:{key[1]}: {exc}")
     return {"refreshed": refreshed, "problems": problems}
@@ -2312,27 +2363,13 @@ def _leaderboard_display_name(row: Mapping[str, Any], wallet: str) -> str:
 
 
 def normalize_polymarket_leaderboard_row(raw: Mapping[str, Any], fallback_rank: int) -> Dict[str, Any]:
-    wallet = str(
-        _leaderboard_lookup(raw, "proxyWallet", "proxy_wallet", "wallet", "address", "userAddress") or ""
-    )
-    pnl = _safe_float(
-        _leaderboard_lookup(raw, "pnl", "pnlUsd", "pnl_usd", "profit", "profitLoss", "realizedPnl", "realizedPnlUsd"),
-        None,
-    )
-    volume = _safe_float(
-        _leaderboard_lookup(raw, "volume", "volumeUsd", "volume_usd", "vol", "totalVolume", "totalVolumeUsd"),
-        None,
-    )
+    fields = source_leaderboard_fields(raw)
+    wallet, pnl, volume = fields["wallet"], fields["pnl"], fields["volume"]
     roi = (float(pnl) / float(volume) * 100.0) if pnl is not None and volume and volume > 0 else None
-    mdd_usd = _safe_float(
-        _leaderboard_lookup(raw, "mdd", "mddUsd", "mdd_usd", "maxDrawdown", "max_drawdown", "maxDrawdownUsd"),
-        None,
-    )
-    mdd_pct = _safe_float(
-        _leaderboard_lookup(raw, "mddPct", "mdd_pct", "maxDrawdownPct", "max_drawdown_pct"),
-        None,
-    )
-    rank = _safe_int(_leaderboard_lookup(raw, "rank", "position"), fallback_rank)
+    if roi is not None and not math.isfinite(roi):
+        raise PolymarketResponseError("Leaderboard derived PnL/volume ratio must be finite; board coverage is unknown.")
+    mdd_usd, mdd_pct = fields["mdd_usd"], fields["mdd_pct"]
+    rank = fields["rank"] or fallback_rank
     display_public = _leaderboard_lookup(raw, "displayUsernamePublic", "display_username_public")
     return {
         "rank": rank or fallback_rank,
@@ -2344,7 +2381,7 @@ def normalize_polymarket_leaderboard_row(raw: Mapping[str, Any], fallback_rank: 
         "volume_usd": volume,
         "roi_pct": roi,
         **performance_ratio_metadata(roi),
-        "trade_count": _safe_int(_leaderboard_lookup(raw, "trades", "tradeCount", "trade_count", "totalTrades"), 0),
+        "trade_count": fields["trade_count"],
         "mdd_usd": mdd_usd,
         "mdd_pct": mdd_pct,
         "mdd_available": mdd_usd is not None or mdd_pct is not None,
@@ -3083,7 +3120,7 @@ def _fetch_polymarket_leaderboard_scan_rows(
     def fetch_page_with_cancellation(page_offset: int, page_limit: int) -> List[Dict[str, Any]]:
         for attempt in range(1, retry_attempts + 1):
             try:
-                return data_api.get_leaderboard(
+                page = data_api.get_leaderboard(
                     limit=page_limit,
                     offset=page_offset,
                     sort_by=remote_sort,
@@ -3091,6 +3128,9 @@ def _fetch_polymarket_leaderboard_scan_rows(
                     period=period,
                     category=category,
                 )
+                for row in page:
+                    source_leaderboard_fields(row)
+                return page
             except RequestCancelled:
                 raise
             except Exception as exc:
@@ -5964,6 +6004,9 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             if path == "/api/alerts":
                 self._send_json(HTTPStatus.OK, alerts_payload(cfg, self.app_server.adapter_registry, self.app_server.alert_price_state))
                 return
+            if path == "/api/alerts/events":
+                self._send_json(HTTPStatus.OK, alert_events_payload(cfg))
+                return
             if path == "/api/wallets":
                 self._send_json(HTTPStatus.OK, wallets_payload(cfg, self.app_server.wallet_polling, self.app_server.wallet_recent_activity))
                 return
@@ -6347,7 +6390,13 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         if entry is not None:
             _assert_mutation_request_matches(entry, method, path, payload)
             if entry.state == "completed":
-                self._send_json(entry.response_status or HTTPStatus.OK, dict(entry.response))
+                response = dict(entry.response)
+                if method == "POST" and path == "/api/alerts":
+                    # Notifications are a current view, not part of the
+                    # immutable bounded create receipt. Never duplicate the
+                    # retained backlog in every idempotency journal entry.
+                    response["event_history"] = alert_events_payload(cfg)
+                self._send_json(entry.response_status or HTTPStatus.OK, response)
                 return None, True
             if entry.state == "rejected":
                 if (
@@ -6685,7 +6734,19 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                     self.app_server.adapter_registry,
                     self.app_server.alert_price_state,
                 )
-                self._commit_local_idempotent_mutation(cfg, journal_entry, response)
+                replay_result = {key: value for key, value in response.items() if key != "event_history"}
+                self._commit_local_idempotent_mutation(
+                    cfg, journal_entry, replay_result,
+                    preserve_response_shape=True, client_response=response,
+                )
+                return
+            event_route = path.strip("/").split("/")
+            if (method == "POST" and len(event_route) == 5
+                    and event_route[:3] == ["api", "alerts", "events"]
+                    and event_route[4] == "acknowledge"):
+                event = cfg.acknowledge_alert_event(unquote(event_route[3]))
+                self._save_config(cfg)
+                self._send_json(HTTPStatus.OK, {"acknowledged": event.to_dict(), **alert_events_payload(cfg)})
                 return
             if method == "POST" and path == "/api/alerts/refresh":
                 result = refresh_all_alert_prices(cfg, self.app_server.adapter_registry, self.app_server.alert_price_state)

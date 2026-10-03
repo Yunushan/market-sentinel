@@ -156,7 +156,7 @@ class MddSourceQualityTests(unittest.TestCase):
             state = Path(temporary) / "state.db"
             with closing(LeaderboardStateStore(state)) as store:
                 store.prepare({}, resume=False)
-                store.record_page(0, 50, [{"wallet": WALLET, "rank": 1, "roi_pct": 10}])
+                store.record_page(0, 50, [{"wallet": WALLET, "rank": 1, "pnl_usd": 10, "volume_usd": 100, "roi_pct": 10}])
                 row = next(store.iter_results({}, require_mdd=False, sort="roi_pct", direction="DESC", limit=None))
                 store.set_mdd(row["id"], result)
             with closing(LeaderboardStateStore(state)) as store:

@@ -10,6 +10,11 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 try:
+    from scripts.windows_signing_policy import REQUIRED_SIGNING_SECRETS, REQUIRED_SIGNING_VARIABLES, signing_configuration_issues
+except ModuleNotFoundError:
+    from windows_signing_policy import REQUIRED_SIGNING_SECRETS, REQUIRED_SIGNING_VARIABLES, signing_configuration_issues
+
+try:
     import truststore
 except ImportError:  # pragma: no cover - optional for minimal standalone use
     truststore = None
@@ -17,7 +22,7 @@ except ImportError:  # pragma: no cover - optional for minimal standalone use
 
 API_VERSION = "2026-03-10"
 DEFAULT_API_URL = "https://api.github.com"
-GOVERNANCE_STATE_SCHEMA_VERSION = 3
+GOVERNANCE_STATE_SCHEMA_VERSION = 4
 REQUIRED_CHECKS = frozenset(
     {
         "Python package build",
@@ -31,13 +36,7 @@ REQUIRED_CHECKS = frozenset(
 )
 GITHUB_ACTIONS_APP_ID = 15368
 REQUIRED_RELEASE_TAG_POLICY = "v*.*.*"
-REQUIRED_RELEASE_SECRETS = frozenset(
-    {
-        "READINESS_ADMIN_TOKEN",
-        "WINDOWS_CODE_SIGNING_CERTIFICATE_BASE64",
-        "WINDOWS_CODE_SIGNING_CERTIFICATE_PASSWORD",
-    }
-)
+REQUIRED_RELEASE_SECRETS = REQUIRED_SIGNING_SECRETS | {"READINESS_ADMIN_TOKEN"}
 JsonRequest = Callable[[str, str, float], Any]
 _TRUSTSTORE_INJECTED = False
 
@@ -208,6 +207,7 @@ def check_release_environment(
     deployment_policies: dict[str, Any],
     protected_branch: str,
     owner_login: str,
+    signing_variables: Mapping[str, str] | None = None,
 ) -> list[dict[str, str]]:
     """Validate owner approval, exact ref restrictions, signing configuration, and secrets."""
     rules = environment.get("protection_rules")
@@ -237,6 +237,7 @@ def check_release_environment(
     exact_ref_policy = custom_policy and len(policy_rows) == 2 and observed_policies == required_policies
     required_secret_names = set(REQUIRED_RELEASE_SECRETS)
     missing_secrets = sorted(required_secret_names - {str(name) for name in secret_names})
+    invalid_signing = signing_configuration_issues(signing_variables or {})
     return [
         _check("release_required_reviewers", reviewer_rule is not None, "release environment must require reviewer approval"),
         _check(
@@ -253,7 +254,13 @@ def check_release_environment(
                 f"tag pattern {REQUIRED_RELEASE_TAG_POLICY!r}"
             ),
         ),
-        _check("release_signing_secrets", not missing_secrets, "missing=" + ",".join(missing_secrets) if missing_secrets else "required release secrets present"),
+        _check(
+            "release_signing_secrets",
+            not missing_secrets and not invalid_signing,
+            "missing/invalid=" + ",".join([*missing_secrets, *invalid_signing])
+            if missing_secrets or invalid_signing
+            else "reviewed SignPath provider configuration and required release secrets present",
+        ),
     ]
 
 
@@ -438,6 +445,22 @@ def _named_inventory(payload: Mapping[str, Any], key: str) -> list[str]:
     )
 
 
+def _signing_variables(document: Mapping[str, Any]) -> dict[str, str]:
+    rows = document.get("variables")
+    output: dict[str, str] = {}
+    if not isinstance(rows, list):
+        return output
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        name = row.get("name")
+        if name in REQUIRED_SIGNING_VARIABLES:
+            if name in output or not isinstance(row.get("value"), str):
+                raise RuntimeError("GitHub release signing variable inventory is ambiguous")
+            output[name] = row["value"]
+    return dict(sorted(output.items()))
+
+
 def canonical_governance_state(
     repository: str,
     branch: str,
@@ -484,6 +507,7 @@ def canonical_governance_state(
         {
             "deployment_policies": release_policy_rows,
             "secret_names": _named_inventory(documents["release_secrets"], "secrets"),
+            "signing_variables": _signing_variables(documents["release_signing_variables"]),
         }
     )
     production_state = _environment_state(production_environment)
@@ -544,6 +568,7 @@ def _collect_documents(
         "release_environment": f"{prefix}/environments/release",
         "release_policies": f"{prefix}/environments/release/deployment-branch-policies?per_page=100",
         "release_secrets": f"{prefix}/environments/release/secrets?per_page=100",
+        "release_signing_variables": f"{prefix}/environments/release/variables?per_page=100",
         "production_environment": f"{prefix}/environments/production",
         "production_secrets": f"{prefix}/environments/production/secrets?per_page=100",
         "production_variables": f"{prefix}/environments/production/variables?per_page=100",
@@ -555,6 +580,7 @@ def _collect_documents(
     for document_name, collection_name in (
         ("release_policies", "branch_policies"),
         ("release_secrets", "secrets"),
+        ("release_signing_variables", "variables"),
         ("production_secrets", "secrets"),
         ("production_variables", "variables"),
     ):
@@ -602,6 +628,7 @@ def collect_governance_evidence(
             release_policies,
             branch,
             owner_login,
+            _signing_variables(documents["release_signing_variables"]),
         ),
         check_release_variable(variable),
         *check_production_environment(

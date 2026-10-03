@@ -284,12 +284,11 @@ class HTTPDeadlineTests(unittest.TestCase):
         transport_error = requests.ReadTimeout("transport timer rounded early")
 
         def expire_at_boundary():
-            control = current_request()
-            self.assertIsNotNone(control)
-            control.deadline = time.monotonic() + 0.002
             raise transport_error
 
-        with self.assertRaises(RequestDeadlineExceeded) as raised:
+        with patch("core.request_control.time.monotonic", side_effect=[
+            0.0, 0.0, 0.998, 0.998, 1.0,
+        ]), self.assertRaises(RequestDeadlineExceeded) as raised:
             controlled_response(1, expire_at_boundary)
         self.assertIs(raised.exception.__cause__, transport_error)
 
@@ -299,14 +298,32 @@ class HTTPDeadlineTests(unittest.TestCase):
 
         def expire_phase_at_boundary(*, timeout):
             self.assertEqual(timeout, (5.0, 0.01))
-            control = current_request()
-            self.assertIsNotNone(control)
-            control.deadline = time.monotonic() + 0.002
             raise phase_error
 
-        with self.assertRaises(requests.ReadTimeout) as raised:
+        with patch("core.request_control.time.monotonic", side_effect=[
+            0.0, 0.0, 5.008,
+        ]), self.assertRaises(requests.ReadTimeout) as raised:
             controlled_response(sum(timeout), expire_phase_at_boundary, timeout=timeout)
         self.assertIs(raised.exception, phase_error)
+
+    def test_transport_timeout_crossing_deadline_during_classification_becomes_overall_deadline(self):
+        for boundary, clock_values in (
+            ("before_wait_at_deadline", [0.0, 0.0, 0.999, 1.0, 1.0]),
+            ("before_wait_after_deadline", [0.0, 0.0, 0.999, 1.001, 1.001]),
+            ("after_wait_at_deadline", [0.0, 0.0, 0.999, 0.999, 0.999, 1.0, 1.0]),
+        ):
+            with self.subTest(boundary=boundary):
+                transport_error = requests.ReadTimeout("transport timeout at deadline")
+
+                def fail_transport(transport_error=transport_error):
+                    raise transport_error
+
+                # A check sees time remaining, then the classification clock
+                # read reaches or crosses the deadline, before or after a wait.
+                with patch("core.request_control.time.monotonic", side_effect=clock_values), \
+                        self.assertRaises(RequestDeadlineExceeded) as raised:
+                    controlled_response(1, fail_transport)
+                self.assertIs(raised.exception.__cause__, transport_error)
 
     def test_dns_timeout_has_bounded_helpers_and_no_http_continuation(self):
         release = threading.Event()
