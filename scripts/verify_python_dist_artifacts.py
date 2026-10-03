@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import tarfile
 from email.parser import BytesParser
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from zipfile import ZipFile
 
 try:
@@ -154,6 +154,38 @@ def _verify_license_text(text: str, label: str) -> None:
         raise SystemExit(f"{label} does not contain the expected BSD Zero Clause License text.")
 
 
+def _verify_artifact_privacy(names: set[str], label: str) -> None:
+    forbidden = []
+    generated_fragments = (
+        "__pycache__", "node_modules", ".cache", ".test-dist", "test-results",
+        "playwright-report", ".tmp", ".git", ".venv",
+    )
+    for name in names:
+        clean_name = name.rstrip("/")
+        path = PurePosixPath(clean_name)
+        parts = path.parts
+        folded_parts = tuple(part.casefold() for part in parts)
+        lower_name = path.name.casefold()
+        if (
+            path.is_absolute() or ".." in parts or "\\" in name
+            or any(":" in part or part.endswith((" ", ".")) for part in parts)
+            or any(part in generated_fragments for part in folded_parts)
+            or folded_parts[:2] == ("frontend", "dist")
+            or (folded_parts and folded_parts[0] == "data" and clean_name not in {"data/config.example.json", "data"})
+            or lower_name == ".coverage"
+            or (
+                (lower_name.startswith(".env") or ".env." in lower_name or lower_name.endswith(".env"))
+                and not lower_name.endswith(".env.example")
+            )
+            or path.suffix.lower() in {".pem", ".key", ".pfx", ".p12", ".jks"}
+        ):
+            forbidden.append(name)
+    if forbidden:
+        raise SystemExit(
+            f"{label} contains generated/private artifacts: {', '.join(sorted(forbidden)[:10])}"
+        )
+
+
 def verify_wheel(path: Path, expected_version: str) -> None:
     expected_version = _canonical_version(expected_version)
     dist_info = f"market_sentinel-{expected_version}.dist-info"
@@ -162,6 +194,7 @@ def verify_wheel(path: Path, expected_version: str) -> None:
     license_name = f"{dist_info}/licenses/LICENSE"
     with ZipFile(path) as archive:
         names = set(archive.namelist())
+        _verify_artifact_privacy(names, f"Wheel {path.name}")
         required = REQUIRED_WHEEL_MEMBERS | {metadata_name, entry_points_name, license_name}
         missing = _missing(required, names)
         if missing:
@@ -220,8 +253,14 @@ def verify_sdist(path: Path, expected_version: str) -> None:
     expected_version = _canonical_version(expected_version)
     prefix = f"market_sentinel-{expected_version}/"
     with tarfile.open(path, "r:gz") as archive:
-        names = {name.replace("\\", "/") for name in archive.getnames()}
+        names = set(archive.getnames())
+        unexpected = sorted(name for name in names if name != prefix.rstrip("/") and not name.startswith(prefix))
+        if unexpected:
+            raise SystemExit(f"Source distribution {path.name} contains unexpected archive roots.")
+        if any(member.issym() or member.islnk() for member in archive.getmembers()):
+            raise SystemExit(f"Source distribution {path.name} contains symbolic or hard links.")
         relative_names = {name[len(prefix) :] for name in names if name.startswith(prefix)}
+        _verify_artifact_privacy(relative_names, f"Source distribution {path.name}")
         missing = _missing(REQUIRED_SDIST_MEMBERS, relative_names)
         if missing:
             raise SystemExit(f"Source distribution {path.name} is missing: {', '.join(missing)}")
@@ -231,24 +270,6 @@ def verify_sdist(path: Path, expected_version: str) -> None:
         _verify_license_text(
             license_file.read().decode("utf-8"),
             f"Source distribution {path.name} LICENSE",
-        )
-    forbidden_fragments = (
-        "/__pycache__/",
-        "frontend/dist/",
-        "frontend/node_modules/",
-        "frontend/.test-dist/",
-        ".cache/",
-        "frontend/test-results/",
-        "frontend/playwright-report/",
-        ".coverage",
-        ".tmp/",
-    )
-    forbidden = sorted(
-        name for name in relative_names if any(fragment in name for fragment in forbidden_fragments)
-    )
-    if forbidden:
-        raise SystemExit(
-            f"Source distribution {path.name} contains generated/private artifacts: {', '.join(forbidden[:10])}"
         )
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .activity_history import activity_snapshot
+
 import math
 import hashlib
 import hmac
@@ -543,7 +545,14 @@ class MyriadAdapter(MarketAdapter):
         wallet = require_activity_identity(self.market_id, wallet_address)
         desired = self._bounded_activity_limit(limit)
         payload = self._fetch_activity_payload(wallet, desired)
-        return self._normalize_activity_payload(wallet, payload, desired)
+        subset = any(self.config.get(key) not in (None, "", "all") for key in (
+            "myriad_activity_market_id", "myriad_activity_market_slug", "myriad_activity_network_id",
+            "myriad_network_id", "myriad_activity_trading_model",
+        ))
+        return activity_snapshot(
+            self._normalize_activity_payload(wallet, payload, desired), payload,
+            effective_limit=desired, row_keys=("data", "events", "results", "items"), complete_window=not subset,
+        )
 
     def account_recovery(self, operation: str, **kwargs: Any) -> Dict[str, Any]:
         """Read Myriad's documented public wallet activity feed.

@@ -247,6 +247,7 @@ REQUIRED_RELEASE_METADATA_STEPS = (
     "Require release tag to resolve to workflow commit on protected main",
 )
 REQUIRED_RELEASE_PUBLISH_STEPS = (
+    "Reverify downloaded Python distribution contents",
     "Verify final release assets",
     "Attest release assets",
     "Reconcile and publish GitHub release",

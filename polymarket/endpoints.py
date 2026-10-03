@@ -99,12 +99,16 @@ CLOB_ENDPOINTS: Dict[str, PolymarketEndpoint] = {
 
 DATA_ENDPOINTS: Dict[str, PolymarketEndpoint] = {
     "activity": PolymarketEndpoint("data", "GET", "/activity", DATA_API, doc_url=DOCS_API_REFERENCE),
+    "activity_v2": PolymarketEndpoint("data", "GET", "/v2/activity", DATA_API, max_items=1000, doc_url="https://docs.polymarket.com/api-reference/feeds/list-account-activity"),
     "positions": PolymarketEndpoint("data", "GET", "/positions", DATA_API, doc_url=DOCS_API_REFERENCE),
+    "positions_v2": PolymarketEndpoint("data", "GET", "/v2/positions", DATA_API, max_items=1000, doc_url="https://docs.polymarket.com/api-reference/wallet/list-positions-for-a-user-or-market"),
     "closed_positions": PolymarketEndpoint("data", "GET", "/closed-positions", DATA_API, doc_url=DOCS_API_REFERENCE),
     "trades": PolymarketEndpoint("data", "GET", "/trades", DATA_API, doc_url=DOCS_API_REFERENCE),
+    "trades_v2": PolymarketEndpoint("data", "GET", "/v2/trades", DATA_API, max_items=1000, doc_url="https://docs.polymarket.com/api-reference/feeds/list-trades"),
     "leaderboard": PolymarketEndpoint("data", "GET", "/v1/leaderboard", DATA_API, doc_url="https://docs.polymarket.com/api-reference/core/get-trader-leaderboard-rankings"),
     "leaderboard_v2": PolymarketEndpoint("data", "GET", "/v2/leaderboard", DATA_API, doc_url="https://docs.polymarket.com/api-reference/boards/get-the-trader-leaderboard"),
     "value": PolymarketEndpoint("data", "GET", "/value", DATA_API, doc_url=DOCS_API_REFERENCE),
+    "value_v2": PolymarketEndpoint("data", "GET", "/v2/value", DATA_API, doc_url="https://docs.polymarket.com/api-reference/wallet/get-portfolio-value"),
     "traded": PolymarketEndpoint("data", "GET", "/traded", DATA_API, doc_url=DOCS_API_REFERENCE),
     "market_positions": PolymarketEndpoint("data", "GET", "/v1/market-positions", DATA_API, doc_url=DOCS_API_REFERENCE),
     "holders": PolymarketEndpoint("data", "GET", "/holders", DATA_API, doc_url=DOCS_API_REFERENCE),

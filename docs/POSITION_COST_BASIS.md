@@ -1,48 +1,57 @@
 # Public Position Cost Basis
 
-MDD calculation version 7 corrects position units and open-position query scope.
-It does not implement verified investment ROI or a full account-equity ledger.
+MDD calculation version 9 reads native Data API v2 position economics. It does
+not implement verified investment ROI or a full account-equity ledger. The
+[official OpenAPI](https://data-api.polymarket.com/v2/openapi.json), reviewed on
+October 3, 2026, defines the current units and fee components. See
+[Data API v2 financial reads](DATA_API_V2_FINANCIAL_CONSUMERS.md) for cursor
+coverage, endpoint migration and history limitations.
 
-## Sources
+## Native v2 calculation
 
-The [current Data API contract](https://docs.polymarket.com/api-reference/core/get-current-positions-for-a-user)
-defines `grossInitialValue` as remaining cost including attributed BUY fees.
-`initialValue` and `avgPrice` exclude those fees. Optional absent fields are
-unavailable, whereas an explicit zero fee is known. The default query excludes
-archived active positions and uses a size threshold of one.
-
-The [official historical position schema](https://github.com/Polymarket/polymarket-subgraph/blob/7a92ba026a9466c07381e0d245a323ba23ee8701/pnl-subgraph/schema.graphql)
-identifies `totalBought` as token quantity. The current closed-position endpoint
-lists numeric `totalBought`/`avgPrice` fields without a detailed cost ledger.
-Multiplying those fields yields a public share-price estimate, not independently
-verified historical spending or starting account capital. The retired subgraph
-is schema evidence only, not a supported current data source.
-
-## Calculation
-
-1. Prefer explicit `grossInitialValue`; do not add its fee component again.
-2. Otherwise use `initialValue`, adding `entryFeesUsdc` only when supplied.
-3. Otherwise multiply bought shares by average price for a closed position, or
-   remaining `size` by average price for an open position. A reported fee is
-   additive to this fee-exclusive estimate.
-4. Without a cost or both price and quantity, report the position cost as
+1. For open holdings, prefer `total_cost_usdc`, the remaining entry cost plus
+   attributed BUY fees. Do not add its fee component again.
+2. Otherwise use fee-exclusive `entry_cost_usdc`, adding `entry_fees_usdc` only
+   when supplied. If entry cost is unavailable, `current_size * avg_price` is
+   an estimate using remaining shares; fee provenance remains explicit.
+3. For CLOSED positions, the residual entry basis is approximately zero and
+   does not establish historical spending. `total_size * avg_price` is an
+   acquisition-cost estimate based on lifetime bought **shares**. Its lifetime
+   fee component remains unverified; residual attributed fees are not treated
+   as proof of lifetime fees.
+4. Without a cost or both price and quantity, report position cost as
    unavailable. Neither raw share count nor current market value is entry cost.
 
-Malformed, non-finite, negative or contradictory entry-cost components invalidate
-risk even when an operator supplies a capital base. Cost-component comparisons
-allow the source's six-decimal rounding. Missing fee components remain visible
-in provenance; none of these fields establishes complete BUY/SELL fee history.
-The source-reported PnL is not relabeled as a fully fee-reconciled net return.
+`total_pnl` must equal `realized_pnl + unrealized_pnl`; a missing component is
+not silently replaced by zero. Unrealized PnL must equal `current_value -
+entry_cost_usdc`, while `current_value` must agree with `current_size *
+current_price`. Invalid, non-finite, negative or contradictory financial
+components invalidate risk even with a user-supplied capital base. Comparisons
+allow six-decimal source rounding. Duplicate open-token observations cannot
+double their current PnL.
 
-`position_capital_basis` records the unit, selected sources and unknown-row
-counts in MDD and leaderboard JSON/CSV and durable scan summaries. Old summaries
-without this field do not gain invented provenance. Resuming a version-6 scan
-invalidates its MDD enrichment while preserving downloaded leaderboard pages.
+MDD requests `status=OPEN`, `filter_type=TOKENS`, `filter_amount=0` and
+`include_archived=true` on each open-position cursor page. This includes
+redeemable holdings and dust positions. CLOSED reads use `last_event_at`
+chronology. Query scope and explicit cursor EOF evidence are recorded in
+`mdd_history_coverage`; caps and unproven coverage retain unknown risk.
 
-MDD requests `sizeThreshold=0` and `includeArchived=true` on every open-position
-page. Query filters are recorded in `mdd_history_coverage`. General callers of
-`get_positions` retain the documented defaults unless they opt in. Page/row
-caps, source-quality checks and unverified-account labels remain in force.
+`position_capital_basis` records the native USDC unit, selected sources and
+unknown-row counts in MDD and durable scan/CSV summaries. Missing fee components
+remain visible. Source-reported PnL is not relabeled as a complete reconciled
+net return. Increasing the calculation version invalidates older MDD scan
+enrichment while preserving source-download evidence according to its original
+API provenance.
+
+## Historical compatibility
+
+Synthetic and previously persisted v1 rows retain their original units.
+`grossInitialValue` already includes attributed BUY fees; `initialValue` and
+`avgPrice` exclude them. `totalBought` is bought share quantity, never dollars.
+An explicit zero is known, while an absent field is unavailable. Historical
+rows are not retroactively assigned current collateral or native v2 volume
+semantics. The [historical position schema](https://github.com/Polymarket/polymarket-subgraph/blob/7a92ba026a9466c07381e0d245a323ba23ee8701/pnl-subgraph/schema.graphql)
+is unit evidence, not a current production data source.
 
 The automatic public denominator still uses aggregate position/trade estimates;
 capital reuse can differ from this basis. Full historical cash flows, inventory,

@@ -60,15 +60,18 @@ class ScanCancellationTests(unittest.TestCase):
             from polymarket.http_client import request_json
 
             phase, origin, database, output = sys.argv[1:]
-            rows = [{'proxyWallet': f'0x{index:040x}', 'pnl': 1, 'vol': 10} for index in range(1, 51)]
+            rows = [{'user_id': f'0x{index:040x}', 'rank': index, 'pnl': 1, 'volume': 10} for index in range(1, 51)]
 
             def slow_request(*args, **kwargs):
                 return request_json(PolymarketEndpoint('test', 'GET', '/body', origin), timeout=30)
 
             def page(**kwargs):
-                return rows if kwargs['offset'] == 0 else slow_request()
+                if kwargs.get('cursor') is not None:
+                    return slow_request()
+                return {'data': rows, 'pagination': {'has_more': True, 'next_cursor': 'fixture-next-page',
+                        'limit': 50, 'offset': 0}}
 
-            web_api.data_api.get_leaderboard = page
+            web_api.data_api.get_leaderboard_v2_page = page
             cli.polymarket_user_mdd_payload = slow_request
             arguments = ['polymarket-leaderboard', '--state-db', database, '--output', output,
                          '--format', 'csv', '--returned', 'unlimited', '--scan-concurrency', '1',
@@ -109,13 +112,16 @@ class ScanCancellationTests(unittest.TestCase):
     def test_cancelled_parallel_page_preserves_only_contiguous_checkpoint(self):
         with slow_server() as (origin, started, _seen):
             cancelled = threading.Event()
-            first = [{"proxyWallet": f"0x{index:040x}", "pnl": 1, "vol": 10} for index in range(1, 51)]
+            first = [{"user_id": f"0x{index:040x}", "rank": index, "pnl": 1, "volume": 10}
+                     for index in range(1, 51)]
             stored = []
             summary = {}
 
             def page(**kwargs):
-                if kwargs["offset"] == 0:
-                    return first
+                if kwargs.get("cursor") is None:
+                    return {"data": first, "pagination": {"has_more": True, "next_cursor": "fixture-next-page",
+                            "limit": 50, "offset": 0}}
+                self.assertEqual(kwargs, {"cursor": "fixture-next-page"})
                 return request_json(PolymarketEndpoint("test", "GET", "/body", origin), timeout=5)
 
             def cancel():
@@ -126,17 +132,20 @@ class ScanCancellationTests(unittest.TestCase):
             worker.start()
             try:
                 before = time.monotonic()
-                with patch("web_api.data_api.get_leaderboard", side_effect=page):
+                with patch("web_api.data_api.get_leaderboard_v2_page", side_effect=page):
                     rows, was_cancelled = web_api._fetch_polymarket_leaderboard_scan_rows(
                         scan_limit=100, remote_sort="PNL", direction="DESC", period="all", category="OVERALL",
                         scan_concurrency=2, is_cancelled=cancelled.is_set, emit_progress=lambda *_a, **_k: None,
                         warnings=[], scan_summary=summary,
-                        page_callback=lambda offset, _limit, _rows: stored.append(offset),
+                        cursor_page_callback=lambda ordinal, _limit, _rows, current, following:
+                        stored.append((ordinal, current, following)),
                     )
                 self.assertLess(time.monotonic() - before, 1.5)
                 self.assertTrue(was_cancelled)
                 self.assertEqual(rows, first)
-                self.assertEqual(stored, [0])
+                self.assertEqual(stored, [(0, None, "fixture-next-page")])
+                self.assertEqual(summary["next_cursor"], "fixture-next-page")
+                self.assertEqual(summary["next_page_index"], 1)
                 self.assertEqual(summary["completion_reason"], "cancelled")
                 self.assertFalse(summary["source_enumeration_complete"])
             finally:
@@ -145,7 +154,9 @@ class ScanCancellationTests(unittest.TestCase):
     def test_cancelled_mdd_workers_do_not_publish_cache_results(self):
         with slow_server() as (origin, started, _seen):
             cancelled = threading.Event()
-            rows = [{"proxyWallet": f"0x{index:040x}", "pnl": 1, "vol": 10} for index in (1, 2)]
+            rows = [{"user_id": f"0x{index:040x}", "rank": index, "pnl": 1, "volume": 10}
+                    for index in (1, 2)]
+            page = {"data": rows, "pagination": {"has_more": False, "next_cursor": None, "limit": 2, "offset": 0}}
 
             def compute(*_args, **_kwargs):
                 return request_json(PolymarketEndpoint("test", "GET", "/body", origin), timeout=5)
@@ -159,7 +170,7 @@ class ScanCancellationTests(unittest.TestCase):
             try:
                 before = time.monotonic()
                 with (
-                    patch("web_api.data_api.get_leaderboard", return_value=rows),
+                    patch("web_api.data_api.get_leaderboard_v2_page", return_value=page),
                     patch("web_api.polymarket_user_mdd_payload", side_effect=compute),
                     patch("web_api.attach_polymarket_mdd_audit_cache") as cache,
                 ):
@@ -183,7 +194,7 @@ class ScanCancellationTests(unittest.TestCase):
                 cancelled.set()
 
         before = time.monotonic()
-        with patch("web_api.data_api.get_leaderboard", side_effect=RuntimeError("upstream unavailable")) as fetch:
+        with patch("web_api.data_api.get_leaderboard_v2_page", side_effect=RuntimeError("upstream unavailable")) as fetch:
             rows, was_cancelled = web_api._fetch_polymarket_leaderboard_scan_rows(
                 scan_limit=10, remote_sort="PNL", direction="DESC", period="all", category="OVERALL",
                 scan_concurrency=1, scan_retry_attempts=10, scan_retry_delay_seconds=60,
@@ -231,7 +242,7 @@ class ScanCancellationTests(unittest.TestCase):
         write.assert_not_called()
 
     def test_failed_cancel_source_fails_closed_before_page_dispatch(self):
-        with patch("web_api.data_api.get_leaderboard") as fetch:
+        with patch("web_api.data_api.get_leaderboard_v2_page") as fetch:
             result = web_api.polymarket_leaderboard_payload({}, cancel_check=lambda: 1 / 0)
         self.assertTrue(result["cancelled"])
         fetch.assert_not_called()

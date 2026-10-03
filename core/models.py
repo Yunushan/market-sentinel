@@ -8,7 +8,7 @@ import math
 import uuid
 import time
 
-from market_adapters.catalog import MARKET_CATALOG
+from market_adapters.catalog import MARKET_CATALOG, MARKET_IDS
 
 
 PriceSource = Literal["last_trade", "midpoint", "best_bid", "best_ask"]
@@ -28,6 +28,7 @@ MAX_COPY_ACTIVITY_OUTBOX_ENTRIES = 10_000
 MAX_MARKET_CONFIGS = 512
 MAX_MUTATION_JOURNAL_ENTRIES = 256
 MAX_MUTATION_RESULT_BYTES = 256 * 1024
+MAX_UNACKNOWLEDGED_WALLET_POLL_RECEIPTS = 16
 MARKET_SAFETY_BOOLEAN_FIELDS = (
     "live_trading_enabled", "live_trading_confirmed", "live_trading_acknowledged",
     "live_trading_kill_switch", "live_trading_paused", "copy_trading_enabled",
@@ -208,6 +209,7 @@ class PaperTradeRecord:
     message: str
     filled_size: float = 0.0
     average_price: Optional[float] = None
+    quote_currency: Optional[str] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
     id: str = field(default_factory=_uuid)
@@ -230,6 +232,10 @@ class PaperTradeRecord:
         data["filled_size"] = float(data.get("filled_size") or 0.0)
         raw_average = data.get("average_price")
         data["average_price"] = None if raw_average in (None, "") else float(raw_average)
+        quote_currency = data.get("quote_currency")
+        if quote_currency not in (None, "USD", "USDC", "USDT", "pUSD"):
+            raise ValueError("Paper quote currency must be a supported native asset or null.")
+        data["quote_currency"] = quote_currency
         raw = data.get("raw")
         data["raw"] = dict(raw) if isinstance(raw, dict) else {}
         return PaperTradeRecord(**data)
@@ -247,6 +253,9 @@ class WalletWatch:
     last_seen_ts: int = 0
     last_seen_tx: str = ""
     seen_activity_keys: List[str] = field(default_factory=list)
+    activity_key_timestamps: Dict[str, int] = field(default_factory=dict)
+    activity_cursor_market_id: str = DEFAULT_MARKET_ID
+    activity_cursors: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     # optional filters
     only_market_slug: str = ""  # if set, only emit events for this market slug
@@ -258,6 +267,36 @@ class WalletWatch:
     def from_dict(d: Dict[str, Any]) -> "WalletWatch":
         data = dict(d)
         data["enabled"] = _config_bool(data, "enabled", True)
+        data["last_seen_ts"] = _config_integer(data.get("last_seen_ts", 0), "wallet cursor timestamp")
+        keys = data.get("seen_activity_keys", [])
+        if not isinstance(keys, list) or len(keys) > 10_000 or any(
+            not isinstance(key, str) or not key or len(key) > 512 or any(ord(char) < 32 for char in key)
+            for key in keys
+        ):
+            raise ValueError("Wallet activity identity ledger is invalid or exceeds capacity.")
+        data["seen_activity_keys"] = list(dict.fromkeys(keys))
+        timestamps = data.get("activity_key_timestamps", {})
+        if not isinstance(timestamps, dict) or len(timestamps) > 10_000:
+            raise ValueError("Wallet activity timestamp ledger is invalid or exceeds capacity.")
+        data["activity_key_timestamps"] = {
+            _record_identity({"key": key}, "key"): _config_integer(value, "activity timestamp")
+            for key, value in timestamps.items()
+        }
+        market_id = data.get("activity_cursor_market_id", DEFAULT_MARKET_ID)
+        if not isinstance(market_id, str) or market_id not in MARKET_IDS:
+            raise ValueError("Wallet activity cursor market is invalid.")
+        cursors = data.get("activity_cursors", {})
+        if not isinstance(cursors, dict) or len(cursors) > MAX_MARKET_CONFIGS:
+            raise ValueError("Wallet activity cursor collection is invalid.")
+        for cursor_market, cursor in cursors.items():
+            if cursor_market not in MARKET_IDS or not isinstance(cursor, dict):
+                raise ValueError("Wallet activity cursor is invalid.")
+            if set(cursor) != {"last_seen_ts", "last_seen_tx", "seen_activity_keys", "activity_key_timestamps"}:
+                raise ValueError("Wallet activity cursor is incomplete.")
+        data["activity_cursors"] = {}
+        for key, value in cursors.items():
+            validated = WalletWatch.from_dict({"wallet": data.get("wallet", ""), **value})
+            data["activity_cursors"][key] = {field: getattr(validated, field) for field in value}
         return WalletWatch(**data)
 
 
@@ -738,6 +777,8 @@ class AppConfig:
                     item
                     for item in self.mutation_journal
                     if item.state in {"completed", "rejected"}
+                    and not (item.state == "completed" and item.path == "/api/wallets/poll"
+                             and item.outcome_code != "wallet_delivery_batch_acknowledged")
                 ),
                 key=lambda item: (item.updated_at, item.created_at, item.id),
             )
@@ -864,7 +905,7 @@ class AppConfig:
             for x in _config_records(d, "paper_trades", maximum=MAX_PAPER_TRADES)
         ]
         wallets = [
-            WalletWatch.from_dict(x)
+            WalletWatch.from_dict({**x, "activity_cursor_market_id": x.get("activity_cursor_market_id", d.get("selected_market_id") or DEFAULT_MARKET_ID)})
             for x in _config_records(d, "wallets", maximum=MAX_WALLETS)
         ]
         copy_activity_outbox = [

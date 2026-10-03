@@ -20,6 +20,23 @@ def page(offset: int, count: int = 50) -> list[dict]:
             for index in range(offset, offset + count)]
 
 
+def native_rows(offset: int, count: int = 50) -> list[dict]:
+    return [{"user_id": "0x" + format(index + 1, "040x"), "rank": index + 1, "pnl": 100, "volume": 100}
+            for index in range(offset, offset + count)]
+
+
+def cursor_page(rows, *, next_cursor=None, limit=1000):
+    return {"data": rows, "pagination": {
+        "has_more": next_cursor is not None, "next_cursor": next_cursor, "limit": limit, "offset": 0,
+    }}
+
+
+def complete_pages():
+    return [cursor_page(native_rows(0, 1000), next_cursor="fixture-page-two"),
+            cursor_page(native_rows(1000, 1000), next_cursor="fixture-page-three"),
+            cursor_page(native_rows(2000, 1000))]
+
+
 class LeaderboardPaginationTests(unittest.TestCase):
     def scan(self, **options):
         summary, warnings = {}, []
@@ -30,47 +47,75 @@ class LeaderboardPaginationTests(unittest.TestCase):
         rows, cancelled = web_api._fetch_polymarket_leaderboard_scan_rows(**arguments)
         return rows, cancelled, summary, warnings
 
-    def test_serial_and_concurrent_unlimited_scans_never_request_beyond_source_bound(self) -> None:
+    def test_serial_and_concurrent_unlimited_scans_follow_exact_cursors_past_legacy_bound(self) -> None:
         for concurrency in (1, 6, 12):
             with self.subTest(concurrency=concurrency), patch.object(
-                data_api, "get_leaderboard", side_effect=lambda **kw: page(kw["offset"], kw["limit"])
+                data_api, "get_leaderboard_v2_page", side_effect=complete_pages()
             ) as get:
                 rows, cancelled, summary, warnings = self.scan(scan_concurrency=concurrency)
-            offsets = [call.kwargs["offset"] for call in get.call_args_list]
-            self.assertEqual(sorted(offsets), list(range(0, 1001, 50)))
-            self.assertEqual(len(rows), 1050)
+            self.assertEqual([call.kwargs.get("cursor") for call in get.call_args_list],
+                             [None, "fixture-page-two", "fixture-page-three"])
+            self.assertTrue(all("offset" not in call.kwargs for call in get.call_args_list))
+            self.assertEqual(len(rows), 3000)
             self.assertFalse(cancelled)
-            self.assertEqual(summary["completion_reason"], "upstream_offset_limit")
-            self.assertFalse(summary["source_enumeration_complete"])
-            self.assertTrue(warnings)
+            self.assertEqual(summary["completion_reason"], "end_of_results")
+            self.assertTrue(summary["source_enumeration_complete"])
+            self.assertEqual(summary["source_api_version"], 2)
+            if concurrency > 1:
+                self.assertTrue(warnings)
 
     def test_legacy_resume_offset_past_bound_does_not_make_a_network_request(self) -> None:
-        with patch.object(data_api, "get_leaderboard") as get:
-            _rows, _cancelled, summary, _warnings = self.scan(scan_start_offset=12335250)
+        with patch.object(data_api, "get_leaderboard_v2_page") as get:
+            with self.assertRaisesRegex(ValueError, "continuation cursor"):
+                self.scan(scan_start_offset=12335250)
         get.assert_not_called()
-        self.assertEqual(summary["completion_reason"], "upstream_offset_limit")
 
     def test_finite_budget_and_short_page_retain_their_own_stop_reasons(self) -> None:
-        with patch.object(data_api, "get_leaderboard", side_effect=lambda **kw: page(kw["offset"], kw["limit"])):
+        with patch.object(data_api, "get_leaderboard_v2_page", return_value=cursor_page(
+            native_rows(0, 75), next_cursor="fixture-more", limit=75
+        )):
             rows, _cancelled, summary, _warnings = self.scan(scan_limit=75)
         self.assertEqual(len(rows), 75)
         self.assertEqual(summary["completion_reason"], "scan_limit_reached")
-        with patch.object(data_api, "get_leaderboard", return_value=page(0, 2)):
+        self.assertFalse(summary["source_enumeration_complete"])
+        self.assertEqual(summary["next_cursor"], "fixture-more")
+        pages = [cursor_page(native_rows(0, 2), next_cursor="fixture-after-short"), cursor_page([])]
+        with patch.object(data_api, "get_leaderboard_v2_page", side_effect=pages) as get:
             _rows, _cancelled, summary, _warnings = self.scan()
+        self.assertEqual(get.call_count, 2)
         self.assertEqual(summary["completion_reason"], "end_of_results")
         self.assertTrue(summary["source_enumeration_complete"])
 
     def test_same_wallets_with_reordered_membership_and_changed_metrics_stop(self) -> None:
-        original = page(0)
+        original = native_rows(0)
         changed = [{**row, "pnl": 900, "rank": index + 51} for index, row in enumerate(reversed(original))]
-        with patch.object(data_api, "get_leaderboard", side_effect=[original, changed]) as get:
+        with patch.object(data_api, "get_leaderboard_v2_page", side_effect=[
+            cursor_page(original, next_cursor="fixture-repeat"), cursor_page(changed)
+        ]) as get:
             rows, _cancelled, summary, _warnings = self.scan()
         self.assertEqual(get.call_count, 2)
         self.assertEqual(len(rows), 50)
         self.assertEqual(summary["completion_reason"], "repeated_page")
 
+    def test_finite_threshold_commits_full_cursor_pages_and_reports_overrun(self) -> None:
+        pages = [cursor_page(native_rows(0, 50), next_cursor="fixture-after-short", limit=50),
+                 cursor_page(native_rows(50, 50), limit=50)]
+        committed = []
+        def save(index, limit, rows, source_cursor, next_cursor):
+            committed.append((index, len(rows), source_cursor, next_cursor))
+        with patch.object(data_api, "get_leaderboard_v2_page", side_effect=pages):
+            rows, _cancelled, summary, warnings = self.scan(scan_limit=75, cursor_page_callback=save)
+        self.assertEqual(len(rows), 100)
+        self.assertEqual(summary["scanned"], 100)
+        self.assertEqual(summary["scan_limit_overrun"], 25)
+        self.assertEqual(summary["scan_limit_policy"], "complete_provider_cursor_pages")
+        self.assertEqual(committed, [(0, 50, None, "fixture-after-short"), (1, 50, "fixture-after-short", None)])
+        self.assertTrue(any("overrun" in warning.lower() or "threshold" in warning.lower() for warning in warnings))
+
     def test_partial_overlap_with_new_wallets_is_not_a_repeat(self) -> None:
-        with patch.object(data_api, "get_leaderboard", side_effect=[page(0), page(25), []]):
+        with patch.object(data_api, "get_leaderboard_v2_page", side_effect=[
+            cursor_page(native_rows(0), next_cursor="fixture-overlap"), cursor_page(native_rows(25))
+        ]):
             rows, _cancelled, summary, _warnings = self.scan()
         self.assertEqual(len(rows), 100)
         self.assertEqual(summary["completion_reason"], "end_of_results")
@@ -81,9 +126,7 @@ class LeaderboardPaginationTests(unittest.TestCase):
         self.assertEqual(wallet_membership_fingerprint([]), "")
 
     def test_unknown_wallets_cannot_claim_complete_discovery(self) -> None:
-        with patch.object(data_api, "get_leaderboard", side_effect=[
-            [{"rank": i} for i in range(50)], [{"rank": i} for i in range(50, 100)], []
-        ]):
+        with patch.object(data_api, "get_leaderboard_v2_page", return_value=cursor_page([{"rank": 1}])):
             with self.assertRaisesRegex(PolymarketResponseError, "wallet identity"):
                 self.scan()
 
@@ -111,25 +154,25 @@ class LeaderboardPaginationTests(unittest.TestCase):
                     self.assertEqual(store.progress()["stop_reason"], "repeated_page")
                     self.assertEqual(store.progress()["scanned"], 50)
 
-    def test_api_and_cli_preserve_requested_unlimited_budgets_and_report_source_limit(self) -> None:
-        with patch.object(data_api, "get_leaderboard", side_effect=lambda **kw: page(kw["offset"], kw["limit"])):
-            result = web_api.polymarket_leaderboard_payload({"limit": ["unlimited"], "scan_limit": ["unlimited"]})
+    def test_api_and_cli_preserve_unlimited_budgets_and_report_real_cursor_exhaustion(self) -> None:
+        with patch.object(data_api, "get_leaderboard_v2_page", side_effect=complete_pages()):
+            result = web_api.polymarket_leaderboard_payload({"limit": ["unlimited"], "scan_limit": ["unlimited"], "sort": ["pnl_usd"]})
         self.assertIsNone(result["limit"])
         self.assertIsNone(result["scan_limit"])
-        self.assertEqual(result["completion_reason"], "upstream_offset_limit")
-        self.assertFalse(result["source_enumeration_complete"])
+        self.assertEqual(result["completion_reason"], "end_of_results")
+        self.assertTrue(result["source_enumeration_complete"])
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "result.json"
             args = ["polymarket-leaderboard", "--state-db", str(Path(temporary) / "state.sqlite3"),
-                    "--scanned", "unlimited", "--returned", "unlimited", "--format", "json", "--output", str(output), "--quiet"]
-            with patch.object(data_api, "get_leaderboard", side_effect=lambda **kw: page(kw["offset"], kw["limit"])):
+                    "--scanned", "unlimited", "--returned", "unlimited", "--sort", "pnl", "--format", "json", "--output", str(output), "--quiet"]
+            with patch.object(data_api, "get_leaderboard_v2_page", side_effect=complete_pages()):
                 self.assertEqual(market_sentinel_cli.main(args), 0)
             result = json.loads(output.read_text())
-            self.assertEqual(result["completion_reason"], "upstream_offset_limit")
-            self.assertFalse(result["source_enumeration_complete"])
+            self.assertEqual(result["completion_reason"], "end_of_results")
+            self.assertTrue(result["source_enumeration_complete"])
             self.assertIsNone(result["scan_limit"])
-            self.assertEqual(result["counts"]["scanned"], 1050)
-            with patch.object(data_api, "get_leaderboard") as get:
+            self.assertEqual(result["counts"]["scanned"], 3000)
+            with patch.object(data_api, "get_leaderboard_v2_page") as get:
                 self.assertEqual(market_sentinel_cli.main(args + ["--resume"]), 0)
             get.assert_not_called()
 
@@ -148,15 +191,13 @@ class LeaderboardPaginationTests(unittest.TestCase):
                 with self.assertRaisesRegex(PolymarketResponseError, "coverage is unknown"):
                     self.scan()
 
-    def test_valid_empty_and_legacy_wrapped_pages_keep_supported_semantics(self) -> None:
+    def test_legacy_wrapper_retains_supported_bare_and_wrapped_arrays(self) -> None:
         for key in (None, "data", "leaderboard", "users", "results"):
             for rows in ([], page(0, 1)):
                 raw = rows if key is None else {key: rows}
                 with self.subTest(key=key, rows=rows), patch.object(data_api, "_get_json", return_value=raw):
-                    result, _cancelled, summary, _warnings = self.scan()
+                    result = data_api.get_leaderboard()
                 self.assertEqual(result, rows)
-                self.assertEqual(summary["completion_reason"], "end_of_results")
-                self.assertTrue(summary["source_enumeration_complete"])
 
 
 if __name__ == "__main__":

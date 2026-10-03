@@ -1752,7 +1752,11 @@ def run_ci_cd_workflow_check() -> None:
             "REQUIRED_WHEEL_MEMBERS",
             "REQUIRED_SDIST_MEMBERS",
             "License-Expression",
-            "frontend/node_modules/",
+            '"__pycache__", "node_modules", ".cache"',
+            "folded_parts = tuple(part.casefold() for part in parts)",
+            'folded_parts[:2] == ("frontend", "dist")',
+            'clean_name not in {"data/config.example.json", "data"}',
+            "contains symbolic or hard links",
         ),
         ROOT / "scripts" / "verify_dependency_lock.py": (
             "requirements.lock",

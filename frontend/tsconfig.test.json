@@ -13,6 +13,7 @@
     "src/formatting.ts",
     "src/live-preflight-audit.tsx",
     "src/mdd-history-coverage.tsx",
+    "src/market-configuration.ts",
     "src/types.ts",
     "src/vite-env.d.ts"
   ]

@@ -18,6 +18,11 @@ from polymarket.leaderboard_state import LeaderboardStateStore
 
 ROOT = Path(__file__).resolve().parents[1]
 RAW = {"proxyWallet": "0x" + "b" * 40, "pnl": 10, "vol": 100}
+V2_RAW = {"user_id": "0x" + "b" * 40, "pnl": 10, "volume": 100}
+
+
+def v2_page(rows):
+    return {"data": rows, "pagination": {"limit": 1, "offset": 0, "has_more": False, "next_cursor": None}}
 
 
 class LeaderboardCategoryTests(unittest.TestCase):
@@ -28,7 +33,7 @@ class LeaderboardCategoryTests(unittest.TestCase):
         return result, stdout.getvalue(), stderr.getvalue()
 
     def scan_args(self, *args):
-        return ("polymarket-leaderboard", "--scanned", "1", "--returned", "1", "--format", "json", "--quiet", *args)
+        return ("polymarket-leaderboard", "--scanned", "1", "--returned", "1", "--scan-retry-attempts", "1", "--format", "json", "--quiet", *args)
 
     def test_all_documented_categories_are_normalized_and_sent_unchanged(self):
         expected = ("OVERALL", "POLITICS", "SPORTS", "ESPORTS", "CRYPTO", "CULTURE", "MENTIONS",
@@ -56,26 +61,26 @@ class LeaderboardCategoryTests(unittest.TestCase):
 
     def test_api_reports_the_category_it_sent_upstream(self):
         for category in LEADERBOARD_CATEGORIES:
-            with self.subTest(category=category), patch("polymarket.data_api._get_json", return_value=[RAW]) as fetch:
+            with self.subTest(category=category), patch("polymarket.data_api._get_json", return_value=v2_page([V2_RAW])) as fetch:
                 result = web_api.polymarket_leaderboard_payload({
                     "category": [" " + category.lower() + " "], "scan_limit": ["1"], "limit": ["1"],
                 })
             self.assertEqual(result["category"], category)
             self.assertEqual(result["counts"]["returned"], 1)
-            self.assertEqual(fetch.call_args.kwargs["params"]["category"], category)
+            self.assertEqual(fetch.call_args.kwargs["params"]["category"], category.lower())
 
     def test_cli_memory_sqlite_and_checkpoint_paths_keep_the_category(self):
         for mode in (None, "--state-db", "--checkpoint"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
                 state = Path(directory) / "scan"
                 extra = (mode, str(state)) if mode else ()
-                with patch("polymarket.data_api._get_json", return_value=[RAW]) as fetch:
+                with patch("polymarket.data_api._get_json", return_value=v2_page([V2_RAW])) as fetch:
                     result, stdout, stderr = self.run_cli(*self.scan_args("--category", " esports ", *extra))
                 self.assertEqual(result, 0, stderr)
                 self.assertEqual(json.loads(stdout)["category"], "ESPORTS")
-                self.assertEqual(fetch.call_args.kwargs["params"]["category"], "ESPORTS")
+                self.assertEqual(fetch.call_args.kwargs["params"]["category"], "esports")
                 if mode:
-                    with patch("polymarket.data_api._get_json", return_value=[]) as fetch:
+                    with patch("polymarket.data_api._get_json", return_value=v2_page([])) as fetch:
                         result, stdout, stderr = self.run_cli(*self.scan_args("--category", "ESPORTS", *extra, "--resume"))
                     self.assertEqual(result, 0, stderr)
                     self.assertEqual(json.loads(stdout)["category"], "ESPORTS")
@@ -128,7 +133,7 @@ class LeaderboardCategoryTests(unittest.TestCase):
     def test_current_esports_sqlite_exports_verified_scan_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / "state.db"
-            with patch("polymarket.data_api._get_json", return_value=[RAW]):
+            with patch("polymarket.data_api._get_json", return_value=v2_page([V2_RAW])):
                 result, _, stderr = self.run_cli(*self.scan_args("--category", "ESPORTS", "--state-db", str(state)))
             self.assertEqual(result, 0, stderr)
             result, stdout, stderr = self.run_cli("polymarket-leaderboard-export", "--state-db", str(state), "--format", "json")
@@ -141,7 +146,7 @@ class LeaderboardCategoryTests(unittest.TestCase):
             with self.subTest(changed=changed), tempfile.TemporaryDirectory() as directory:
                 state, output = Path(directory) / "scan.jsonl", Path(directory) / "result.json"
                 args = self.scan_args("--category", "ESPORTS", "--checkpoint", str(state), "--output", str(output))
-                with patch("polymarket.data_api._get_json", return_value=[RAW]):
+                with patch("polymarket.data_api._get_json", return_value=v2_page([V2_RAW])):
                     result, _, stderr = self.run_cli(*args)
                 self.assertEqual(result, 0, stderr)
                 before_state, before_output = state.read_bytes(), output.read_bytes()
@@ -180,25 +185,27 @@ class LeaderboardCategoryTests(unittest.TestCase):
     def test_checkpoint_resume_separates_an_interrupted_tail_from_new_pages(self):
         args = cli.build_parser().parse_args(self.scan_args("--category", "ESPORTS"))
         signature = cli._leaderboard_scan_signature(cli.build_polymarket_leaderboard_params(args))
-        header = json.dumps({"type": "leaderboard_scan", "version": 1, "signature": signature})
-        page = json.dumps({"type": "leaderboard_page", "offset": 0, "limit": 1, "rows": [RAW]})
+        header = json.dumps({"type": "leaderboard_scan", "version": 2, "signature": signature})
+        page = json.dumps({"type": "leaderboard_page", "source_api_version": 2, "page_index": 0, "limit": 1,
+                           "row_count": 1, "source_cursor": None, "next_cursor": "continue", "rows": [V2_RAW]})
         for tail in (page, page + '\n{"type":"leaderboard_page",'):
             with self.subTest(tail=tail), tempfile.TemporaryDirectory() as directory:
                 checkpoint = Path(directory) / "scan.jsonl"
                 checkpoint.write_text(header + "\n" + tail, encoding="utf-8")
-                loaded, offset, _, _ = cli._load_leaderboard_checkpoint(checkpoint, signature=signature)
-                self.assertEqual(offset, 1)
-                self.assertEqual(loaded, [RAW])
-                with closing(cli._LeaderboardCheckpointWriter(checkpoint)) as writer:
-                    writer.record(1, 1, [{**RAW, "proxyWallet": "0x" + "c" * 40}])
-                loaded, offset, _, _ = cli._load_leaderboard_checkpoint(checkpoint, signature=signature)
-                self.assertEqual(offset, 2)
-                self.assertEqual(len(loaded), 2)
+                state = cli._load_leaderboard_checkpoint(checkpoint, signature=signature)
+                self.assertEqual(state.next_page, 1)
+                self.assertEqual(state.rows, [V2_RAW])
+                with closing(cli._LeaderboardCheckpointWriter(checkpoint, truncate_at=state.truncate_at)) as writer:
+                    writer.record(1, 1, [{**V2_RAW, "user_id": "0x" + "c" * 40}], "continue", None)
+                state = cli._load_leaderboard_checkpoint(checkpoint, signature=signature)
+                self.assertEqual(state.next_page, 2)
+                self.assertEqual(len(state.rows), 2)
+                self.assertTrue(state.scan_complete)
 
     def test_checkpoint_cannot_mix_multiple_scan_headers(self):
         args = cli.build_parser().parse_args(self.scan_args())
         signature = cli._leaderboard_scan_signature(cli.build_polymarket_leaderboard_params(args))
-        header = json.dumps({"type": "leaderboard_scan", "version": 1, "signature": signature})
+        header = json.dumps({"type": "leaderboard_scan", "version": 2, "signature": signature})
         with tempfile.TemporaryDirectory() as directory:
             checkpoint = Path(directory) / "scan.jsonl"
             checkpoint.write_text(header + "\n" + header + "\n", encoding="utf-8")

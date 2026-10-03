@@ -96,7 +96,10 @@ class PositionCapitalBasisTests(unittest.TestCase):
         inputs = mdd.MddInputs(WALLET, [
             {"timestamp": 100, "realizedPnl": -10, "totalBought": 100, "avgPrice": 0.25},
         ], [], [], [])
-        with patch.object(data_api, "get_leaderboard", return_value=[{"proxyWallet": WALLET, "pnl": 10, "vol": 100}]), patch.object(
+        with patch.object(data_api, "get_leaderboard_v2_page", return_value={
+            "data": [{"user_id": WALLET, "pnl": 10, "volume": 100}],
+            "pagination": {"limit": 50, "offset": 0, "has_more": False, "next_cursor": None},
+        }), patch.object(
             mdd, "fetch_mdd_inputs", return_value=inputs
         ), patch("web_api.attach_polymarket_mdd_audit_cache", return_value={}):
             result = web_api.polymarket_leaderboard_payload({"max_mdd_pct": ["20"]})
@@ -144,11 +147,13 @@ class PositionCapitalBasisTests(unittest.TestCase):
 class PositionQueryScopeTests(unittest.TestCase):
     def test_mdd_requests_dust_and_archived_active_positions_on_every_page(self):
         row = {"cashPnl": -0.1}
-        with patch.object(data_api, "get_positions", side_effect=[[row] * 500, [row]]) as fetch:
+        pages = [{"data": [row] * 500, "pagination": {"next_cursor": "next"}},
+                 {"data": [row], "pagination": {"next_cursor": None}}]
+        with patch.object(data_api, "get_positions_page_v2", side_effect=pages) as fetch:
             self.assertEqual(len(mdd._fetch_open_positions(WALLET, 1000)), 501)
-        self.assertEqual([call.kwargs["offset"] for call in fetch.call_args_list], [0, 500])
+        self.assertEqual([call.kwargs["cursor"] for call in fetch.call_args_list], [None, "next"])
         for call in fetch.call_args_list:
-            self.assertEqual(call.kwargs["size_threshold"], 0)
+            self.assertEqual(call.kwargs["filter_amount"], 0)
             self.assertIs(call.kwargs["include_archived"], True)
 
     def test_position_wrapper_preserves_explicit_zero_and_archived_flag(self):
@@ -172,12 +177,17 @@ class PositionQueryScopeTests(unittest.TestCase):
                 get.assert_not_called()
 
     def test_mdd_coverage_discloses_query_scope_without_verifying_account_history(self):
-        with patch.object(data_api, "get_positions", return_value=[{"cashPnl": -1, "initialValue": 10}]), patch.object(
-            data_api, "get_closed_positions", return_value=[]
-        ), patch.object(data_api, "get_activity", return_value=[]), patch.object(data_api, "get_trades", return_value=[]):
+        def positions_page(**kwargs):
+            rows = [{"cashPnl": -1, "initialValue": 10}] if kwargs["status"] == "OPEN" else []
+            return {"data": rows, "pagination": {"next_cursor": None}}
+
+        empty = {"data": [], "pagination": {"next_cursor": None}}
+        with patch.object(data_api, "get_positions_page_v2", side_effect=positions_page), patch.object(
+            data_api, "get_activity_page_v2", return_value=empty
+        ), patch.object(data_api, "get_trades_page_v2", return_value=empty):
             result = mdd.build_historical_mdd_payload(mdd.fetch_mdd_inputs(WALLET))
         self.assertEqual(result["mdd_history_coverage"]["open_positions"]["query_filters"], {
-            "sizeThreshold": 0, "includeArchived": True,
+            "status": "OPEN", "filter_type": "TOKENS", "filter_amount": 0, "include_archived": True,
         })
         self.assertFalse(result["mdd_account_equity_verified"])
 

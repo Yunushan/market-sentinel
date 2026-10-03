@@ -13,9 +13,9 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import closing, contextmanager, nullcontext
+from contextlib import ExitStack, closing, contextmanager, nullcontext
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, TextIO
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, NamedTuple, Optional, Sequence, TextIO
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
@@ -27,7 +27,7 @@ from market_adapters import build_default_registry
 from polymarket import data_api
 from polymarket.http_client import PolymarketHTTPError, PolymarketRateLimitError
 from polymarket.leaderboard import LEADERBOARD_CATEGORIES, normalize_leaderboard_category
-from polymarket.leaderboard_state import LeaderboardStateStore, leaderboard_writer_lock_path
+from polymarket.leaderboard_state import LeaderboardStateStore, _acquire_writer_lock, leaderboard_writer_lock_path
 from polymarket.leaderboard_validation import source_leaderboard_fields
 from polymarket.mdd import MDD_CALCULATION_VERSION
 from polymarket.live_reports import (
@@ -118,9 +118,17 @@ LEADERBOARD_FIELDS = [
     "wallet",
     "pnl_usd",
     "volume_usd",
+    "volume_shares",
+    "source_api_version",
+    "quote_currency",
+    "volume_unit",
     "roi_pct",
     "trade_count",
     "mdd_usd",
+    "mdd_quote_currency",
+    "mdd_equity_base_currency",
+    "mdd_currency_status",
+    "mdd_percentage_available",
     "mdd_pct",
     "mdd_method",
     "mdd_pct_basis",
@@ -143,9 +151,10 @@ SORT_ALIASES = {
     "roi_pct": "roi_pct",
     "pnl": "pnl_usd",
     "pnl_usd": "pnl_usd",
-    "volume": "volume_usd",
-    "vol": "volume_usd",
+    "volume": "volume_shares",
+    "vol": "volume_shares",
     "volume_usd": "volume_usd",
+    "volume_shares": "volume_shares",
     "mdd": "mdd_pct",
     "mdd_pct": "mdd_pct",
     "mdd_usd": "mdd_usd",
@@ -276,7 +285,9 @@ def _split_key_value(raw: str) -> tuple[str, str]:
 
 def build_polymarket_leaderboard_params(args: argparse.Namespace) -> Dict[str, List[str]]:
     params: Dict[str, List[str]] = {}
-    sort = SORT_ALIASES.get(str(args.sort or "roi_pct").strip().lower(), "roi_pct")
+    sort = SORT_ALIASES.get(str(args.sort or "pnl_usd").strip().lower())
+    if sort is None:
+        raise ValueError("Unsupported leaderboard sort.")
     _add_param(params, "sort", sort)
     _add_param(params, "direction", args.direction)
     _add_param(params, "period", args.period)
@@ -300,6 +311,7 @@ def build_polymarket_leaderboard_params(args: argparse.Namespace) -> Dict[str, L
     _add_param(params, "mdd_persist_cache", args.mdd_persist_cache)
     _add_param(params, "mdd_cache_ttl_seconds", args.mdd_cache_ttl_seconds)
     _add_param(params, "equity_base_usd", args.equity_base_usd)
+    _add_param(params, "equity_base_currency", getattr(args, "equity_base_currency", "USD"))
     _add_param(params, "scan_concurrency", args.scan_concurrency)
     _add_param(params, "scan_retry_attempts", args.scan_retry_attempts)
     _add_param(params, "scan_retry_delay_seconds", args.scan_retry_delay_seconds)
@@ -311,6 +323,8 @@ def build_polymarket_leaderboard_params(args: argparse.Namespace) -> Dict[str, L
         "max_pnl_usd",
         "min_volume_usd",
         "max_volume_usd",
+        "min_volume_shares",
+        "max_volume_shares",
         "min_roi_pct",
         "max_roi_pct",
         "min_mdd_usd",
@@ -318,12 +332,22 @@ def build_polymarket_leaderboard_params(args: argparse.Namespace) -> Dict[str, L
         "min_mdd_pct",
         "max_mdd_pct",
     ):
-        _add_param(params, key, getattr(args, key))
+        _add_param(params, key, getattr(args, key, ""))
 
     for key, value in args.param or []:
         _add_param(params, key, value)
-
+    _validate_v2_leaderboard_financial_request(str(params["sort"][0]), params)
     return params
+
+
+def _validate_v2_leaderboard_financial_request(sort: str, values: Mapping[str, Any]) -> None:
+    if sort not in LEADERBOARD_SORTS:
+        raise ValueError("Unsupported leaderboard sort.")
+    if sort in {"roi_pct", "volume_usd"} or any(
+        values.get(key) not in (None, "", [])
+        for key in ("min_volume_usd", "max_volume_usd", "min_roi_pct", "max_roi_pct")
+    ):
+        raise ValueError("Data API v2 volume is measured in shares; monetary volume and PnL/volume ratio sorts or filters are unavailable.")
 
 
 def _row_mdd_source(row: Mapping[str, Any]) -> str:
@@ -339,6 +363,10 @@ def _csv_rows(rows: Iterable[Mapping[str, Any]]) -> Iterable[Dict[str, Any]]:
     for row in rows:
         item = {field: row.get(field, "") for field in LEADERBOARD_FIELDS}
         item["mdd_source"] = _row_mdd_source(row)
+        source_version = row.get("source_api_version", 2 if "user_id" in (row.get("raw") or {}) else 1)
+        item["source_api_version"] = source_version
+        item["quote_currency"] = row.get("quote_currency", "USDC" if source_version == 2 else "USD")
+        item["volume_unit"] = row.get("volume_unit", "shares" if source_version == 2 else "USD")
         version = row.get("mdd_calculation_version", row.get("calculation_version"))
         item["mdd_calculation_version"] = version
         item["mdd_calculation_current"] = type(version) is int and version == MDD_CALCULATION_VERSION
@@ -573,6 +601,7 @@ def _disk_backed_mdd_options(args: argparse.Namespace) -> Dict[str, Any]:
         "trade_limit": _cli_clamp_int(args.mdd_trade_limit, 1000, 0, 5000),
         "include_open": True,
         "equity_base_usd": _cli_optional_float(args.equity_base_usd),
+        "equity_base_currency": getattr(args, "equity_base_currency", "USD"),
         "cache_ttl_seconds": _cli_clamp_int(args.mdd_cache_ttl_seconds, 60, 0, 300),
         "mark_replay_token_limit": _cli_clamp_int(args.mdd_mark_replay_token_limit, 10, 1, 20),
         "mark_replay_point_limit": _cli_clamp_int(args.mdd_mark_replay_point_limit, 5000, 1, 10000),
@@ -591,6 +620,8 @@ def _leaderboard_filter_values(args: argparse.Namespace) -> Dict[str, Optional[f
             "max_pnl_usd",
             "min_volume_usd",
             "max_volume_usd",
+            "min_volume_shares",
+            "max_volume_shares",
             "min_roi_pct",
             "max_roi_pct",
             "min_mdd_usd",
@@ -692,14 +723,23 @@ def _run_disk_backed_polymarket_leaderboard(
             )
 
         if not state["scan_complete"] and (scan_limit is None or state["scanned"] < scan_limit):
-            def save_page(offset: int, _limit: int, page: List[Dict[str, Any]]) -> bool:
-                normalized = [normalize_polymarket_leaderboard_row(row, offset + index + 1) for index, row in enumerate(page)]
-                return store.record_page(offset, _limit, normalized)
+            rank_offset = int(state["scanned"])
+
+            def save_page(page_index: int, provider_limit: int, page: List[Dict[str, Any]],
+                          source_cursor: Optional[str], next_cursor: Optional[str]) -> bool:
+                nonlocal rank_offset
+                normalized = [normalize_polymarket_leaderboard_row(row, rank_offset + index + 1) for index, row in enumerate(page)]
+                accepted = store.record_page(page_index, provider_limit, normalized, source_version=2,
+                                             source_cursor=source_cursor, next_cursor=next_cursor)
+                if accepted:
+                    rank_offset += len(page)
+                return accepted
 
             scan_summary: Dict[str, Any] = {}
             _fetch_polymarket_leaderboard_scan_rows(
                 scan_limit=scan_limit,
                 scan_start_offset=int(state["next_offset"]),
+                scan_start_cursor=state["next_cursor"],
                 initial_scanned=int(state["scanned"]),
                 retain_rows=False,
                 remote_sort=remote_sort,
@@ -712,7 +752,7 @@ def _run_disk_backed_polymarket_leaderboard(
                 is_cancelled=is_cancelled,
                 emit_progress=emit,
                 warnings=warnings,
-                page_callback=save_page,
+                cursor_page_callback=save_page,
                 scan_summary=scan_summary,
             )
             if scan_summary.get("completion_reason") == "upstream_offset_limit":
@@ -812,6 +852,8 @@ def _run_disk_backed_polymarket_leaderboard(
             "limit_unlimited": returned_limit is None,
             "scan_limit": scan_limit,
             "scan_limit_unlimited": scan_limit is None,
+            "scan_limit_policy": "complete_provider_cursor_pages",
+            "scan_limit_overrun": max(0, int(final_state["scanned"]) - scan_limit) if scan_limit is not None else 0,
             "mdd_scan_limit": mdd_scan_limit,
             "mdd_scan_limit_unlimited": mdd_scan_limit is None,
             "disk_backed": True,
@@ -827,6 +869,11 @@ def _run_disk_backed_polymarket_leaderboard(
             ),
             "source": "polymarket_data_api_leaderboard",
             "source_sort": remote_sort,
+            "source_api_version": 2,
+            "quote_currency": "USDC",
+            "volume_unit": "shares",
+            "roi_pct_basis": "unavailable",
+            "next_cursor": final_state["next_cursor"],
             "ranking_scope": "computed_from_scanned_public_leaderboard_rows_with_durable_local_state",
             "mdd_available": final_state["mdd_available"] > 0,
             "warnings": warnings,
@@ -851,6 +898,7 @@ def _run_disk_backed_polymarket_leaderboard(
 
 def _leaderboard_scan_signature(params: Mapping[str, List[str]]) -> Dict[str, Any]:
     signature = {
+        "source_api_version": 2,
         "remote_sort": LEADERBOARD_SORTS[params["sort"][0]],
         "direction": params["direction"][0].upper(),
         "period": params["period"][0],
@@ -870,73 +918,103 @@ def _validate_saved_leaderboard_category(signature: Mapping[str, Any]) -> None:
         raise ValueError("Legacy ESPORTS scan contains unverified category data. Start a new scan in a separate state database.")
 
 
-def _load_leaderboard_checkpoint(path: Path, *, signature: Mapping[str, Any]) -> tuple[List[Dict[str, Any]], int, int, int]:
-    if not path.exists():
-        return [], 0, 0, 0
+class _LeaderboardCheckpointState(NamedTuple):
+    rows: List[Dict[str, Any]]
+    next_page: int
+    loaded_pages: int
+    ignored_lines: int
+    next_cursor: Optional[str]
+    scan_complete: bool
+    truncate_at: Optional[int]
 
-    pages: Dict[int, tuple[int, List[Dict[str, Any]]]] = {}
-    ignored = 0
-    with path.open("r", encoding="utf-8") as stream:
-        try:
-            header = loads_strict_json(stream.readline())
-        except ValueError as exc:
-            raise ValueError("Checkpoint has no valid scan identity; start a new scan in a separate checkpoint file.") from exc
-        if not isinstance(header, Mapping) or header.get("type") != "leaderboard_scan" or header.get("version") != 1:
-            raise ValueError("Legacy checkpoint has no scan identity; start a new scan in a separate checkpoint file.")
-        if header.get("signature") != dict(signature):
-            raise ValueError("Checkpoint was created with different leaderboard scan settings.")
-        for line in stream:
-            raw = line.strip()
-            if not raw:
-                continue
-            try:
-                record = loads_strict_json(raw)
-            except json.JSONDecodeError:
-                ignored += 1
-                continue
-            if isinstance(record, Mapping) and record.get("type") == "leaderboard_scan":
-                raise ValueError("Checkpoint contains multiple scan identities; start a new scan in a separate checkpoint file.")
-            if not isinstance(record, Mapping) or record.get("type") != "leaderboard_page":
-                ignored += 1
-                continue
-            try:
-                offset = max(0, int(record.get("offset", 0)))
-                limit = max(0, int(record.get("limit", 0)))
-            except (TypeError, ValueError):
-                ignored += 1
-                continue
-            raw_rows = record.get("rows")
-            if not isinstance(raw_rows, list):
-                ignored += 1
-                continue
-            for row in raw_rows:
-                source_leaderboard_fields(row)
-            rows = [dict(row) for row in raw_rows]
-            pages[offset] = (limit, rows)
+
+def _checkpoint_cursor(value: Any) -> Optional[str]:
+    if value is not None and (not isinstance(value, str) or not value or len(value) > 8192):
+        raise ValueError("Checkpoint cursor is invalid.")
+    return value
+
+
+def _load_leaderboard_checkpoint(path: Path, *, signature: Mapping[str, Any]) -> _LeaderboardCheckpointState:
+    if not path.exists():
+        return _LeaderboardCheckpointState([], 0, 0, 0, None, False, None)
 
     rows: List[Dict[str, Any]] = []
-    expected_offset = 0
-    loaded_pages = 0
-    for offset, (_limit, page_rows) in sorted(pages.items()):
-        if offset < expected_offset:
-            ignored += 1
-            continue
-        if offset > expected_offset:
-            ignored += 1
-            break
-        rows.extend(page_rows)
-        loaded_pages += 1
-        expected_offset = offset + len(page_rows)
+    expected_page = 0
+    expected_cursor: Optional[str] = None
+    complete = False
+    visited_cursors: set[str] = set()
+    ignored = 0
+    truncate_at: Optional[int] = None
+    with path.open("rb") as stream:
+        try:
+            header = loads_strict_json(stream.readline().decode("utf-8"))
+        except ValueError as exc:
+            raise ValueError("Checkpoint has no valid scan identity; start a new scan in a separate checkpoint file.") from exc
+        if not isinstance(header, Mapping) or header.get("type") != "leaderboard_scan" or header.get("version") != 2:
+            raise ValueError("Legacy checkpoint has no v2 scan identity; start a new scan in a separate checkpoint file.")
+        if header.get("signature") != dict(signature):
+            raise ValueError("Checkpoint was created with different leaderboard scan settings.")
+        if signature.get("source_api_version") != 2:
+            raise ValueError("Checkpoint is not bound to the v2 source contract.")
+        while True:
+            line_start = stream.tell()
+            line = stream.readline()
+            if not line:
+                break
+            if not line.strip():
+                continue
+            try:
+                record = loads_strict_json(line.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                # A crash can tear the final append. Only an unterminated tail
+                # is discardable; corrupt complete or interior records fail closed.
+                if not line.endswith(b"\n"):
+                    ignored = 1
+                    truncate_at = line_start
+                    break
+                raise ValueError("Checkpoint contains a corrupt committed record.") from exc
+            if isinstance(record, Mapping) and record.get("type") == "leaderboard_scan":
+                raise ValueError("Checkpoint contains multiple scan identities; start a new scan in a separate checkpoint file.")
+            if not isinstance(record, Mapping) or record.get("type") != "leaderboard_page" or record.get("source_api_version") != 2:
+                raise ValueError("Checkpoint contains an unexpected record or source version.")
+            page_index = record.get("page_index")
+            limit = record.get("limit")
+            raw_rows = record.get("rows")
+            if (type(page_index) is not int or page_index != expected_page or type(limit) is not int
+                    or not 1 <= limit <= 1000 or not isinstance(raw_rows, list) or len(raw_rows) > limit
+                    or type(record.get("row_count")) is not int or record["row_count"] != len(raw_rows)):
+                raise ValueError("Checkpoint page order, bounds, or row count is invalid.")
+            if "source_cursor" not in record or "next_cursor" not in record:
+                raise ValueError("Checkpoint page has no committed cursor provenance.")
+            source_cursor = _checkpoint_cursor(record["source_cursor"])
+            next_cursor = _checkpoint_cursor(record["next_cursor"])
+            if complete or source_cursor != expected_cursor:
+                raise ValueError("Checkpoint page does not continue its committed cursor chain.")
+            if next_cursor is not None and (next_cursor == source_cursor or next_cursor in visited_cursors):
+                raise ValueError("Checkpoint repeats a previously consumed cursor.")
+            for row in raw_rows:
+                source_leaderboard_fields(row, version=2)
+            rows.extend(dict(row) for row in raw_rows)
+            expected_page += 1
+            if source_cursor is not None:
+                visited_cursors.add(source_cursor)
+            expected_cursor = next_cursor
+            complete = next_cursor is None
 
-    return rows, expected_offset, loaded_pages, ignored
+    return _LeaderboardCheckpointState(rows, expected_page, expected_page, ignored, expected_cursor, complete, truncate_at)
 
 
 class _LeaderboardCheckpointWriter:
-    def __init__(self, path: Path, *, fsync_every: int = 20) -> None:
+    def __init__(self, path: Path, *, fsync_every: int = 20, truncate_at: Optional[int] = None) -> None:
         self.path = path
         self.fsync_every = max(1, int(fsync_every or 20))
         self.written = 0
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if truncate_at is not None:
+            with self.path.open("r+b") as stream:
+                stream.truncate(truncate_at)
+                stream.flush()
+                os.fsync(stream.fileno())
         needs_newline = False
         if self.path.exists() and self.path.stat().st_size:
             with self.path.open("rb") as stream:
@@ -946,21 +1024,19 @@ class _LeaderboardCheckpointWriter:
         if needs_newline:
             self.stream.write("\n")
 
-    def record(self, offset: int, limit: int, rows: List[Dict[str, Any]]) -> None:
-        json.dump(
-            {
-                "type": "leaderboard_page",
-                "offset": int(offset),
-                "limit": int(limit),
-                "row_count": len(rows),
-                "written_at": int(time.time()),
-                "rows": rows,
-            },
-            self.stream,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        self.stream.write("\n")
+    def record(self, page_index: int, limit: int, rows: List[Dict[str, Any]],
+               source_cursor: Optional[str], next_cursor: Optional[str]) -> None:
+        for row in rows:
+            source_leaderboard_fields(row, version=2)
+        record = {
+            "type": "leaderboard_page", "source_api_version": 2,
+            "page_index": int(page_index), "limit": int(limit), "row_count": len(rows),
+            "source_cursor": _checkpoint_cursor(source_cursor), "next_cursor": _checkpoint_cursor(next_cursor),
+            "written_at": int(time.time()), "rows": rows,
+        }
+        # Serialize before touching the checkpoint, then append rows and their
+        # continuation as one replayable record rather than separate updates.
+        self.stream.write(json.dumps(record, separators=(",", ":"), sort_keys=True, allow_nan=False) + "\n")
         self.stream.flush()
         self.written += 1
         if self.written % self.fsync_every == 0:
@@ -1083,6 +1159,7 @@ def _run_polymarket_leaderboard(args: argparse.Namespace, *, cancel_check: Calla
     checkpoint_path_text = str(getattr(args, "checkpoint", "") or "").strip()
     checkpoint_writer: Optional[_LeaderboardCheckpointWriter] = None
     initial_raw_rows: Optional[List[Mapping[str, Any]]] = None
+    checkpoint_state = _LeaderboardCheckpointState([], 0, 0, 0, None, False, None)
     payload_kwargs: Dict[str, Any] = {"progress_callback": progress_callback, "cancel_check": cancel_check}
     if not args.quiet:
         checkpoint_label = checkpoint_path_text or "-"
@@ -1092,38 +1169,41 @@ def _run_polymarket_leaderboard(args: argparse.Namespace, *, cancel_check: Calla
             file=sys.stderr,
             flush=True,
         )
-    if checkpoint_path_text:
-        checkpoint_path = Path(checkpoint_path_text).expanduser()
-        _validate_leaderboard_output(args.output, checkpoint_path)
-        signature = _leaderboard_scan_signature(params)
-        if getattr(args, "resume", False) and checkpoint_path.exists():
-            checkpoint_rows, next_offset, loaded_pages, ignored_lines = _load_leaderboard_checkpoint(checkpoint_path, signature=signature)
-            initial_raw_rows = checkpoint_rows
-            _add_param(params, "scan_start_offset", next_offset)
-            if not args.quiet:
-                print(
-                    f"[{_log_timestamp()} pid={os.getpid()} status=running elapsed={_format_elapsed(time.monotonic() - started_at)} phase=resume] "
-                    f"Resuming leaderboard scan from {checkpoint_path}: loaded {len(checkpoint_rows)} rows "
-                    f"from {loaded_pages} page(s); next offset {next_offset}; ignored {ignored_lines} line(s).",
-                    file=sys.stderr,
-                    flush=True,
-                )
-        else:
-            with atomic_text_writer(checkpoint_path) as stream:
-                json.dump({"type": "leaderboard_scan", "version": 1, "signature": signature}, stream, sort_keys=True)
-                stream.write("\n")
-        checkpoint_writer = _LeaderboardCheckpointWriter(
-            checkpoint_path,
-            fsync_every=max(1, int(str(getattr(args, "checkpoint_fsync_every", "20") or "20"))),
-        )
-        payload_kwargs["initial_raw_rows"] = initial_raw_rows or []
-        payload_kwargs["leaderboard_page_callback"] = checkpoint_writer.record
-
-    try:
+    with ExitStack() as resources:
+        if checkpoint_path_text:
+            checkpoint_path = Path(checkpoint_path_text).expanduser()
+            _validate_leaderboard_output(args.output, checkpoint_path)
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            resources.enter_context(closing(_acquire_writer_lock(checkpoint_path)))
+            signature = _leaderboard_scan_signature(params)
+            if getattr(args, "resume", False) and checkpoint_path.exists():
+                checkpoint_state = _load_leaderboard_checkpoint(checkpoint_path, signature=signature)
+                initial_raw_rows = checkpoint_state.rows
+                _add_param(params, "scan_start_offset", checkpoint_state.next_page)
+                if not args.quiet:
+                    print(
+                        f"[{_log_timestamp()} pid={os.getpid()} status=running elapsed={_format_elapsed(time.monotonic() - started_at)} phase=resume] "
+                        f"Resuming leaderboard scan from {checkpoint_path}: loaded {len(checkpoint_state.rows)} rows "
+                        f"from {checkpoint_state.loaded_pages} page(s); next page {checkpoint_state.next_page}; "
+                        f"ignored {checkpoint_state.ignored_lines} incomplete tail record(s).",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            else:
+                with atomic_text_writer(checkpoint_path) as stream:
+                    json.dump({"type": "leaderboard_scan", "version": 2, "signature": signature}, stream, sort_keys=True)
+                    stream.write("\n")
+            checkpoint_writer = _LeaderboardCheckpointWriter(
+                checkpoint_path,
+                fsync_every=max(1, int(str(getattr(args, "checkpoint_fsync_every", "20") or "20"))),
+                truncate_at=checkpoint_state.truncate_at,
+            )
+            resources.callback(checkpoint_writer.close)
+            payload_kwargs["initial_raw_rows"] = initial_raw_rows or []
+            payload_kwargs["leaderboard_cursor_page_callback"] = checkpoint_writer.record
+            payload_kwargs["scan_start_cursor"] = checkpoint_state.next_cursor
+            payload_kwargs["checkpoint_complete"] = checkpoint_state.scan_complete
         payload = polymarket_leaderboard_payload(params, **payload_kwargs)
-    finally:
-        if checkpoint_writer is not None:
-            checkpoint_writer.close()
     if cancel_check() or payload.get("cancelled"):
         raise RequestCancelled("Leaderboard scan cancelled; previous output was preserved.")
     write_leaderboard_payload(payload, output_format=args.format, output=args.output, cancel_check=cancel_check)
@@ -1207,7 +1287,9 @@ def run_polymarket_leaderboard_export(args: argparse.Namespace) -> int:
     if not state_path.is_file():
         raise FileNotFoundError(f"Leaderboard state database does not exist: {state_path}")
     _validate_leaderboard_output(args.output, state_path)
-    sort = SORT_ALIASES.get(str(args.sort or "roi_pct").strip().lower(), "roi_pct")
+    sort = SORT_ALIASES.get(str(args.sort or "pnl_usd").strip().lower())
+    if sort is None:
+        raise ValueError("Unsupported leaderboard sort.")
     direction = str(args.direction or "DESC").upper()
     returned_limit = _cli_optional_limit(args.returned, 100)
     filters = _leaderboard_filter_values(args)
@@ -1218,6 +1300,11 @@ def run_polymarket_leaderboard_export(args: argparse.Namespace) -> int:
         state = store.progress()
         scan_status = store.status()
         _validate_saved_leaderboard_category(scan_status["signature"])
+        source_version = scan_status["signature"].get("source_api_version", state.get("source_api_version", 1))
+        if source_version == 2:
+            _validate_v2_leaderboard_financial_request(sort, filters)
+        elif sort == "volume_shares" or any(filters[key] is not None for key in ("min_volume_shares", "max_volume_shares")):
+            raise ValueError("Legacy leaderboard observations do not supply native share volume.")
         mdd_signature = scan_status["mdd_signature"]
         mdd_current = isinstance(mdd_signature, Mapping) and mdd_signature.get("calculation_version") == MDD_CALCULATION_VERSION
         qualified = store.result_count(filters, require_mdd=require_mdd)
@@ -1250,6 +1337,12 @@ def run_polymarket_leaderboard_export(args: argparse.Namespace) -> int:
             "state": state,
             "state_db": str(state_path),
             "scan_signature": scan_status["signature"],
+            "source_api_version": source_version,
+            "quote_currency": "USDC" if source_version == 2 else "USD",
+            "volume_unit": "shares" if source_version == 2 else "USD",
+            "roi_pct_basis": "unavailable" if source_version == 2 else "declared USD turnover",
+            "scan_limit_policy": "complete_provider_cursor_pages" if source_version == 2 else "legacy_offset_pages",
+            "next_cursor": state.get("next_cursor"),
             "exported_at": int(time.time()),
             "mdd_signature": mdd_signature,
             "mdd_calculation_current": mdd_current,
@@ -2988,6 +3081,7 @@ def run_polymarket_user_mdd(args: argparse.Namespace) -> int:
         trade_limit=int(args.trade_limit),
         include_open=bool(args.include_open),
         equity_base_usd=None if args.equity_base_usd in (None, "") else float(args.equity_base_usd),
+        equity_base_currency=args.equity_base_currency,
         max_points=int(args.max_points),
         cache_ttl_seconds=int(args.cache_ttl_seconds),
         mark_replay_token_limit=int(args.mark_replay_token_limit),
@@ -3177,7 +3271,7 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[common],
         help="Rank public Polymarket candidates by PnL/volume, PnL, volume, or observed MDD without a GUI.",
     )
-    leaderboard.add_argument("--sort", default="roi_pct", help="roi_pct (PnL/volume %%, not investment ROI), pnl_usd, volume_usd, mdd_pct, or mdd_usd (observed public PnL drawdown).")
+    leaderboard.add_argument("--sort", default="pnl_usd", help="pnl_usd (native USDC PnL), volume_shares, mdd_pct, or mdd_usd. V2 does not supply USD turnover or a PnL/volume percentage.")
     leaderboard.add_argument("--direction", default="DESC", choices=["ASC", "DESC"])
     leaderboard.add_argument("--period", default="all")
     leaderboard.add_argument("--category", default="OVERALL", help="Leaderboard category: " + ", ".join(LEADERBOARD_CATEGORIES))
@@ -3200,6 +3294,7 @@ def build_parser() -> argparse.ArgumentParser:
     leaderboard.add_argument("--mdd-persist-cache", action="store_true")
     leaderboard.add_argument("--mdd-cache-ttl-seconds", default="60")
     leaderboard.add_argument("--equity-base-usd", default="")
+    leaderboard.add_argument("--equity-base-currency", choices=["USD", "USDC"], default="USD", help="Asset of the supplied equity base. Legacy input defaults to USD; native v2 curves use USDC without conversion.")
     leaderboard.add_argument("--scan-concurrency", default="")
     leaderboard.add_argument("--scan-retry-attempts", default="5", help="Retry each leaderboard page this many times before failing.")
     leaderboard.add_argument("--scan-retry-delay-seconds", "--scan-retry-delay", default="30", help="Seconds to wait between leaderboard page retry attempts.")
@@ -3232,6 +3327,8 @@ def build_parser() -> argparse.ArgumentParser:
     leaderboard.add_argument("--max-pnl-usd", default="")
     leaderboard.add_argument("--min-volume-usd", default="")
     leaderboard.add_argument("--max-volume-usd", default="")
+    leaderboard.add_argument("--min-volume-shares", default="", help="Minimum native outcome-share volume (v2).")
+    leaderboard.add_argument("--max-volume-shares", default="", help="Maximum native outcome-share volume (v2).")
     leaderboard.add_argument("--min-roi-pct", default="")
     leaderboard.add_argument("--max-roi-pct", default="")
     leaderboard.add_argument("--min-mdd-usd", default="")
@@ -3273,7 +3370,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Export current durable leaderboard rows without starting, resuming, or changing a scan.",
     )
     leaderboard_export.add_argument("--state-db", required=True, help="Existing SQLite state database created by polymarket-leaderboard.")
-    leaderboard_export.add_argument("--sort", default="roi_pct", help="roi_pct (PnL/volume %%, not investment ROI), pnl_usd, volume_usd, mdd_pct, or mdd_usd (observed public PnL drawdown).")
+    leaderboard_export.add_argument("--sort", default="pnl_usd", help="pnl_usd, volume_shares, mdd_pct, or mdd_usd; volume_usd and roi_pct are available only for declared legacy v1 stored observations.")
     leaderboard_export.add_argument("--direction", default="DESC", choices=["ASC", "DESC"])
     leaderboard_export.add_argument("--returned", "--limit", default="unlimited", help="Rows to export; use unlimited, all, 0, or -1 for no local cap.")
     leaderboard_export.add_argument("--require-mdd", action="store_true", help="Export only rows with completed MDD calculations.")
@@ -3281,6 +3378,8 @@ def build_parser() -> argparse.ArgumentParser:
     leaderboard_export.add_argument("--max-pnl-usd", default="")
     leaderboard_export.add_argument("--min-volume-usd", default="")
     leaderboard_export.add_argument("--max-volume-usd", default="")
+    leaderboard_export.add_argument("--min-volume-shares", default="", help="Minimum native outcome-share volume for v2 stored observations.")
+    leaderboard_export.add_argument("--max-volume-shares", default="", help="Maximum native outcome-share volume for v2 stored observations.")
     leaderboard_export.add_argument("--min-roi-pct", default="")
     leaderboard_export.add_argument("--max-roi-pct", default="")
     leaderboard_export.add_argument("--min-mdd-usd", default="")
@@ -3832,6 +3931,7 @@ def build_parser() -> argparse.ArgumentParser:
     user_mdd.add_argument("--trade-limit", default="1000")
     user_mdd.add_argument("--include-open", action=argparse.BooleanOptionalAction, default=True)
     user_mdd.add_argument("--equity-base-usd", default=None)
+    user_mdd.add_argument("--equity-base-currency", choices=["USD", "USDC"], default="USD", help="Asset of the supplied equity base; no USD/USDC conversion is assumed.")
     user_mdd.add_argument("--max-points", default="50")
     user_mdd.add_argument("--cache-ttl-seconds", default="0")
     user_mdd.add_argument("--mark-replay-token-limit", default="10")
