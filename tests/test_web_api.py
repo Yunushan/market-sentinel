@@ -5672,12 +5672,13 @@ class WebApiTests(unittest.TestCase):
             }
         )
         env = {
+            "POLYMARKET_PRIVATE_KEY": "0x" + "1" * 64,
             "POLY_ADDRESS": "0xabc",
             "POLY_API_KEY": "key",
             "POLY_PASSPHRASE": "pass",
             "POLY_SIGNATURE": "sig",
             "POLY_TIMESTAMP": "1",
-            "POLY_API_SECRET": "ws-secret",
+            "POLY_API_SECRET": 'c25hcHNob3Qtd3Mtc2VjcmV0',
         }
 
         with patch.dict(os.environ, env, clear=True):
@@ -5688,13 +5689,133 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload["credential_runbook"]["mode"], "credential_runbook_no_funded_actions")
         self.assertFalse(payload["credential_runbook"]["funded_execution_exposed"])
         self.assertIn("credentialed_read_no_funded_actions", payload["credential_runbook"]["operator_commands"])
+        dry_run_flags = payload["operator_commands"]["dry_run_order_cancel"].split()
+        self.assertIn("--cancel-immediately", dry_run_flags)
+        self.assertNotIn("--allow-funded-order", dry_run_flags)
+        self.assertNotIn("--confirm-live-order-cancel", dry_run_flags)
         self.assertFalse(payload["stage_gates"]["credentialed_read_ok"])
         self.assertFalse(payload["stage_gates"]["safe_to_attempt_funded_order"])
         self.assertEqual(payload["authenticated_read_checks"]["clob_l2_orders"]["status"], "skipped")
         self.assertEqual(payload["authenticated_read_checks"]["user_websocket_auth_payload"]["status"], "skipped")
         self.assertIn("authenticated read", payload["stage_gates"]["next_step"])
         self.assertNotIn("1" * 64, str(payload))
-        self.assertNotIn("ws-secret", str(payload))
+        self.assertNotIn(env["POLY_API_SECRET"], str(payload))
+
+    def test_polymarket_live_validation_snapshot_uses_fresh_sdk_read_inputs_without_network(self) -> None:
+        sdk_credentials = {
+            "POLYMARKET_PRIVATE_KEY": "0x" + "1" * 64,
+            "POLY_API_KEY": "snapshot-api-key-never-expose",
+            "POLY_API_SECRET": 'c25hcHNob3QtYXBpLXNlY3JldC1uZXZlci1leHBvc2U=',
+            "POLY_PASSPHRASE": "snapshot-passphrase-never-expose",
+        }
+        old_headers = {
+            "POLY_ADDRESS": WALLET,
+            "POLY_API_KEY": sdk_credentials["POLY_API_KEY"],
+            "POLY_PASSPHRASE": sdk_credentials["POLY_PASSPHRASE"],
+            "POLY_SIGNATURE": "snapshot-old-signature-never-expose",
+            "POLY_TIMESTAMP": "1",
+        }
+        websocket_credentials = {
+            key: value for key, value in sdk_credentials.items()
+            if key != "POLYMARKET_PRIVATE_KEY"
+        }
+        cases = (
+            ("sdk_only", sdk_credentials, True, False, True),
+            ("legacy_headers_only", old_headers, False, True, False),
+            ("websocket_only", websocket_credentials, False, False, True),
+        )
+        for name, environment, sdk_ready, headers_ready, websocket_ready in cases:
+            with self.subTest(inputs=name), patch.dict(os.environ, environment, clear=True), \
+                patch("socket.getaddrinfo", side_effect=AssertionError("snapshot must not resolve DNS")) as dns, \
+                patch("socket.socket.connect", side_effect=AssertionError("snapshot must not connect")) as connect:
+                payload = polymarket_live_validation_payload(AppConfig())
+                dns.assert_not_called()
+                connect.assert_not_called()
+
+            expected_status = "skipped" if sdk_ready else "blocked"
+            for check in ("clob_l2_orders", "py_clob_client_credentials"):
+                self.assertEqual(payload["authenticated_read_checks"][check]["status"], expected_status)
+            runbook = payload["credential_runbook"]
+            self.assertEqual(runbook["readiness"]["sdk_authenticated_read"]["status"], "ok" if sdk_ready else "blocked")
+            self.assertEqual(runbook["readiness"]["non_destructive_auth_ready"], sdk_ready)
+            self.assertEqual(runbook["readiness"]["credentialed_read_candidates"], ["clob_l2_orders"] if sdk_ready else [])
+            self.assertEqual(payload["clob_auth_readiness"]["direct_l2_read_ready"], headers_ready)
+            self.assertEqual(set(payload["credential_presence"]["clob_l2_headers"]), set(old_headers))
+            self.assertEqual(
+                payload["authenticated_read_checks"]["user_websocket_auth_payload"]["status"],
+                "skipped" if websocket_ready else "blocked",
+            )
+            self.assertEqual(payload["mode"], "local_readiness_only")
+            self.assertFalse(payload["stage_gates"]["credentialed_read_ok"])
+            self.assertFalse(payload["stage_gates"]["safe_to_attempt_funded_order"])
+            self.assertFalse(payload["funded_execution_exposed"])
+            for credential in (sdk_credentials["POLYMARKET_PRIVATE_KEY"], sdk_credentials["POLY_API_KEY"],
+                               sdk_credentials["POLY_API_SECRET"], sdk_credentials["POLY_PASSPHRASE"],
+                               old_headers["POLY_SIGNATURE"]):
+                self.assertNotIn(credential, str(payload))
+
+    def test_polymarket_live_validation_snapshot_does_not_use_app_settings_for_cli_signer(self) -> None:
+        cfg = AppConfig()
+        cfg.markets["polymarket"].settings.update({"private_key": "0x" + "1" * 64})
+        environment = {
+            "POLY_API_KEY": "snapshot-settings-api-key",
+            "POLY_API_SECRET": 'c25hcHNob3Qtc2V0dGluZ3MtYXBpLXNlY3JldA==',
+            "POLY_PASSPHRASE": "snapshot-settings-passphrase",
+        }
+        with patch.dict(os.environ, environment, clear=True), \
+            patch("socket.getaddrinfo", side_effect=AssertionError("snapshot must not resolve DNS")) as dns, \
+            patch("socket.socket.connect", side_effect=AssertionError("snapshot must not connect")) as connect:
+            payload = polymarket_live_validation_payload(cfg)
+            dns.assert_not_called()
+            connect.assert_not_called()
+
+        self.assertTrue(payload["clob_auth_readiness"]["sdk_trading_ready"])
+        self.assertEqual(payload["authenticated_read_checks"]["clob_l2_orders"]["status"], "blocked")
+        self.assertEqual(payload["authenticated_read_checks"]["py_clob_client_credentials"]["status"], "blocked")
+        self.assertIn("POLYMARKET_PRIVATE_KEY or PRIVATE_KEY", payload["authenticated_read_checks"]["clob_l2_orders"]["missing"])
+        self.assertFalse(payload["credential_runbook"]["readiness"]["non_destructive_auth_ready"])
+        self.assertFalse(payload["stage_gates"]["credentialed_read_ok"])
+        self.assertFalse(payload["stage_gates"]["safe_to_attempt_funded_order"])
+        self.assertFalse(payload["funded_execution_exposed"])
+
+    def test_polymarket_live_validation_snapshot_rejects_blank_relayer_credentials_without_network(self) -> None:
+        relayer_key = "snapshot-relayer-key-never-expose"
+        relayer_address = "0x" + "d" * 40
+        cases = (
+            ("both_whitespace", " \t\n", " \r\n", ["RELAYER_API_KEY", "RELAYER_API_KEY_ADDRESS"]),
+            ("key_whitespace", " \t", relayer_address, ["RELAYER_API_KEY"]),
+            ("address_whitespace", relayer_key, " \r\n", ["RELAYER_API_KEY_ADDRESS"]),
+            ("nonblank_pair", relayer_key, relayer_address, []),
+        )
+        for name, key, address, missing in cases:
+            environment = {"RELAYER_API_KEY": key, "RELAYER_API_KEY_ADDRESS": address}
+            with self.subTest(inputs=name), patch.dict(os.environ, environment, clear=True), \
+                patch("socket.getaddrinfo", side_effect=AssertionError("snapshot must not resolve DNS")) as dns, \
+                patch("socket.socket.connect", side_effect=AssertionError("snapshot must not connect")) as connect:
+                payload = polymarket_live_validation_payload(AppConfig())
+                dns.assert_not_called()
+                connect.assert_not_called()
+
+            check = payload["authenticated_read_checks"]["relayer_recent_transactions"]
+            self.assertEqual(check["status"], "blocked" if missing else "skipped")
+            self.assertEqual(check["missing"], missing)
+            runbook_readiness = payload["credential_runbook"]["readiness"]
+            self.assertEqual(runbook_readiness["relayer_headers"]["status"], "blocked" if missing else "ok")
+            self.assertEqual(runbook_readiness["non_destructive_auth_ready"], not missing)
+            self.assertEqual(
+                runbook_readiness["credentialed_read_candidates"],
+                [] if missing else ["relayer_recent_transactions"],
+            )
+            # Existing audit sanitization redacts the named relayer presence fields.
+            self.assertEqual(
+                payload["credential_presence"]["relayer_headers"],
+                {name: "***" for name in environment},
+            )
+            self.assertFalse(payload["stage_gates"]["credentialed_read_ok"])
+            self.assertFalse(payload["stage_gates"]["safe_to_attempt_funded_order"])
+            self.assertFalse(payload["funded_execution_exposed"])
+            self.assertNotIn(relayer_key, str(payload))
+            self.assertNotIn(relayer_address, str(payload))
 
     def test_polymarket_live_validation_reports_store_import_compare_and_redact(self) -> None:
         cfg = AppConfig()

@@ -84,7 +84,7 @@ Polymarket coverage is intentionally reported by verification tier, not as a sin
 | `app_workflow_available` | Tkinter/API/React exposes a user workflow for that surface. |
 | `offline_tested` | Unit tests cover request construction, parsing, and guardrails. |
 | `public_live_verified` | Safe non-credentialed live probe passed from this machine. |
-| `credential_live_verified` | Real credentialed read/stream verified. Currently blocked without credentials. |
+| `credential_live_verified` | Real semantic CLOB order-list or relayer authenticated read verified through current attested workflow evidence. Currently blocked without credentials. |
 | `funded_live_verified` | Exact-revision bounded order/immediate-cancel flow verified from the protected workflow, including hosted evidence review and a resolved durable recovery journal. This evidence tier does not enable normal product mutations; credentials, eligibility, funding, and explicit live-action approval are still required. |
 
 Current truthful status: Gamma/Data/CLOB/Bridge probes are implemented and must be
@@ -105,7 +105,7 @@ Stored live-validation reports include a promotion guard before they can support
 
 | Promotion tier | Required evidence |
 | --- | --- |
-| `credential_live_verified` | An actual `ok` non-destructive authenticated CLOB L2 order-list read, relayer authenticated read, or authenticated user WebSocket connection in `authenticated_read_checks`. A stage-gate boolean or credential runbook is not enough. |
+| `credential_live_verified` | An actual `ok` semantic CLOB L2 order-list or relayer collection read in `authenticated_read_checks`, bound to current protected-main workflow evidence and attestation. WebSocket payload/connect, companion SDK status, stage-gate booleans and credential runbooks do not qualify. |
 | `funded_live_verified` | An `ok` result from the dedicated protected-workflow audit must have `live_action=true`, an exact order id, placed/cancel/post-cancel audit sections, `post_cancel_verified=true`, a resolved recovery journal, and hosted review/attestation. Dry-run transcripts and `ready_to_execute` reports never promote this tier or enable normal product mutations. |
 
 Reports with local-only modes such as GUI readiness snapshots, credential runbooks, or browser smoke fixtures are always blocked from promotion even if they contain simulated successful fields.
@@ -162,7 +162,8 @@ Authenticated CLOB readiness follows the official Polymarket split between L1/L2
 | Readiness item | Current behavior |
 | --- | --- |
 | SDK trading readiness | Requires a 0x-prefixed private key, supported signature type, official CLOB host, Polygon chain id 137, and a funder/deposit wallet when the signature type requires one. |
-| Direct L2 read readiness | Requires all explicit `POLY_ADDRESS`, `POLY_API_KEY`, `POLY_PASSPHRASE`, `POLY_SIGNATURE`, and `POLY_TIMESTAMP` headers. |
+| Fresh SDK read readiness | Requires an environment signer, explicit existing API key/secret/passphrase, supported signature type and required funder. It uses the same selected inputs as the current read CLI and never derives keys during inventory. |
+| Legacy L2 header inventory | Reports the presence of `POLY_ADDRESS`, `POLY_API_KEY`, `POLY_PASSPHRASE`, `POLY_SIGNATURE`, and `POLY_TIMESTAMP`; this inventory does not satisfy current SDK read readiness. |
 | L1 REST readiness | Reports presence of `POLY_ADDRESS`, `POLY_SIGNATURE`, `POLY_TIMESTAMP`, and `POLY_NONCE`; it does not synthesize signatures. |
 | Redaction | Private keys and signed headers are never returned by readiness payloads; addresses are shortened. |
 | Live action boundary | Readiness checks never derive credentials or move funds. Normal application mutations remain blocked. Only the dedicated protected-workflow audit factory may submit one tightly capped, allow-listed V2 order and cancel its exact returned id; a dry run or readiness snapshot cannot unlock that capability. |
@@ -172,10 +173,11 @@ The credential runbook is the first local step before any credentialed live vali
 | Runbook group | Variables |
 | --- | --- |
 | SDK trading credentials | `POLYMARKET_PRIVATE_KEY` or `PRIVATE_KEY`; optional `POLYMARKET_SIGNATURE_TYPE` or `SIGNATURE_TYPE`; `POLYMARKET_FUNDER_ADDRESS`, `FUNDER_ADDRESS`, or `DEPOSIT_WALLET_ADDRESS` when the signature type requires a funder/deposit wallet. |
-| Direct CLOB L2 reads | `POLY_ADDRESS`, `POLY_API_KEY`, `POLY_PASSPHRASE`, `POLY_SIGNATURE`, and `POLY_TIMESTAMP`. |
+| Fresh SDK CLOB read | `POLYMARKET_PRIVATE_KEY` or `PRIVATE_KEY`; `POLY_API_KEY`, `POLY_API_SECRET` or `POLY_SECRET`, `POLY_PASSPHRASE`; optional `POLYMARKET_SIGNATURE_TYPE` or `SIGNATURE_TYPE`; `POLYMARKET_FUNDER_ADDRESS` or `FUNDER_ADDRESS` when required. |
+| Legacy pre-signed L2 headers | `POLY_ADDRESS`, `POLY_API_KEY`, `POLY_PASSPHRASE`, `POLY_SIGNATURE`, and `POLY_TIMESTAMP`; inventory only. |
 | CLOB L1 REST headers | `POLY_ADDRESS`, `POLY_SIGNATURE`, `POLY_TIMESTAMP`, and `POLY_NONCE`. |
 | User WebSocket | `POLY_API_KEY`, `POLY_API_SECRET` or `POLY_SECRET`, and `POLY_PASSPHRASE`. |
-| Relayer | `RELAYER_API_KEY` and `RELAYER_API_KEY_ADDRESS`. |
+| Relayer | Nonblank, unpadded HTTP-compatible `RELAYER_API_KEY` and `RELAYER_API_KEY_ADDRESS`; local presence does not prove authentication. |
 | Builder API | `POLY_BUILDER_API_KEY`, `POLY_BUILDER_TIMESTAMP`, `POLY_BUILDER_PASSPHRASE`, and `POLY_BUILDER_SIGNATURE`. |
 
 Use it to create a redacted inventory report:
@@ -185,11 +187,13 @@ python scripts/verify_polymarket_credentials.py --json --report-file polymarket-
 python scripts/verify_polymarket_credentials.py --require-authenticated-read-ready
 ```
 
-`--require-authenticated-read-ready` exits non-zero until at least one non-destructive authenticated read/stream candidate is locally ready. The runbook output includes follow-up commands for public readiness, credentialed reads, user WebSocket probing, and dry-run order/cancel transcripts. The runbook itself cannot perform funded actions.
+`--require-authenticated-read-ready` requires a locally ready current SDK CLOB or relayer authenticated-read candidate. `--require-l2-read-ready` intentionally now gates the actual SDK CLOB inputs instead of legacy pre-signed header presence. User WebSocket payload readiness remains separate. SDK read inputs come only from the environment: `POLYMARKET_` aliases have priority, API secret selection prefers `POLY_API_SECRET`, and invalid higher-priority values do not fall through. Settings-only credentials and `DEPOSIT_WALLET_ADDRESS` cannot prepare the standalone CLI read. The selected API secret must pass the locked SDK's URL-safe base64 decoder; trimmed API key/passphrase must fit its ASCII HTTP header grammar, and relayer inputs must be sendable raw HTTP headers. These are local syntax checks, not successful authentication. The runbook never instantiates the SDK, signs or derives keys. See [the credential runbook](docs/POLYMARKET_CREDENTIAL_RUNBOOK.md) for validation and compatibility details.
+
+Funded guidance only links to or inspects the protected main workflow; it provides no standalone execution or dispatch command. That workflow supplies real SHA/run/attempt/nonce metadata. Do not invent provenance values. Explicit user authorization for exact inputs, production reviewer approval, eligible funded credentials, the protected token policy and a persistent Linux collector remain prerequisites.
 
 Normal product trading remains disabled. A separate, non-application V2 audit
 factory is available only to the protected evidence workflow. It can attempt one
-allow-listed, post-only GTC order within the five-share and one-dollar caps,
+allow-listed, post-only GTC order within the five-share and one-USDC caps,
 immediately cancel only the exact returned order id, and verify the post-cancel
 state. The capability is consumed before transport and uses a durable recovery
 journal so ambiguous placement or cancellation cannot be retried silently. A
@@ -202,7 +206,7 @@ For live credential validation, use the verifier as a stage gate and keep the JS
 ```powershell
 python scripts/verify_polymarket_live.py --report-file live-report.json
 python scripts/verify_polymarket_live.py --require-authenticated-read-ok --include-user-websocket-connect --report-file live-auth-report.json
-python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <PRICE> --size <SIZE> --allow-token-id <TOKEN> --report-file live-dry-run-report.json
+python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <PRICE> --size <SIZE> --allow-token-id <TOKEN> --cancel-immediately --report-file live-dry-run-report.json
 ```
 
 `--require-authenticated-read-ok` fails unless at least one non-destructive authenticated read/stream check succeeds. `--include-user-websocket-connect` opens the authenticated user WebSocket and sends the subscription payload; secrets are not returned in the report. Use `--skip-public-checks` or `--skip-authenticated-read-checks` only for local readiness/debug runs, not for a production live approval.

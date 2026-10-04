@@ -108,7 +108,11 @@ from polymarket.analytics_cache import (
     purge_analytics_artifacts,
     store_analytics_artifact,
 )
-from polymarket.auth_readiness import build_clob_auth_readiness
+from polymarket.auth_readiness import (
+    build_authenticated_read_readiness,
+    build_clob_auth_readiness,
+    build_relayer_read_readiness,
+)
 from polymarket.coverage import polymarket_official_api_coverage
 from polymarket.credential_runbook import build_polymarket_credential_runbook
 from polymarket.http_client import PolymarketHTTPError, PolymarketRateLimitError, PolymarketResponseError
@@ -2632,9 +2636,10 @@ def polymarket_live_validation_payload(cfg: AppConfig) -> Dict[str, Any]:
     market_cfg = cfg.markets.get("polymarket")
     settings = dict(market_cfg.settings) if market_cfg else {}
     readiness = build_clob_auth_readiness(settings)
-    direct_l2_ready = bool(readiness.get("direct_l2_read_ready"))
-    sdk_ready = bool(readiness.get("sdk_trading_ready"))
-    relayer_ready = _all_env_present(POLYMARKET_RELAYER_HEADERS)
+    authenticated_read_readiness = build_authenticated_read_readiness()
+    sdk_read_ready = bool(authenticated_read_readiness.get("ok"))
+    relayer_readiness = build_relayer_read_readiness()
+    relayer_ready = bool(relayer_readiness.get("ok"))
     user_ws_auth = {
         "apiKey": os.getenv("POLY_API_KEY", ""),
         "secret": os.getenv("POLY_API_SECRET") or os.getenv("POLY_SECRET", ""),
@@ -2681,25 +2686,28 @@ def polymarket_live_validation_payload(cfg: AppConfig) -> Dict[str, Any]:
         },
         "authenticated_read_checks": {
             "clob_l2_orders": _validation_item(
-                "skipped" if direct_l2_ready else "blocked",
-                "Explicit L2 headers are present; run the CLI for a non-destructive order-list read."
-                if direct_l2_ready
-                else "Missing explicit L2 headers for CLOB order-list reads.",
-                missing=readiness.get("l2_headers", {}).get("missing", []),
+                "skipped" if sdk_read_ready else "blocked",
+                "Explicit SDK credentials and environment signer settings are locally ready; run the CLI for a freshly signed read-only order-list check."
+                if sdk_read_ready
+                else "Missing or invalid environment credentials for the freshly signed SDK CLOB read.",
+                missing=authenticated_read_readiness.get("missing", []),
+                blockers=authenticated_read_readiness.get("blockers", []),
             ),
             "py_clob_client_credentials": _validation_item(
-                "skipped" if sdk_ready else "blocked",
-                "SDK trading credentials are locally ready; GUI/API does not derive API credentials."
-                if sdk_ready
-                else "SDK trading credentials are not locally ready.",
-                blockers=readiness.get("blockers", []),
+                "skipped" if sdk_read_ready else "blocked",
+                "Explicit SDK read credentials are locally ready; GUI/API does not derive credentials or make authenticated reads."
+                if sdk_read_ready
+                else "Explicit SDK read credentials are not locally ready in the environment.",
+                missing=authenticated_read_readiness.get("missing", []),
+                blockers=authenticated_read_readiness.get("blockers", []),
             ),
             "relayer_recent_transactions": _validation_item(
                 "skipped" if relayer_ready else "blocked",
-                "Relayer headers are present; run the CLI for a non-destructive recent-transactions read."
+                "Nonblank relayer credentials are present; run the CLI for a non-destructive recent-transactions read."
                 if relayer_ready
-                else "Missing relayer API key headers.",
-                missing=[name for name, present in _env_presence(POLYMARKET_RELAYER_HEADERS).items() if not present],
+                else "Missing or blank relayer API key headers.",
+                missing=relayer_readiness.get("missing", []),
+                blockers=relayer_readiness.get("blockers", []),
             ),
             "user_websocket_auth_payload": user_ws_payload,
             "user_websocket_connect": _validation_item(
@@ -2733,7 +2741,7 @@ def polymarket_live_validation_payload(cfg: AppConfig) -> Dict[str, Any]:
         "operator_commands": {
             "public_and_readiness": "python scripts/verify_polymarket_live.py --report-file live-report.json",
             "credentialed_read": "python scripts/verify_polymarket_live.py --require-authenticated-read-ok --include-user-websocket-connect --report-file live-auth-report.json",
-            "dry_run_order_cancel": "python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <PRICE> --size <SIZE> --allow-token-id <TOKEN> --report-file live-dry-run-report.json",
+            "dry_run_order_cancel": "python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <PRICE> --size <SIZE> --allow-token-id <TOKEN> --cancel-immediately --report-file live-dry-run-report.json",
         },
         "funded_execution_exposed": False,
         "notes": [

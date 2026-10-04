@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import re
 from typing import Any, Dict, Mapping, Optional
@@ -42,6 +44,150 @@ SIGNATURE_TYPE_INFO: Dict[int, Dict[str, Any]] = {
         "requires_funder": True,
     },
 }
+
+
+# The non-mutating SDK probe selects these aliases in this exact order.
+# Keep this separate from the broader config/legacy signing inventory below.
+AUTHENTICATED_READ_ENVIRONMENT = {
+    "private_key": ("POLYMARKET_PRIVATE_KEY", "PRIVATE_KEY"),
+    "funder_address": ("POLYMARKET_FUNDER_ADDRESS", "FUNDER_ADDRESS"),
+    "signature_type": ("POLYMARKET_SIGNATURE_TYPE", "SIGNATURE_TYPE"),
+    "api_key": ("POLY_API_KEY",),
+    "api_secret": ("POLY_API_SECRET", "POLY_SECRET"),
+    "api_passphrase": ("POLY_PASSPHRASE",),
+}
+SDK_AUTH_HEADER_RE = re.compile(rb"[^\x00\s]+(?:[ \t]+[^\x00\s]+)*")
+SECP256K1_ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+
+
+def resolve_authenticated_read_environment(
+    *, environ: Optional[Mapping[str, str]] = None,
+) -> Dict[str, str]:
+    """Resolve raw credentials for execution callers; never include this in reports."""
+    env = os.environ if environ is None else environ
+    selected = {
+        field: next((str(env[name]) for name in names if env.get(name)), "")
+        for field, names in AUTHENTICATED_READ_ENVIRONMENT.items()
+    }
+    selected["signature_type"] = selected["signature_type"] or "0"
+    return selected
+
+
+def build_authenticated_read_readiness(
+    *, environ: Optional[Mapping[str, str]] = None,
+) -> Dict[str, Any]:
+    """Check the current SDK read's selected environment inputs without SDK/network use.
+
+    This checks local input validity only, never successful authentication or account
+    eligibility. Config settings and pre-signed legacy headers cannot satisfy it.
+    """
+    env = os.environ if environ is None else environ
+    selected = resolve_authenticated_read_environment(environ=env)
+    sources = {
+        field: next((name for name in names if env.get(name)), "")
+        for field, names in AUTHENTICATED_READ_ENVIRONMENT.items()
+    }
+    blockers: list[str] = []
+    missing: list[str] = []
+    field_ready: Dict[str, bool] = {}
+
+    private_key = selected["private_key"]
+    private_key_valid = bool(HEX_PRIVATE_KEY_RE.fullmatch(private_key))
+    if private_key_valid:
+        private_key_valid = 1 <= int(private_key[2:], 16) < SECP256K1_ORDER
+    field_ready["private_key"] = private_key_valid
+    if not private_key:
+        missing.append("POLYMARKET_PRIVATE_KEY or PRIVATE_KEY")
+        blockers.append("Fresh SDK reads require an explicit environment private key.")
+    elif not private_key_valid:
+        blockers.append("The selected private key must be an unpadded 0x-prefixed valid secp256k1 scalar.")
+
+    signature_type, signature_error = _parse_signature_type(selected["signature_type"])
+    signature_valid = signature_error is None and signature_type in SIGNATURE_TYPE_INFO
+    field_ready["signature_type"] = signature_valid
+    if not signature_valid:
+        blockers.append("The selected environment signature type must be a supported integer (0, 1, 2, or 3).")
+    requires_funder = bool(SIGNATURE_TYPE_INFO.get(signature_type, {}).get("requires_funder")) if signature_valid else False
+    funder = selected["funder_address"]
+    funder_valid = bool(EVM_ADDRESS_RE.fullmatch(funder)) if funder else not requires_funder
+    field_ready["funder_address"] = funder_valid
+    if requires_funder and not funder:
+        missing.append("POLYMARKET_FUNDER_ADDRESS or FUNDER_ADDRESS")
+        blockers.append("The selected signature type requires an explicit environment funder address.")
+    elif funder and not funder_valid:
+        blockers.append("The selected funder must be an unpadded 0x-prefixed EVM address.")
+
+    for field in ("api_key", "api_secret", "api_passphrase"):
+        # Match Trader._explicit_api_creds; a whitespace primary alias must not
+        # fall through to a valid lower-priority alias before this validation.
+        field_ready[field] = bool(selected[field].strip())
+        if not field_ready[field]:
+            names = " or ".join(AUTHENTICATED_READ_ENVIRONMENT[field])
+            missing.append(names)
+            blockers.append(f"Fresh SDK reads require explicit nonempty {names}.")
+
+    for field in ("api_key", "api_passphrase"):
+        if not field_ready[field]:
+            continue
+        try:
+            encoded_header = selected[field].strip().encode("ascii")
+        except UnicodeEncodeError:
+            encoded_header = b""
+        if not SDK_AUTH_HEADER_RE.fullmatch(encoded_header):
+            field_ready[field] = False
+            name = " or ".join(AUTHENTICATED_READ_ENVIRONMENT[field])
+            blockers.append(f"The selected {name} is not compatible with the SDK's HTTP header encoding.")
+
+    if field_ready["api_secret"]:
+        try:
+            # Match the locked SDK's local HMAC input decoder exactly. Decoder
+            # success is syntax compatibility, not proof of valid API credentials.
+            base64.urlsafe_b64decode(selected["api_secret"].strip())
+        except (binascii.Error, ValueError):
+            field_ready["api_secret"] = False
+            blockers.append("The selected API secret is not decodable by the SDK's URL-safe base64 decoder.")
+
+    return {
+        "status": "blocked" if blockers else "ok",
+        "detail": "Environment inputs are ready for a fresh SDK read; authentication remains unverified." if not blockers else "Environment inputs are not ready for the current SDK read.",
+        "ok": not blockers,
+        "blockers": blockers,
+        "missing": missing,
+        "sources": sources,
+        "field_ready": field_ready,
+        "requires_funder": requires_funder,
+        "signature_type": signature_type if signature_valid else None,
+    }
+
+
+RELAYER_READ_HEADERS = ("RELAYER_API_KEY", "RELAYER_API_KEY_ADDRESS")
+
+
+def build_relayer_read_readiness(
+    *, environ: Optional[Mapping[str, str]] = None,
+) -> Dict[str, Any]:
+    """Check raw relayer header transport compatibility; never claim API/account eligibility."""
+    env = os.environ if environ is None else environ
+    def usable_header(value: Any) -> bool:
+        if not isinstance(value, str) or not value.strip() or value != value.strip():
+            return False
+        if any(ord(character) < 32 or ord(character) == 127 for character in value):
+            return False
+        try:
+            value.encode("latin-1")  # The raw request header must be encodable by HTTP transport.
+        except UnicodeEncodeError:
+            return False
+        return True
+
+    missing = [name for name in RELAYER_READ_HEADERS if not usable_header(env.get(name))]
+    return {
+        "status": "blocked" if missing else "ok",
+        "ok": not missing,
+        "detail": "Relayer header inputs are present; authentication remains unverified." if not missing else "Relayer read requires nonblank, unpadded HTTP-compatible environment headers.",
+        "missing": missing,
+        "blockers": [f"Relayer reads require a nonblank, unpadded HTTP-compatible {name}." for name in missing],
+        "sources": {name: f"env:{name}" if env.get(name) else "" for name in RELAYER_READ_HEADERS},
+    }
 
 
 def build_clob_auth_readiness(

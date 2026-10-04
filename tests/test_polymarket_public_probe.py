@@ -89,7 +89,7 @@ class PublicOnlyPolymarketProbeTests(unittest.TestCase):
     def test_authenticated_reads_stay_available_without_legacy_sdk_derivation(self) -> None:
         credentials = {
             "POLY_API_KEY": "api-key",
-            "POLY_API_SECRET": "api-secret",
+            "POLY_API_SECRET": "cmVhZC1zZWNyZXQ=",
             "POLY_PASSPHRASE": "passphrase",
             "POLYMARKET_PRIVATE_KEY": "0x" + "1" * 64,
         }
@@ -108,7 +108,7 @@ class PublicOnlyPolymarketProbeTests(unittest.TestCase):
         self.assertTrue(config.authenticated_sdk_reads)
         self.assertFalse(config.allow_api_key_derivation)
         self.assertFalse(config.allow_api_key_creation)
-        self.assertEqual(config.api_secret, "api-secret")
+        self.assertEqual(config.api_secret, "cmVhZC1zZWNyZXQ=")
 
     def test_relayer_read_requires_an_object_collection_before_credential_promotion(self) -> None:
         credentials = {
