@@ -27,7 +27,13 @@ except Exception:  # pragma: no cover
 from polymarket import bridge, clob_rest, data_api, gamma, relayer
 from core.atomic_files import atomic_write_text
 from core.json_validation import loads_strict_json
-from polymarket.auth_readiness import build_clob_auth_readiness, is_evm_address_like
+from polymarket.auth_readiness import (
+    build_authenticated_read_readiness,
+    build_clob_auth_readiness,
+    build_relayer_read_readiness,
+    is_evm_address_like,
+    resolve_authenticated_read_environment,
+)
 from polymarket.constants import (
     POLYMARKET_BOUNDED_AUDIT_MUTATION_BLOCKER,
     POLYMARKET_BOUNDED_AUDIT_MUTATIONS_SUPPORTED,
@@ -842,36 +848,24 @@ def _authenticated_read_checks(
     user_ws_markets: Iterable[str] = (),
 ) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
-    private_key = os.getenv("POLYMARKET_PRIVATE_KEY") or os.getenv("PRIVATE_KEY")
-    api_key = os.getenv("POLY_API_KEY")
-    api_secret = os.getenv("POLY_API_SECRET") or os.getenv("POLY_SECRET")
-    api_passphrase = os.getenv("POLY_PASSPHRASE")
-    missing_sdk_credentials = []
-    for present, label in (
-        (private_key, "POLYMARKET_PRIVATE_KEY or PRIVATE_KEY"),
-        (api_key, "POLY_API_KEY"),
-        (api_secret, "POLY_API_SECRET or POLY_SECRET"),
-        (api_passphrase, "POLY_PASSPHRASE"),
-    ):
-        if not present:
-            missing_sdk_credentials.append(label)
-    if missing_sdk_credentials:
-        detail = "Missing explicit credentials for fresh py-clob-client-v2 authenticated reads."
-        out["clob_l2_orders"] = _result("blocked", detail, missing=missing_sdk_credentials)
-        out["py_clob_client_credentials"] = _result("blocked", detail, missing=missing_sdk_credentials)
+    env = dict(os.environ)
+    selected = resolve_authenticated_read_environment(environ=env)
+    readiness = build_authenticated_read_readiness(environ=env)
+    if not readiness["ok"]:
+        detail = "Local environment inputs are not ready for fresh py-clob-client-v2 authenticated reads."
+        metadata = {"missing": readiness["missing"], "blockers": readiness["blockers"]}
+        out["clob_l2_orders"] = _result("blocked", detail, **metadata)
+        out["py_clob_client_credentials"] = _result("blocked", detail, **metadata)
     else:
         def read_open_orders() -> list[Any]:
-            readiness = build_clob_auth_readiness()
-            if readiness["blockers"]:
-                raise ValueError("; ".join(readiness["blockers"]))
             trader = PolymarketTrader(
                 TraderConfig(
-                    private_key=str(private_key),
-                    funder_address=os.getenv("POLYMARKET_FUNDER_ADDRESS") or os.getenv("FUNDER_ADDRESS") or None,
-                    signature_type=int(os.getenv("POLYMARKET_SIGNATURE_TYPE") or os.getenv("SIGNATURE_TYPE") or "0"),
-                    api_key=str(api_key),
-                    api_secret=str(api_secret),
-                    api_passphrase=str(api_passphrase),
+                    private_key=selected["private_key"],
+                    funder_address=selected["funder_address"] or None,
+                    signature_type=int(readiness["signature_type"]),
+                    api_key=selected["api_key"],
+                    api_secret=selected["api_secret"],
+                    api_passphrase=selected["api_passphrase"],
                     authenticated_sdk_reads=True,
                     allow_api_key_derivation=False,
                     allow_api_key_creation=False,
@@ -896,15 +890,17 @@ def _authenticated_read_checks(
                 error_type=out["clob_l2_orders"].get("error_type", "unknown"),
             )
 
-    if _missing(RELAYER_HEADERS):
+    relayer_readiness = build_relayer_read_readiness(environ=env)
+    if not relayer_readiness["ok"]:
         out["relayer_recent_transactions"] = _result(
             "blocked",
-            "Missing relayer API key headers.",
-            missing=_missing(RELAYER_HEADERS),
+            "Relayer read requires both nonblank environment headers.",
+            missing=relayer_readiness["missing"],
+            blockers=relayer_readiness["blockers"],
         )
     else:
         out["relayer_recent_transactions"] = _probe(
-            lambda: relayer.get_recent_transactions(_headers(RELAYER_HEADERS), timeout=timeout),
+            lambda: relayer.get_recent_transactions({name: env[name] for name in RELAYER_HEADERS}, timeout=timeout),
             "Authenticated relayer recent transactions responded.",
             _validate_authenticated_list,
         )

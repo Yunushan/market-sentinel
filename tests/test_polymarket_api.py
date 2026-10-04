@@ -2946,7 +2946,7 @@ store_live_validation_report(
             "POLY_PASSPHRASE": "passphrase-secret",
             "POLY_SIGNATURE": "signature-secret",
             "POLY_TIMESTAMP": "123",
-            "POLY_API_SECRET": "websocket-secret",
+            "POLY_API_SECRET": "cmVhZC1zZWNyZXQ=",
             "RELAYER_API_KEY": "relayer-secret",
             "RELAYER_API_KEY_ADDRESS": "0x" + "b" * 40,
             "PRIVATE_KEY": "0x" + "1" * 64,
@@ -2965,10 +2965,11 @@ store_live_validation_report(
         self.assertIn("clob_l2_orders", runbook["readiness"]["credentialed_read_candidates"])
         self.assertIn("verify_polymarket_credentials.py --json", runbook["operator_commands"]["credential_inventory"])
         self.assertIn("--require-authenticated-read-ok", runbook["operator_commands"]["credentialed_read_no_funded_actions"])
-        self.assertIn("--allow-funded-order", runbook["operator_commands"]["funded_order_cancel_requires_approval"])
-        self.assertIn(CONFIRM_LIVE_ORDER_CANCEL, runbook["operator_commands"]["funded_order_cancel_requires_approval"])
+        self.assertIn("gh workflow view", runbook["operator_commands"]["funded_workflow_inspection"])
+        self.assertTrue(runbook["funded_workflow"]["requires_explicit_user_approval"])
+        self.assertTrue(all("--allow-funded-order" not in command for command in runbook["operator_commands"].values()))
         self.assertNotIn("api-key-secret", str(runbook))
-        self.assertNotIn("websocket-secret", str(runbook))
+        self.assertNotIn("cmVhZC1zZWNyZXQ=", str(runbook))
         self.assertNotIn("1" * 64, str(runbook))
 
     def test_credential_runbook_blocks_missing_authenticated_read_inputs(self) -> None:

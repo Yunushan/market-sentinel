@@ -39,6 +39,7 @@ def _print_summary(runbook: dict) -> None:
         "user_websocket_auth_payload",
         "relayer_headers",
         "sdk_trading_credentials",
+        "sdk_authenticated_read",
     ):
         item = readiness.get(key, {}) if isinstance(readiness, dict) else {}
         status = item.get("status", "unknown")
@@ -57,12 +58,12 @@ def main() -> int:
     parser.add_argument(
         "--require-authenticated-read-ready",
         action="store_true",
-        help="Exit non-zero unless at least one non-destructive authenticated read or stream candidate is locally ready.",
+        help="Exit non-zero unless a current SDK CLOB or relayer authenticated-read candidate is locally ready; WebSocket payloads do not satisfy this gate.",
     )
     parser.add_argument(
         "--require-l2-read-ready",
         action="store_true",
-        help="Exit non-zero unless all explicit CLOB L2 read headers are present.",
+        help="Exit non-zero unless the current freshly signed SDK CLOB read is locally ready. Legacy pre-signed header presence no longer satisfies this flag.",
     )
     parser.add_argument(
         "--require-user-websocket-ready",
@@ -83,7 +84,7 @@ def main() -> int:
     readiness = runbook["readiness"]
     if args.require_authenticated_read_ready and not readiness["non_destructive_auth_ready"]:
         return 1
-    if args.require_l2_read_ready and readiness["direct_l2_read_headers"]["status"] != "ok":
+    if args.require_l2_read_ready and readiness["sdk_authenticated_read"]["status"] != "ok":
         return 1
     if args.require_user_websocket_ready and readiness["user_websocket_auth_payload"]["status"] != "ok":
         return 1
