@@ -219,7 +219,8 @@ python scripts/verify_polymarket_live.py --token-id <TOKEN> --side BUY --price <
 - Load an implemented market, select a contract, and submit dry-run paper orders through the selected adapter
 - Refresh the selected contract's quote/orderbook preview before sizing a paper or preflighted live order
 - Fill the order limit from the selected contract's current quote using side-aware bid/ask selection
-- Summarizes local paper exposure by market and contract from accepted paper-order history
+- Summarizes local paper inventory with chronological average cost, remaining entry basis, and separate realized/unrealized P&L; full closes leave the open-position table
+- Retains paper history beyond 200 orders and rejects new records at capacity; dry-run fill assumptions and unsupported venue/currency metrics are reported explicitly ([accounting contract](docs/PAPER_ACCOUNTING.md))
 - Refreshes paper exposure marks and unrealized P&L from adapter price feeds without placing orders
 - Refreshes a selected paper exposure mark without replacing other active marks
 - Clears a selected paper exposure mark without dropping other active marks
@@ -387,13 +388,13 @@ Then open `http://127.0.0.1:8765`.
 Headless CLI support for Linux, Windows, and servers:
 ```bash
 python -m market_sentinel_cli polymarket-leaderboard \
-  --sort roi_pct --direction DESC \
+  --sort pnl_usd --direction DESC \
   --returned unlimited --scanned unlimited \
   --compute-mdd --fast-scan --mdd-scan unlimited --max-mdd-pct 20 \
   --scan-retry-attempts 10 --scan-retry-delay 60 \
-  --state-db data/polymarket-best-roi-mdd20.sqlite3 --resume \
+  --state-db data/polymarket-pnl-mdd20-v2.sqlite3 --resume \
   --resume-on-failure --resume-backoff-seconds 60 \
-  --format csv --output data/polymarket-best-roi-mdd20.csv
+  --format csv --output data/polymarket-pnl-mdd20-v2.csv
 ```
 
 After package installation, the same command is available as `market-sentinel ...`. The CLI uses the same shared `data/config.json` file as the desktop and web UIs, and every command accepts `--config path/to/config.json` for isolated Linux/Windows automation.
@@ -499,8 +500,9 @@ The command streams raw rows to an atomic JSON export, including
 budget returns an explicitly partial result when a next cursor exists. Continue
 from that token with `--cursor TOKEN --max-pages 10 --output next.json`; the
 resumed export leaves board parameters unknown because the opaque cursor binds
-them. V2 `volume` is outcome shares, so these rows are not fed into the v1
-`volume_usd` and PnL/volume analytics. V2 cursors remove v1's documented
+them. The regular analytics API, CLI, and desktop also consume native v2 board
+rows. V2 `volume` is outcome shares, exposed as `volume_shares`; `volume_usd`,
+`roi_pct`, and `pnl_volume_pct` remain null. V2 cursors remove v1's documented
 1,000-offset request boundary, but the board still omits unranked accounts and
 its offset-shaped cursor walk can skip or repeat rows across a data refresh.
 Even `cursor_exhausted=true` is not a stable, exhaustive account snapshot.
@@ -515,12 +517,24 @@ JSON scan/export output and SQLite status include `mdd_signature` for provenance
 An unchanged resume deliberately retains its previous observations; start a new
 scan without `--resume` when a fresh leaderboard and current MDD are required.
 
-The legacy API/CLI key `roi_pct` means `pnl_usd / volume_usd * 100`, not return
-on invested capital. Interfaces label it **PnL/volume %**; API/JSON/CSV rows
-also include `pnl_volume_pct` and `roi_pct_basis`. Existing sort/filter flags
-remain compatible. This ratio ranks only the fetched public candidates.
+Active analytics default to `pnl_usd` (served in USDC) and support
+`volume_shares` sorting. Monetary-volume and PnL/volume ratio sorts or filters
+are rejected before fetching, because the native share volume cannot establish
+a cash denominator. Historical v1 SQLite exports retain their original USD
+turnover and ratio provenance; their `roi_pct` is PnL/turnover, not investment
+ROI. A legacy offset scan cannot resume into a v2 cursor scan: use a separate
+state database or checkpoint file.
 
-MDD calculation version 8 independently maximizes dollar loss and percentage
+SQLite and JSONL checkpoints commit each complete provider page together with
+its input and continuation cursors. Resume uses the original cursor; response
+offsets and ranks are never converted into new anchors. Only an explicit null
+continuation cursor establishes board exhaustion. A scan threshold can be
+exceeded by the final complete cursor page; output exposes `scan_limit_overrun`
+and `scan_limit_policy=complete_provider_cursor_pages` rather than discarding
+uncommitted rows. The board's `all` PnL is realized-only; finite windows include
+marked equity changes net of flows. See the [v2 migration contract](docs/POLYMARKET_DATA_V2.md).
+
+MDD calculation version 9 independently maximizes monetary loss and percentage
 loss over the sampled PnL curve. The observed window starts from a constructed
 zero-PnL baseline, so its initial loss is included. No PnL observations means
 unavailable MDD, not zero risk. `peak_value`/`trough_value` and their timestamps
@@ -536,16 +550,32 @@ diagnostics. Legacy accounting `base_equity_usd` fields are null, with
 `base_source=unavailable_from_point_in_time_snapshot`; `max_equity_usd` remains
 available as a statement statistic, not a historical capital estimate.
 
-Position capital is denominated in USD: explicit entry cost takes precedence,
-and otherwise closed bought shares or remaining open shares require an average
-entry price. Raw `totalBought` and `currentValue` do not establish entry cost.
-Open `grossInitialValue` already includes attributed BUY fees; reported
-`entryFeesUsdc` are added only to a fee-exclusive basis. Missing costs/fees
-remain unavailable, not known zeros. `position_capital_basis` in audit and
-leaderboard JSON/CSV records the source and unknown-row counts. These are
+Native Data API v2 position capital is denominated in USDC: open
+`total_cost_usdc` already includes attributed BUY `entry_fees_usdc`, which are
+added only when using a fee-exclusive `entry_cost_usdc` basis. `current_size`
+is remaining shares; `total_size` is lifetime bought shares and never dollars.
+CLOSED residual entry cost is approximately zero, so `total_size * avg_price`
+is used only as an explicitly labeled acquisition-cost estimate with an
+unverified lifetime fee component. Missing costs, fees or PnL components remain
+unavailable, not known zeros. Served total PnL, unrealized PnL and current value
+must agree with their documented components. `position_capital_basis` in audit
+and leaderboard JSON/CSV records source, unit and unknown-row counts. These are
 public cost/turnover estimates, not verified initial capital or net-fee returns.
-MDD position queries request `sizeThreshold=0` and `includeArchived=true` on
-every page; existing row caps and incomplete-history safeguards still apply.
+Historical v1 rows retain their original provenance. Native position history
+uses `last_event_at`; OPEN requests repeat `filter_type=TOKENS`,
+`filter_amount=0` and `include_archived=true` on each cursor page, including
+dust and redeemable holdings. Activity/trade reads request full-wallet
+`start=1`, retain flow evidence and include maker fills. See
+[Data API v2 financial reads](docs/DATA_API_V2_FINANCIAL_CONSUMERS.md).
+
+New MDD results retain separate `quote_currency` and `equity_base_currency`
+metadata. A supplied legacy `equity_base_usd` means USD unless the caller
+explicitly selects `equity_base_currency=USDC` (CLI:
+`--equity-base-currency USDC`); native derived capital is USDC. No USD/USDC
+conversion or parity is assumed. A mismatched basis leaves percentage MDD
+unavailable with `equity_base_currency_mismatch`, while retaining valid
+monetary drawdown. Old saved audit amounts without unit proof stay unavailable
+in current displays rather than acquiring current asset labels.
 
 Every fetched trade and normalized mark contributes to replay; the replay
 point limit only bounds retained output. Incomplete inventory/marks return
@@ -559,20 +589,26 @@ PnL/volume fields before pagination, normalization, persistence, or resumption.
 Malformed source responses cannot signal an exhausted board or publish a
 completed export; prior committed pages and output files remain available.
 `mdd_history_coverage` records each source's row count, limit, observed timestamp
-range, and whether it reached a limit, ended its results, or was not requested.
-A full final page conservatively counts as `limit_reached`: more history has
-not been ruled out. Such results cannot pass MDD filters, including after
-accounting reconciliation, persisted resume, or required-MDD export. A source
-window ending is not proof of lifetime history: all current public calculations
-carry `mdd_scope=observed_public_pnl` and `mdd_account_equity_verified=false`.
-Excluding a source is recorded, never silently represented as full history.
+range and whether it reached a local limit, exhausted its cursor, was not
+requested or lacks proven coverage. Only explicit
+`pagination.next_cursor=null` establishes source-window EOF. A full terminal
+page can be complete; a short page with a cursor must continue. Local caps,
+discarded overflow rows, skipped sources and missing EOF evidence cannot pass
+MDD filters, including after accounting reconciliation, persisted resume or
+required-MDD export. Cursor exhaustion is not independent proof of full
+account-equity history: current public calculations carry
+`mdd_scope=observed_public_pnl` and `mdd_account_equity_verified=false`.
 
 Malformed financial rows, invalid timestamps and ambiguous same-timestamp
-ordering make risk unavailable. `mdd_source_quality` records rejected-row
+ordering make risk unavailable. The published v2 feed fields cannot uniquely
+identify identical fills within one transaction; MDD preserves within-feed
+multiplicity and merges overlapping feeds by their greatest observed
+multiplicity. Indistinguishable repeated identities and duplicate open-token
+snapshots cannot qualify exact risk. `mdd_source_quality` records rejected-row
 counts/reasons; `mdd_unavailable_reasons` survives API, CLI, desktop CSV and
 SQLite exports. Invalid sources stop mark replay before price requests and
 cannot qualify through accounting reconciliation or diagnostic fallback. Version
-8 invalidates prior durable MDD enrichment when a scan resumes, including older
+9 invalidates prior durable MDD enrichment when a scan resumes, including older
 percentages rebased on a later accounting statement.
 Standalone risk-filtered exports reject qualifying saved results with obsolete
 or missing calculation signatures until the scan resumes and recomputes MDD.
@@ -617,7 +653,7 @@ operational artifacts (`data/*.sqlite*`, `data/*.jsonl`, `data/*.csv`,
 `data/*.log`, `data/*.pid`, and the analytics cache) so they cannot be added to
 a commit accidentally.
 
-For a strict public-data ROI/MDD screen, `--max-mdd-pct 20` filters to successful public-data MDD calculations at or below 20%. Fast MDD is a public historical-equity approximation, not independently verified account-equity MDD: public deposits/withdrawals, unresolved historical marks, fees, and records outside the selected fetch windows can change the true result. Use `--mdd-mode mark_replay --mdd-include-accounting` for deeper sampled reconciliation, inspect the exported `mdd_method`, `mdd_pct_basis`, `mdd_source`, and warnings, and treat results as candidates for manual due diligence.
+For a public-data PnL/MDD screen, `--max-mdd-pct 20` filters to successful observed MDD calculations at or below 20%. Fast MDD is a public historical-equity approximation, not independently verified account-equity MDD: cash flows that are not reconstructed, unresolved historical marks, fees, and records outside the selected fetch windows can change the true result. Use `--mdd-mode mark_replay --mdd-include-accounting` for deeper sampled reconciliation, inspect the exported `mdd_method`, `mdd_pct_basis`, `mdd_source`, and warnings, and treat results as candidates for manual due diligence.
 
 Useful local API endpoints:
 - Predict.fun account operations are available at `GET /api/markets/predict_fun/account/{operation}` for `account`, `active_orders`, `order_detail`, `account_activity`, `positions`, and validated wallet-scoped `positions_by_address`; relay-only removal is available at `POST /api/markets/predict_fun/orders/{operation}` for `remove_orders` and `remove_orders_by_hash`, with JWT credentials, opt-in safety gates, and explicit non-on-chain-cancellation reporting.
@@ -634,7 +670,7 @@ Useful local API endpoints:
 - `GET /api/markets/{market_id}/account/{operation}` exposes explicitly allow-listed authenticated recovery reads. Kalshi operations are `active_orders`, `order_history`, `fills`, `positions`, `settlements`, `balance`, and `queue_positions`; Gemini operations remain the documented order/position/volume reads; Limitless operations are `positions`, `account_history`, and `user_orders` (the latter requires a validated `market_slug`); Xmarket operations are `positions`, `user_orders`, and `market_orders` with bounded status/page/page-size filters and a validated market id, while its normalized history routes expose only bounded account-scoped fills; Opinion operations are `order_history`, `order_detail`, and wallet-scoped `positions` with bounded page/limit, numeric market/chain filters, status allow-listing, and a validated account wallet; Betfair exposes `active_orders`, `cleared_orders`, `funds`, `account`, `statement`, and `currency_rates` through the documented Exchange/Accounts JSON-RPC feeds with bounded status/order-by/sort/id/date filters, validated locale/currency values, and a validated wallet; Matchbook exposes authenticated `settled_bets`, `current_bets`, `current_offers`, `balance`, and `account` reads with bounded numeric-id, date, odds, side/status, interval, cancellation, and aggregation filters; Hyperliquid operations are `active_orders`, `order_history`, `positions`, `spot_balances`, `portfolio`, and `subaccounts` and use the configured `HYPERLIQUID_ACCOUNT_WALLET` (falling back to the trade/activity wallet) with an optional validated `dex` name; Myriad exposes public wallet-scoped `account_activity`, `portfolio`, and `market_positions` reads from the documented `/users/{address}/events`, `/portfolio`, and `/markets` endpoints with bounded pagination, model/network/wallet validation, documented portfolio filters, and lossless raw payloads; Polymarket exposes L2-authenticated `active_orders`, `order_detail`, and `fills` reads with validated order hashes, condition/token filters, cursors, and time bounds; Probable exposes L2-authenticated `open_orders` and `order` reads through fixed chain-scoped CLOB paths with signed query parameters; IBKR ForecastTrader, ForecastEx, and CME event contracts expose `orders` and `order_status` through the documented Client Portal account paths with an authorized session and account id; Manifold exposes `account`, `active_orders`, and `order_history` through authenticated `/v0/me` and `/v0/bets` calls, including documented `kinds=open-limit` and bounded cursor/time filters; Prophet Exchange exposes `balance`, `transactions`, `order_history`, `order_detail`, and `trades` through the documented `/v4/mm/get_balance`, `/v4/mm/get_transactions`, `/v4/mm/get_order_history`, `/v4/mm/get_order/{id}`, and `/v4/mm/get_trades` wallet/history endpoints with bounded opaque cursors, time bounds, status/identity filters, and page sizes. Limitless accepts an optional validated `on_behalf_of` profile for delegated reads. Kalshi order/fill history accepts `historical=true` for the documented historical endpoints. Credentials, account eligibility, delegation scope, and any live trading remain operator-controlled external gates.
 - `POST /api/markets/{market_id}/positions` accepts only Myriad's allow-listed `split`, `merge`, `redeem`, `redeem_voided`, `neg_risk_split`, and `neg_risk_merge` operations. It returns the documented unsigned `{to, calldata, value}` transaction intent after validating market/network ids, uint256 amounts, NegRisk event ids, and outcome indexes; this route never signs or submits on-chain and requires external wallet review/signing.
 - `POST /api/markets/{market_id}/orders/{operation}` exposes only explicit adapter allow-lists. The current non-increasing surface is Betfair (`cancel_orders`), Kalshi (`cancel_order`, `batch_cancel_orders`, `decrease_order`), Limitless (`cancel_order`, `batch_cancel_orders`, `cancel_all_orders`), Probable (`cancel_order`, `cancel_orders`, `cancel_all_orders`), Hyperliquid (`cancel_order`, `cancel_orders`, `cancel_by_cloid`, `schedule_cancel`), Xmarket (`batch_cancel_orders`), IBKR event contracts (`cancel_order`, `cancel_all_orders`), Manifold (`cancel_order`), Prophet Exchange (`cancel_order`, `cancel_orders`), Context V2 (`cancel_order`, `batch_cancel_orders`), Gemini (`cancel_order`, `batch_cancel_orders`), Opinion (`cancel_order`, `batch_cancel_orders`, `cancel_all_orders`), Myriad (`cancel_order`, `batch_cancel_orders`, `cancel_all_orders`), Matchbook (`cancel_offer`, `cancel_offers`, `cancel_all_offers`), Smarkets (`cancel_order`, `cancel_orders`), SX Bet (`cancel_order`, `cancel_orders`, `cancel_event_orders`, `cancel_all_orders`), XO (`cancel_order`), and Predict.fun (`remove_orders`, `remove_orders_by_hash`). Polymarket declares no order-management operations until its CLOB V2 mutation migration is reviewed. Requests require the venue-specific order-management opt-in, shared live-safety gates, bounded documented payloads, and explicit operator confirmation. Replace, amend, edit, modify, and batch-create operations are intentionally absent so order management cannot increase or reprice exposure. The route is POST-only and never accepts an arbitrary upstream method or path.
-- `PATCH /api/markets/{market_id}` toggles a market and persists live-safety settings such as enablement, acknowledgement, kill switch, max size, and max notional.
+- `PATCH /api/markets/{market_id}` toggles a market and persists live-safety settings such as enablement, acknowledgement, kill switch, max size, and max notional. First read `/api/markets` and include the market's `configuration_revision` as `expected_revision`; missing revisions return HTTP 428 and stale revisions return HTTP 409 `market_config_conflict` without changing state. Send only deliberately edited fields and refresh/review controls after a conflict.
 - `GET /api/alerts` returns alert rows enriched with adapter-backed status and current in-memory price state.
 - `POST /api/alerts` creates a market-scoped price alert after validating the selected adapter supports alerts.
 - `PATCH /api/alerts/{alert_id}` edits alert fields or toggles alert enablement.
@@ -645,9 +681,9 @@ Useful local API endpoints:
 - `POST /api/wallets` creates a Polymarket wallet watch for a valid `0x` proxy wallet.
 - `PATCH /api/wallets/{wallet_id}` edits wallet display name, enablement, or market-slug filter.
 - `DELETE /api/wallets/{wallet_id}` deletes a wallet watch from local config.
-- `POST /api/wallets/poll` polls enabled wallet watches once through the Polymarket Data API and updates dedupe state.
+- `POST /api/wallets/poll` requires an `Idempotency-Key` and returns a bounded batch from fully collected wallet history. The batch receipt and consumed cursor commit together; retry the same key after uncertain delivery. `has_more` indicates pending events for another poll with a new key. Polling previews never submit live orders.
 - `GET /api/polymarket/users/search?q=...` searches public Polymarket profiles and returns proxy-wallet candidates.
-- `GET /api/polymarket/users/leaderboard` returns public leaderboard rows ranked by PnL USD, volume USD, computed ROI %, MDD USD, or MDD %, with min/max filters for PnL, volume, ROI, and MDD. `limit`, `scan_limit`, and `mdd_scan_limit` accept finite integers or explicit no-cap values (`all`, `unlimited`, `0`, `-1`) with no local 1,000,000-row cap; smaller values should be selected for normal interactive use. MDD scans accept `mdd_mode`, `mdd_history_limit`, `mdd_activity_limit`, `mdd_trade_limit`, `mdd_open_limit`, `mdd_mark_replay_token_limit`, `mdd_mark_replay_interval`, `mdd_mark_replay_fidelity`, `mdd_include_accounting`, `mdd_persist_cache`, and `mdd_cache_ttl_seconds`; payloads include `analytics_cache` and `rate_limit` metadata.
+- `GET /api/polymarket/users/leaderboard` returns native v2 public board rows ranked by PnL USDC, share volume, or observed MDD, with compatible min/max filters. Cash-volume and PnL/volume ratio sorts or filters are unavailable. `limit`, `scan_limit`, and `mdd_scan_limit` accept finite integers or explicit no-cap values (`all`, `unlimited`, `0`, `-1`); use finite budgets for interactive work. MDD scans accept `mdd_mode`, per-source history limits, mark-replay options, accounting reconciliation and audit caching; payloads include unit, cursor, completeness, cache and rate-limit metadata.
 - `GET /api/polymarket/users/mdd?user=0x...` computes one wallet's MDD USD/% v2 from public closed positions, activity/trade capital basis, and the current open-position snapshot. It accepts `mode=fast` by default or `mode=mark_replay` for CLOB price-history inventory replay, plus `include_accounting_snapshot=true` for accounting ZIP reconciliation, `persist_cache=true`, `closed_limit`, `activity_limit`, `trade_limit`, `open_limit`, `include_open`, `max_points`, `equity_base_usd`, `mark_replay_token_limit`, `mark_replay_interval`, `mark_replay_fidelity`, and `cache_ttl_seconds`.
 - `GET /api/polymarket/users/mdd/cache` lists cached MDD audit artifacts with wallet, MDD, age, TTL, expiry, size, and cache path metadata.
 - `GET /api/polymarket/users/mdd/cache/health` returns cache path, size, entry counts, active/expired counts, TTL, and retention bounds for MDD audit artifacts.

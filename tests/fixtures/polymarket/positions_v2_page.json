@@ -1,0 +1,37 @@
+{
+  "data": [
+    {
+      "proxy_wallet": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "condition_id": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "token_id": "1234567890",
+      "event_id": "123",
+      "event_slug": "fixture-event",
+      "slug": "fixture-market",
+      "title": "Offline position fixture",
+      "outcome": "Yes",
+      "outcome_index": 0,
+      "status": "OPEN",
+      "current_size": 10,
+      "total_size": 100,
+      "avg_price": 0.4,
+      "current_price": 0.5,
+      "entry_cost_usdc": 4,
+      "entry_fees_usdc": 0.01,
+      "total_cost_usdc": 40.1,
+      "current_value": 5,
+      "realized_pnl": -2,
+      "unrealized_pnl": 1,
+      "total_pnl": -1,
+      "percent_pnl": -2.5,
+      "percent_realized_pnl": -5,
+      "first_entry_at": 50,
+      "last_event_at": 100,
+      "archived": false,
+      "mergeable": false,
+      "negative_risk": false,
+      "redeemable": false,
+      "verified": false
+    }
+  ],
+  "pagination": {"has_more": false, "limit": 2, "offset": 0, "next_cursor": null}
+}

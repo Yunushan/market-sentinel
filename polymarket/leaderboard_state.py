@@ -18,6 +18,7 @@ _SORT_COLUMNS = {
     "roi_pct": "roi_pct",
     "pnl_usd": "pnl_usd",
     "volume_usd": "volume_usd",
+    "volume_shares": "volume_shares",
     "mdd_pct": "mdd_pct",
     "mdd_usd": "mdd_usd",
 }
@@ -80,6 +81,7 @@ class LeaderboardStateStore:
                 self.connection = sqlite3.connect(self.path)
             self.connection.row_factory = sqlite3.Row
             self._validate_durable_rows()
+            self._validate_cursor_chain()
             if read_only:
                 index = self.connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'rows_wallet_unique_idx'"
@@ -107,7 +109,7 @@ class LeaderboardStateStore:
         exists = self.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='rows'").fetchone()
         if exists is None:
             return
-        for row in self.connection.execute("SELECT wallet, pnl_usd, volume_usd, roi_pct, mdd_usd, mdd_pct, raw_json FROM rows"):
+        for row in self.connection.execute("SELECT * FROM rows"):
             fields = dict(row)
             try:
                 fields["raw"] = loads_strict_json(fields.pop("raw_json"))
@@ -126,6 +128,70 @@ class LeaderboardStateStore:
         finally:
             if started:
                 self.connection.rollback()
+
+    def _validate_cursor_chain(self) -> None:
+        """Reject durable v2 provenance that cannot reproduce its continuation."""
+        if self.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='pages'").fetchone() is None:
+            return
+        columns = {str(row["name"]) for row in self.connection.execute("PRAGMA table_info(pages)")}
+        if "source_version" not in columns:
+            return  # Historical offset databases are validated as legacy observations.
+        pages = self.connection.execute("SELECT * FROM pages ORDER BY page_offset")
+        expected_cursor = None
+        consumed: set[str] = set()
+        count = 0
+        seen_legacy = False
+        for page in pages:
+            if page["source_version"] == 1:
+                seen_legacy = True
+                if count:
+                    raise ValueError("Leaderboard state mixes offset and cursor provenance.")
+                continue
+            if page["source_version"] != 2 or seen_legacy or int(page["page_offset"]) != count:
+                raise ValueError("Leaderboard state has an invalid v2 cursor page sequence.")
+            if count and expected_cursor is None:
+                raise ValueError("Leaderboard state contains pages after cursor exhaustion.")
+            for cursor in (page["source_cursor"], page["next_cursor"]):
+                if cursor is not None and (not isinstance(cursor, str) or not cursor or len(cursor) > 8192 or
+                                           cursor.strip() != cursor or any(ord(char) < 32 or ord(char) == 127 for char in cursor)):
+                    raise ValueError("Leaderboard state has an invalid saved cursor.")
+            if page["source_cursor"] != expected_cursor:
+                raise ValueError("Leaderboard state has a broken saved cursor chain.")
+            if expected_cursor is not None:
+                consumed.add(expected_cursor)
+            expected_cursor = page["next_cursor"]
+            if expected_cursor is not None and expected_cursor in consumed:
+                raise ValueError("Leaderboard state has a repeated saved cursor.")
+            if not 1 <= int(page["page_limit"]) <= 1000 or not 0 <= int(page["row_count"]) <= int(page["page_limit"]):
+                raise ValueError("Leaderboard state has invalid cursor page bounds.")
+            count += 1
+        if count or self._metadata("source_api_version") == "2":
+            invalid_row = self.connection.execute(
+                """SELECT rows.id FROM rows LEFT JOIN pages ON rows.page_offset=pages.page_offset
+                   WHERE pages.page_offset IS NULL OR rows.page_index < 0 OR rows.page_index >= pages.row_count
+                      OR pages.source_version != 2 LIMIT 1"""
+            ).fetchone()
+            excessive_retention = self.connection.execute(
+                """SELECT pages.page_offset FROM pages LEFT JOIN rows ON rows.page_offset=pages.page_offset
+                   GROUP BY pages.page_offset HAVING COUNT(rows.id) > pages.row_count LIMIT 1"""
+            ).fetchone()
+            if invalid_row is not None or excessive_retention is not None:
+                raise ValueError("Leaderboard retained observations contradict their source cursor pages.")
+            try:
+                cursor = loads_strict_json(self._metadata("v2_next_cursor") or "null")
+                ordinal = int(self._metadata("v2_next_page") or "0")
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Leaderboard state has invalid cursor progress metadata.") from exc
+            if seen_legacy or self._metadata("source_api_version") != "2" or cursor != expected_cursor or ordinal != count:
+                raise ValueError("Leaderboard cursor progress metadata contradicts its saved pages.")
+            reason = self._metadata("stop_reason")
+            complete = self._metadata("scan_complete")
+            if complete not in {"0", "1"} or (complete == "1" and reason not in {"end_of_results", "repeated_page"}) or (complete == "0" and reason):
+                raise ValueError("Leaderboard cursor completion metadata has no consistent terminal reason.")
+            if count and ((expected_cursor is None) != (reason == "end_of_results")):
+                raise ValueError("Leaderboard cursor exhaustion metadata contradicts its saved pages.")
+            if count and expected_cursor is None and complete != "1":
+                raise ValueError("Leaderboard terminal cursor is not marked complete.")
 
     def _create_schema(self) -> None:
         # A successful page/MDD commit must request a storage sync, not wait
@@ -186,8 +252,16 @@ class LeaderboardStateStore:
             str(row["name"])
             for row in self.connection.execute("PRAGMA table_info(pages)")
         }
+        row_columns = {str(row["name"]) for row in self.connection.execute("PRAGMA table_info(rows)")}
+        if "volume_shares" not in row_columns:
+            self.connection.execute("ALTER TABLE rows ADD COLUMN volume_shares REAL")
+        self.connection.execute("CREATE INDEX IF NOT EXISTS rows_volume_shares_idx ON rows(volume_shares)")
         if "fingerprint" not in page_columns:
             self.connection.execute("ALTER TABLE pages ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''")
+        for column, declaration in (("source_version", "INTEGER NOT NULL DEFAULT 1"),
+                                    ("source_cursor", "TEXT"), ("next_cursor", "TEXT")):
+            if column not in page_columns:
+                self.connection.execute(f"ALTER TABLE pages ADD COLUMN {column} {declaration}")  # noqa: S608 -- fixed schema allowlist
         migrate_memberships = "wallet_fingerprint" not in page_columns
         if migrate_memberships:
             self.connection.execute("ALTER TABLE pages ADD COLUMN wallet_fingerprint TEXT NOT NULL DEFAULT ''")
@@ -245,6 +319,10 @@ class LeaderboardStateStore:
                 self._set_metadata("scan_complete", "0")
                 self._set_metadata("started_at", now)
                 self._set_metadata("last_updated_at", now)
+            if signature.get("source_api_version") == 2 and not self._metadata("source_api_version"):
+                self._set_metadata("source_api_version", "2")
+                self._set_metadata("v2_next_cursor", "null")
+                self._set_metadata("v2_next_page", "0")
 
     def prepare_mdd(self, signature: Mapping[str, Any]) -> int:
         """Invalidate enrichment, not fetched pages, when calculation inputs change."""
@@ -302,6 +380,8 @@ class LeaderboardStateStore:
         next_offset = 0
         if last_page is not None:
             next_offset = int(last_page["page_offset"]) + int(last_page["row_count"])
+        if self._metadata("source_api_version") == "2":
+            next_offset = int(self._metadata("v2_next_page") or "0")
         page_started_at = str(page_stats["started_at"] or "")
         page_updated_at = str(page_stats["updated_at"] or "")
         started_at = self._metadata("started_at") or page_started_at
@@ -318,6 +398,8 @@ class LeaderboardStateStore:
             "mdd_errors": failed,
             "mdd_pending": max(0, row_count - done - failed),
             "next_offset": next_offset,
+            "source_api_version": int(self._metadata("source_api_version") or "1"),
+            "next_cursor": json.loads(self._metadata("v2_next_cursor")) if self._metadata("v2_next_cursor") else None,
             "scan_complete": self._metadata("scan_complete") == "1",
             "stop_reason": self._metadata("stop_reason"),
             "started_at": started_at,
@@ -345,7 +427,12 @@ class LeaderboardStateStore:
             **progress,
         }
 
-    def record_page(self, offset: int, limit: int, rows: list[Mapping[str, Any]]) -> bool:
+    def record_page(self, offset: int, limit: int, rows: list[Mapping[str, Any]], *,
+                    source_version: int = 1, source_cursor: Optional[str] = None,
+                    next_cursor: Optional[str] = None) -> bool:
+        if source_version == 2 and (type(offset) is not int or offset < 0 or type(limit) is not int or
+                                    not 1 <= limit <= 1000 or len(rows) > limit):
+            raise ValueError("Leaderboard v2 page bounds are invalid.")
         for row in rows:
             validate_stored_leaderboard_row(row)
         clean_offset = max(0, int(offset))
@@ -353,13 +440,49 @@ class LeaderboardStateStore:
         fingerprint = self._page_fingerprint(rows)
         wallet_fingerprint = wallet_membership_fingerprint(rows)
         with self.connection:
+            if source_version not in (1, 2):
+                raise ValueError("Unsupported leaderboard source version.")
             saved_page = self.connection.execute(
-                "SELECT fingerprint FROM pages WHERE page_offset = ?", (clean_offset,)
+                "SELECT fingerprint, page_limit, source_version, source_cursor, next_cursor FROM pages WHERE page_offset = ?", (clean_offset,)
             ).fetchone()
             if saved_page is not None:
-                if saved_page["fingerprint"] != fingerprint:
-                    raise ValueError("Cannot overwrite an already saved leaderboard page with different observations.")
+                if saved_page["fingerprint"] != fingerprint or (source_version == 2 and (
+                    saved_page["page_limit"] != clean_limit or saved_page["source_version"] != 2 or
+                    saved_page["source_cursor"] != source_cursor or saved_page["next_cursor"] != next_cursor
+                )):
+                    raise ValueError("Cannot overwrite an already saved leaderboard page with different observations or cursors.")
                 return True
+            if source_version == 2:
+                for cursor in (source_cursor, next_cursor):
+                    if cursor is not None and (not isinstance(cursor, str) or not cursor or len(cursor) > 8192 or
+                                               cursor.strip() != cursor or any(ord(char) < 32 or ord(char) == 127 for char in cursor)):
+                        raise ValueError("Leaderboard cursor is invalid.")
+                if clean_offset != int(self._metadata("v2_next_page") or "0"):
+                    raise ValueError("Leaderboard page ordinal is not contiguous with the durable cursor.")
+                if any(not isinstance(row.get("raw"), Mapping) or "user_id" not in row["raw"] for row in rows):
+                    raise ValueError("V2 cursor pages require native v2 source rows.")
+                existing_version = self._metadata("source_api_version")
+                if existing_version == "1":
+                    raise ValueError("Cannot append v2 cursor pages to legacy offset observations; use a new state file.")
+                previous = self._metadata("v2_next_cursor")
+                if previous and json.loads(previous) != source_cursor:
+                    raise ValueError("Leaderboard page does not continue the durable cursor.")
+                if not previous and (source_cursor is not None or clean_offset != 0):
+                    raise ValueError("Leaderboard v2 cannot resume from a synthesized offset.")
+                if previous and self._metadata("scan_complete") == "1":
+                    raise ValueError("Leaderboard cursor already reached a terminal state.")
+                if source_cursor is not None and self.connection.execute(
+                    "SELECT 1 FROM pages WHERE source_version=2 AND source_cursor=?", (source_cursor,)
+                ).fetchone():
+                    raise ValueError("Leaderboard cursor was already consumed.")
+                if next_cursor is not None and (next_cursor == source_cursor or self.connection.execute(
+                    "SELECT 1 FROM pages WHERE source_version=2 AND source_cursor=?", (next_cursor,)
+                ).fetchone()):
+                    raise ValueError("Leaderboard next cursor repeated.")
+            elif self._metadata("source_api_version") == "2":
+                raise ValueError("Cannot append legacy offset observations to a v2 cursor scan.")
+            elif any(isinstance(row.get("raw"), Mapping) and "user_id" in row["raw"] for row in rows):
+                raise ValueError("Native v2 rows require cursor provenance rather than a legacy page version.")
             duplicate = self.connection.execute(
                 "SELECT page_offset FROM pages WHERE (fingerprint = ? OR (? != '' AND wallet_fingerprint = ?)) AND page_offset != ? LIMIT 1",
                 (fingerprint, wallet_fingerprint, wallet_fingerprint, clean_offset),
@@ -372,13 +495,13 @@ class LeaderboardStateStore:
                 self._set_metadata("last_updated_at", str(int(time.time())))
                 return False
             self.connection.execute(
-                "INSERT OR REPLACE INTO pages(page_offset, page_limit, row_count, fingerprint, wallet_fingerprint, saved_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (clean_offset, clean_limit, len(rows), fingerprint, wallet_fingerprint, int(time.time())),
+                "INSERT INTO pages(page_offset, page_limit, row_count, fingerprint, wallet_fingerprint, saved_at, source_version, source_cursor, next_cursor) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (clean_offset, clean_limit, len(rows), fingerprint, wallet_fingerprint, int(time.time()), source_version, source_cursor, next_cursor),
             )
             self.connection.executemany(
                 """
-                INSERT INTO rows(page_offset, page_index, rank, display_name, wallet, pnl_usd, volume_usd, roi_pct, trade_count, raw_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO rows(page_offset, page_index, rank, display_name, wallet, pnl_usd, volume_usd, volume_shares, roi_pct, trade_count, raw_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(wallet) WHERE wallet != '' DO NOTHING
                 """,
                 [
@@ -390,6 +513,7 @@ class LeaderboardStateStore:
                         str(row.get("wallet") or "").strip().lower(),
                         row.get("pnl_usd"),
                         row.get("volume_usd"),
+                        row.get("volume_shares"),
                         row.get("roi_pct"),
                         row.get("trade_count"),
                         json.dumps(dict(row.get("raw") or {}), separators=(",", ":"), sort_keys=True, allow_nan=False),
@@ -397,11 +521,17 @@ class LeaderboardStateStore:
                     for index, row in enumerate(rows)
                 ],
             )
-            if len(rows) < clean_limit:
+            exhausted = next_cursor is None if source_version == 2 else len(rows) < clean_limit
+            if exhausted:
                 self._set_metadata("scan_complete", "1")
                 self._set_metadata("stop_reason", "end_of_results")
             else:
+                self._set_metadata("scan_complete", "0")
                 self._set_metadata("stop_reason", "")
+            self._set_metadata("source_api_version", str(source_version))
+            if source_version == 2:
+                self._set_metadata("v2_next_cursor", json.dumps(next_cursor))
+                self._set_metadata("v2_next_page", str(clean_offset + 1))
             self._set_metadata("last_updated_at", str(int(time.time())))
         return True
 
@@ -500,6 +630,11 @@ class LeaderboardStateStore:
             "mdd_source_quality",
             "mdd_unavailable_reasons",
             "equity_base_usd",
+            "source_economics_currency",
+            "quote_currency",
+            "equity_base_currency",
+            "mdd_currency_status",
+            "mdd_percentage_available",
             "equity_base_source",
             "public_capital_basis_usd",
             "position_capital_basis",
@@ -565,6 +700,7 @@ class LeaderboardStateStore:
         for column, minimum_key, maximum_key in (
             ("pnl_usd", "min_pnl_usd", "max_pnl_usd"),
             ("volume_usd", "min_volume_usd", "max_volume_usd"),
+            ("volume_shares", "min_volume_shares", "max_volume_shares"),
             ("roi_pct", "min_roi_pct", "max_roi_pct"),
         ):
             minimum = filters.get(minimum_key)
@@ -594,7 +730,7 @@ class LeaderboardStateStore:
 
     @staticmethod
     def _order_clause(sort: str, direction: str, *, candidate: bool = False) -> str:
-        column = _SORT_COLUMNS.get(sort, "roi_pct")
+        column = _SORT_COLUMNS.get(sort, "pnl_usd")
         if candidate and column in {"mdd_pct", "mdd_usd"}:
             return "ORDER BY rank ASC, id ASC"
         clean_direction = "ASC" if str(direction).upper() == "ASC" else "DESC"
@@ -602,6 +738,8 @@ class LeaderboardStateStore:
 
     @staticmethod
     def _decode_row(row: sqlite3.Row) -> Dict[str, Any]:
+        raw = json.loads(str(row["raw_json"] or "{}"))
+        version = 2 if "user_id" in raw else 1
         result = {
             "id": int(row["id"]),
             "rank": row["rank"],
@@ -609,8 +747,14 @@ class LeaderboardStateStore:
             "wallet": row["wallet"],
             "pnl_usd": row["pnl_usd"],
             "volume_usd": row["volume_usd"],
+            "volume_shares": row["volume_shares"] if version == 2 and "volume_shares" in row.keys() else None,
+            "source_api_version": version,
+            "quote_currency": "USDC" if version == 2 else "USD",
+            "volume_unit": "shares" if version == 2 else "USD",
             "roi_pct": row["roi_pct"],
-            **performance_ratio_metadata(row["roi_pct"]),
+            **(performance_ratio_metadata(row["roi_pct"]) if version == 1 else {
+                "pnl_volume_pct": None, "pnl_volume_pct_basis": "unavailable", "roi_pct_basis": "unavailable",
+            }),
             "trade_count": row["trade_count"],
             "mdd_usd": row["mdd_usd"],
             "mdd_pct": row["mdd_pct"],
@@ -619,11 +763,15 @@ class LeaderboardStateStore:
             "mdd_source": row["mdd_source"] or "",
             "mdd_status": row["mdd_status"],
             "mdd_error": row["mdd_error"] or "",
-            "raw": json.loads(str(row["raw_json"] or "{}")),
+            "raw": raw,
         }
         if row["mdd_json"]:
             try:
-                result.update(json.loads(str(row["mdd_json"])))
+                summary = json.loads(str(row["mdd_json"]))
+                result["mdd_quote_currency"] = summary.pop("quote_currency", None)
+                result["mdd_source_economics_currency"] = summary.pop("source_economics_currency", None)
+                result["mdd_equity_base_currency"] = summary.pop("equity_base_currency", None)
+                result.update(summary)
             except json.JSONDecodeError:
                 pass
         result["id"] = int(row["id"])

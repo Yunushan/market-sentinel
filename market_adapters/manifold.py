@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .activity_history import activity_snapshot
+
 import math
 import re
 from typing import Any, Dict, List, Mapping, Optional, Tuple
@@ -119,7 +121,7 @@ class ManifoldAdapter(MarketAdapter):
                 activities.append(self._activity_from_bet(normalized, bet))
             except MarketConfigurationError:
                 continue
-        return activities
+        return activity_snapshot(activities, payload, effective_limit=desired, row_keys=("bets", "data", "results"))
 
     def list_trades(
         self,
@@ -257,7 +259,7 @@ class ManifoldAdapter(MarketAdapter):
             after=start_ts,
         )
         buckets: Dict[int, Dict[str, Any]] = {}
-        for trade in trades:
+        for trade in sorted(trades, key=lambda item: (item.timestamp or 0.0, item.trade_id)):
             if trade.timestamp is None or trade.timestamp < 0:
                 continue
             if start_ts is not None and trade.timestamp < start_ts:

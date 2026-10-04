@@ -21,6 +21,11 @@ from polymarket.mdd import MddInputs, _build_mark_replay_points, build_mark_repl
 WALLET = "0x" + "a" * 40
 
 
+def leaderboard_page():
+    return {"data": [{"user_id": WALLET, "pnl": 10, "volume": 100}],
+            "pagination": {"limit": 50, "offset": 0, "has_more": False, "next_cursor": None}}
+
+
 def trade(timestamp, side, price, size=100, token="token"):
     return {"timestamp": timestamp, "asset": token, "side": side, "price": price, "size": size}
 
@@ -248,7 +253,7 @@ class MarkReplayCorrectnessTests(unittest.TestCase):
     def test_snapshot_identity_gaps_and_duplicate_positions_do_not_qualify(self):
         opened = {"asset": "token", "size": 100, "cashPnl": 0}
         for positions, reason in (([{"cashPnl": 0}], "current_position_identity_or_size_unavailable"),
-                                  ([opened, dict(opened)], "duplicate_current_position")):
+                                  ([opened, dict(opened)], "invalid_source_data:open_positions:duplicate_position_observation")):
             with self.subTest(positions=positions):
                 data = MddInputs(WALLET, [], positions, [], [trade(2, "BUY", 0.5)])
                 result = self.build(inputs=data, history={"history": {"token": [{"t": 3, "p": 0.5}]}})
@@ -291,7 +296,7 @@ class MarkReplayCorrectnessTests(unittest.TestCase):
     def test_api_risk_filter_rejects_stale_zero_replay_and_preserves_reason(self):
         opened = {"asset": "token", "size": 100, "cashPnl": 0, "realizedPnl": 0, "currentValue": 1}
         data = MddInputs(WALLET, [], [opened], [], [trade(2, "BUY", 0.5)])
-        with patch("web_api.data_api.get_leaderboard", return_value=[{"proxyWallet": WALLET, "pnl": 10, "vol": 100}]), patch(
+        with patch("web_api.data_api.get_leaderboard_v2_page", return_value=leaderboard_page()), patch(
             "polymarket.mdd.fetch_mdd_inputs", return_value=data
         ), patch("polymarket.mdd.clob_rest.get_batch_price_history", return_value={"history": {"token": [{"t": 3, "p": 0.5}]}}), patch(
             "web_api.attach_polymarket_mdd_audit_cache", return_value={}
@@ -317,7 +322,7 @@ class MarkReplayCorrectnessTests(unittest.TestCase):
                 self.build(history={"history": {"token": [{"t": 3, "p": price}]}})
 
     def test_api_maximum_mdd_rejects_default_limit_replay_loss(self):
-        with patch("web_api.data_api.get_leaderboard", return_value=[{"proxyWallet": WALLET, "pnl": 10, "vol": 100}]), patch(
+        with patch("web_api.data_api.get_leaderboard_v2_page", return_value=leaderboard_page()), patch(
             "polymarket.mdd.fetch_mdd_inputs", return_value=self.inputs
         ), patch("polymarket.mdd.clob_rest.get_batch_price_history", return_value=self.history), patch(
             "web_api.attach_polymarket_mdd_audit_cache", return_value={}
@@ -334,15 +339,15 @@ class MarkReplayCorrectnessTests(unittest.TestCase):
             output = Path(temporary) / "result.json"
             args = ["polymarket-leaderboard", "--state-db", str(state), "--scanned", "unlimited",
                     "--returned", "unlimited", "--mdd-mode", "mark_replay", "--max-mdd-pct", "20",
-                    "--equity-base-usd", "100", "--format", "json", "--output", str(output), "--quiet"]
-            with patch("web_api.data_api.get_leaderboard", return_value=[{"proxyWallet": WALLET, "pnl": 10, "vol": 100}]), patch(
+                    "--equity-base-usd", "100", "--sort", "pnl_usd", "--format", "json", "--output", str(output), "--quiet"]
+            with patch("web_api.data_api.get_leaderboard_v2_page", return_value=leaderboard_page()), patch(
                 "polymarket.mdd.fetch_mdd_inputs", return_value=self.inputs
             ), patch("polymarket.mdd.clob_rest.get_batch_price_history", return_value=self.history), patch(
                 "market_sentinel_cli.attach_polymarket_mdd_audit_cache", return_value={}
             ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 self.assertEqual(market_sentinel_cli.main(args), 0)
             self.assertEqual(json.loads(output.read_text())["counts"]["returned"], 0)
-            with patch("web_api.data_api.get_leaderboard") as page, patch("market_sentinel_cli.polymarket_user_mdd_payload") as mdd:
+            with patch("web_api.data_api.get_leaderboard_v2_page") as page, patch("market_sentinel_cli.polymarket_user_mdd_payload") as mdd:
                 self.assertEqual(market_sentinel_cli.main(args + ["--resume"]), 0)
             page.assert_not_called()
             mdd.assert_not_called()

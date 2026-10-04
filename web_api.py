@@ -20,8 +20,9 @@ import sys
 import tempfile
 import threading
 import time
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from core.request_control import RequestCancelled, cancellation_scope, request_scope
+from core.request_control import RequestCancelled, RequestDeadlineExceeded, cancellation_scope, request_scope
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -47,14 +48,33 @@ from core.models import (
     alert_probability,
     bounded_mutation_result,
     MAX_MUTATION_RESULT_BYTES,
+    MAX_UNACKNOWLEDGED_WALLET_POLL_RECEIPTS,
     MAX_ALERT_EVENTS,
     MARKET_SAFETY_BOOLEAN_FIELDS,
     MARKET_SAFETY_LIMIT_FIELDS,
 )
 from core.config_security import assert_no_persisted_secrets, is_sensitive_display_key
+from core.paper_accounting import (
+    SHARE_QUOTE_CURRENCIES,
+    ensure_paper_history_capacity,
+    paper_accounting,
+    paper_order_impact as account_paper_order_impact,
+    paper_position_rows as account_paper_position_rows,
+    paper_summary,
+    paper_unrealized,
+)
 from core.deployment_identity import capture_runtime_identity
 from core.json_validation import loads_strict_json
 from core.storage import ConfigConflictError, DEFAULT_CONFIG_PATH, load_config, save_config
+from core.wallet_activity import (
+    ActivityHistoryIncompleteError,
+    activity_key as wallet_activity_key,
+    collect_adapter_activity,
+    collect_polymarket_activity_v2,
+    cursor_for_market,
+    legacy_transaction_key,
+    remember_activity,
+)
 from market_adapters import build_default_registry, support_matrix_entry, support_matrix_summary
 from market_adapters.registry import AdapterRegistry
 from market_adapters.catalog import MARKET_CATALOG, MARKET_IDS
@@ -92,6 +112,7 @@ from polymarket.auth_readiness import build_clob_auth_readiness
 from polymarket.coverage import polymarket_official_api_coverage
 from polymarket.credential_runbook import build_polymarket_credential_runbook
 from polymarket.http_client import PolymarketHTTPError, PolymarketRateLimitError, PolymarketResponseError
+from polymarket.history_v2 import fetch_cursor_history
 from polymarket.live_verification import (
     ABSOLUTE_MAX_VERIFY_NOTIONAL,
     ABSOLUTE_MAX_VERIFY_SIZE,
@@ -134,11 +155,12 @@ from polymarket.live_reports import (
 )
 from polymarket.live_report_schema import LiveValidationReportSchemaError, parse_live_validation_report_json
 from polymarket.leaderboard import (
-    LEADERBOARD_MAX_OFFSET, PNL_VOLUME_BASIS, normalize_leaderboard_category,
-    performance_ratio_metadata, wallet_membership_fingerprint,
+    PNL_VOLUME_BASIS, normalize_leaderboard_category,
+    performance_ratio_metadata,
 )
 from polymarket.leaderboard_validation import source_leaderboard_fields
 from polymarket.mdd import (
+    _position_total_pnl as shared_position_total_pnl,
     DEFAULT_CACHE_TTL_SECONDS as POLYMARKET_MDD_CACHE_TTL_SECONDS,
     MDD_CALCULATION_VERSION,
     MDD_MARK_REPLAY_ASSUMPTIONS,
@@ -174,6 +196,8 @@ MAX_HTTP_WORKERS = 32
 MAX_HTTP_MUTATION_WORKERS = 8
 HTTP_RESERVED_READ_WORKERS = 4
 HTTP_CONNECTION_TIMEOUT_SECONDS = 15.0
+HTTP_HEADER_DEADLINE_SECONDS = 15.0
+HTTP_BODY_DEADLINE_SECONDS = 15.0
 HTTP_OVERLOAD_RETRY_AFTER_SECONDS = 1
 HTTP_MUTATION_LOCK_TIMEOUT_SECONDS = 5.0
 HTTP_MUTATION_DRAIN_TIMEOUT_SECONDS = 10.0
@@ -205,6 +229,7 @@ LOCAL_DURABLE_CREATE_ROUTES = frozenset(
     {
         "/api/alerts",
         "/api/wallets",
+        "/api/wallets/poll",
         "/api/paper/orders",
     }
 )
@@ -604,6 +629,17 @@ def _utf8_bytes(text: str, *, max_bytes: Optional[int] = None) -> bytes:
 
 
 def _read_json_body(handler: BaseHTTPRequestHandler) -> Dict[str, Any]:
+    receiver = getattr(handler, "_receive_reader", None)
+    if receiver is not None:
+        receiver.begin(HTTP_BODY_DEADLINE_SECONDS)
+    try:
+        return _read_json_body_with_deadline(handler)
+    finally:
+        if receiver is not None:
+            receiver.end()
+
+
+def _read_json_body_with_deadline(handler: BaseHTTPRequestHandler) -> Dict[str, Any]:
     transfer_encoding = str(handler.headers.get("Transfer-Encoding") or "").strip()
     if transfer_encoding:
         raise ValueError("Transfer-Encoding is not supported for JSON request bodies; send Content-Length.")
@@ -941,14 +977,7 @@ def _query_bool(params: Mapping[str, List[str]], key: str, default: bool = False
 
 
 def activity_key(item: Mapping[str, Any]) -> str:
-    tx = str(item.get("transactionHash") or item.get("transaction_hash") or "").strip().lower()
-    if tx:
-        return f"tx:{tx}"
-    activity_id = str(item.get("activityId") or item.get("activity_id") or "").strip().lower()
-    if activity_id:
-        return f"activity-id:{activity_id}"
-    fields = ("timestamp", "proxyWallet", "asset", "side", "price", "size", "slug", "outcome")
-    return "activity:" + "|".join(str(item.get(key) or "").strip().lower() for key in fields)
+    return wallet_activity_key(item)
 
 
 def _alert_market_id(alert: PriceAlert) -> str:
@@ -1043,50 +1072,10 @@ def _paper_position_mark_price(snapshot: PriceSnapshot, net_size: float) -> Tupl
 
 
 def _paper_position_unrealized(row: Dict[str, Any], mark: Mapping[str, Any]) -> Optional[float]:
-    mark_price = _safe_float(mark.get("mark_price"), None)
-    notional = row.get("notional")
-    if mark_price is None or notional is None:
-        return None
-    return float(row["net_size"]) * mark_price - float(notional)
-
+    return paper_unrealized(row, mark.get("mark_price"))
 
 def paper_position_rows(records: List[PaperTradeRecord]) -> List[Dict[str, Any]]:
-    grouped: Dict[tuple[str, str], Dict[str, Any]] = {}
-    for record in records:
-        if not record.accepted:
-            continue
-        signed_size = _paper_record_signed_size(record)
-        if signed_size == 0:
-            continue
-        price = record.average_price if record.average_price is not None else record.limit_price
-        key = (record.market_id, record.contract_id)
-        row = grouped.setdefault(
-            key,
-            {
-                "market_id": record.market_id,
-                "contract_id": record.contract_id,
-                "net_size": 0.0,
-                "notional": 0.0,
-                "priced_size": 0.0,
-                "trades": 0,
-            },
-        )
-        row["net_size"] += signed_size
-        row["trades"] += 1
-        if price is not None:
-            row["notional"] += signed_size * float(price)
-            row["priced_size"] += abs(signed_size)
-
-    rows: List[Dict[str, Any]] = []
-    for row in grouped.values():
-        priced_size = float(row.pop("priced_size"))
-        notional = float(row["notional"])
-        net_size = float(row["net_size"])
-        row["average_price"] = abs(notional) / abs(net_size) if priced_size > 0 and net_size != 0 else None
-        row["notional"] = notional if priced_size > 0 else None
-        rows.append(row)
-    return sorted(rows, key=lambda item: (str(item["market_id"]), str(item["contract_id"])))
-
+    return account_paper_position_rows(records)
 
 def _paper_marks_for_rows(
     marks: Mapping[Tuple[str, str], Dict[str, Any]],
@@ -1100,36 +1089,7 @@ def paper_position_summary(
     rows: List[Dict[str, Any]],
     marks: Optional[Mapping[Tuple[str, str], Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    marks = marks or {}
-    priced_rows = [row for row in rows if row.get("notional") is not None]
-    unrealized_values = []
-    mark_sources: Dict[str, int] = {}
-    last_marked_at: Optional[float] = None
-    marked_count = 0
-    for row in rows:
-        mark = marks.get((str(row["market_id"]), str(row["contract_id"])), {})
-        if _safe_float(mark.get("mark_price"), None) is not None:
-            marked_count += 1
-        unrealized = _paper_position_unrealized(row, mark)
-        if unrealized is not None:
-            unrealized_values.append(float(unrealized))
-        source = str(mark.get("source") or "")
-        if source:
-            mark_sources[source] = mark_sources.get(source, 0) + 1
-        marked_at = _safe_float(mark.get("marked_at"), None)
-        if marked_at is not None:
-            last_marked_at = marked_at if last_marked_at is None else max(last_marked_at, marked_at)
-    return {
-        "positions": len(rows),
-        "gross_size": sum(abs(float(row["net_size"])) for row in rows),
-        "entry_notional": sum(abs(float(row["notional"])) for row in priced_rows),
-        "net_notional": sum(float(row["notional"]) for row in priced_rows),
-        "marked": marked_count,
-        "unrealized": sum(unrealized_values) if unrealized_values else None,
-        "mark_sources": mark_sources,
-        "last_marked_at": last_marked_at,
-    }
-
+    return paper_summary(rows, marks or {})
 
 def bool_from_setting(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
@@ -1241,6 +1201,18 @@ def market_safety_payload(settings: Mapping[str, Any], enabled: bool) -> Dict[st
     }
 
 
+class MarketConfigConflictError(RuntimeError):
+    """A client attempted to replace market controls from an older snapshot."""
+
+
+def market_configuration_revision(cfg: AppConfig, market_id: str) -> str:
+    market = cfg.markets.get(market_id)
+    snapshot = {"market_id": market_id, "enabled": bool(market and market.enabled),
+                "settings": dict(market.settings) if market else {}}
+    encoded = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def market_health_payload(meta: MarketMetadata, cfg: AppConfig, registry: Optional[AdapterRegistry] = None) -> Dict[str, Any]:
     market_cfg = cfg.markets.get(meta.market_id)
     settings = dict(market_cfg.settings) if market_cfg else {}
@@ -1273,6 +1245,7 @@ def market_health_payload(meta: MarketMetadata, cfg: AppConfig, registry: Option
     return {
         "market_id": meta.market_id,
         "display_name": meta.display_name,
+        "configuration_revision": market_configuration_revision(cfg, meta.market_id),
         "enabled": bool(market_cfg and market_cfg.enabled),
         "default_enabled": bool(meta.default_enabled),
         "homepage_url": meta.homepage_url,
@@ -1472,7 +1445,8 @@ def paper_payload(
     cfg: AppConfig,
     marks: Optional[Mapping[Tuple[str, str], Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    positions = paper_position_rows(cfg.paper_trades)
+    accounting = paper_accounting(cfg.paper_trades)
+    positions = accounting["positions"]
     active_marks = _paper_marks_for_rows(marks or {}, positions)
     marked_positions = []
     for row in positions:
@@ -1490,7 +1464,8 @@ def paper_payload(
         )
     history = [record.to_dict() for record in cfg.paper_trades]
     return {
-        "summary": paper_position_summary(positions, active_marks),
+        "summary": paper_summary(positions, active_marks, accounting),
+        "accounting": {key: value for key, value in accounting.items() if key != "positions"},
         "positions": marked_positions,
         "history": history,
         "counts": {
@@ -1933,6 +1908,12 @@ def apply_market_patch(
     if normalized not in cfg.markets:
         raise ValueError(f"Unknown market id: {normalized}")
     market_cfg = cfg.markets[normalized]
+    if "expected_revision" in payload:
+        expected = payload["expected_revision"]
+        if not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+            raise ValueError("expected_revision must be the market configuration revision from a current read.")
+        if not hmac.compare_digest(expected, market_configuration_revision(cfg, normalized)):
+            raise MarketConfigConflictError("Market settings changed. Refresh and review the current controls before saving.")
     control_fields = (*MARKET_SAFETY_BOOLEAN_FIELDS, *MARKET_SAFETY_LIMIT_FIELDS)
     top_settings = {key: payload[key] for key in control_fields if key in payload}
     top = MarketConfig.from_dict(normalized, {
@@ -2276,10 +2257,14 @@ def require_selected_market(cfg: AppConfig, feature: str) -> str:
     return market_id
 
 
-def wallet_payload(wallet: WalletWatch) -> Dict[str, Any]:
+def wallet_payload(wallet: WalletWatch, market_id: Optional[str] = None) -> Dict[str, Any]:
+    selected = market_id or wallet.activity_cursor_market_id
+    cursor = cursor_for_market(wallet, selected)
     return {
         **wallet.to_dict(),
-        "seen_count": len(wallet.seen_activity_keys or []),
+        **cursor,
+        "activity_cursor_market_id": selected,
+        "seen_count": len(cursor["seen_activity_keys"] or []),
     }
 
 
@@ -2310,7 +2295,7 @@ def wallets_payload(
 ) -> Dict[str, Any]:
     enabled_wallets = [wallet for wallet in cfg.wallets if wallet.enabled]
     return {
-        "wallets": [wallet_payload(wallet) for wallet in cfg.wallets],
+        "wallets": [wallet_payload(wallet, cfg.selected_market_id) for wallet in cfg.wallets],
         "counts": {
             "total": len(cfg.wallets),
             "enabled": len(enabled_wallets),
@@ -2329,6 +2314,7 @@ LEADERBOARD_SORTS = {
     "roi_pct": "PNL",
     "pnl_usd": "PNL",
     "volume_usd": "VOL",
+    "volume_shares": "VOLUME",
     "mdd_usd": "PNL",
     "mdd_pct": "PNL",
 }
@@ -2363,9 +2349,10 @@ def _leaderboard_display_name(row: Mapping[str, Any], wallet: str) -> str:
 
 
 def normalize_polymarket_leaderboard_row(raw: Mapping[str, Any], fallback_rank: int) -> Dict[str, Any]:
-    fields = source_leaderboard_fields(raw)
+    version = 2 if "user_id" in raw else 1
+    fields = source_leaderboard_fields(raw, version=version)
     wallet, pnl, volume = fields["wallet"], fields["pnl"], fields["volume"]
-    roi = (float(pnl) / float(volume) * 100.0) if pnl is not None and volume and volume > 0 else None
+    roi = (float(pnl) / float(volume) * 100.0) if version == 1 and pnl is not None and volume and volume > 0 else None
     if roi is not None and not math.isfinite(roi):
         raise PolymarketResponseError("Leaderboard derived PnL/volume ratio must be finite; board coverage is unknown.")
     mdd_usd, mdd_pct = fields["mdd_usd"], fields["mdd_pct"]
@@ -2374,13 +2361,18 @@ def normalize_polymarket_leaderboard_row(raw: Mapping[str, Any], fallback_rank: 
     return {
         "rank": rank or fallback_rank,
         "wallet": wallet,
-        "display_name": _leaderboard_display_name(raw, wallet),
+        "display_name": str(raw.get("user_name") or _leaderboard_display_name(raw, wallet)),
         "profile_image": str(_leaderboard_lookup(raw, "profileImage", "profile_image", "avatar") or ""),
         "display_username_public": bool(display_public) if display_public is not None else True,
         "pnl_usd": pnl,
-        "volume_usd": volume,
+        "volume_usd": volume if version == 1 else None,
+        "volume_shares": volume if version == 2 else None,
+        "source_api_version": version,
+        "quote_currency": "USDC" if version == 2 else "USD",
+        "volume_unit": "shares" if version == 2 else "USD",
         "roi_pct": roi,
         **performance_ratio_metadata(roi),
+        "roi_pct_basis": PNL_VOLUME_BASIS if version == 1 else "unavailable",
         "trade_count": fields["trade_count"],
         "mdd_usd": mdd_usd,
         "mdd_pct": mdd_pct,
@@ -2390,53 +2382,21 @@ def normalize_polymarket_leaderboard_row(raw: Mapping[str, Any], fallback_rank: 
 
 
 def _position_total_pnl(row: Mapping[str, Any]) -> Optional[float]:
-    total = _safe_float(_leaderboard_lookup(row, "totalPnl", "total_pnl"), None)
-    if total is not None:
-        return total
-    values = [
-        _safe_float(_leaderboard_lookup(row, "cashPnl", "cash_pnl"), None),
-        _safe_float(_leaderboard_lookup(row, "realizedPnl", "realized_pnl"), None),
-    ]
-    present = [value for value in values if value is not None]
-    return sum(present) if present else None
+    return shared_position_total_pnl(row)
 
 
 def _fetch_user_positions_all(wallet: str, limit: int = 500) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    offset = 0
-    clean_limit = max(0, min(int(limit), 1000))
-    while len(rows) < clean_limit:
-        page_limit = min(500, clean_limit - len(rows))
-        page = data_api.get_positions(wallet, limit=page_limit, offset=offset)
-        if not page:
-            break
-        rows.extend(page)
-        if len(page) < page_limit:
-            break
-        offset += len(page)
-    return rows
+    return fetch_cursor_history(
+        data_api.get_positions_page_v2, user=wallet, limit=max(0, min(int(limit), 1000)),
+        status="OPEN", filter_type="TOKENS", filter_amount=0, include_archived=True,
+    )
 
 
 def _fetch_user_closed_positions_all(wallet: str, limit: int = 500) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    offset = 0
-    clean_limit = max(0, min(int(limit), 1000))
-    while len(rows) < clean_limit:
-        page_limit = min(50, clean_limit - len(rows))
-        page = data_api.get_closed_positions(
-            wallet,
-            limit=page_limit,
-            offset=offset,
-            sort_by="TIMESTAMP",
-            sort_direction="ASC",
-        )
-        if not page:
-            break
-        rows.extend(page)
-        if len(page) < page_limit:
-            break
-        offset += len(page)
-    return rows
+    return fetch_cursor_history(
+        data_api.get_positions_page_v2, user=wallet, limit=max(0, min(int(limit), 1000)),
+        status="CLOSED", sort_by="TIMESTAMP", sort_direction="ASC",
+    )
 
 
 def _max_drawdown(points: List[Dict[str, Any]], equity_base_usd: Optional[float]) -> Dict[str, Any]:
@@ -2453,6 +2413,7 @@ def polymarket_user_mdd_payload(
     trade_limit: int = 1000,
     include_open: bool = True,
     equity_base_usd: Optional[float] = None,
+    equity_base_currency: Optional[str] = None,
     max_points: int = 50,
     cache_ttl_seconds: int = 0,
     mark_replay_token_limit: int = 10,
@@ -2474,6 +2435,7 @@ def polymarket_user_mdd_payload(
             trade_limit=trade_limit,
             include_open=include_open,
             equity_base_usd=equity_base_usd,
+            equity_base_currency=equity_base_currency,
             max_points=max_points,
             cache_ttl_seconds=cache_ttl_seconds,
             mark_replay_token_limit=mark_replay_token_limit,
@@ -2493,6 +2455,7 @@ def polymarket_user_mdd_payload(
         trade_limit=trade_limit,
         include_open=include_open,
         equity_base_usd=equity_base_usd,
+        equity_base_currency=equity_base_currency,
         max_points=max_points,
         cache_ttl_seconds=cache_ttl_seconds,
         include_accounting_snapshot=include_accounting_snapshot,
@@ -3068,8 +3031,8 @@ def _sort_polymarket_leaderboard_rows(rows: List[Dict[str, Any]], sort: str, dir
     missing_numeric = float("-inf") if reverse else float("inf")
     if sort == "roi_pct":
         rows.sort(key=lambda row: row["roi_pct"] if row["roi_pct"] is not None else missing_numeric, reverse=reverse)
-    elif sort == "volume_usd":
-        rows.sort(key=lambda row: row["volume_usd"] if row["volume_usd"] is not None else missing_numeric, reverse=reverse)
+    elif sort in {"volume_usd", "volume_shares"}:
+        rows.sort(key=lambda row: row.get(sort) if row.get(sort) is not None else missing_numeric, reverse=reverse)
     elif sort == "mdd_usd":
         rows.sort(key=lambda row: row["mdd_usd"] if row["mdd_usd"] is not None else missing_numeric, reverse=reverse)
     elif sort == "mdd_pct":
@@ -3082,6 +3045,8 @@ def _fetch_polymarket_leaderboard_scan_rows(
     *,
     scan_limit: Optional[int],
     scan_start_offset: int = 0,
+    scan_start_cursor: Optional[str] = None,
+    initial_complete: bool = False,
     initial_rows: Optional[List[Dict[str, Any]]] = None,
     initial_scanned: Optional[int] = None,
     retain_rows: bool = True,
@@ -3097,189 +3062,20 @@ def _fetch_polymarket_leaderboard_scan_rows(
     warnings: List[str],
     page_callback: Optional[Callable[[int, int, List[Dict[str, Any]]], Optional[bool]]] = None,
     scan_summary: Optional[Dict[str, Any]] = None,
+    cursor_page_callback: Optional[Callable[..., Optional[bool]]] = None,
 ) -> Tuple[List[Dict[str, Any]], bool]:
-    raw_rows: List[Dict[str, Any]] = [dict(row) for row in (initial_rows or [])]
-    scanned_count = max(len(raw_rows), int(initial_scanned or 0))
-    if not retain_rows:
-        raw_rows = []
-    offset = max(0, int(scan_start_offset or 0))
-    if scanned_count and offset <= 0:
-        offset = scanned_count
-    cancelled = False
-    concurrency = max(1, int(scan_concurrency or 1))
-    retry_attempts = max(1, int(scan_retry_attempts or 1))
-    retry_delay = max(0.0, float(scan_retry_delay_seconds or 0.0))
-    seen_page_fingerprints: set[str] = set()
-    seen_wallet_fingerprints: set[str] = set()
-    completion_reason = "scan_limit_reached" if scan_limit is not None else "upstream_exhausted"
+    from polymarket.leaderboard_scan import scan_leaderboard_v2
 
-    def fetch_page(page_offset: int, page_limit: int) -> List[Dict[str, Any]]:
-        with cancellation_scope(is_cancelled):
-            return fetch_page_with_cancellation(page_offset, page_limit)
-
-    def fetch_page_with_cancellation(page_offset: int, page_limit: int) -> List[Dict[str, Any]]:
-        for attempt in range(1, retry_attempts + 1):
-            try:
-                page = data_api.get_leaderboard(
-                    limit=page_limit,
-                    offset=page_offset,
-                    sort_by=remote_sort,
-                    sort_direction=direction,
-                    period=period,
-                    category=category,
-                )
-                for row in page:
-                    source_leaderboard_fields(row)
-                return page
-            except RequestCancelled:
-                raise
-            except Exception as exc:
-                if attempt >= retry_attempts:
-                    raise
-                warning = (
-                    f"Leaderboard page offset {page_offset} failed attempt {attempt}/{retry_attempts}: "
-                    f"{exc}; retrying in {retry_delay:g}s."
-                )
-                warnings.append(warning)
-                emit_progress(
-                    "leaderboard",
-                    scanned=scanned_count,
-                    message=warning,
-                )
-                if retry_delay:
-                    with request_scope(retry_delay + 1) as control:
-                        control.sleep(retry_delay)
-        return []
-
-    emit_progress(
-        "leaderboard",
-        scanned=scanned_count,
-        message=f"Scanning leaderboard rows {scanned_count}/{_limit_label(scan_limit)} from offset {offset}.",
+    return scan_leaderboard_v2(
+        scan_limit=scan_limit, scan_start_offset=scan_start_offset, scan_start_cursor=scan_start_cursor,
+        initial_complete=initial_complete,
+        initial_rows=initial_rows, initial_scanned=initial_scanned, retain_rows=retain_rows,
+        remote_sort=remote_sort, direction=direction, period=period, category=category,
+        scan_concurrency=scan_concurrency, scan_retry_attempts=scan_retry_attempts,
+        scan_retry_delay_seconds=scan_retry_delay_seconds, is_cancelled=is_cancelled,
+        emit_progress=emit_progress, warnings=warnings, page_callback=page_callback,
+        cursor_page_callback=cursor_page_callback, scan_summary=scan_summary,
     )
-    while scan_limit is None or scanned_count < scan_limit:
-        if offset > LEADERBOARD_MAX_OFFSET:
-            completion_reason = "upstream_offset_limit"
-            warning = f"Leaderboard scan reached the documented upstream offset limit ({LEADERBOARD_MAX_OFFSET}); not all Polymarket accounts can be enumerated."
-            warnings.append(warning)
-            emit_progress("leaderboard", scanned=scanned_count, message=warning)
-            break
-        if is_cancelled():
-            cancelled = True
-            completion_reason = "cancelled"
-            warnings.append("Leaderboard scan cancelled by user.")
-            break
-
-        remaining = None if scan_limit is None else scan_limit - scanned_count
-        batch_specs: List[Tuple[int, int]] = []
-        page_count = concurrency if remaining is None else min(concurrency, max(1, (remaining + POLYMARKET_LEADERBOARD_PAGE_SIZE - 1) // POLYMARKET_LEADERBOARD_PAGE_SIZE))
-        for _ in range(page_count):
-            if offset > LEADERBOARD_MAX_OFFSET:
-                break
-            if remaining is not None and remaining <= 0:
-                break
-            page_limit = POLYMARKET_LEADERBOARD_PAGE_SIZE if remaining is None else min(POLYMARKET_LEADERBOARD_PAGE_SIZE, remaining)
-            batch_specs.append((offset, page_limit))
-            offset += page_limit
-            if remaining is not None:
-                remaining -= page_limit
-        if not batch_specs:
-            break
-
-        pages_by_offset: Dict[int, List[Dict[str, Any]]] = {}
-        if len(batch_specs) == 1:
-            page_offset, page_limit = batch_specs[0]
-            try:
-                pages_by_offset[page_offset] = fetch_page(page_offset, page_limit)
-            except RequestCancelled:
-                cancelled = True
-        else:
-            with ThreadPoolExecutor(max_workers=len(batch_specs)) as executor:
-                futures = {
-                    executor.submit(fetch_page, page_offset, page_limit): (page_offset, page_limit)
-                    for page_offset, page_limit in batch_specs
-                }
-                for future in as_completed(futures):
-                    page_offset, _page_limit = futures[future]
-                    try:
-                        pages_by_offset[page_offset] = future.result()
-                    except RequestCancelled:
-                        cancelled = True
-                        continue
-                    completed = scanned_count + sum(len(page) for page in pages_by_offset.values())
-                    progress_scanned = completed if scan_limit is None else min(completed, scan_limit)
-                    emit_progress(
-                        "leaderboard",
-                        scanned=progress_scanned,
-                        message=f"Scanning leaderboard rows {progress_scanned}/{_limit_label(scan_limit)}.",
-                    )
-
-        stop_after_batch = False
-        for page_offset, page_limit in batch_specs:
-            if page_offset not in pages_by_offset:
-                break  # Never checkpoint beyond a cancelled pagination gap.
-            page = pages_by_offset.get(page_offset) or []
-            if page_callback is not None:
-                try:
-                    accepted = page_callback(page_offset, page_limit, page)
-                except Exception as exc:
-                    warnings.append(f"Leaderboard checkpoint callback failed at offset {page_offset}: {exc}")
-                    raise
-                if accepted is False:
-                    completion_reason = "repeated_page"
-                    warning = f"Leaderboard scan stopped at offset {page_offset}: upstream returned a page already stored at an earlier offset."
-                    warnings.append(warning)
-                    emit_progress("leaderboard", scanned=scanned_count, message=warning)
-                    stop_after_batch = True
-                    break
-            if not page:
-                completion_reason = "end_of_results"
-                stop_after_batch = True
-                break
-            page_fingerprint = hashlib.sha256(
-                json.dumps(page, default=str, separators=(",", ":"), sort_keys=True).encode("utf-8")
-            ).hexdigest()
-            wallet_fingerprint = wallet_membership_fingerprint(page)
-            if page_fingerprint in seen_page_fingerprints or (wallet_fingerprint and wallet_fingerprint in seen_wallet_fingerprints):
-                completion_reason = "repeated_page"
-                warning = f"Leaderboard scan stopped at offset {page_offset}: upstream repeated a previously returned page or wallet membership."
-                warnings.append(warning)
-                emit_progress("leaderboard", scanned=scanned_count, message=warning)
-                stop_after_batch = True
-                break
-            seen_page_fingerprints.add(page_fingerprint)
-            if wallet_fingerprint:
-                seen_wallet_fingerprints.add(wallet_fingerprint)
-            scanned_count += len(page)
-            if retain_rows:
-                raw_rows.extend(page)
-            if len(page) < page_limit:
-                completion_reason = "end_of_results"
-                stop_after_batch = True
-                break
-
-        progress_scanned = scanned_count if scan_limit is None else min(scanned_count, scan_limit)
-        emit_progress(
-            "leaderboard",
-            scanned=progress_scanned,
-            message=f"Scanning leaderboard rows {progress_scanned}/{_limit_label(scan_limit)}.",
-        )
-        if cancelled or is_cancelled():
-            cancelled = True
-            completion_reason = "cancelled"
-            warnings.append("Leaderboard scan cancelled by user.")
-            break
-        if stop_after_batch:
-            break
-
-    if scan_summary is not None:
-        scan_summary.update(
-            {
-                "completion_reason": completion_reason,
-                "source_enumeration_complete": completion_reason == "end_of_results",
-                "source_max_offset": LEADERBOARD_MAX_OFFSET,
-            }
-        )
-    return _limit_slice(raw_rows, scan_limit), cancelled
 
 
 def polymarket_leaderboard_payload(
@@ -3289,18 +3085,25 @@ def polymarket_leaderboard_payload(
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     initial_raw_rows: Optional[List[Mapping[str, Any]]] = None,
     leaderboard_page_callback: Optional[Callable[[int, int, List[Dict[str, Any]]], Optional[bool]]] = None,
+    leaderboard_cursor_page_callback: Optional[Callable[..., Optional[bool]]] = None,
+    scan_start_cursor: Optional[str] = None,
+    checkpoint_complete: bool = False,
 ) -> Dict[str, Any]:
     query = params or {}
-    sort = _query_value(query, "sort", "roi_pct").lower()
+    sort = _query_value(query, "sort", "pnl_usd").lower()
     if sort not in LEADERBOARD_SORTS:
-        sort = "roi_pct"
+        raise ValueError("Unsupported leaderboard sort.")
+    if sort in {"roi_pct", "volume_usd"} or any(_query_value(query, key, "") for key in (
+        "min_roi_pct", "max_roi_pct", "min_volume_usd", "max_volume_usd",
+    )):
+        raise ValueError("Data API v2 volume is measured in shares; monetary volume and PnL/volume ratio sorts or filters are unavailable.")
     direction = _query_value(query, "direction", "DESC").upper()
     if direction not in {"ASC", "DESC"}:
         direction = "DESC"
     period = _query_value(query, "period", "all") or "all"
     category = normalize_leaderboard_category(_query_value(query, "category", "OVERALL"))
     limit = _parse_optional_limit(_query_value(query, "limit", "100"), 100)
-    default_scan = 500 if sort == "roi_pct" else max(100, limit or 100)
+    default_scan = max(100, limit or 100)
     scan_limit = _parse_optional_limit(_query_value(query, "scan_limit", str(default_scan)), default_scan)
     if limit is not None and scan_limit is not None:
         scan_limit = max(scan_limit, limit)
@@ -3333,6 +3136,9 @@ def polymarket_leaderboard_payload(
     )
     compute_mdd = _query_bool(query, "compute_mdd", False)
     equity_base_usd = _query_float(query, "equity_base_usd")
+    equity_base_currency = _query_value(query, "equity_base_currency", "") or None
+    if equity_base_currency is not None and equity_base_currency not in {"USD", "USDC"}:
+        raise ValueError("equity_base_currency must be USD or USDC.")
     fast_scan = _query_bool(query, "fast_scan", False)
     scan_concurrency_default = 6 if fast_scan else 1
     mdd_concurrency_default = 3 if fast_scan else 1
@@ -3364,6 +3170,8 @@ def polymarket_leaderboard_payload(
     max_pnl = _query_float(query, "max_pnl_usd")
     min_volume = _query_float(query, "min_volume_usd")
     max_volume = _query_float(query, "max_volume_usd")
+    min_shares = _query_float(query, "min_volume_shares")
+    max_shares = _query_float(query, "max_volume_shares")
     min_roi = _query_float(query, "min_roi_pct")
     max_roi = _query_float(query, "max_roi_pct")
     min_mdd_usd = _query_float(query, "min_mdd_usd")
@@ -3376,7 +3184,7 @@ def polymarket_leaderboard_payload(
     mdd_stop_on_limit = limit is not None and _query_bool(
         query,
         "mdd_stop_on_limit",
-        fast_scan and sort == "roi_pct" and direction == "DESC" and any(
+        fast_scan and sort == "pnl_usd" and direction == "DESC" and any(
             value is not None for value in (min_mdd_usd, max_mdd_usd, min_mdd_pct, max_mdd_pct)
         ),
     )
@@ -3445,6 +3253,8 @@ def polymarket_leaderboard_payload(
     raw_rows, leaderboard_cancelled = _fetch_polymarket_leaderboard_scan_rows(
         scan_limit=scan_limit,
         scan_start_offset=scan_start_offset,
+        scan_start_cursor=scan_start_cursor,
+        initial_complete=checkpoint_complete,
         initial_rows=checkpoint_rows,
         remote_sort=remote_sort,
         direction=direction,
@@ -3457,6 +3267,7 @@ def polymarket_leaderboard_payload(
         emit_progress=emit_progress,
         warnings=warnings,
         page_callback=leaderboard_page_callback,
+        cursor_page_callback=leaderboard_cursor_page_callback,
         scan_summary=scan_summary,
     )
     cancelled = cancelled or leaderboard_cancelled
@@ -3476,6 +3287,8 @@ def polymarket_leaderboard_payload(
         if not _number_in_range(row["pnl_usd"], min_pnl, max_pnl):
             continue
         if not _number_in_range(row["volume_usd"], min_volume, max_volume):
+            continue
+        if not _number_in_range(row["volume_shares"], min_shares, max_shares):
             continue
         if not _number_in_range(row["roi_pct"], min_roi, max_roi):
             continue
@@ -3503,6 +3316,7 @@ def polymarket_leaderboard_payload(
                 "trade_limit": mdd_trade_limit,
                 "include_open": True,
                 "equity_base_usd": equity_base_usd,
+                "equity_base_currency": equity_base_currency,
                 "cache_ttl_seconds": mdd_cache_ttl_seconds,
                 "mark_replay_token_limit": mdd_mark_replay_token_limit,
                 "mark_replay_point_limit": mdd_mark_replay_point_limit,
@@ -3598,6 +3412,11 @@ def polymarket_leaderboard_payload(
                     "mdd_activity_events": mdd.get("activity_events", 0),
                     "mdd_trade_events": mdd.get("trade_events", 0),
                     "mdd_equity_base_usd": mdd["equity_base_usd"],
+                    "mdd_quote_currency": mdd.get("quote_currency"),
+                    "mdd_source_economics_currency": mdd.get("source_economics_currency"),
+                    "mdd_equity_base_currency": mdd.get("equity_base_currency"),
+                    "mdd_currency_status": mdd.get("mdd_currency_status"),
+                    "mdd_percentage_available": mdd.get("mdd_percentage_available", mdd.get("mdd_pct") is not None),
                     "mdd_equity_base_source": mdd.get("equity_base_source"),
                     "mdd_public_capital_basis_usd": mdd.get("public_capital_basis_usd"),
                     "mdd_peak_value": mdd["peak_value"],
@@ -3756,19 +3575,26 @@ def polymarket_leaderboard_payload(
         "source": "polymarket_data_api_leaderboard",
         "cancelled": cancelled,
         "source_sort": remote_sort,
-        "roi_pct_basis": PNL_VOLUME_BASIS,
+        "source_api_version": 2,
+        "quote_currency": "USDC",
+        "volume_unit": "shares",
+        "roi_pct_basis": "unavailable",
         "wallet_observation_policy": "first_observation_per_normalized_wallet",
         "ranking_scope": "computed_from_scanned_public_leaderboard_rows_with_optional_public_data_mdd_v2",
         "completion_reason": str(scan_summary.get("completion_reason") or "unknown"),
         "source_enumeration_complete": bool(scan_summary.get("source_enumeration_complete")),
-        "source_max_offset": LEADERBOARD_MAX_OFFSET,
+        "source_max_offset": None,
+        "next_cursor": scan_summary.get("next_cursor"),
+        "next_page_index": scan_summary.get("next_page_index"),
+        "scan_limit_overrun": scan_summary.get("scan_limit_overrun", 0),
+        "scan_limit_policy": "complete_provider_cursor_pages",
         "source_scope_note": (
             "Results cover only rows exposed by the public Polymarket leaderboard for the selected period and category; "
             "they do not establish coverage of every Polymarket account."
         ),
         "search_strategy": (
-            "fast_roi_candidates_then_adaptive_mdd_filter"
-            if fast_scan and mdd_requested and sort == "roi_pct"
+            "fast_pnl_candidates_then_adaptive_mdd_filter"
+            if fast_scan and mdd_requested and sort == "pnl_usd"
             else "scanned_public_leaderboard_rows"
         ),
         "mdd_available": mdd_values_available,
@@ -4181,6 +4007,10 @@ def copy_preview_payload(cfg: AppConfig, registry: AdapterRegistry, payload: Map
     return {"preview": preview, "copy": copy_payload(cfg, registry)}
 
 
+WALLET_POLL_BATCH_ITEMS = 100
+WALLET_POLL_TIMEOUT_SECONDS = 60.0
+
+
 def poll_wallet_activity(
     cfg: AppConfig,
     registry: AdapterRegistry,
@@ -4188,71 +4018,147 @@ def poll_wallet_activity(
     *,
     limit: int = 25,
     advance_seen: bool = True,
+    max_batch_items: int = WALLET_POLL_BATCH_ITEMS,
+    timeout_seconds: Optional[float] = None,
+    response_validator: Optional[Callable[[AppConfig, Dict[str, Any], List[Dict[str, Any]]], None]] = None,
 ) -> Dict[str, Any]:
-    """Poll enabled wallets and optionally advance their durable dedupe cursor.
+    """Stage a chronological, replay-sized delivery batch before moving cursors.
 
-    Interactive/API polling keeps the default ``advance_seen=True`` behavior.
-    Read-only unattended observers pass ``False`` because they have no durable
-    activity consumer; advancing the cursor there would discard events before
-    the desktop/API poller can deliver them.
+    Complete reads establish coverage, but only emitted events and known filter
+    skips are consumed. A single deadline covers all wallets and copy previews.
+    Callers can preflight the full HTTP representation before any state changes.
+    Read-only observers keep ``advance_seen=False``.
     """
-    market_id = require_selected_market(cfg, "Wallet polling")
-    adapter = adapter_for_market(cfg, market_id, registry)
-    activity_loader = getattr(adapter, "list_activity", None)
-    if not callable(activity_loader) and market_id != "polymarket":
-        raise ValueError(
-            f"{adapter.display_name} does not expose an official wallet activity feed for tracking."
-        )
+    if type(max_batch_items) is not int or not 1 <= max_batch_items <= WALLET_POLL_BATCH_ITEMS:
+        raise ValueError("Wallet activity delivery batch must contain between 1 and 100 events.")
+    staged_cfg = deepcopy(cfg)
+    staged_recent = deepcopy(recent_activity[:100])
     emitted: List[Dict[str, Any]] = []
     problems: List[str] = []
-    copy_conflicts: Dict[str, Dict[str, Any]] = {}
-    for wallet in list(cfg.wallets):
-        if not wallet.enabled:
-            continue
-        try:
-            if callable(activity_loader):
-                items = activity_loader(wallet.wallet, limit=limit)
-            else:
-                items = data_api.get_activity(wallet.wallet, limit=limit, types=["TRADE"])
-        except Exception as exc:
-            problems.append(f"{wallet.wallet}: {exc}")
-            continue
-        seen_keys = set(wallet.seen_activity_keys or [])
-        new_items: List[Tuple[str, Mapping[str, Any]]] = []
-        for item in reversed(items or []):
-            if not isinstance(item, Mapping):
-                continue
-            key = activity_key(item)
-            if key in seen_keys:
-                continue
-            timestamp = int(item.get("timestamp") or 0)
-            tx = str(item.get("transactionHash") or item.get("transaction_hash") or "")
-            if timestamp > (wallet.last_seen_ts or 0):
-                new_items.append((key, item))
+    consumed_filtered = 0
+    remaining = 0
+    enabled = [wallet for wallet in staged_cfg.wallets if wallet.enabled]
+    budget = min(MAX_MUTATION_RESULT_BYTES, MAX_HTTP_RESPONSE_BYTES)
+
+    def result() -> Dict[str, Any]:
+        return {"activity": list(reversed(emitted)), "problems": list(problems),
+                "polled_wallets": len(enabled), "delivered_activity": len(emitted),
+                "has_more": remaining > 0 or bool(problems),
+                "remaining_activity": None if problems else remaining,
+                "consumed_filtered": consumed_filtered, "batch_limit": max_batch_items}
+
+    def preflight() -> None:
+        candidate = result()
+        _json_bytes(candidate, max_bytes=budget)
+        # Reject nonfinite and noncanonical JSON before persisting a receipt.
+        json.dumps(candidate, allow_nan=False)
+        if response_validator is not None:
+            response_validator(staged_cfg, candidate, staged_recent)
+
+    with request_scope(WALLET_POLL_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds) as control:
+        market_id = require_selected_market(staged_cfg, "Wallet polling")
+        adapter = adapter_for_market(staged_cfg, market_id, registry)
+        activity_loader = getattr(adapter, "list_activity", None)
+        if not callable(activity_loader) and market_id != "polymarket":
+            raise ValueError(f"{adapter.display_name} does not expose an official wallet activity feed for tracking.")
+        preflight()
+        candidates: List[Tuple[int, int, int, str, Mapping[str, Any]]] = []
+        observed_items = 0
+        for wallet_index, wallet in enumerate(enabled):
+            control.check()
+            cursor = cursor_for_market(wallet, market_id)
+            try:
+                if callable(activity_loader):
+                    items = collect_adapter_activity(activity_loader, wallet.wallet, since=cursor["last_seen_ts"], page_size=limit,
+                                                     timeout_seconds=control.remaining())
+                else:
+                    items = collect_polymarket_activity_v2(data_api.get_activity_page_v2, wallet.wallet,
+                                                          since=cursor["last_seen_ts"], page_size=limit,
+                                                          maximum_items=50_000 - observed_items,
+                                                          timeout_seconds=control.remaining())
+                observed_items += len(items)
+                if observed_items > 50_000:
+                    raise ActivityHistoryIncompleteError("Aggregate wallet history exceeds the bounded poll capacity; cursor unchanged.")
+                control.check()
+            except (RequestCancelled, RequestDeadlineExceeded):
+                raise
+            except Exception as exc:
+                problems.append(f"{wallet.wallet}: {exc}")
+                return result()  # No wallet or recent view has been published.
+            seen_keys = set(cursor["seen_activity_keys"] or [])
+            for item_index, item in enumerate(reversed(items)):
+                control.check()
+                key = activity_key(item)
+                if key in seen_keys or int(item["timestamp"]) < cursor["last_seen_ts"]:
+                    continue
+                legacy_key = legacy_transaction_key(item)
+                if legacy_key and legacy_key != key and legacy_key in seen_keys:
+                    problems.append(f"{wallet.wallet}: Legacy transaction checkpoint requires fill reconciliation; cursor unchanged.")
+                    return result()
                 seen_keys.add(key)
-            elif timestamp == (wallet.last_seen_ts or 0) and (not tx or tx != (wallet.last_seen_tx or "")):
-                new_items.append((key, item))
-                seen_keys.add(key)
-        for key, item in new_items:
-            if wallet.only_market_slug and str(item.get("slug") or "") != wallet.only_market_slug:
+                candidates.append((int(item["timestamp"]), wallet_index, item_index, key, item))
+                if not wallet.only_market_slug or str(item.get("slug") or "") == wallet.only_market_slug:
+                    remaining += 1
+        candidates.sort(key=lambda item: item[:3])
+        copy_conflicts: Dict[str, Dict[str, Any]] = {}
+        blocked_wallets: set[int] = set()
+        delivery_full = False
+        for _timestamp, wallet_index, _item_index, key, item in candidates:
+            control.check()
+            wallet = enabled[wallet_index]
+            if wallet_index in blocked_wallets:
                 continue
-            if advance_seen:
-                wallet.last_seen_ts = max(wallet.last_seen_ts or 0, int(item.get("timestamp") or 0))
-                wallet.last_seen_tx = str(
-                    item.get("transactionHash")
-                    or item.get("transaction_hash")
-                    or wallet.last_seen_tx
-                    or ""
+            filtered = bool(wallet.only_market_slug and str(item.get("slug") or "") != wallet.only_market_slug)
+            if not filtered and (delivery_full or len(emitted) >= max_batch_items):
+                blocked_wallets.add(wallet_index)
+                delivery_full = True
+                continue
+            previous_wallet = deepcopy(wallet.__dict__)
+            previous_recent = list(staged_recent)
+            previous_filtered = consumed_filtered
+            previous_remaining = remaining
+            previous_conflicts = deepcopy(copy_conflicts)
+            previous_emitted = len(emitted)
+            try:
+                if advance_seen:
+                    remember_activity(wallet, item, key, market_id=market_id)
+                if filtered:
+                    consumed_filtered += 1
+                    preflight()
+                    continue
+                activity = sanitize_audit_value(wallet_activity_payload(wallet, item))
+                assert_no_persisted_secrets(activity)
+                emitted.append(activity)
+                remaining -= 1
+                staged_recent.insert(0, activity)
+                del staged_recent[100:]
+                preflight()  # Oversized raw events do not trigger copy HTTP work.
+                activity["copy_preview"] = sanitize_audit_value(
+                    copy_trade_preview_from_activity(staged_cfg, registry, item, copy_conflicts)
                 )
-                wallet.seen_activity_keys.append(key)
-                if len(wallet.seen_activity_keys) > 200:
-                    wallet.seen_activity_keys = wallet.seen_activity_keys[-200:]
-            activity = wallet_activity_payload(wallet, item)
-            activity["copy_preview"] = copy_trade_preview_from_activity(cfg, registry, item, copy_conflicts)
-            emitted.insert(0, activity)
-            recent_activity.insert(0, activity)
-    del recent_activity[100:]
-    return {"activity": emitted, "problems": problems, "polled_wallets": sum(1 for wallet in cfg.wallets if wallet.enabled)}
+                control.check()
+                preflight()
+            except HttpResponseTooLargeError:
+                wallet.__dict__.clear()
+                wallet.__dict__.update(previous_wallet)
+                staged_recent[:] = previous_recent
+                consumed_filtered = previous_filtered
+                remaining = previous_remaining
+                copy_conflicts = previous_conflicts
+                del emitted[previous_emitted:]
+                if not emitted:
+                    raise HttpResponseTooLargeError("The next wallet event cannot fit its complete delivery response; cursor unchanged.") from None
+                blocked_wallets.add(wallet_index)
+                delivery_full = True
+        preflight()
+        control.check()
+        final_result = result()
+    # Publish only after the scope's final deadline check, preserving existing
+    # WalletWatch references used by desktop observers.
+    for original, staged in zip(cfg.wallets, staged_cfg.wallets, strict=True):
+        original.__dict__.update(deepcopy(staged.__dict__))
+    recent_activity[:] = staged_recent
+    return final_result
 
 
 def paper_order_from_payload(payload: Mapping[str, Any]) -> PaperOrderRequest:
@@ -4280,52 +4186,19 @@ def paper_order_from_payload(payload: Mapping[str, Any]) -> PaperOrderRequest:
 
 
 def paper_order_impact(records: List[PaperTradeRecord], order: PaperOrderRequest) -> Dict[str, Any]:
-    current_row = next(
-        (
-            row
-            for row in paper_position_rows(records)
-            if row["market_id"] == order.market_id and row["contract_id"] == order.contract_id
-        ),
-        None,
-    )
-    current_net = float(current_row["net_size"]) if current_row else 0.0
-    current_notional = current_row.get("notional") if current_row else None
-    signed_size = _paper_order_signed_size(order)
-    projected_net = current_net + signed_size
-    order_notional = signed_size * float(order.limit_price) if order.limit_price is not None else None
-    projected_notional = (
-        float(current_notional) + float(order_notional)
-        if current_notional is not None and order_notional is not None
-        else None
-    )
-    projected_average = (
-        abs(projected_notional) / abs(projected_net)
-        if projected_notional is not None and projected_net != 0
-        else None
-    )
-    return {
-        "market_id": order.market_id,
-        "contract_id": order.contract_id,
-        "side": order.side,
-        "size": order.size,
-        "limit_price": order.limit_price,
-        "current_net": current_net,
-        "signed_size": signed_size,
-        "projected_net": projected_net,
-        "effect": _paper_order_effect(current_net, signed_size, projected_net),
-        "order_notional": order_notional,
-        "projected_notional": projected_notional,
-        "projected_average": projected_average,
-    }
-
+    return account_paper_order_impact(records, order)
 
 def format_paper_order_impact(impact: Mapping[str, Any]) -> str:
+    def quantity(key: str) -> str:
+        value = impact.get(key)
+        return "unavailable" if value is None else f"{float(value):.4f}"
+
     parts = [
         f"Impact: {impact['market_id']}:{impact['contract_id']}",
         f"{impact['side']} size={float(impact['size']):g}",
-        f"current_net={float(impact['current_net']):.4f}",
-        f"order_net={float(impact['signed_size']):.4f}",
-        f"projected_net={float(impact['projected_net']):.4f}",
+        f"current_net={quantity('current_net')}",
+        f"order_net={quantity('signed_size')}",
+        f"projected_net={quantity('projected_net')}",
         f"effect={impact['effect']}",
     ]
     if impact.get("order_notional") is None:
@@ -4336,6 +4209,8 @@ def format_paper_order_impact(impact: Mapping[str, Any]) -> str:
         parts.append(f"projected_notional={float(impact['projected_notional']):.4f}")
     if impact.get("projected_average") is not None:
         parts.append(f"projected_avg={float(impact['projected_average']):.4f}")
+    if impact.get("incomplete_reasons"):
+        parts.append("accounting incomplete: " + ", ".join(impact["incomplete_reasons"]))
     return "; ".join(parts)
 
 
@@ -5266,6 +5141,7 @@ def paper_quote_limit_payload(cfg: AppConfig, registry: AdapterRegistry, payload
 
 
 def record_paper_trade(cfg: AppConfig, order: PaperOrderRequest, result: PaperOrderResult) -> PaperTradeRecord:
+    ensure_paper_history_capacity(cfg.paper_trades)
     record = PaperTradeRecord(
         market_id=order.market_id,
         contract_id=order.contract_id,
@@ -5276,15 +5152,15 @@ def record_paper_trade(cfg: AppConfig, order: PaperOrderRequest, result: PaperOr
         message=result.message,
         filled_size=result.filled_size,
         average_price=result.average_price,
+        quote_currency=SHARE_QUOTE_CURRENCIES.get(order.market_id),
         raw={"request": order.metadata, "result": result.raw},
     )
     cfg.paper_trades.insert(0, record)
-    if len(cfg.paper_trades) > 200:
-        cfg.paper_trades = cfg.paper_trades[:200]
     return record
 
 
 def submit_paper_order(cfg: AppConfig, registry: AdapterRegistry, payload: Mapping[str, Any]) -> Dict[str, Any]:
+    ensure_paper_history_capacity(cfg.paper_trades)
     order = paper_order_from_payload(payload)
     require_market_enabled(cfg, order.market_id, "paper trading")
     adapter = adapter_for_market(cfg, order.market_id, registry)
@@ -5352,6 +5228,8 @@ def position_refill_payload(cfg: AppConfig, market_id: str, contract_id: str) ->
     )
     if not row:
         raise ValueError("Paper position was not found.")
+    if row.get("net_size") is None:
+        raise ValueError("Paper position quantity accounting is unavailable for this venue or ledger.")
     net_size = float(row["net_size"])
     side = position_close_side(cfg.paper_trades, normalized, contract, net_size)
     return {
@@ -5376,6 +5254,9 @@ def refresh_paper_marks(
     for row in rows:
         market_id = str(row["market_id"])
         contract_id = str(row["contract_id"])
+        if row.get("net_size") is None:
+            problems.append(f"{market_id}:{contract_id}: quantity accounting unavailable")
+            continue
         if not cfg.markets.get(market_id) or not cfg.markets[market_id].enabled:
             problems.append(f"{market_id}: disabled")
             continue
@@ -5409,6 +5290,8 @@ def refresh_selected_paper_mark(
     row = next((item for item in rows if item["market_id"] == normalized and item["contract_id"] == contract), None)
     if not row:
         raise ValueError("Paper position was not found.")
+    if row.get("net_size") is None:
+        raise ValueError("Paper position quantity accounting is unavailable for this venue or ledger.")
     require_market_enabled(cfg, normalized, "paper mark refresh")
     adapter = adapter_for_market(cfg, normalized, registry)
     if not adapter.capabilities.price_reading:
@@ -5545,6 +5428,12 @@ class ReactGuiServer(ThreadingHTTPServer):
             for origin in (allowed_origins or default_origins)
             if (normalized := _normalize_allowed_origin(origin))
         }
+        local_hosts = {"localhost", "127.0.0.1", "[::1]"}
+        bind_authority = f"[{self.bind_host}]" if ":" in self.bind_host else self.bind_host
+        local_hosts.add(bind_authority.lower())
+        self.allowed_hosts = local_hosts | {
+            f"{host}:{self.server_address[1]}" for host in local_hosts
+        } | {urlparse(origin).netloc.lower() for origin in self.allowed_origins}
         self.paper_position_marks: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self.alert_price_state: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self.wallet_recent_activity: List[Dict[str, Any]] = []
@@ -5698,6 +5587,49 @@ class HttpClientDisconnected(ConnectionError):
     """The response stream, not an upstream transport, lost its client."""
 
 
+class _RequestReceiveReader(io.RawIOBase):
+    """Apply an absolute deadline before every socket read, including dripped input."""
+
+    def __init__(self, raw: Any, connection: Any) -> None:
+        super().__init__()
+        self.raw = raw
+        self.connection = connection
+        self.deadline: Optional[float] = None
+        self.timed_out = False
+
+    def begin(self, seconds: float) -> None:
+        self.deadline = time.monotonic() + float(seconds)
+        self.timed_out = False
+
+    def end(self) -> None:
+        self.deadline = None
+        self.connection.settimeout(HTTP_CONNECTION_TIMEOUT_SECONDS)
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        timeout = self.connection.gettimeout()
+        if self.deadline is not None:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                self.timed_out = True
+                raise TimeoutError("HTTP request receive deadline exceeded.")
+            timeout = min(timeout, remaining) if timeout is not None else remaining
+        self.connection.settimeout(timeout)
+        try:
+            return self.raw.readinto(buffer)
+        except TimeoutError:
+            self.timed_out = True
+            raise
+
+    def close(self) -> None:
+        try:
+            self.raw.close()
+        finally:
+            super().close()
+
+
 class _ClientResponseWriter:
     """Identify peer disconnects at the only stream that writes to the client."""
 
@@ -5748,6 +5680,13 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         super().setup()
         self.wfile = _ClientResponseWriter(self.wfile)
         self.connection.settimeout(HTTP_CONNECTION_TIMEOUT_SECONDS)
+        self._receive_reader = _RequestReceiveReader(self.rfile.detach(), self.connection)
+        self.rfile = io.BufferedReader(self._receive_reader)
+
+    def parse_request(self) -> bool:
+        parsed = super().parse_request()
+        self._receive_reader.end()
+        return parsed
 
     def version_string(self) -> str:
         """Do not disclose the Python runtime version in HTTP responses."""
@@ -5765,6 +5704,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         self._request_id = secrets.token_hex(12)
         self._response_status: Optional[int] = None
         client_disconnected = False
+        self._receive_reader.begin(HTTP_HEADER_DEADLINE_SECONDS)
         try:
             super().handle_one_request()
         except HttpClientDisconnected:
@@ -5774,6 +5714,8 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             method = str(getattr(self, "command", "") or "").upper()
             if method:
                 status = self._response_status if self._response_status is not None else HTTPStatus.INTERNAL_SERVER_ERROR
+                if self._response_status is None and self._receive_reader.timed_out:
+                    status = HTTPStatus.REQUEST_TIMEOUT
                 if client_disconnected:
                     # 499 is local accounting only; no second response is sent.
                     status = 499
@@ -5802,6 +5744,8 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             self.send_header("X-Request-ID", request_id)
 
     def do_OPTIONS(self) -> None:
+        if not self._require_allowed_host():
+            return
         if not self._origin_is_allowed():
             self._send_error(HTTPStatus.FORBIDDEN, "cors_origin_forbidden", "Request origin is not allowed.")
             return
@@ -5858,7 +5802,18 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
         origin = str(self.headers.get("Origin") or "").strip().rstrip("/")
         return not origin or origin in self.app_server.allowed_origins
 
+    def _require_allowed_host(self) -> bool:
+        values = self.headers.get_all("Host", [])
+        if len(values) != 1 or str(values[0]).strip().lower() not in self.app_server.allowed_hosts:
+            self._send_error(
+                HTTPStatus.FORBIDDEN, "host_forbidden", "Request host is not a trusted server authority."
+            )
+            return False
+        return True
+
     def _require_authorized_request(self, *, allow_observability: bool = False) -> bool:
+        if not self._require_allowed_host():
+            return False
         if not self._origin_is_allowed():
             self._send_error(HTTPStatus.FORBIDDEN, "cors_origin_forbidden", "Request origin is not allowed.")
             return False
@@ -6069,6 +6024,7 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                     "trade_limit": _clamp_int(_query_value(query_params, "trade_limit", "1000"), 1000, 0, 5000),
                     "include_open": _query_bool(query_params, "include_open", True),
                     "equity_base_usd": _query_float(query_params, "equity_base_usd"),
+                    "equity_base_currency": _query_value(query_params, "equity_base_currency", "") or None,
                     "max_points": _clamp_int(_query_value(query_params, "max_points", "50"), 50, 1, 1000),
                     "cache_ttl_seconds": _clamp_int(_query_value(query_params, "cache_ttl_seconds", "0"), 0, 0, 300),
                     "mark_replay_token_limit": _clamp_int(_query_value(query_params, "mark_replay_token_limit", "10"), 10, 1, 20),
@@ -6322,6 +6278,11 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 self._send_error(HTTPStatus.BAD_REQUEST, "invalid_json", "Invalid JSON request body.")
                 return
+            except TimeoutError:
+                self._send_error(
+                    HTTPStatus.REQUEST_TIMEOUT, "request_receive_timeout", "JSON body receive deadline exceeded."
+                )
+                return
             except ValueError as exc:
                 self._send_error(HTTPStatus.BAD_REQUEST, "validation_error", str(exc))
                 return
@@ -6396,6 +6357,20 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                     # immutable bounded create receipt. Never duplicate the
                     # retained backlog in every idempotency journal entry.
                     response["event_history"] = alert_events_payload(cfg)
+                elif method == "POST" and path == "/api/wallets/poll":
+                    # The browser renders the recent view. Rehydrate the exact
+                    # receipt batch after restart, including when newer polls
+                    # have already populated the transient history cache.
+                    recovered = [dict(item) for item in response.get("activity", []) if isinstance(item, Mapping)]
+                    identities = {(item.get("wallet_id"), item.get("id")) for item in recovered}
+                    recent = (recovered + [item for item in self.app_server.wallet_recent_activity
+                                           if (item.get("wallet_id"), item.get("id")) not in identities])[:100]
+                    response.update(
+                        wallets=wallets_payload(cfg, self.app_server.wallet_polling, recent),
+                        copy=copy_payload(cfg, self.app_server.adapter_registry),
+                    )
+                    _json_bytes(response)  # Keep the receipt pinned if current views cannot fit.
+                    self.app_server.wallet_recent_activity = recent
                 self._send_json(entry.response_status or HTTPStatus.OK, response)
                 return None, True
             if entry.state == "rejected":
@@ -6648,6 +6623,10 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 return
             if method == "PATCH" and path.startswith("/api/markets/"):
                 market_id = path.rsplit("/", 1)[-1]
+                if market_id in cfg.markets and "expected_revision" not in payload:
+                    self._send_error(HTTPStatus.PRECONDITION_REQUIRED, "market_config_revision_required",
+                                     "Read the current market configuration and supply its configuration_revision as expected_revision.")
+                    return
                 apply_market_patch(cfg, market_id, payload)
                 self._save_config(cfg)
                 self._send_json(HTTPStatus.OK, markets_payload(cfg, self.app_server.adapter_registry))
@@ -6826,26 +6805,92 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 return
             if method == "POST" and path == "/api/wallets/poll":
                 limit = int(_safe_float(payload.get("limit"), 25) or 25)
-                result = poll_wallet_activity(
-                    cfg,
-                    self.app_server.adapter_registry,
-                    self.app_server.wallet_recent_activity,
-                    limit=max(1, min(limit, 100)),
-                )
-                self.app_server.wallet_polling["last_polled_at"] = time.time()
-                self.app_server.wallet_polling["last_message"] = (
-                    f"Polled {result['polled_wallets']} wallet(s); {len(result['activity'])} new activity item(s)."
-                )
-                self._save_config(cfg)
-                self._send_json(
-                    HTTPStatus.OK,
-                    {
-                        "wallets": wallets_payload(cfg, self.app_server.wallet_polling, self.app_server.wallet_recent_activity),
-                        "copy": copy_payload(cfg, self.app_server.adapter_registry),
-                        "message": self.app_server.wallet_polling["last_message"],
-                        **result,
-                    },
-                )
+                if journal_entry is None:
+                    raise RuntimeError("Wallet polling requires a durable replay receipt.")
+                staged_cfg = deepcopy(cfg)
+                staged_recent = deepcopy(self.app_server.wallet_recent_activity)
+                staged_polling = deepcopy(self.app_server.wallet_polling)
+                staged_polling["last_polled_at"] = time.time()
+                acknowledge = payload.get("acknowledge_receipt_id")
+                if acknowledge is not None:
+                    if not isinstance(acknowledge, str) or not acknowledge or len(acknowledge) > 128:
+                        raise ValueError("acknowledge_receipt_id must identify a previously received wallet poll receipt.")
+                    prior = next((entry for entry in staged_cfg.mutation_journal if entry.id == acknowledge), None)
+                    if prior is None or prior.method != "POST" or prior.path != "/api/wallets/poll" or prior.state != "completed":
+                        raise ValueError("The acknowledged wallet poll receipt does not exist or has not committed.")
+                    if prior.outcome_code != "wallet_delivery_batch_acknowledged":
+                        prior.outcome_code = "wallet_delivery_batch_acknowledged"
+                        prior.outcome_message = "The client acknowledged receiving this complete wallet activity batch."
+                        prior.updated_at = int(time.time())
+                unacknowledged = sum(entry.state == "completed" and entry.path == "/api/wallets/poll"
+                                     and entry.outcome_code != "wallet_delivery_batch_acknowledged"
+                                     for entry in staged_cfg.mutation_journal)
+                if unacknowledged >= MAX_UNACKNOWLEDGED_WALLET_POLL_RECEIPTS:
+                    self._send_error(HTTPStatus.SERVICE_UNAVAILABLE, "wallet_poll_receipts_full",
+                                     "Unacknowledged wallet activity receipts are full; acknowledge a received batch before polling again.",
+                                     {"max_unacknowledged_receipts": MAX_UNACKNOWLEDGED_WALLET_POLL_RECEIPTS})
+                    return
+                try:
+                    # Reserve durable journal capacity before any upstream work.
+                    # A failed poll discards this staged reservation and ack.
+                    staged_cfg.append_mutation_journal(journal_entry)
+                except ValueError:
+                    self._send_error(HTTPStatus.SERVICE_UNAVAILABLE, "wallet_poll_receipts_full",
+                                     "The durable journal has no removable capacity; acknowledge received wallet batches or reconcile unresolved operations.")
+                    return
+
+                def poll_response(candidate_cfg, result, candidate_recent):
+                    message = (f"Polled {result['polled_wallets']} wallet(s); delivered {result['delivered_activity']} "
+                               f"activity item(s); {result['remaining_activity']} remaining.")
+                    receipt = {**result, "message": message, "delivery": {
+                        "mode": "durable_replayable_batch", "receipt_id": journal_entry.id,
+                        "acknowledge_with_next_poll": True,
+                    }}
+                    # A replay receipt must contain every delivered event.
+                    # Shape trimming or receipt-only fallback would lose them.
+                    _json_bytes(receipt, max_bytes=min(MAX_MUTATION_RESULT_BYTES, MAX_HTTP_RESPONSE_BYTES))
+                    staged_polling["last_message"] = message
+                    response = {"wallets": wallets_payload(candidate_cfg, staged_polling, candidate_recent),
+                                "copy": copy_payload(candidate_cfg, self.app_server.adapter_registry), **receipt}
+                    _json_bytes(response)
+                    return response, receipt
+
+                try:
+                    result = poll_wallet_activity(
+                        staged_cfg,
+                        self.app_server.adapter_registry,
+                        staged_recent,
+                        limit=max(1, min(limit, 100)),
+                        response_validator=lambda candidate_cfg, candidate, candidate_recent:
+                        poll_response(candidate_cfg, candidate, candidate_recent),
+                    )
+                except (RequestCancelled, RequestDeadlineExceeded):
+                    self._send_error(HTTPStatus.SERVICE_UNAVAILABLE, "wallet_poll_budget_exhausted",
+                                     "Wallet polling exceeded its aggregate work budget; cursors were left unchanged.")
+                    return
+                except HttpResponseTooLargeError:
+                    self._send_error(HTTPStatus.SERVICE_UNAVAILABLE, "wallet_poll_response_budget",
+                                     "The next wallet event or current state cannot fit a complete replayable response; cursors were left unchanged.")
+                    return
+                if result["problems"]:
+                    self._send_error(HTTPStatus.SERVICE_UNAVAILABLE, "wallet_poll_incomplete",
+                                     "Wallet source history is incomplete; delivery cursors were left unchanged.",
+                                     {"problems": result["problems"], "has_more": True, "remaining_activity": None})
+                    return
+                response, receipt = poll_response(staged_cfg, result, staged_recent)
+                stored = _stored_mutation_result(receipt)
+                if stored != receipt:
+                    raise ValueError("Wallet delivery receipt cannot be preserved exactly; cursors were left unchanged.")
+                journal_entry.state = "completed"
+                journal_entry.response_status = HTTPStatus.OK
+                journal_entry.response = stored
+                journal_entry.outcome_code = "wallet_delivery_batch_committed"
+                journal_entry.outcome_message = "Wallet cursors and the complete replayable activity batch committed atomically."
+                journal_entry.updated_at = int(time.time())
+                self._save_config(staged_cfg)
+                self.app_server.wallet_recent_activity = staged_recent
+                self.app_server.wallet_polling = staged_polling
+                self._send_json(HTTPStatus.OK, response)
                 return
             if method == "PATCH" and path.startswith("/api/wallets/"):
                 wallet_id = path.rsplit("/", 1)[-1]
@@ -6998,6 +7043,9 @@ class ReactGuiHandler(BaseHTTPRequestHandler):
                 "Live validation report failed schema validation.",
                 {"schema_validation": exc.validation},
             )
+            return
+        except MarketConfigConflictError as exc:
+            self._send_error(HTTPStatus.CONFLICT, "market_config_conflict", str(exc))
             return
         except ConfigConflictError:
             self._send_error(

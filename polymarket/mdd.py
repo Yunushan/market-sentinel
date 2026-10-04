@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import time
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -10,6 +10,7 @@ from core.request_control import RequestCancelled
 from . import clob_rest, data_api
 from .accounting import download_and_parse_accounting_snapshot, reconcile_mdd_payload_with_accounting
 from .drawdown import max_drawdown
+from .history_v2 import fetch_cursor_history
 from .memory_cache import BoundedJsonCache
 from .util import normalize_wallet
 
@@ -17,7 +18,7 @@ from .util import normalize_wallet
 MDD_METHOD_V2 = "public_data_historical_equity_curve_v2"
 MDD_METHOD_MARK_REPLAY = "clob_price_history_inventory_mark_replay_v1"
 # Increment when changing calculations to invalidate durable scan enrichment.
-MDD_CALCULATION_VERSION = 8
+MDD_CALCULATION_VERSION = 9
 MDD_PCT_BASIS_V2 = "max_t(drawdown_usd[t] / (equity_base_usd + running_peak_pnl_usd[t])) * 100"
 MAX_CLOSED_POSITIONS = 1000
 MAX_OPEN_POSITIONS = 1000
@@ -29,15 +30,16 @@ DEFAULT_CACHE_TTL_SECONDS = 60
 
 MDD_V2_ASSUMPTIONS = [
     "Drawdown starts from zero PnL at the beginning of the observed window; the initial loss is included.",
-    "Closed positions are ordered by public Data API timestamp and contribute realizedPnl to the historical PnL curve.",
+    "Closed positions are ordered by Data API v2 last_event_at and contribute realized_pnl to the observed historical PnL curve.",
     "Current open positions are represented by one current snapshot using public currentValue and PnL fields.",
     "Activity/trade rows are used for capital and exposure basis; they do not reconstruct historical mark-to-market prices.",
     "When equity_base_usd is not supplied, percentage MDD uses the largest public capital basis found from closed positions, open positions, and trade notional.",
     "Position capital uses USD entry values or share quantity multiplied by average entry price, never raw share count or current market value.",
     "Open-position gross entry values already include attributed BUY fees; reported entry fees are added only to a fee-exclusive basis.",
+    "Percentage drawdown requires matching source and equity-base currencies; no USD/USDC conversion is assumed.",
 ]
 MDD_V2_LIMITATIONS = [
-    "Public Data API rows do not expose a complete deposit/withdrawal ledger, so true account-equity cash flows are not independently verified.",
+    "This diagnostic does not reconstruct an account deposit/withdrawal ledger even when flow activity is present; true account-equity cash flows are not independently verified.",
     "Historical unrealized valleys between trade/close timestamps require per-token price replay and exact position inventory.",
     "Unresolved/open markets are included only at the current snapshot, not at every historical timestamp.",
     "Exhausting a public endpoint window does not verify complete account history or investment-capital returns.",
@@ -126,10 +128,57 @@ def _clamp(value: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(int(value), maximum))
 
 
+def _source_economics_currency(inputs: MddInputs) -> Optional[str]:
+    if any(source.get("source_api") == "Data API v2" for source in inputs.history_coverage.values()):
+        return "USDC"
+    rows = inputs.closed_positions + inputs.open_positions + inputs.activity_events + inputs.trade_rows
+    native = any(isinstance(row, Mapping) and any(key in row for key in (
+        "current_size", "total_size", "entry_cost_usdc", "total_cost_usdc", "unrealized_pnl", "token_id"
+    )) for row in rows)
+    legacy_economics = any(isinstance(row, Mapping) and any(key in row for key in (
+        "realizedPnl", "cashPnl", "totalPnl", "totalBought", "grossInitialValue", "initialValue"
+    )) for row in rows)
+    if native and legacy_economics:
+        return None
+    # The legacy calculator's supplied-row contract declares USD. This does
+    # not retroactively add unit metadata to historical saved audit records.
+    return "USDC" if native else "USD" if rows else None
+
+
+def _equity_currency(value: Optional[str], *, supplied: bool, source: Optional[str]) -> Optional[str]:
+    if value is not None and value not in {"USD", "USDC"}:
+        raise ValueError("equity_base_currency must be USD or USDC.")
+    return (value or "USD") if supplied else source
+
+
+def _apply_currency_boundary(payload: Dict[str, Any]) -> Dict[str, Any]:
+    source, basis = payload.get("quote_currency"), payload.get("equity_base_currency")
+    mismatch = source is not None and basis is not None and source != basis
+    unknown = source is None or basis is None
+    payload["mdd_currency_status"] = "mismatch" if mismatch else "unavailable" if unknown else "consistent"
+    if mismatch or unknown:
+        payload["mdd_pct"] = None
+        for key in ("pct_peak_value", "pct_trough_value", "pct_peak_timestamp", "pct_trough_timestamp", "pct_drawdown_usd"):
+            payload[key] = None
+        if isinstance(payload.get("observed_drawdown"), dict):
+            payload["observed_drawdown"]["mdd_pct"] = None
+        replay_observed = (payload.get("mark_replay") or {}).get("observed_drawdown")
+        if isinstance(replay_observed, dict):
+            replay_observed["mdd_pct"] = None
+        reason = "equity_base_currency_mismatch" if mismatch else "mdd_economic_currency_unavailable"
+        payload["mdd_unavailable_reasons"] = list(dict.fromkeys([*payload.get("mdd_unavailable_reasons", []), reason]))
+    payload["mdd_percentage_available"] = payload.get("mdd_pct") is not None
+    return payload
+
+
 def _position_total_pnl(row: Mapping[str, Any]) -> Optional[float]:
-    total = _safe_float(_lookup(row, "totalPnl", "total_pnl"), None)
+    total = _finite_number(_lookup(row, "total_pnl", "totalPnl"))
     if total is not None:
         return total
+    if any(key in row for key in ("current_size", "entry_cost_usdc", "unrealized_pnl")):
+        realized = _finite_number(row.get("realized_pnl"))
+        unrealized = _finite_number(row.get("unrealized_pnl"))
+        return realized + unrealized if realized is not None and unrealized is not None else None
     values = [
         _safe_float(_lookup(row, "cashPnl", "cash_pnl"), None),
         _safe_float(_lookup(row, "realizedPnl", "realized_pnl"), None),
@@ -139,6 +188,32 @@ def _position_total_pnl(row: Mapping[str, Any]) -> Optional[float]:
 
 
 def _position_capital(row: Mapping[str, Any], *, closed: bool) -> Tuple[Optional[float], str]:
+    if any(key in row for key in ("current_size", "total_size", "entry_cost_usdc", "total_cost_usdc")):
+        if closed:
+            # V2's CLOSED entry basis describes residual inventory (~zero),
+            # not lifetime spending. Its total_size is bought SHARES.
+            quantity = _finite_number(row.get("total_size"))
+            price = _finite_number(row.get("avg_price"))
+            if quantity is None or price is None:
+                return None, "unavailable"
+            return quantity * price, "v2_lifetime_bought_shares_times_average_price_fee_component_unverified"
+        gross = _finite_number(row.get("total_cost_usdc"))
+        if gross is not None:
+            return gross, "v2_total_cost_usdc"
+        value = _finite_number(row.get("entry_cost_usdc"))
+        if value is None:
+            quantity = _finite_number(row.get("current_size"))
+            price = _finite_number(row.get("avg_price"))
+            if quantity is None or price is None:
+                return None, "unavailable"
+            value = quantity * price
+            source = "v2_held_shares_times_average_price"
+        else:
+            source = "v2_entry_cost_usdc"
+        fees = _finite_number(row.get("entry_fees_usdc"))
+        return (value + fees, source + "_with_reported_entry_fees") if fees is not None else (
+            value, source + "_fee_component_unavailable"
+        )
     gross = _finite_number(_lookup(row, "grossInitialValue", "gross_initial_value"))
     if gross is not None:
         return gross, "gross_initial_value"
@@ -235,13 +310,16 @@ def _source_quality(inputs: MddInputs) -> Dict[str, Any]:
         "grossinitialvalue", "gross_initial_value", "entryfeesusdc", "entry_fees_usdc",
         "usdcsize", "usdc_size", "notional", "value", "cash", "size", "tokens", "amount",
         "price", "avgprice", "avg_price",
+        "current_size", "total_size", "entry_cost_usdc", "total_cost_usdc", "unrealized_pnl",
+        "current_price",
     }
-    nonnegative_fields = numeric_fields - {"realizedpnl", "realized_pnl", "cashpnl", "cash_pnl", "totalpnl", "total_pnl"}
+    nonnegative_fields = numeric_fields - {"realizedpnl", "realized_pnl", "cashpnl", "cash_pnl", "totalpnl", "total_pnl", "unrealized_pnl"}
     for name, rows in source_rows.items():
         row_issues: Dict[int, set[str]] = {}
         all_issues[name] = row_issues
         closed_times: Dict[int, List[Tuple[int, float]]] = {}
         position_ids: Dict[Tuple[str, int], int] = {}
+        trade_ids: Dict[Tuple[Any, ...], int] = {}
         for index, row in enumerate(rows):
             issues: set[str] = set()
             row_issues[index] = issues
@@ -254,15 +332,16 @@ def _source_quality(inputs: MddInputs) -> Dict[str, Any]:
                     number = _finite_number(value)
                     if number is None or (field_name in nonnegative_fields and number < 0):
                         issues.add("invalid_numeric_field")
-                    elif field_name in {"price", "avgprice", "avg_price"} and number > 1:
+                    elif field_name in {"price", "avgprice", "avg_price", "current_price"} and number > 1:
                         issues.add("invalid_probability_price")
-            timestamp = _event_timestamp(_lookup(row, "timestamp"), latest=latest)
+            timestamp = _event_timestamp(_lookup(row, "last_event_at", "timestamp") if name in {"closed_positions", "open_positions"}
+                                         else _lookup(row, "timestamp"), latest=latest)
             if name in {"closed_positions", "open_positions"}:
                 capital, _ = _position_capital(row, closed=name == "closed_positions")
                 if capital is not None and not math.isfinite(capital):
                     issues.add("invalid_position_capital")
-                gross = _finite_number(_lookup(row, "grossInitialValue", "gross_initial_value"))
-                initial = _finite_number(_lookup(row, "initialValue", "initial_value"))
+                gross = _finite_number(_lookup(row, "total_cost_usdc", "grossInitialValue", "gross_initial_value"))
+                initial = _finite_number(_lookup(row, "entry_cost_usdc", "initialValue", "initial_value"))
                 fees = _finite_number(_lookup(row, "entryFeesUsdc", "entry_fees_usdc"))
                 # The API rounds each cost component to six decimal places.
                 tolerance = 1.000001e-6
@@ -272,6 +351,24 @@ def _source_quality(inputs: MddInputs) -> Dict[str, Any]:
                         and not math.isclose(gross, initial + fees, rel_tol=0, abs_tol=tolerance))
                 ):
                     issues.add("inconsistent_position_entry_cost")
+                if "total_pnl" in row:
+                    total = _finite_number(row.get("total_pnl"))
+                    realized = _finite_number(row.get("realized_pnl"))
+                    unrealized = _finite_number(row.get("unrealized_pnl"))
+                    if (total is not None and realized is not None and unrealized is not None
+                            and not math.isclose(total, realized + unrealized, rel_tol=0, abs_tol=tolerance)):
+                        issues.add("inconsistent_position_pnl")
+                quantity, price, current_value = (_finite_number(row.get(field)) for field in (
+                    "current_size", "current_price", "current_value"
+                ))
+                if (quantity is not None and price is not None and current_value is not None
+                        and not math.isclose(current_value, quantity * price, rel_tol=0, abs_tol=tolerance)):
+                    issues.add("inconsistent_current_position_value")
+                unrealized = _finite_number(row.get("unrealized_pnl"))
+                entry_cost = _finite_number(row.get("entry_cost_usdc"))
+                if (unrealized is not None and entry_cost is not None and current_value is not None
+                        and not math.isclose(unrealized, current_value - entry_cost, rel_tol=0, abs_tol=tolerance)):
+                    issues.add("inconsistent_unrealized_position_pnl")
             if name == "closed_positions":
                 pnl = _finite_number(_lookup(row, "realizedPnl", "realized_pnl"))
                 if timestamp is None:
@@ -282,7 +379,11 @@ def _source_quality(inputs: MddInputs) -> Dict[str, Any]:
                     closed_times.setdefault(timestamp, []).append((index, pnl))
                     asset = _trade_token_id(row)
                     if asset:
-                        identity = (asset, timestamp)
+                        # Native CLOSED rows aggregate a wallet/token holding;
+                        # last_event_at changes do not create another position.
+                        # Legacy supplied observations retain timestamp identity.
+                        native_position = "current_size" in row or "total_size" in row
+                        identity = (asset, 0 if native_position else timestamp)
                         previous = position_ids.setdefault(identity, index)
                         if previous != index:
                             issues.add("duplicate_position_observation")
@@ -290,6 +391,14 @@ def _source_quality(inputs: MddInputs) -> Dict[str, Any]:
             elif name == "open_positions":
                 if _finite_number(_position_total_pnl(row)) is None:
                     issues.add("invalid_open_pnl")
+                asset = _trade_token_id(row)
+                if asset:
+                    # An open snapshot has one holding per wallet/token. A
+                    # duplicated cursor observation must not double its PnL.
+                    previous = position_ids.setdefault((asset, 0), index)
+                    if previous != index:
+                        issues.add("duplicate_position_observation")
+                        row_issues[previous].add("duplicate_position_observation")
                 current_values = _position_current_values(row)
                 if current_values and any(not math.isclose(value, current_values[0], rel_tol=0, abs_tol=1.000001e-6)
                                           for value in current_values[1:]):
@@ -305,6 +414,15 @@ def _source_quality(inputs: MddInputs) -> Dict[str, Any]:
                     issues.add("invalid_trade_notional")
                 if timestamp is not None and _trade_token_id(row):
                     trade_times.setdefault((_trade_token_id(row), timestamp), []).append((name, index, side))
+                    identity = _trade_key(row)
+                    if identity[0]:
+                        # V2 supplies no per-fill sequence identifier. Equal
+                        # economics in one transaction can be separate fills
+                        # or repeated observations; neither is proven here.
+                        previous = trade_ids.setdefault(identity, index)
+                        if previous != index:
+                            issues.add("ambiguous_trade_identity")
+                            row_issues[previous].add("ambiguous_trade_identity")
         # Opposite-signed observations in one timestamp bucket have no proven
         # order; neither input order nor sorting can establish their drawdown.
         for observations in closed_times.values():
@@ -329,80 +447,32 @@ def _source_quality(inputs: MddInputs) -> Dict[str, Any]:
 
 
 def _fetch_closed_positions(wallet: str, limit: int) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    offset = 0
-    clean_limit = _clamp(limit, 0, MAX_CLOSED_POSITIONS)
-    while len(rows) < clean_limit:
-        page_limit = min(50, clean_limit - len(rows))
-        page = data_api.get_closed_positions(
-            wallet,
-            limit=page_limit,
-            offset=offset,
-            sort_by="TIMESTAMP",
-            sort_direction="ASC",
-        )
-        if not page:
-            break
-        rows.extend(page)
-        if len(page) < page_limit:
-            break
-        offset += len(page)
-    return rows
+    return fetch_cursor_history(
+        data_api.get_positions_page_v2, user=wallet, limit=_clamp(limit, 0, MAX_CLOSED_POSITIONS),
+        status="CLOSED", sort_by="TIMESTAMP", sort_direction="ASC",
+    )
 
 
 def _fetch_open_positions(wallet: str, limit: int) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    offset = 0
-    clean_limit = _clamp(limit, 0, MAX_OPEN_POSITIONS)
-    while len(rows) < clean_limit:
-        page_limit = min(500, clean_limit - len(rows))
-        page = data_api.get_positions(wallet, limit=page_limit, offset=offset, size_threshold=0, include_archived=True)
-        if not page:
-            break
-        rows.extend(page)
-        if len(page) < page_limit:
-            break
-        offset += len(page)
-    return rows
+    return fetch_cursor_history(
+        data_api.get_positions_page_v2, user=wallet, limit=_clamp(limit, 0, MAX_OPEN_POSITIONS),
+        status="OPEN", filter_type="TOKENS", filter_amount=0, include_archived=True,
+    )
 
 
 def _fetch_activity_events(wallet: str, limit: int) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    offset = 0
-    clean_limit = _clamp(limit, 0, MAX_ACTIVITY_EVENTS)
-    while len(rows) < clean_limit:
-        page_limit = min(500, clean_limit - len(rows))
-        page = data_api.get_activity(
-            wallet,
-            limit=page_limit,
-            offset=offset,
-            types=["TRADE", "SPLIT", "MERGE", "REDEEM", "REWARD", "CONVERSION", "MAKER_REBATE", "REFERRAL_REWARD"],
-            sort_by="TIMESTAMP",
-            sort_direction="ASC",
-        )
-        if not page:
-            break
-        rows.extend(page)
-        if len(page) < page_limit:
-            break
-        offset += len(page)
-    return rows
+    return fetch_cursor_history(
+        data_api.get_activity_page_v2, user=wallet, limit=_clamp(limit, 0, MAX_ACTIVITY_EVENTS),
+        start=1, end=int(time.time()), sort_by="TIMESTAMP", sort_direction="ASC",
+        exclude_deposits_withdrawals=False,
+    )
 
 
 def _fetch_trade_rows(wallet: str, limit: int) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    offset = 0
-    clean_limit = _clamp(limit, 0, MAX_TRADE_ROWS)
-    while len(rows) < clean_limit:
-        page_limit = min(500, clean_limit - len(rows))
-        page = data_api.get_trades(wallet, limit=page_limit, offset=offset)
-        if not page:
-            break
-        rows.extend(page)
-        if len(page) < page_limit:
-            break
-        offset += len(page)
-    return rows
+    return fetch_cursor_history(
+        data_api.get_trades_page_v2, user=wallet, limit=_clamp(limit, 0, MAX_TRADE_ROWS),
+        start=1, end=int(time.time()), taker_only=False,
+    )
 
 
 def fetch_mdd_inputs(
@@ -438,10 +508,11 @@ def fetch_mdd_inputs(
     }
     coverage = {}
     for name, (rows, row_limit) in sources.items():
-        timestamps = [_event_timestamp(_lookup(row, "timestamp")) if isinstance(row, Mapping) else None for row in rows]
+        timestamps = [_event_timestamp(_lookup(row, "last_event_at", "timestamp")) if isinstance(row, Mapping) else None for row in rows]
         known_times = [timestamp for timestamp in timestamps if timestamp is not None]
         coverage[name] = {
-            "status": "not_requested" if row_limit == 0 else "limit_reached" if len(rows) >= row_limit else "end_of_results",
+            "status": "not_requested" if row_limit == 0 else "end_of_results" if getattr(rows, "history_complete", False)
+            else "limit_reached" if len(rows) >= row_limit else "coverage_unproven",
             "returned": len(rows),
             "limit": row_limit,
             "first_timestamp": min(known_times) if known_times else None,
@@ -449,7 +520,13 @@ def fetch_mdd_inputs(
             "rows_without_timestamp": len(timestamps) - len(known_times),
         }
         if name == "open_positions" and row_limit > 0:
-            coverage[name]["query_filters"] = {"sizeThreshold": 0, "includeArchived": True}
+            coverage[name]["query_filters"] = {"status": "OPEN", "filter_type": "TOKENS", "filter_amount": 0, "include_archived": True}
+        if name in {"activity_events", "trade_rows"} and row_limit > 0:
+            coverage[name]["query_filters"] = {"start": 1, **(
+                {"taker_only": False} if name == "trade_rows" else {"exclude_deposits_withdrawals": False}
+            )}
+        coverage[name]["source_api"] = "Data API v2"
+        coverage[name]["exhaustion_evidence"] = "pagination.next_cursor=null" if getattr(rows, "history_complete", False) else None
     inputs = MddInputs(
         wallet=normalized_wallet,
         **{name: rows for name, (rows, _) in sources.items()},
@@ -464,6 +541,7 @@ def _apply_history_coverage(payload: Dict[str, Any], inputs: MddInputs) -> Dict[
     coverage = inputs.history_coverage
     capped = [name for name, source in coverage.items() if source["status"] == "limit_reached"]
     excluded = [name for name, source in coverage.items() if source["status"] == "not_requested"]
+    unproven = [name for name, source in coverage.items() if source["status"] == "coverage_unproven"]
     quality = payload.get("mdd_source_quality") or _source_quality(inputs)
     invalid_reasons = [f"invalid_source_data:{name}:{reason}"
                        for name, source in quality["sources"].items() for reason in source["reasons"]]
@@ -473,16 +551,16 @@ def _apply_history_coverage(payload: Dict[str, Any], inputs: MddInputs) -> Dict[
         mdd_history_coverage=coverage,
         mdd_history_status=(
             "invalid_source_data" if invalid_reasons else "limit_reached" if capped else "sources_excluded" if excluded
+            else "coverage_unproven" if unproven
             else "source_window_exhausted" if coverage else "supplied_rows_unverified"
         ),
         mdd_history_capped_sources=capped,
         mdd_history_excluded_sources=excluded,
         mdd_source_quality=quality,
     )
-    # A full final page does not prove that the next page is empty. Skipping a
-    # source also leaves an unknown risk window; neither result can qualify a
-    # drawdown filter. Keep the sampled value available as a diagnostic.
-    if capped or excluded or invalid_reasons:
+    # A local budget without explicit cursor EOF, a skipped source or an
+    # unproven read leaves an unknown risk window. Keep only diagnostics.
+    if capped or excluded or unproven or invalid_reasons:
         if "observed_drawdown" not in payload:
             payload["observed_drawdown"] = {
                 key: payload.get(key) for key in ("mdd_usd", "mdd_pct", "mdd_method", "equity_base_usd")
@@ -492,23 +570,28 @@ def _apply_history_coverage(payload: Dict[str, Any], inputs: MddInputs) -> Dict[
             *payload.get("mdd_unavailable_reasons", []),
             *[f"history_limit_reached:{name}" for name in capped],
             *[f"history_source_not_requested:{name}" for name in excluded],
+            *[f"history_coverage_unproven:{name}" for name in unproven],
             *invalid_reasons,
         ]))
-    return payload
+    return _apply_currency_boundary(payload)
 
 
 def _canonical_trade_events(activity_events: Sequence[Mapping[str, Any]], trade_rows: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
     events: List[Mapping[str, Any]] = []
-    seen = set()
-    for row in list(activity_events) + list(trade_rows):
-        row_type = str(_lookup(row, "type") or "TRADE").strip().upper()
-        if row_type and row_type != "TRADE":
-            continue
-        key = _trade_key(row)
-        if key in seen:
-            continue
-        seen.add(key)
-        events.append(row)
+    seen: Counter[Tuple[Any, ...]] = Counter()
+    for source in (activity_events, trade_rows):
+        occurrences: Counter[Tuple[Any, ...]] = Counter()
+        for row in source:
+            row_type = str(_lookup(row, "type") or "TRADE").strip().upper()
+            if row_type and row_type != "TRADE":
+                continue
+            key = _trade_key(row)
+            occurrences[key] += 1
+            # De-duplicate matching observations across feeds while retaining
+            # the greatest observed multiplicity within either source.
+            if occurrences[key] > seen[key]:
+                events.append(row)
+        seen |= occurrences
 
     events.sort(key=lambda item: _safe_int(_lookup(item, "timestamp"), 0) or 0)
     return events
@@ -566,8 +649,11 @@ def build_historical_mdd_payload(
     inputs: MddInputs,
     *,
     equity_base_usd: Optional[float] = None,
+    equity_base_currency: Optional[str] = None,
     max_points: int = 50,
 ) -> Dict[str, Any]:
+    source_currency = _source_economics_currency(inputs)
+    base_currency = _equity_currency(equity_base_currency, supplied=equity_base_usd is not None, source=source_currency)
     quality = _source_quality(inputs)
     calculation_inputs = inputs if quality["status"] == "valid" else MddInputs(inputs.wallet, [], [], [], [])
     points: List[Dict[str, Any]] = []
@@ -576,7 +662,7 @@ def build_historical_mdd_payload(
     capital_sources: Dict[str, int] = {}
     unknown_closed_capital = 0
     unknown_open_capital = 0
-    for row in sorted(calculation_inputs.closed_positions, key=lambda item: _event_timestamp(_lookup(item, "timestamp"))):
+    for row in sorted(calculation_inputs.closed_positions, key=lambda item: _event_timestamp(_lookup(item, "last_event_at", "timestamp"))):
         realized = _safe_float(_lookup(row, "realizedPnl", "realized_pnl"), None)
         if realized is None:
             continue
@@ -587,7 +673,7 @@ def build_historical_mdd_payload(
         closed_capital += capital if capital is not None else 0.0
         points.append(
             {
-                "timestamp": _safe_int(_lookup(row, "timestamp"), 0),
+                "timestamp": _safe_int(_lookup(row, "last_event_at", "timestamp"), 0),
                 "value": cumulative_realized,
                 "kind": "closed_position",
                 "realized_pnl": cumulative_realized,
@@ -650,6 +736,9 @@ def build_historical_mdd_payload(
         "mdd_method": MDD_METHOD_V2,
         "mdd_pct_basis": MDD_PCT_BASIS_V2,
         "equity_base_usd": base if base > 0 else None,
+        "source_economics_currency": source_currency,
+        "quote_currency": source_currency,
+        "equity_base_currency": base_currency,
         "equity_base_source": base_source,
         "public_capital_basis_usd": public_capital_basis if public_capital_basis > 0 else None,
         "closed_positions": len(inputs.closed_positions),
@@ -661,7 +750,11 @@ def build_historical_mdd_payload(
         "closed_capital_basis_usd": closed_capital,
         "open_capital_basis_usd": open_capital,
         "position_capital_basis": {
-            "unit": "USD",
+            "unit": "USDC" if any(
+                isinstance(row, Mapping) and any(key in row for key in (
+                    "current_size", "total_size", "entry_cost_usdc", "total_cost_usdc", "unrealized_pnl"
+                )) for row in inputs.open_positions + inputs.closed_positions
+            ) else "USD",
             "sources": capital_sources,
             "closed_unknown_rows": unknown_closed_capital,
             "open_unknown_rows": unknown_open_capital,
@@ -882,6 +975,10 @@ def _base_payload_summary(payload: Mapping[str, Any]) -> Dict[str, Any]:
         "mdd_method",
         "equity_base_usd",
         "equity_base_source",
+        "source_economics_currency",
+        "quote_currency",
+        "equity_base_currency",
+        "mdd_currency_status",
         "public_capital_basis_usd",
         "peak_value",
         "trough_value",
@@ -907,7 +1004,7 @@ def _reconcile_replay_snapshot(inputs: MddInputs, replay: Mapping[str, Any], bas
     current_values: Dict[str, float] = {}
     for row in inputs.open_positions:
         token = _trade_token_id(row)
-        size = _finite_number(_lookup(row, "size"))
+        size = _finite_number(_lookup(row, "current_size", "size"))
         if not token or size is None or size < 0:
             reasons.append("current_position_identity_or_size_unavailable")
             continue
@@ -988,6 +1085,7 @@ def build_mark_replay_mdd_payload(
     inputs: MddInputs,
     *,
     equity_base_usd: Optional[float] = None,
+    equity_base_currency: Optional[str] = None,
     max_points: int = 50,
     mark_replay_token_limit: int = 10,
     mark_replay_point_limit: int = 5000,
@@ -997,7 +1095,8 @@ def build_mark_replay_mdd_payload(
     mark_replay_end_ts: Optional[int] = None,
     cache_ttl_seconds: int = 0,
 ) -> Dict[str, Any]:
-    base = build_historical_mdd_payload(inputs, equity_base_usd=equity_base_usd, max_points=max_points)
+    base = build_historical_mdd_payload(inputs, equity_base_usd=equity_base_usd,
+                                        equity_base_currency=equity_base_currency, max_points=max_points)
     fallback_summary = _base_payload_summary(base)
     if base["mdd_source_quality"]["status"] == "invalid":
         base.update(requested_mdd_method=MDD_METHOD_MARK_REPLAY,
@@ -1115,8 +1214,7 @@ def build_mark_replay_mdd_payload(
         return base
 
     drawdown = replay["drawdown"]
-    incomplete_reasons = [f"history_limit_reached:{name}" for name in base["mdd_history_capped_sources"]]
-    incomplete_reasons.extend(f"history_source_not_requested:{name}" for name in base["mdd_history_excluded_sources"])
+    incomplete_reasons = [reason for reason in base.get("mdd_unavailable_reasons", []) if reason.startswith("history_")]
     unsupported_activity: Dict[str, int] = {}
     for row in inputs.activity_events:
         activity_type = str(_lookup(row, "type") or "TRADE").strip().upper()
@@ -1192,11 +1290,13 @@ def polymarket_user_mdd_payload_v2(
     trade_limit: int = 1000,
     include_open: bool = True,
     equity_base_usd: Optional[float] = None,
+    equity_base_currency: Optional[str] = None,
     max_points: int = 50,
     cache_ttl_seconds: int = 0,
     include_accounting_snapshot: bool = False,
     accounting_timeout: float = 30.0,
 ) -> Dict[str, Any]:
+    _equity_currency(equity_base_currency, supplied=equity_base_usd is not None, source=None)
     inputs = fetch_mdd_inputs(
         wallet,
         closed_limit=closed_limit,
@@ -1206,7 +1306,8 @@ def polymarket_user_mdd_payload_v2(
         include_open=include_open,
         cache_ttl_seconds=cache_ttl_seconds,
     )
-    payload = build_historical_mdd_payload(inputs, equity_base_usd=equity_base_usd, max_points=max_points)
+    payload = build_historical_mdd_payload(inputs, equity_base_usd=equity_base_usd,
+                                         equity_base_currency=equity_base_currency, max_points=max_points)
     payload["input_limits"] = {
         "closed_limit": _clamp(closed_limit, 0, MAX_CLOSED_POSITIONS),
         "open_limit": _clamp(open_limit, 0, MAX_OPEN_POSITIONS) if include_open else 0,
@@ -1232,6 +1333,7 @@ def polymarket_user_mdd_payload_mark_replay(
     trade_limit: int = 1000,
     include_open: bool = True,
     equity_base_usd: Optional[float] = None,
+    equity_base_currency: Optional[str] = None,
     max_points: int = 50,
     cache_ttl_seconds: int = 0,
     mark_replay_token_limit: int = 10,
@@ -1243,6 +1345,7 @@ def polymarket_user_mdd_payload_mark_replay(
     include_accounting_snapshot: bool = False,
     accounting_timeout: float = 30.0,
 ) -> Dict[str, Any]:
+    _equity_currency(equity_base_currency, supplied=equity_base_usd is not None, source=None)
     inputs = fetch_mdd_inputs(
         wallet,
         closed_limit=closed_limit,
@@ -1255,6 +1358,7 @@ def polymarket_user_mdd_payload_mark_replay(
     payload = build_mark_replay_mdd_payload(
         inputs,
         equity_base_usd=equity_base_usd,
+        equity_base_currency=equity_base_currency,
         max_points=max_points,
         mark_replay_token_limit=mark_replay_token_limit,
         mark_replay_point_limit=mark_replay_point_limit,

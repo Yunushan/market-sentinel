@@ -7,6 +7,7 @@ import os
 import socket
 import threading
 import time
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional
@@ -34,6 +35,7 @@ DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 HARD_MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 ERROR_RESPONSE_PREVIEW_BYTES = 4096
 REDACTED = "***"
+MAX_SHARED_RATE_LIMITERS = 1024
 
 
 @dataclass(frozen=True)
@@ -63,30 +65,89 @@ class RateLimiter:
         self._lock = threading.Lock()
         self._next_allowed_at = 0.0
 
-    def wait(self) -> float:
-        if self.min_interval_seconds <= 0:
-            return 0.0
+    def _acquire_schedule(self):
         control = current_request()
         if control is None:
             self._lock.acquire()
         else:
             while not self._lock.acquire(timeout=min(0.05, control.remaining())):
                 control.check()
+        return control
+
+    def strengthen_interval(self, interval: float) -> None:
+        """Apply a stricter interval to the already-reserved next request too."""
+        if interval <= self.min_interval_seconds:
+            return
+        self._acquire_schedule()
+        try:
+            increase = max(0.0, interval - self.min_interval_seconds)
+            if self._next_allowed_at > 0:
+                self._next_allowed_at += increase
+            self.min_interval_seconds = max(self.min_interval_seconds, interval)
+        finally:
+            self._lock.release()
+
+    def wait(self) -> float:
+        if self.min_interval_seconds <= 0:
+            return 0.0
+        control = self._acquire_schedule()
         try:
             if control is not None:
                 control.check()
             now = self._clock()
             delay = max(0.0, self._next_allowed_at - now)
-            if delay:
+            while now < self._next_allowed_at:
+                remaining = self._next_allowed_at - now
                 if control is None:
-                    self._sleeper(delay)
+                    self._sleeper(remaining)
                 else:
-                    control.sleep(delay)
+                    control.sleep(remaining)
                 now = self._clock()
             self._next_allowed_at = max(now, self._next_allowed_at) + self.min_interval_seconds
             return delay
         finally:
             self._lock.release()
+
+
+@dataclass
+class _SharedRateLimiter:
+    limiter: RateLimiter
+    owners: weakref.WeakSet
+
+
+_shared_rate_limiters: Dict[str, _SharedRateLimiter] = {}
+_shared_rate_limiters_lock = threading.Lock()
+
+
+def _venue_rate_limiter(market_id: str, interval: float, owner: Any) -> RateLimiter:
+    """Keep venue pacing across short-lived adapters and conservatively share accounts.
+
+    An entry survives adapter collection until its reserved interval expires.
+    Live owners are never evicted: doing so would split one venue's schedule.
+    """
+    if not math.isfinite(interval) or interval < 0:
+        raise MarketConfigurationError("Request interval must be finite and non-negative.")
+    with _shared_rate_limiters_lock:
+        entry = _shared_rate_limiters.get(market_id)
+        if entry is None and interval <= 0:
+            return RateLimiter()
+        if entry is None:
+            now = time.monotonic()
+            removable = [
+                key for key, item in _shared_rate_limiters.items()
+                if not item.owners and item.limiter._next_allowed_at <= now
+            ]
+            for key in removable:
+                del _shared_rate_limiters[key]
+            if len(_shared_rate_limiters) >= MAX_SHARED_RATE_LIMITERS:
+                raise MarketConfigurationError("Too many active venue rate-limit schedules; retry after they expire.")
+            entry = _SharedRateLimiter(RateLimiter(interval), weakref.WeakSet())
+            _shared_rate_limiters[market_id] = entry
+        else:
+            # Concurrent adapters must not weaken an already-reserved schedule.
+            entry.limiter.strengthen_interval(interval)
+        entry.owners.add(owner)
+        return entry.limiter
 
 
 class _PinnedConnectionMixin:
@@ -478,7 +539,7 @@ class AdapterRuntime:
             if min_request_interval_seconds is not None
             else self.config.get("min_request_interval_seconds", 0.0)
         )
-        self.rate_limiter = RateLimiter(float(interval or 0.0))
+        self.rate_limiter = _venue_rate_limiter(self.market_id, float(interval or 0.0), self)
         self.max_response_bytes = self._positive_byte_cap(
             self.config.get("http_max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES),
             label="HTTP JSON response byte cap",

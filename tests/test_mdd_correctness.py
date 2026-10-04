@@ -20,6 +20,11 @@ from polymarket.mdd import MDD_CALCULATION_VERSION, MddInputs, build_historical_
 WALLET = "0x" + "b" * 40
 
 
+def leaderboard_page():
+    return {"data": [{"user_id": WALLET, "pnl": 8000, "volume": 1000}],
+            "pagination": {"limit": 50, "offset": 0, "has_more": False, "next_cursor": None}}
+
+
 def inputs(deltas: list[float]) -> MddInputs:
     return MddInputs(
         wallet=WALLET,
@@ -160,7 +165,7 @@ class DrawdownCorrectnessTests(unittest.TestCase):
         self.assertEqual(web_api._max_drawdown([{"value": -30}], 100)["mdd_pct"], 30)
 
     def test_api_risk_filter_rejects_25_percent_wallet(self) -> None:
-        with patch("web_api.data_api.get_leaderboard", return_value=[{"proxyWallet": WALLET, "pnl": 8000, "vol": 1000}]), patch(
+        with patch("web_api.data_api.get_leaderboard_v2_page", return_value=leaderboard_page()), patch(
             "polymarket.mdd.fetch_mdd_inputs", return_value=inputs([1000, -500, 8500, -1000])
         ), patch("web_api.attach_polymarket_mdd_audit_cache", return_value={}):
             result = web_api.polymarket_leaderboard_payload({
@@ -175,15 +180,15 @@ class DrawdownCorrectnessTests(unittest.TestCase):
             args = ["polymarket-leaderboard", "--state-db", str(Path(temporary) / "state.sqlite3"),
                     "--scanned", "unlimited", "--returned", "unlimited", "--compute-mdd",
                     "--mdd-scan", "unlimited", "--max-mdd-pct", "20", "--equity-base-usd", "1000",
-                    "--format", "json", "--output", str(output), "--quiet"]
-            with patch("web_api.data_api.get_leaderboard", return_value=[{"proxyWallet": WALLET, "pnl": 8000, "vol": 1000}]), patch(
+                    "--sort", "pnl_usd", "--format", "json", "--output", str(output), "--quiet"]
+            with patch("web_api.data_api.get_leaderboard_v2_page", return_value=leaderboard_page()), patch(
                 "market_sentinel_cli.MDD_CALCULATION_VERSION", 1
             ), patch("market_sentinel_cli.polymarket_user_mdd_payload", return_value={"mdd_pct": 10}), patch(
                 "market_sentinel_cli.attach_polymarket_mdd_audit_cache", return_value={}
             ):
                 self.assertEqual(market_sentinel_cli.main(args), 0)
             self.assertEqual(json.loads(output.read_text())["counts"]["returned"], 1)
-            with patch("web_api.data_api.get_leaderboard") as fetch, patch(
+            with patch("web_api.data_api.get_leaderboard_v2_page") as fetch, patch(
                 "polymarket.mdd.fetch_mdd_inputs", return_value=inputs([1000, -500, 8500, -1000])
             ) as get_inputs, patch("market_sentinel_cli.attach_polymarket_mdd_audit_cache", return_value={}):
                 self.assertEqual(market_sentinel_cli.main(args + ["--resume"]), 0)

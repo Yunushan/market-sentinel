@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .activity_history import activity_snapshot
+
 import math
 import re
 from decimal import Decimal, InvalidOperation
@@ -911,7 +913,11 @@ class OpinionAdapter(MarketAdapter):
         if chain_id:
             params["chainId"] = chain_id
         payload = self._get(f"/trade/user/{wallet}", params=params)
-        return [self._activity_from_trade(wallet, item) for item in self._result_list(payload)]
+        return activity_snapshot(
+            [self._activity_from_trade(wallet, item) for item in self._result_list(payload)], payload,
+            effective_limit=desired, row_keys=("list", "data", "markets"),
+            complete_window=not (market_id or chain_id),
+        )
 
     def copy_trade_from_activity(self, activity: Mapping[str, Any]) -> PaperOrderResult:
         self.ensure_capability("copy_trading")

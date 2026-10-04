@@ -173,9 +173,10 @@ class PublicOnlyPolymarketProbeTests(unittest.TestCase):
         valid_payloads = {
             "clob_time": {"time": int(time.time())},
             "gamma_markets": [{"id": "123", "question": "Will the semantic probe pass?"}],
-            "data_leaderboard": [
-                {"rank": "1", "proxyWallet": "0x" + "1" * 40, "pnl": 1.0, "vol": 2.0}
-            ],
+            "data_leaderboard": {
+                "data": [{"rank": 1, "user_id": "0x" + "1" * 40, "pnl": 1.0, "volume": 2.0}],
+                "pagination": {"has_more": False, "next_cursor": None, "limit": 1, "offset": 0},
+            },
             "bridge_supported_assets": {
                 "supportedAssets": [
                     {
@@ -190,7 +191,7 @@ class PublicOnlyPolymarketProbeTests(unittest.TestCase):
             with (
                 patch.object(live_probe.clob_rest, "get_server_time", return_value=payloads["clob_time"]),
                 patch.object(live_probe.gamma, "list_markets", return_value=payloads["gamma_markets"]),
-                patch.object(live_probe.data_api, "get_leaderboard", return_value=payloads["data_leaderboard"]),
+                patch.object(live_probe.data_api, "get_leaderboard_v2_page", return_value=payloads["data_leaderboard"]),
                 patch.object(
                     live_probe.bridge,
                     "get_supported_assets",

@@ -222,7 +222,7 @@ class CopyHarness:
 class AnalyticsHarness:
     def __init__(self) -> None:
         self.cfg = AppConfig()
-        self.lb_sort_var = FakeVar("ROI %")
+        self.lb_sort_var = FakeVar("PnL USDC")
         self.lb_direction_var = FakeVar("High to low")
         self.lb_limit_var = FakeVar("1000")
         self.lb_scan_limit_var = FakeVar("1000")
@@ -232,20 +232,20 @@ class AnalyticsHarness:
         self.lb_fast_scan_var = FakeVar(True)
         self.lb_mdd_mode_var = FakeVar("Fast public curve")
         self.lb_mdd_scan_limit_var = FakeVar("100")
-        self.lb_min_roi_var = FakeVar("")
-        self.lb_max_roi_var = FakeVar("")
+        self.lb_min_pnl_var = FakeVar("")
+        self.lb_max_pnl_var = FakeVar("")
         self.lb_min_mdd_pct_var = FakeVar("")
         self.lb_max_mdd_pct_var = FakeVar("")
         self.leaderboard_tree = FakeTree()
         self.wallet_tree = FakeTree()
         self.lb_returned_metric_var = FakeVar()
         self.lb_scanned_metric_var = FakeVar()
-        self.lb_best_roi_metric_var = FakeVar()
+        self.lb_best_pnl_metric_var = FakeVar()
         self.lb_mdd_metric_var = FakeVar()
         self.lb_status_var = FakeVar()
         self.status_var = FakeVar()
         self.ct_follow_var = FakeVar("")
-        self.lb_fast_roi_btn = FakeButton()
+        self.lb_fast_pnl_btn = FakeButton()
         self.lb_cancel_btn = FakeButton()
         self._leaderboard_loading = False
         self._leaderboard_cancel_event = threading.Event()
@@ -720,7 +720,7 @@ class AppLogicTests(unittest.TestCase):
         self.assertEqual(activity_key({"transactionHash": "0xABC"}), "tx:0xabc")
         self.assertEqual(
             activity_key({"activityId": "Context:0xabc:0x1"}),
-            "activity-id:context:0xabc:0x1",
+            "activity-id:Context:0xabc:0x1",
         )
         fallback = activity_key({"timestamp": 1, "asset": "token", "side": "BUY"})
         self.assertTrue(fallback.startswith("activity:1|"))
@@ -767,14 +767,14 @@ class AppLogicTests(unittest.TestCase):
 
         self.assertEqual(installed, "installed")
 
-    def test_desktop_polymarket_analytics_builds_top_roi_query(self) -> None:
+    def test_desktop_polymarket_analytics_builds_native_pnl_query(self) -> None:
         harness = AnalyticsHarness()
         harness.lb_compute_mdd_var.set(True)
         harness.lb_max_mdd_pct_var.set("25")
 
         params = App._polymarket_leaderboard_params(harness)
 
-        self.assertEqual(params["sort"], ["roi_pct"])
+        self.assertEqual(params["sort"], ["pnl_usd"])
         self.assertEqual(params["direction"], ["DESC"])
         self.assertEqual(params["limit"], ["1000"])
         self.assertEqual(params["scan_limit"], ["1000"])
@@ -811,11 +811,39 @@ class AppLogicTests(unittest.TestCase):
 
         self.assertEqual(harness.lb_returned_metric_var.get(), "1")
         self.assertEqual(harness.lb_scanned_metric_var.get(), "1000")
-        self.assertEqual(harness.lb_best_roi_metric_var.get(), "20.00%")
+        self.assertEqual(harness.lb_best_pnl_metric_var.get(), "20.00")
         self.assertEqual(len(harness.leaderboard_tree.rows), 1)
         row_values = next(iter(harness.leaderboard_tree.rows.values()))
         self.assertEqual(row_values[1], "alpha")
         self.assertEqual(row_values[2], WALLET)
+
+    def test_desktop_native_share_volume_never_displays_a_dollar_ratio(self) -> None:
+        harness = AnalyticsHarness()
+        harness.lb_min_pnl_var.set("10")
+        params = App._polymarket_leaderboard_params(harness)
+        self.assertEqual(params["min_pnl_usd"], ["10"])
+        self.assertNotIn("min_roi_pct", params)
+        self.assertEqual(App._leaderboard_sort_value("Volume shares"), "volume_shares")
+        App._refresh_polymarket_leaderboard_table(harness, {"rows": [{
+            "wallet": WALLET, "pnl_usd": 20, "volume_shares": 125,
+            "source_api_version": 2, "volume_usd": 1, "roi_pct": 2000,
+        }]})
+        row = next(iter(harness.leaderboard_tree.rows.values()))
+        self.assertEqual(row[4], "125.00")
+        self.assertEqual(row[5], "-")
+
+    def test_desktop_mdd_preserves_proven_currency_and_hides_unknown_units(self) -> None:
+        harness = AnalyticsHarness()
+        App._refresh_polymarket_leaderboard_table(harness, {"rows": [
+            {"wallet": WALLET, "quote_currency": "USD", "mdd_usd": 12.5,
+             "mdd_available": True, "mdd_quote_currency": "USDC"},
+            {"wallet": WALLET, "quote_currency": "USDC", "mdd_usd": 7,
+             "mdd_available": True, "mdd_quote_currency": "USD"},
+            {"wallet": WALLET, "quote_currency": "USDC", "mdd_usd": 20,
+             "mdd_available": True},
+        ]})
+        self.assertEqual([row[7] for row in harness.leaderboard_tree.rows.values()],
+                         ["12.50 USDC", "7.00 USD", "-"])
 
     def test_desktop_polymarket_leaderboard_row_actions_copy_full_values(self) -> None:
         harness = AnalyticsHarness()
@@ -1270,6 +1298,7 @@ class AppLogicTests(unittest.TestCase):
             [
                 PaperTradeRecord(
                     market_id="kalshi",
+                    quote_currency="USD",
                     contract_id="KALSHI-CONTRACT",
                     side="BUY",
                     size=4,
@@ -1281,6 +1310,7 @@ class AppLogicTests(unittest.TestCase):
                 ),
                 PaperTradeRecord(
                     market_id="kalshi",
+                    quote_currency="USD",
                     contract_id="KALSHI-CONTRACT",
                     side="SELL",
                     size=1,
@@ -1292,6 +1322,7 @@ class AppLogicTests(unittest.TestCase):
                 ),
                 PaperTradeRecord(
                     market_id="kalshi",
+                    quote_currency="USD",
                     contract_id="IGNORED",
                     side="BUY",
                     size=8,
@@ -1306,8 +1337,9 @@ class AppLogicTests(unittest.TestCase):
         self.assertEqual(rows[0]["market_id"], "kalshi")
         self.assertEqual(rows[0]["contract_id"], "KALSHI-CONTRACT")
         self.assertAlmostEqual(rows[0]["net_size"], 3.0)
-        self.assertAlmostEqual(rows[0]["notional"], 1.05)
-        self.assertAlmostEqual(rows[0]["average_price"], 0.35)
+        self.assertAlmostEqual(rows[0]["notional"], 1.20)
+        self.assertAlmostEqual(rows[0]["average_price"], 0.40)
+        self.assertAlmostEqual(rows[0]["realized"], 0.15)
         self.assertEqual(rows[0]["trades"], 2)
 
     def test_paper_order_impact_projects_position_after_order(self) -> None:
@@ -1315,6 +1347,7 @@ class AppLogicTests(unittest.TestCase):
             [
                 PaperTradeRecord(
                     market_id="kalshi",
+                    quote_currency="USD",
                     contract_id="KALSHI-CONTRACT",
                     side="BUY",
                     size=4,
@@ -1337,8 +1370,9 @@ class AppLogicTests(unittest.TestCase):
         self.assertAlmostEqual(impact["projected_net"], 3.0)
         self.assertEqual(impact["effect"], "reduces position")
         self.assertAlmostEqual(impact["order_notional"], -0.55)
-        self.assertAlmostEqual(impact["projected_notional"], 1.05)
-        self.assertAlmostEqual(impact["projected_average"], 0.35)
+        self.assertAlmostEqual(impact["projected_notional"], 1.20)
+        self.assertAlmostEqual(impact["projected_average"], 0.40)
+        self.assertAlmostEqual(impact["projected_realized"], 0.15)
 
     def test_preview_paper_order_impact_reports_projection_without_ordering(self) -> None:
         adapter = FakePaperAdapter()
@@ -1348,6 +1382,7 @@ class AppLogicTests(unittest.TestCase):
         harness.cfg.paper_trades = [
             PaperTradeRecord(
                 market_id="kalshi",
+                quote_currency="USD",
                 contract_id="KALSHI-CONTRACT",
                 side="BUY",
                 size=4,
@@ -1371,7 +1406,7 @@ class AppLogicTests(unittest.TestCase):
         self.assertEqual(harness.adapter_registry.calls, [])
         self.assertIn("projected_net=3.0000", harness.paper_status_var.get())
         self.assertIn("effect=reduces position", harness.paper_status_var.get())
-        self.assertIn("projected_avg=0.3500", harness.paper_status_var.get())
+        self.assertIn("projected_avg=0.4000", harness.paper_status_var.get())
         self.assertEqual(harness.status_var.get(), "Paper order impact previewed.")
         self.assertEqual(harness.ui_queue.get_nowait()[0], "log")
 
@@ -1383,6 +1418,7 @@ class AppLogicTests(unittest.TestCase):
         harness.cfg.paper_trades = [
             PaperTradeRecord(
                 market_id="kalshi",
+                quote_currency="USD",
                 contract_id="KALSHI-CONTRACT",
                 side="BUY",
                 size=2,
@@ -1411,6 +1447,7 @@ class AppLogicTests(unittest.TestCase):
             [
                 PaperTradeRecord(
                     market_id="kalshi",
+                    quote_currency="USD",
                     contract_id="KALSHI-CONTRACT",
                     side="BUY",
                     size=2,
@@ -1458,6 +1495,7 @@ class AppLogicTests(unittest.TestCase):
         harness.cfg.paper_trades = [
             PaperTradeRecord(
                 market_id="kalshi",
+                quote_currency="USD",
                 contract_id="KALSHI-CONTRACT",
                 side="BUY",
                 size=2,
@@ -1467,6 +1505,7 @@ class AppLogicTests(unittest.TestCase):
             ),
             PaperTradeRecord(
                 market_id="kalshi",
+                quote_currency="USD",
                 contract_id="KALSHI-CONTRACT",
                 side="BUY",
                 size=1,
@@ -1504,6 +1543,7 @@ class AppLogicTests(unittest.TestCase):
         harness.adapter_registry = FakeRegistry(adapter)
         record = PaperTradeRecord(
             market_id="kalshi",
+            quote_currency="USD",
             contract_id="KALSHI-CONTRACT",
             side="BUY",
             size=4,
@@ -1561,6 +1601,7 @@ class AppLogicTests(unittest.TestCase):
         harness.adapter_registry = FakeRegistry(adapter)
         record = PaperTradeRecord(
             market_id="kalshi",
+            quote_currency="USD",
             contract_id="KALSHI-CONTRACT",
             side="BUY",
             size=4,
@@ -1639,6 +1680,7 @@ class AppLogicTests(unittest.TestCase):
         harness.cfg.paper_trades = [
             PaperTradeRecord(
                 market_id="kalshi",
+                quote_currency="USD",
                 contract_id="KALSHI-CONTRACT",
                 side="BUY",
                 size=2,
@@ -1692,6 +1734,7 @@ class AppLogicTests(unittest.TestCase):
         harness.cfg.paper_trades = [
             PaperTradeRecord(
                 market_id="kalshi",
+                quote_currency="USD",
                 contract_id="KALSHI-CONTRACT",
                 side="BUY",
                 size=2,
@@ -1725,6 +1768,7 @@ class AppLogicTests(unittest.TestCase):
         harness.cfg.paper_trades = [
             PaperTradeRecord(
                 market_id="kalshi",
+                quote_currency="USD",
                 contract_id="KALSHI-CONTRACT",
                 side="BUY",
                 size=2,
@@ -1734,6 +1778,7 @@ class AppLogicTests(unittest.TestCase):
             ),
             PaperTradeRecord(
                 market_id="kalshi",
+                quote_currency="USD",
                 contract_id="OTHER-CONTRACT",
                 side="BUY",
                 size=1,
@@ -1793,6 +1838,7 @@ class AppLogicTests(unittest.TestCase):
         harness.cfg.paper_trades = [
             PaperTradeRecord(
                 market_id="kalshi",
+                quote_currency="USD",
                 contract_id="KALSHI-CONTRACT",
                 side="BUY",
                 size=2,
@@ -1802,6 +1848,7 @@ class AppLogicTests(unittest.TestCase):
             ),
             PaperTradeRecord(
                 market_id="kalshi",
+                quote_currency="USD",
                 contract_id="OTHER-CONTRACT",
                 side="BUY",
                 size=1,
@@ -1852,6 +1899,7 @@ class AppLogicTests(unittest.TestCase):
         harness.cfg.paper_trades = [
             PaperTradeRecord(
                 market_id="kalshi",
+                quote_currency="USD",
                 contract_id="KALSHI-CONTRACT",
                 side="BUY",
                 size=2,
@@ -1881,6 +1929,7 @@ class AppLogicTests(unittest.TestCase):
         harness.cfg.paper_trades = [
             PaperTradeRecord(
                 market_id="kalshi",
+                quote_currency="USD",
                 contract_id="KALSHI-CONTRACT",
                 side="BUY",
                 size=2,
@@ -2606,7 +2655,7 @@ class AppLogicTests(unittest.TestCase):
             poller.stop()
             return []
 
-        with patch("app.data_api.get_activity", side_effect=fake_get_activity):
+        with patch("app.data_api.get_activity_page_v2", side_effect=lambda *args, **kwargs: {"data": fake_get_activity(*args, **kwargs), "pagination": {"next_cursor": None}}):
             poller._run()
 
         self.assertEqual(processed, ["tx:old-1", "tx:old-2", "tx:new-3"])
@@ -2637,7 +2686,7 @@ class AppLogicTests(unittest.TestCase):
             poller.stop()
             return [{"timestamp": 100, "transactionHash": "maybe", "slug": "m"}]
 
-        with patch("app.data_api.get_activity", side_effect=fake_get_activity):
+        with patch("app.data_api.get_activity_page_v2", side_effect=lambda *args, **kwargs: {"data": fake_get_activity(*args, **kwargs), "pagination": {"next_cursor": None}}):
             poller._run()
 
         drained = []
@@ -2785,7 +2834,7 @@ class AppLogicTests(unittest.TestCase):
 
         poller._run()
 
-        self.assertEqual(processed, [("opinion_labs", "tx:same")])
+        self.assertEqual(processed, [("opinion_labs", activity_key(adapter.list_activity(WALLET)[0]))])
 
     def test_wallet_activity_is_not_handled_when_checkpoint_persistence_fails(self) -> None:
         class QueueHarness:
@@ -2842,7 +2891,7 @@ class AppLogicTests(unittest.TestCase):
             poller.stop()
             return [{"timestamp": 100, "transactionHash": "tx1", "slug": "m"}]
 
-        with patch("app.data_api.get_activity", side_effect=fake_get_activity):
+        with patch("app.data_api.get_activity_page_v2", side_effect=lambda *args, **kwargs: {"data": fake_get_activity(*args, **kwargs), "pagination": {"next_cursor": None}}):
             poller._run()
 
         self.assertEqual(snapshots, [(0, ())])
@@ -2883,7 +2932,7 @@ class AppLogicTests(unittest.TestCase):
             calls += 1
             return response
 
-        with patch("app.data_api.get_activity", side_effect=fake_get_activity):
+        with patch("app.data_api.get_activity_page_v2", side_effect=lambda *args, **kwargs: {"data": fake_get_activity(*args, **kwargs), "pagination": {"next_cursor": None}}):
             poller._run()
 
         drained = []
