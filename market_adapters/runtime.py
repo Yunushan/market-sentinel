@@ -8,9 +8,10 @@ import socket
 import threading
 import time
 import weakref
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Mapping, Optional
+from typing import Any, Callable, Dict, Iterable, Iterator, Mapping, Optional
 
 import requests
 import urllib3
@@ -56,7 +57,7 @@ class RateLimiter:
         self,
         min_interval_seconds: float = 0.0,
         *,
-        clock: Callable[[], float] = time.monotonic,
+        clock: Callable[[], float] = time.perf_counter,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self.min_interval_seconds = max(0.0, float(min_interval_seconds or 0.0))
@@ -87,26 +88,49 @@ class RateLimiter:
         finally:
             self._lock.release()
 
+    def _wait_for_interval(self, control) -> tuple[float, float]:
+        if control is not None:
+            control.check()
+        now = self._clock()
+        delay = max(0.0, self._next_allowed_at - now)
+        while now < self._next_allowed_at:
+            remaining = self._next_allowed_at - now
+            if control is None:
+                self._sleeper(remaining)
+            else:
+                control.sleep(remaining)
+            now = self._clock()
+        return now, delay
+
     def wait(self) -> float:
         if self.min_interval_seconds <= 0:
             return 0.0
         control = self._acquire_schedule()
         try:
-            if control is not None:
-                control.check()
-            now = self._clock()
-            delay = max(0.0, self._next_allowed_at - now)
-            while now < self._next_allowed_at:
-                remaining = self._next_allowed_at - now
-                if control is None:
-                    self._sleeper(remaining)
-                else:
-                    control.sleep(remaining)
-                now = self._clock()
+            now, delay = self._wait_for_interval(control)
             self._next_allowed_at = max(now, self._next_allowed_at) + self.min_interval_seconds
             return delay
         finally:
             self._lock.release()
+
+    @contextmanager
+    def request_slot(self) -> Iterator[None]:
+        """Serialize dispatch and reserve the next interval after it returns."""
+        if self.min_interval_seconds <= 0:
+            yield
+            return
+        control = self._acquire_schedule()
+        dispatched = False
+        try:
+            self._wait_for_interval(control)
+            dispatched = True
+            yield
+        finally:
+            try:
+                if dispatched:
+                    self._next_allowed_at = max(self._clock(), self._next_allowed_at) + self.min_interval_seconds
+            finally:
+                self._lock.release()
 
 
 @dataclass
@@ -132,10 +156,9 @@ def _venue_rate_limiter(market_id: str, interval: float, owner: Any) -> RateLimi
         if entry is None and interval <= 0:
             return RateLimiter()
         if entry is None:
-            now = time.monotonic()
             removable = [
                 key for key, item in _shared_rate_limiters.items()
-                if not item.owners and item.limiter._next_allowed_at <= now
+                if not item.owners and item.limiter._next_allowed_at <= item.limiter._clock()
             ]
             for key in removable:
                 del _shared_rate_limiters[key]
@@ -143,11 +166,13 @@ def _venue_rate_limiter(market_id: str, interval: float, owner: Any) -> RateLimi
                 raise MarketConfigurationError("Too many active venue rate-limit schedules; retry after they expire.")
             entry = _SharedRateLimiter(RateLimiter(interval), weakref.WeakSet())
             _shared_rate_limiters[market_id] = entry
-        else:
-            # Concurrent adapters must not weaken an already-reserved schedule.
-            entry.limiter.strengthen_interval(interval)
+        # Pin this entry before releasing the registry lock: a constructor
+        # waiting for its venue's dispatch must not lose the shared schedule.
         entry.owners.add(owner)
-        return entry.limiter
+    # Strengthening can wait for an in-flight dispatch. Keep that wait local
+    # to this venue instead of blocking creation of every unrelated adapter.
+    entry.limiter.strengthen_interval(interval)
+    return entry.limiter
 
 
 class _PinnedConnectionMixin:
@@ -701,7 +726,6 @@ class AdapterRuntime:
             policy=self.outbound_policy,
             resolve_addresses=self._resolve_addresses_for_request(),
         )
-        self.rate_limiter.wait()
         request_headers = {"Accept": "application/json", "User-Agent": self.user_agent}
         request_headers.update(dict(headers or {}))
         request_options: Dict[str, Any] = {
@@ -721,7 +745,8 @@ class AdapterRuntime:
         if self._managed_transport_is_intact():
             request_options["_market_sentinel_url_validated"] = True
         try:
-            response = self.session.request(method.upper(), safe_url, **request_options)
+            with self.rate_limiter.request_slot():
+                response = self.session.request(method.upper(), safe_url, **request_options)
         except requests.RequestException as exc:
             request_label = (
                 f"{subject} request failed"
