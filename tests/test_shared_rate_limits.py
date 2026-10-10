@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import gc
-import time
 import unittest
 from unittest.mock import patch
 
@@ -22,6 +21,17 @@ class SharedRateLimitTests(unittest.TestCase):
 
     def test_separate_api_adapter_instances_keep_upstream_pacing(self) -> None:
         calls = []
+        now = [10.0]
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        def controlled_sleep(control, seconds):
+            control.check()
+            sleep(seconds)
+            control.check()
 
         class Response:
             status_code = 200
@@ -35,7 +45,7 @@ class SharedRateLimitTests(unittest.TestCase):
 
         class Session:
             def request(self, *_args, **_kwargs):
-                calls.append(time.monotonic())
+                calls.append(now[0])
                 return Response()
 
         def factory(config):
@@ -46,11 +56,22 @@ class SharedRateLimitTests(unittest.TestCase):
         cfg.markets["kalshi"].settings["min_request_interval_seconds"] = 0.04
         registry = AdapterRegistry()
         registry.register_factory(KalshiAdapter.metadata, factory)
-        for _ in range(4):
-            market_events_payload(cfg, registry, "kalshi", {})
-            gc.collect()  # Short-lived adapters must not erase the reserved next interval.
+        # Exercise the real shared limiter and API path without making assertions
+        # about OS scheduling between reservation and the fake HTTP transport.
+        with patch.object(
+            runtime_module, "RateLimiter",
+            side_effect=lambda interval=0: RateLimiter(interval, clock=lambda: now[0], sleeper=sleep),
+        ), patch("core.request_control.RequestControl.sleep", autospec=True, side_effect=controlled_sleep):
+            for _ in range(4):
+                market_events_payload(cfg, registry, "kalshi", {})
+                gc.collect()  # Collection must not erase the reserved next interval.
+                self.assertFalse(runtime_module._shared_rate_limiters["kalshi"].owners)
         self.assertEqual(len(calls), 4)
-        self.assertTrue(all(second - first >= 0.035 for first, second in zip(calls, calls[1:], strict=False)))
+        self.assertEqual(len(sleeps), 3)
+        for first, second in zip(calls, calls[1:], strict=False):
+            self.assertAlmostEqual(second - first, 0.04)
+        for delay in sleeps:
+            self.assertAlmostEqual(delay, 0.04)
 
     def test_bounded_registry_does_not_evict_schedules_with_live_owners(self) -> None:
         with patch("market_adapters.runtime.MAX_SHARED_RATE_LIMITERS", 2):
