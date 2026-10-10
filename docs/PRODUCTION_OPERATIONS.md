@@ -219,6 +219,8 @@ request dispatch at a time uses the venue slot, and the full interval begins
 when that dispatch returns response headers or fails. Network time adds to the
 configured interval; slow dispatches cannot let later requests bunch together.
 Slot acquisition and interval waits honor the request deadline and cancellation.
+Dispatch locking is isolated to each venue; unrelated adapters can be created
+while one venue is busy.
 A zero interval keeps dispatch unthrottled. Reserved intervals survive
 collection of a short-lived adapter; at most 1,024 live venue schedules are
 retained, with new identities rejected while all slots remain in use. An

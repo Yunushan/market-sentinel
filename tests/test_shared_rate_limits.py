@@ -180,6 +180,60 @@ class SharedRateLimitTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertAlmostEqual(calls[1] - calls[0], 0.24)
 
+    def test_stricter_busy_venue_does_not_block_unrelated_adapter_creation(self) -> None:
+        class Session:
+            def request(self, *_args, **_kwargs):
+                raise AssertionError("adapter construction must not dispatch HTTP")
+
+        first = AdapterRuntime("busy-venue", min_request_interval_seconds=0.04, session=Session())
+        strengthening = threading.Event()
+        unrelated_created = threading.Event()
+        results = {}
+        failures = []
+        original = first.rate_limiter.strengthen_interval
+
+        def strengthen(interval):
+            strengthening.set()
+            return original(interval)
+
+        def create_stricter():
+            try:
+                results["stricter"] = AdapterRuntime(
+                    "busy-venue", min_request_interval_seconds=0.1, session=Session(),
+                )
+            except Exception as exc:
+                failures.append(exc)
+
+        def create_unrelated():
+            try:
+                results["unrelated"] = AdapterRuntime(
+                    "other-venue", min_request_interval_seconds=0.04, session=Session(),
+                )
+                unrelated_created.set()
+            except Exception as exc:
+                failures.append(exc)
+
+        stricter_thread = threading.Thread(target=create_stricter, daemon=True)
+        unrelated_thread = threading.Thread(target=create_unrelated, daemon=True)
+        with patch.object(first.rate_limiter, "strengthen_interval", side_effect=strengthen):
+            try:
+                with first.rate_limiter.request_slot():
+                    stricter_thread.start()
+                    self.assertTrue(strengthening.wait(2))
+                    unrelated_thread.start()
+                    self.assertTrue(unrelated_created.wait(2), "an unrelated venue waited for the busy dispatch")
+                    self.assertNotIn("stricter", results)
+            finally:
+                stricter_thread.join(2)
+                if unrelated_thread.ident is not None:
+                    unrelated_thread.join(2)
+        self.assertFalse(stricter_thread.is_alive())
+        self.assertFalse(unrelated_thread.is_alive())
+        self.assertEqual(failures, [])
+        self.assertIs(first.rate_limiter, results["stricter"].rate_limiter)
+        self.assertEqual(first.rate_limiter.min_interval_seconds, 0.1)
+        self.assertIsNot(first.rate_limiter, results["unrelated"].rate_limiter)
+
     def test_zero_interval_does_not_acquire_a_dispatch_slot(self) -> None:
         limiter = RateLimiter(0)
         limiter._lock.acquire()

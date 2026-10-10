@@ -166,11 +166,13 @@ def _venue_rate_limiter(market_id: str, interval: float, owner: Any) -> RateLimi
                 raise MarketConfigurationError("Too many active venue rate-limit schedules; retry after they expire.")
             entry = _SharedRateLimiter(RateLimiter(interval), weakref.WeakSet())
             _shared_rate_limiters[market_id] = entry
-        else:
-            # Concurrent adapters must not weaken an already-reserved schedule.
-            entry.limiter.strengthen_interval(interval)
+        # Pin this entry before releasing the registry lock: a constructor
+        # waiting for its venue's dispatch must not lose the shared schedule.
         entry.owners.add(owner)
-        return entry.limiter
+    # Strengthening can wait for an in-flight dispatch. Keep that wait local
+    # to this venue instead of blocking creation of every unrelated adapter.
+    entry.limiter.strengthen_interval(interval)
+    return entry.limiter
 
 
 class _PinnedConnectionMixin:
