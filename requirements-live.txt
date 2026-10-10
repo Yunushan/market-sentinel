@@ -1,3 +1,5 @@
 -r requirements.txt
 py-clob-client-v2>=1.1.0,<2.0.0
 opinion-clob-sdk>=0.7.0
+# Security floor for the live SDK dependency graph (CVE-2026-104874).
+multidict>=6.9.1,<7.0.0
