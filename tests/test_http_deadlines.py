@@ -166,7 +166,7 @@ class HTTPDeadlineTests(unittest.TestCase):
             self.assertFalse(control._sockets)
             self.assertTrue(control._closed)
 
-    def test_rate_limiter_lock_wait_obeys_deadline_and_cancellation(self):
+    def _check_rate_limiter_lock_wait(self, *, dispatch):
         for cancel in (False, True):
             with self.subTest(cancel=cancel):
                 limiter = RateLimiter(0.1)
@@ -182,7 +182,11 @@ class HTTPDeadlineTests(unittest.TestCase):
                     with cancellation_scope(cancelled.is_set), self.assertRaises(
                         RequestCancelled if cancel else RequestDeadlineExceeded
                     ), request_scope(3 if cancel else 0.1):
-                        limiter.wait()
+                        if dispatch:
+                            with limiter.request_slot():
+                                self.fail("dispatch acquired a blocked slot")
+                        else:
+                            limiter.wait()
                     self.assertLess(time.monotonic() - before, 0.75)
                     self.assertEqual(limiter._next_allowed_at, 0)
                 finally:
@@ -193,6 +197,38 @@ class HTTPDeadlineTests(unittest.TestCase):
                         canceller.join()
                     if limiter._lock.locked():
                         limiter._lock.release()
+
+    def test_rate_limiter_lock_wait_obeys_deadline_and_cancellation(self):
+        self._check_rate_limiter_lock_wait(dispatch=False)
+
+    def test_dispatch_slot_lock_wait_obeys_deadline_and_cancellation(self):
+        self._check_rate_limiter_lock_wait(dispatch=True)
+
+    def test_dispatch_interval_wait_preserves_reservation_on_deadline_and_cancellation(self):
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel):
+                limiter = RateLimiter(1)
+                with limiter.request_slot():
+                    pass
+                reservation = limiter._next_allowed_at
+                cancelled = threading.Event()
+                canceller = threading.Timer(0.1, cancelled.set)
+                if cancel:
+                    canceller.start()
+                try:
+                    before = time.monotonic()
+                    with cancellation_scope(cancelled.is_set), self.assertRaises(
+                        RequestCancelled if cancel else RequestDeadlineExceeded
+                    ), request_scope(3 if cancel else 0.1):
+                        with limiter.request_slot():
+                            self.fail("dispatch started before its reserved interval")
+                    self.assertLess(time.monotonic() - before, 0.75)
+                    self.assertEqual(limiter._next_allowed_at, reservation)
+                    self.assertFalse(limiter._lock.locked())
+                finally:
+                    canceller.cancel()
+                    if cancel:
+                        canceller.join()
 
     def test_post_timeout_never_retries_a_potential_mutation(self):
         with slow_server() as (origin, _started, seen):

@@ -214,7 +214,14 @@ The configured `timeout` is the budget for one HTTP operation, including its
 internal retries; it is not the duration limit for an entire unlimited scan.
 Adapter `min_request_interval_seconds` pacing is shared across adapter instances
 in the same process and conservatively across accounts for each venue. Creating
-a new API request does not reset the schedule. Reserved intervals survive
+a new API request does not reset the schedule. With a positive interval, one
+request dispatch at a time uses the venue slot, and the full interval begins
+when that dispatch returns response headers or fails. Network time adds to the
+configured interval; slow dispatches cannot let later requests bunch together.
+Slot acquisition and interval waits honor the request deadline and cancellation.
+Dispatch locking is isolated to each venue; unrelated adapters can be created
+while one venue is busy.
+A zero interval keeps dispatch unthrottled. Reserved intervals survive
 collection of a short-lived adapter; at most 1,024 live venue schedules are
 retained, with new identities rejected while all slots remain in use. An
 existing venue schedule retains the largest configured interval until it can be
