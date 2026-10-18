@@ -74,12 +74,69 @@ runs:
           --output "${receipt_dir}/platform-ci-receipt.json" \
           --github-output "${GITHUB_OUTPUT}"
 
-    - name: Attest canonical hosted-job receipt
+    # The transparency log can fail transiently after a successful workload.
+    # Individual failures allow bounded retries; the required gate below checks
+    # the real outcomes before any receipt can be reverified or uploaded.
+    - name: Attest canonical hosted-job receipt (attempt 1)
+      id: attest_1
+      continue-on-error: true
       uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
       with:
         subject-path: ${{ steps.generate.outputs.receipt-path }}
 
+    - name: Wait before receipt attestation retry 2
+      id: retry_delay_1
+      if: ${{ !cancelled() && steps.attest_1.outcome == 'failure' }}
+      shell: bash
+      run: sleep 15
+
+    - name: Attest canonical hosted-job receipt (attempt 2)
+      id: attest_2
+      if: ${{ !cancelled() && steps.attest_1.outcome == 'failure' && steps.retry_delay_1.outcome == 'success' }}
+      continue-on-error: true
+      uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+      with:
+        subject-path: ${{ steps.generate.outputs.receipt-path }}
+
+    - name: Wait before receipt attestation retry 3
+      id: retry_delay_2
+      if: ${{ !cancelled() && steps.attest_2.outcome == 'failure' }}
+      shell: bash
+      run: sleep 30
+
+    - name: Attest canonical hosted-job receipt (attempt 3)
+      id: attest_3
+      if: ${{ !cancelled() && steps.attest_1.outcome == 'failure' && steps.attest_2.outcome == 'failure' && steps.retry_delay_2.outcome == 'success' }}
+      continue-on-error: true
+      uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+      with:
+        subject-path: ${{ steps.generate.outputs.receipt-path }}
+
+    - name: Require successful receipt attestation
+      id: require_attestation
+      if: ${{ !cancelled() }}
+      shell: bash
+      env:
+        ATTESTATION_OUTCOME_1: ${{ steps.attest_1.outcome }}
+        ATTESTATION_OUTCOME_2: ${{ steps.attest_2.outcome }}
+        ATTESTATION_OUTCOME_3: ${{ steps.attest_3.outcome }}
+      run: |
+        python - <<'PY'
+        import os
+
+        outcomes = tuple(os.environ.get(f"ATTESTATION_OUTCOME_{attempt}", "") for attempt in range(1, 4))
+        accepted = {
+            ("success", "skipped", "skipped"),
+            ("failure", "success", "skipped"),
+            ("failure", "failure", "success"),
+        }
+        if outcomes not in accepted:
+            raise SystemExit(f"Receipt attestation did not succeed: {outcomes!r}")
+        PY
+
     - name: Reverify canonical hosted-job receipt
+      id: reverify
+      if: ${{ success() && steps.require_attestation.outcome == 'success' }}
       shell: bash
       working-directory: ${{ github.workspace }}
       env:
@@ -100,6 +157,7 @@ runs:
           --expected-sha256 "${EXPECTED_RECEIPT_SHA256}"
 
     - name: Upload canonical hosted-job receipt
+      if: ${{ success() && steps.require_attestation.outcome == 'success' && steps.reverify.outcome == 'success' }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       with:
         name: ${{ steps.generate.outputs.artifact-name }}
