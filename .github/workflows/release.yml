@@ -155,7 +155,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -185,7 +185,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.14"
 
@@ -277,7 +277,7 @@ jobs:
           PY
 
       - name: Upload Python distributions
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: python-dist
           path: dist/*
@@ -302,7 +302,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "24"
 
@@ -329,7 +329,7 @@ jobs:
             --output ../release-frontend-dist.zip
 
       - name: Upload frontend distribution
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: frontend-dist-zip
           path: release-frontend-dist.zip
@@ -367,13 +367,13 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
 
       - name: Set up reviewed SignPath runtime
         if: ${{ env.WINDOWS_SIGNING_REQUIRED == 'true' }}
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "24"
 
@@ -385,7 +385,7 @@ jobs:
         run: python scripts/signpath_release.py preflight
 
       - name: Download frontend bundle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: frontend-dist-zip
           path: build/release-inputs
@@ -434,7 +434,7 @@ jobs:
       - name: Upload unsigned staged executable for origin-verified signing
         if: ${{ env.WINDOWS_SIGNING_REQUIRED == 'true' }}
         id: unsigned_exe
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: unsigned-exe-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: build/windows-release/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64/market-sentinel.exe
@@ -479,7 +479,7 @@ jobs:
       - name: Upload unsigned MSI for origin-verified signing
         if: ${{ env.WINDOWS_SIGNING_REQUIRED == 'true' }}
         id: unsigned_msi
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: unsigned-msi-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: build/windows-release-assets/market-sentinel-${{ needs.metadata.outputs.tag_name }}-win-x64.msi
@@ -582,7 +582,7 @@ jobs:
           }
 
       - name: Upload Windows release packages
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: windows-dist
           path: build/windows-release-assets/*
@@ -617,7 +617,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python for release metadata
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.14"
 
@@ -636,7 +636,7 @@ jobs:
             --windows-signed "${WINDOWS_SIGNED}"
 
       - name: Download Python distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: python-dist
           path: release-assets
@@ -650,13 +650,13 @@ jobs:
             --expected-version "${RELEASE_VERSION}"
 
       - name: Download frontend bundle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: frontend-dist-zip
           path: release-assets
 
       - name: Download Windows packages
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: windows-dist
           path: release-assets
@@ -1041,7 +1041,7 @@ jobs:
 
       - name: Upload published release evidence
         if: needs.metadata.outputs.prerelease == 'false' && needs.metadata.outputs.draft == 'false'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: release-evidence/release-evidence.json
