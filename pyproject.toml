@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools==84.0.0"]
+requires = ["setuptools==84.2.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -39,17 +39,17 @@ classifiers = [
 [project.optional-dependencies]
 build = [
     "build==1.6.1",
-    "setuptools==84.0.0",
+    "setuptools==84.2.1",
 ]
 live = [
     "py-clob-client-v2>=1.1.0,<2.0.0",
     "opinion-clob-sdk>=0.7.0",
-    "multidict>=6.9.1,<7.0.0",
+    "multidict>=6.9.1,<8.0.0",
 ]
 test = [
     "pytest>=8.0",
     "coverage[toml]>=7.6",
-    "ruff==0.16.9",
+    "ruff==0.17.2",
 ]
 
 [tool.setuptools]
